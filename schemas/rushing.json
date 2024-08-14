@@ -1,0 +1,11 @@
+{
+  "attempts": "smallint",
+  "yards": "smallint",
+  "touchdowns": "smallint",
+  "ybc": "smallint",
+  "yac": "smallint",
+  "broken_tackles": "smallint",
+  "player": "mediumint",
+  "game": "mediumint",
+  "team": "mediumint"
+}

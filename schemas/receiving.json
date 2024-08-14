@@ -1,0 +1,13 @@
+{
+  "targets": "smallint",
+  "receptions": "smallint",
+  "yards": "smallint",
+  "touchdownds": "smallint",
+  "yac": "smallint",
+  "ybc": "smallint",
+  "broken_tackles": "smallint",
+  "drops": "smallint",
+  "player": "mediumint",
+  "game": "mediumint",
+  "team": "mediumint"
+}

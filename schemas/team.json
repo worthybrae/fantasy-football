@@ -1,0 +1,5 @@
+{
+  "name": "varchar(50)",
+  "abbreviation": "varchar(5)",
+  "id": "mediumint"
+}

@@ -1,0 +1,9 @@
+{
+  "year": "smallint",
+  "week": "smallint",
+  "home_team": "mediumint",
+  "away_team": "mediumint",
+  "home_score": "smallint",
+  "away_score": "smallint",
+  "id": "mediumint"
+}

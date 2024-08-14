@@ -1,0 +1,15 @@
+{
+  "completions": "smallint",
+  "attempts": "smallint",
+  "yards": "smallint",
+  "cay": "smallint",
+  "yac": "smallint",
+  "drops": "smallint",
+  "bad_throws": "smallint",
+  "pressured": "smallint",
+  "blitzed": "smallint",
+  "scrambles": "smallint",
+  "player": "mediumint",
+  "game": "mediumint",
+  "team": "mediumint"
+}

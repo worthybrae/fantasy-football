@@ -1,0 +1,7 @@
+{
+  "name": "varchar(255)",
+  "position": "varchar(10)",
+  "years_played": "smallint",
+  "team": "mediumint",
+  "id": "mediumint"
+}
