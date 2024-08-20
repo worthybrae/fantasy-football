@@ -10,10 +10,8 @@ def main():
             "create_team.sql",
             "create_player.sql",
             "create_game.sql",
-            "create_snaps.sql",
-            "create_rushing.sql",
-            "create_receiving.sql",
-            "create_passing.sql"
+            "create_stats.sql",
+            "create_plays.sql"
         ]
 
         # Execute each SQL file

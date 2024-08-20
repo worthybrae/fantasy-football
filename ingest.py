@@ -17,20 +17,22 @@ def get_game_urls(week):
         a_tags = game.find_all('a')
         for a in a_tags:
             if a['href'].startswith('/boxscores'):
-                game_urls.append(f"https://www.pro-football-reference.com{a['href']}")
-    return game_urls      
+                game_urls.append(f"https://www.pro-football-reference.com{a['href']}#all_player_offense")
+    return game_urls     
 
 # Function to scrape data from a game URL
 def scrape_game_data(game_url):
     response = requests.get(game_url)
-    soup = BeautifulSoup(response.content, 'html.parser')
-    
-    # Example: Extracting the game title and score (you can customize this)
-    cells = soup.find_all('td', class_='right')
-        
-    for cell in cells:
-        # Get all cells (td elements) in the row
-        print(cell)
+    if response.status_code == 200:
+        soup = BeautifulSoup(response.content, 'html.parser')
+        rows = soup.find_all('tr')
+        for row in rows:
+            row_data = []
+            for header in row.find_all('th'):
+                row_data.append(header.text)
+            for cell in row.find_all('td'):
+                row_data.append(cell.text)
+            print(row_data)
     
 for week in range(1, 3):
     game_urls = get_game_urls(week)
