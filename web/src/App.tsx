@@ -88,9 +88,10 @@ function App() {
             className="rail-toggle"
             aria-expanded={!railCollapsed}
             aria-label={railCollapsed ? 'Expand rail' : 'Collapse rail'}
+            title={railCollapsed ? 'Expand rail' : 'Collapse rail'}
             onClick={() => setRailCollapsed((c) => !c)}
           >
-            {railCollapsed ? '»' : '« Collapse'}
+            {railCollapsed ? '»' : '«'}
           </button>
           {!railCollapsed && (
             <div className="rail-content">
@@ -129,9 +130,16 @@ function App() {
                 />
                 {/* PlayerTable renders header + zero rows on its own when
                     filteredPlayers is empty; this sits right below it so the
-                    empty state still reads as part of the same table. */}
+                    empty state still reads as part of the same table.
+                    "Esc to clear" only makes sense when search is why the
+                    board is empty -- tab/hide-drafted filters have no
+                    keyboard shortcut to point at. */}
                 {filteredPlayers.length === 0 && (
-                  <p className="empty-state-row">No players match — Esc to clear</p>
+                  <p className="empty-state-row">
+                    {search.trim()
+                      ? 'No players match — Esc to clear'
+                      : 'No players match the current filters.'}
+                  </p>
                 )}
               </div>
             </>

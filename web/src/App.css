@@ -368,11 +368,15 @@ td:first-child {
 
 /* -- player profile drawer -- */
 
+/* Both sit above .topbar's z-index: 30 -- the drawer is a full-viewport
+   overlay and needs to cover the sticky top bar too (including the close
+   button, which lines up with the top bar's right side), not just the
+   board content below it. */
 .drawer-backdrop {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.5);
-  z-index: 20;
+  z-index: 40;
 }
 
 .player-drawer {
@@ -386,7 +390,7 @@ td:first-child {
   border-left: 1px solid var(--border);
   box-shadow: -8px 0 24px rgba(0, 0, 0, 0.35);
   padding: var(--space-5);
-  z-index: 21;
+  z-index: 41;
   text-align: left;
 }
 
