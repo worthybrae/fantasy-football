@@ -75,11 +75,11 @@ position to select columns.
 - Season table `PPG` cells get the same treatment across the player's
   seasons.
 
-## 5. Wider drawer
+## 5. Drawer width
 
-`.player-drawer` widens to `clamp(560px, 60vw, 840px)` on desktop; existing
-small-screen behavior (full width) unchanged. Tables must fit each
-position's column set without horizontal scrolling at the widened width;
+Investigation found `.player-drawer` is already `min(70vw, 900px)` — wider
+than the proposed clamp — so no width change is needed. Tables must fit each
+position's column set without horizontal scrolling at the existing width;
 the scroll-wrapper stays as a safety net only.
 
 ## Error handling
