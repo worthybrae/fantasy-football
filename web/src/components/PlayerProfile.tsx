@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { fetchProfile, type Player, type PlayerProfileData } from '../api'
 import FactorBars from './FactorBars'
+import GameLog from './GameLog'
+import SeasonTable from './SeasonTable'
 import SimilarPlayers from './SimilarPlayers'
+import WeeklyChart from './WeeklyChart'
 
 interface PlayerProfileProps {
   playerId: string
@@ -128,16 +131,21 @@ export default function PlayerProfile({ playerId, onClose, onToggleDrafted, onSe
               <FactorBars factors={profile.factors} />
             </section>
 
-            <section id="weekly-chart" className="drawer-section" />
+            {profile.game_log.length > 0 && (
+              <section className="drawer-section">
+                <h3>Weekly points</h3>
+                <WeeklyChart gameLog={profile.game_log} />
+              </section>
+            )}
 
             <section className="drawer-section">
               <h3>Season history</h3>
-              <p className="drawer-placeholder">Season-by-season stats coming in next task.</p>
+              <SeasonTable seasons={profile.seasons} />
             </section>
 
             <section className="drawer-section">
               <h3>Game log</h3>
-              <p className="drawer-placeholder">Weekly game log coming in next task.</p>
+              <GameLog gameLog={profile.game_log} />
             </section>
 
             <section className="drawer-section">

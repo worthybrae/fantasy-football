@@ -14,6 +14,21 @@ The pipeline stages are:
 3. **web** — a React draft board: sortable table, live weight sliders,
    position filters, and drafted-player tracking that persists to disk.
 
+## Player profiles
+
+Clicking a row opens that player's profile drawer: header chips (rank, tier,
+VOR, composite, ADP, edge), the five scoring factors as bars, a weekly
+PPR-points chart across up to three seasons with a per-season average line,
+full season-by-season stat totals, an expandable game log, next-season
+outlook (depth slot, implied points, strength of schedule, bye), and a list
+of similar players. For skill positions with stat history, "similar players"
+are cross-year **stat twins** — other player-seasons nearest by a weighted
+z-score distance over per-game production, target/carry share, and
+efficiency — shown next to what that twin's *next* season's PPG turned out
+to be, a quick gut check on what a comparable stat line tends to become;
+rookies and K/DST (no stat history) instead get similar-value neighbors from
+the board.
+
 ## Project structure
 
 - `pipeline/` — data ingestion and refresh workflow (`sources.py`, `db.py`,

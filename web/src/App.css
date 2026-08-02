@@ -435,3 +435,117 @@ td:first-child {
   gap: 6px;
   margin-left: auto;
 }
+
+/* -- weekly chart -- */
+
+.weekly-chart-legend {
+  display: flex;
+  gap: 14px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.weekly-chart-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.weekly-chart-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.weekly-chart-scroll {
+  overflow-x: auto;
+}
+
+.weekly-chart-svg {
+  display: block;
+}
+
+.weekly-chart-gridline {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.weekly-chart-axis {
+  stroke: var(--text);
+  stroke-opacity: 0.5;
+  stroke-width: 1;
+}
+
+.weekly-chart-tick {
+  fill: var(--text);
+  font-size: 10px;
+}
+
+.weekly-chart-season-label {
+  fill: var(--text-h);
+  font-size: 11px;
+}
+
+.weekly-bar {
+  transition: filter 0.1s ease;
+}
+
+.weekly-bar:hover,
+.weekly-bar:focus-visible {
+  filter: brightness(1.2);
+  outline: none;
+}
+
+/* -- season table -- */
+
+.season-table-wrap {
+  overflow-x: auto;
+}
+
+.season-table {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* -- game log -- */
+
+.game-log-summary {
+  cursor: pointer;
+  color: var(--text-h);
+  font-size: 13px;
+}
+
+.game-log-summary:hover {
+  color: var(--accent);
+}
+
+.game-log-season {
+  margin-top: 12px;
+}
+
+.game-log-season-header {
+  margin: 0 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-h);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.game-log-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.game-log-row {
+  font-size: 12px;
+  color: var(--text);
+  padding: 3px 0;
+  border-bottom: 1px solid var(--border);
+}
