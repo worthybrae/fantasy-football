@@ -16,6 +16,7 @@ interface PlayerTableProps {
 
 const fmt1 = (n: number) => n.toFixed(1)
 const fmtNullable = (n: number | null) => (n === null ? '—' : n)
+const NUMERIC_COLUMNS = new Set(['rank', 'tier', 'bye', 'vor', 'composite', 'adp', 'edge'])
 
 export default function PlayerTable({ players, onToggleDrafted }: PlayerTableProps) {
   const [sorting, setSorting] = useState<SortingState>([{ id: 'rank', desc: false }])
@@ -98,21 +99,36 @@ export default function PlayerTable({ players, onToggleDrafted }: PlayerTablePro
         ))}
       </thead>
       <tbody>
-        {table.getRowModel().rows.map((row) => (
-          <tr
-            key={row.id}
-            onClick={() => onToggleDrafted(row.original)}
-            style={
-              row.original.drafted
-                ? { opacity: 0.35, textDecoration: 'line-through', cursor: 'pointer' }
-                : { cursor: 'pointer' }
-            }
-          >
-            {row.getVisibleCells().map((cell) => (
-              <td key={cell.id}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>
-            ))}
-          </tr>
-        ))}
+        {table.getRowModel().rows.map((row, i, rows) => {
+          // Tier boundaries only make sense when the board is in rank order;
+          // sorting by another column would scatter tiers non-contiguously.
+          const prevRow = i > 0 ? rows[i - 1] : null
+          const isTierBoundary =
+            sorting[0]?.id === 'rank' &&
+            prevRow !== null &&
+            prevRow.original.tier !== row.original.tier
+          return (
+            <tr
+              key={row.id}
+              onClick={() => onToggleDrafted(row.original)}
+              className={isTierBoundary ? 'tier-boundary' : undefined}
+              style={
+                row.original.drafted
+                  ? { opacity: 0.35, textDecoration: 'line-through', cursor: 'pointer' }
+                  : { cursor: 'pointer' }
+              }
+            >
+              {row.getVisibleCells().map((cell) => (
+                <td
+                  key={cell.id}
+                  className={NUMERIC_COLUMNS.has(cell.column.id) ? 'mono' : undefined}
+                >
+                  {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                </td>
+              ))}
+            </tr>
+          )
+        })}
       </tbody>
     </table>
   )

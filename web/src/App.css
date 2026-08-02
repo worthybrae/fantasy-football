@@ -1,12 +1,167 @@
 .app {
-  max-width: 1100px;
+  /* Deliberately dark regardless of OS theme -- this is a draft-night tool,
+     usually run in a dim room next to a video call. */
+  --bg: #16171d;
+  --text: #9ca3af;
+  --text-h: #f3f4f6;
+  --border: #2e303a;
+  --code-bg: #1f2028;
+  --accent: #c084fc;
+  --accent-bg: rgba(192, 132, 252, 0.15);
+  --accent-border: rgba(192, 132, 252, 0.5);
+  --ok: #34d399;
+  --fail: #f87171;
+
+  max-width: 1200px;
   margin: 0 auto;
   padding: 24px;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100%;
+  text-align: left;
+}
+
+.mono {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
 }
 
 .error {
-  color: red;
+  color: var(--fail);
 }
+
+/* -- layout -- */
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.app-header h1 {
+  margin: 12px 0;
+}
+
+.app-body {
+  display: flex;
+  gap: 24px;
+  align-items: flex-start;
+}
+
+.sidebar {
+  width: 220px;
+  flex-shrink: 0;
+  position: sticky;
+  top: 16px;
+}
+
+.main {
+  flex: 1;
+  min-width: 0;
+}
+
+/* -- weight sliders -- */
+
+.weight-sliders h2 {
+  color: var(--text-h);
+}
+
+.weight-slider {
+  margin-bottom: 14px;
+}
+
+.weight-slider label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  margin-bottom: 4px;
+  color: var(--text-h);
+}
+
+.weight-slider input[type='range'] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.hide-drafted {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  margin-top: 16px;
+}
+
+/* -- position tabs -- */
+
+.position-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.position-tabs button {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.position-tabs button:hover {
+  border-color: var(--accent-border);
+}
+
+.position-tabs button.active {
+  background: var(--accent-bg);
+  border-color: var(--accent-border);
+  color: var(--text-h);
+}
+
+/* -- freshness badge -- */
+
+.freshness {
+  text-align: right;
+}
+
+.freshness-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.freshness-chip {
+  font-size: 11px;
+  font-family: var(--mono);
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  cursor: default;
+}
+
+.freshness-chip.ok {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.freshness-chip.fail {
+  color: var(--fail);
+  border-color: var(--fail);
+}
+
+.freshness-warning {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--fail);
+  max-width: 320px;
+}
+
+/* -- table -- */
 
 table {
   width: 100%;
@@ -18,11 +173,21 @@ th,
 td {
   padding: 6px 10px;
   text-align: left;
-  border-bottom: 1px solid var(--border, #ddd);
+  border-bottom: 1px solid var(--border);
+}
+
+th {
+  color: var(--text-h);
 }
 
 tbody tr:hover {
-  background: rgba(127, 127, 127, 0.08);
+  background: rgba(192, 132, 252, 0.08);
+}
+
+/* Subtle rule marking where one VOR tier ends and the next begins, only
+   meaningful while the board is sorted by rank (see PlayerTable). */
+tr.tier-boundary td {
+  border-top: 2px solid var(--accent-border);
 }
 
 .rookie-badge {
@@ -32,6 +197,6 @@ tbody tr:hover {
   font-size: 11px;
   font-weight: 700;
   border-radius: 3px;
-  background: #2563eb;
-  color: #fff;
+  background: var(--accent);
+  color: #16171d;
 }
