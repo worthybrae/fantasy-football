@@ -1,4 +1,5 @@
 import pandas as pd
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from fastapi.testclient import TestClient
 from pipeline.db import get_conn, write_table
 from api.main import create_app
@@ -48,3 +49,30 @@ def test_drafted_roundtrip(tmp_path):
 def test_meta(tmp_path):
     c = _client(tmp_path)
     assert "sources" in c.get("/api/meta").json()
+
+def test_concurrent_requests(tmp_path):
+    """Verify per-request cursors handle concurrent requests without thread-safety issues."""
+    c = _client(tmp_path)
+    pid = c.get("/api/players").json()["players"][0]["player_id"]
+
+    def get_players():
+        r = c.get("/api/players")
+        assert r.status_code == 200
+        return r
+
+    def post_drafted():
+        r = c.post(f"/api/drafted/{pid}")
+        assert r.status_code == 200
+        return r
+
+    # Fire 8 parallel GET requests + 1 POST request
+    with ThreadPoolExecutor(max_workers=9) as executor:
+        futures = []
+        for _ in range(8):
+            futures.append(executor.submit(get_players))
+        futures.append(executor.submit(post_drafted))
+
+        # Verify all complete successfully with no exceptions
+        for future in as_completed(futures):
+            result = future.result()
+            assert result.status_code == 200
