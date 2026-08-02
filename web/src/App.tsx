@@ -77,10 +77,26 @@ function App() {
         </aside>
         <main className="main">
           <PositionTabs value={positionFilter} onChange={setPositionFilter} />
-          {loading && <p>Loading players…</p>}
-          {error && <p className="error">{error}</p>}
-          {!loading && !error && (
-            <PlayerTable players={filteredPlayers} onToggleDrafted={handleToggleDrafted} />
+          {/* First load / fatal error with nothing to show yet: no table to
+              keep mounted, so a full-page message is the only option. */}
+          {players.length === 0 && loading && <p>Loading players…</p>}
+          {players.length === 0 && !loading && error && <p className="error">{error}</p>}
+          {/* Once we have data, keep PlayerTable mounted across every
+              refetch (slider debounce, drafted toggle) so its internal sort
+              state survives -- swapping it for a loading message would
+              remount the table and reset sorting back to rank. */}
+          {players.length > 0 && (
+            <>
+              {error && <p className="error">{error}</p>}
+              {loading && <p className="refreshing-hint">Refreshing…</p>}
+              <div className={loading ? 'table-wrap is-loading' : 'table-wrap'}>
+                <PlayerTable
+                  players={filteredPlayers}
+                  onToggleDrafted={handleToggleDrafted}
+                  showTierBreaks={positionFilter !== 'ALL' && positionFilter !== 'FLEX'}
+                />
+              </div>
+            </>
           )}
         </main>
       </div>

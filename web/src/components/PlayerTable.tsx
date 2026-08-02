@@ -12,13 +12,18 @@ import type { Player } from '../api'
 interface PlayerTableProps {
   players: Player[]
   onToggleDrafted: (p: Player) => void
+  /** Tier is computed per-position, so the boundary rule is only meaningful
+   *  when a single position is in view -- on ALL/FLEX, adjacent rows are
+   *  usually different positions with unrelated tier numbers, so the rule
+   *  would fire almost everywhere and just be noise. */
+  showTierBreaks: boolean
 }
 
 const fmt1 = (n: number) => n.toFixed(1)
 const fmtNullable = (n: number | null) => (n === null ? '—' : n)
 const NUMERIC_COLUMNS = new Set(['rank', 'tier', 'bye', 'vor', 'composite', 'adp', 'edge'])
 
-export default function PlayerTable({ players, onToggleDrafted }: PlayerTableProps) {
+export default function PlayerTable({ players, onToggleDrafted, showTierBreaks }: PlayerTableProps) {
   const [sorting, setSorting] = useState<SortingState>([{ id: 'rank', desc: false }])
 
   const columns = useMemo<ColumnDef<Player>[]>(
@@ -100,10 +105,14 @@ export default function PlayerTable({ players, onToggleDrafted }: PlayerTablePro
       </thead>
       <tbody>
         {table.getRowModel().rows.map((row, i, rows) => {
-          // Tier boundaries only make sense when the board is in rank order;
-          // sorting by another column would scatter tiers non-contiguously.
+          // Tier boundaries only make sense when the board is in rank order
+          // within a single position -- sorting by another column would
+          // scatter tiers non-contiguously, and on ALL/FLEX views tier
+          // numbers reset per position so the rule would fire on nearly
+          // every row.
           const prevRow = i > 0 ? rows[i - 1] : null
           const isTierBoundary =
+            showTierBreaks &&
             sorting[0]?.id === 'rank' &&
             prevRow !== null &&
             prevRow.original.tier !== row.original.tier

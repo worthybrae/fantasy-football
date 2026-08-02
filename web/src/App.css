@@ -30,6 +30,20 @@
   color: var(--fail);
 }
 
+.refreshing-hint {
+  font-size: 12px;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+
+.table-wrap {
+  transition: opacity 0.15s ease;
+}
+
+.table-wrap.is-loading {
+  opacity: 0.6;
+}
+
 /* -- layout -- */
 
 .app-header {
