@@ -31,8 +31,9 @@ def assign_tiers(df: pd.DataFrame) -> pd.DataFrame:
     for pos, grp in out.groupby("position"):
         ranked = grp.sort_values("vor", ascending=False)
         drops = -ranked["vor"].diff().fillna(0)  # positive gaps between consecutive players
-        if len(drops) > 2 and drops.std() > 0:
-            threshold = drops.mean() + drops.std()
+        gaps = -ranked["vor"].diff().dropna()  # N-1 real gaps (excluding synthetic leading 0)
+        if len(gaps) >= 2 and gaps.std() > 0:
+            threshold = gaps.mean() + gaps.std()
         else:
             threshold = float("inf")
         tier = (drops > threshold).cumsum() + 1
