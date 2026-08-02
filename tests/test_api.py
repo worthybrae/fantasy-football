@@ -19,6 +19,8 @@ def _seed(path):
         {"adp_name": "A Star", "position": "WR", "team": "DET", "adp": 5.1}]))
     write_table(conn, "depth_charts", pd.DataFrame(
         columns=["gsis_id", "depth_team", "formation", "week", "position"]))
+    write_table(conn, "snap_counts", pd.DataFrame(
+        columns=["player", "team", "season", "offense_pct"]))
     conn.close()
 
 def _client(tmp_path):
@@ -146,3 +148,15 @@ def test_concurrent_requests(tmp_path):
         for future in as_completed(futures):
             result = future.result()
             assert result.status_code == 200
+
+def test_profile_endpoint(tmp_path):
+    c = _client(tmp_path)
+    pid = c.get("/api/players").json()["players"][0]["player_id"]
+    p = c.get(f"/api/players/{pid}/profile")
+    assert p.status_code == 200
+    body = p.json()
+    assert body["header"]["player_id"] == pid
+    assert {"factors", "seasons", "game_log", "outlook", "similar"} <= set(body)
+
+def test_profile_404(tmp_path):
+    assert _client(tmp_path).get("/api/players/nope/profile").status_code == 404

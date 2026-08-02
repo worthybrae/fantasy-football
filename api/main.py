@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException, Query
 from pipeline.db import get_conn, read_table, DEFAULT_PATH
 from scoring.board import build_board
 from scoring.config import DEFAULT_WEIGHTS
+from scoring.profile import build_profile
 
 def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
     app = FastAPI(title="Draft Board API")
@@ -61,6 +62,17 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
                 lambda v: None if v is None else str(v)
             )
             return {"sources": m.to_dict(orient="records")}
+        finally:
+            cur.close()
+
+    @app.get("/api/players/{player_id}/profile")
+    def player_profile(player_id: str):
+        cur = conn.cursor()
+        try:
+            payload = build_profile(cur, player_id)
+            if payload is None:
+                raise HTTPException(status_code=404, detail="unknown player_id")
+            return payload
         finally:
             cur.close()
 
