@@ -77,6 +77,24 @@ def _stat_line(row, position):
     return line
 
 
+# Payload key -> weekly-table column. Every game_log row carries all 12 keys
+# (zero-filled when the column is absent) so the frontend's position-aware
+# column configs can index into a uniform shape.
+_GAME_STAT_COLS = {
+    "completions": "completions", "attempts": "attempts",
+    "pass_yards": "passing_yards", "pass_tds": "passing_tds",
+    "interceptions": "passing_interceptions",
+    "carries": "carries", "rush_yards": "rushing_yards",
+    "rush_tds": "rushing_tds", "targets": "targets",
+    "receptions": "receptions", "rec_yards": "receiving_yards",
+    "rec_tds": "receiving_tds",
+}
+
+
+def _game_stats(row):
+    return {k: int(_num(row, col)) for k, col in _GAME_STAT_COLS.items()}
+
+
 def season_summaries(weekly: pd.DataFrame, snaps: pd.DataFrame, player_id: str) -> list[dict]:
     if weekly.empty:
         return []
@@ -137,6 +155,7 @@ def game_log(weekly: pd.DataFrame, player_id: str) -> list[dict]:
             "week": int(r["week"]),
             "opponent": r.get("opponent_team"),
             "stat_line": _stat_line(r, r.get("position")),
+            "stats": _game_stats(r),
             "ppr_points": round(float(r["ppr_points"]), 1),
         })
     return rows

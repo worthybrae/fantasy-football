@@ -25,6 +25,17 @@ def test_game_log_line_and_order():
     assert rows[0]["stat_line"] == "9 tgt, 6 rec, 80 yds, 1 TD"
     assert rows[0]["ppr_points"] == 20.0
 
+def test_game_log_includes_structured_stats():
+    rows = game_log(_weekly_rows(), "p1")
+    s = rows[0]["stats"]
+    assert s["targets"] == 9 and s["receptions"] == 6
+    assert s["rec_yards"] == 80 and s["rec_tds"] == 1
+    # columns absent from the weekly frame zero-fill
+    assert s["pass_yards"] == 0 and s["completions"] == 0 and s["carries"] == 0
+    assert set(s) == {"completions", "attempts", "pass_yards", "pass_tds",
+                      "interceptions", "carries", "rush_yards", "rush_tds",
+                      "targets", "receptions", "rec_yards", "rec_tds"}
+
 def _seed(tmp_path):
     conn = get_conn(str(tmp_path / "t.duckdb"))
     write_table(conn, "weekly", _weekly_rows())
