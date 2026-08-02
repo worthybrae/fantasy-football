@@ -1,18 +1,25 @@
 import type { SeasonSummary } from '../api'
+import { ptsShadeClass, seasonColumnsFor } from '../statColumns'
 
 interface SeasonTableProps {
   seasons: SeasonSummary[]
+  position: string
 }
 
-const fmtPct = (n: number | null) => (n === null ? '—' : `${(n * 100).toFixed(1)}%`)
-const fmt1 = (n: number | null) => (n === null ? '—' : n.toFixed(1))
-
-export default function SeasonTable({ seasons }: SeasonTableProps) {
+export default function SeasonTable({ seasons, position }: SeasonTableProps) {
   if (seasons.length === 0) {
     return <p className="drawer-placeholder">No season history available.</p>
   }
 
+  const columns = seasonColumnsFor(position)
   const rows = [...seasons].sort((a, b) => b.season - a.season)
+
+  // Games-weighted career PPG, so a 3-game injury season doesn't drag the
+  // reference point the way a plain mean of season PPGs would.
+  const totalGames = rows.reduce((sum, s) => sum + s.games, 0)
+  const careerPpg = totalGames > 0
+    ? rows.reduce((sum, s) => sum + s.ppg * s.games, 0) / totalGames
+    : 0
 
   return (
     <div className="season-table-wrap">
@@ -22,15 +29,9 @@ export default function SeasonTable({ seasons }: SeasonTableProps) {
             <th>Season</th>
             <th>G</th>
             <th>PPG</th>
-            <th>Tgt</th>
-            <th>Tgt%</th>
-            <th>Car</th>
-            <th>Rec Yds</th>
-            <th>Rush Yds</th>
-            <th>TD</th>
-            <th>Rec</th>
-            <th>Yds/Opp</th>
-            <th>Snap%</th>
+            {columns.map((c) => (
+              <th key={c.label}>{c.label}</th>
+            ))}
           </tr>
         </thead>
         <tbody>
@@ -38,16 +39,10 @@ export default function SeasonTable({ seasons }: SeasonTableProps) {
             <tr key={s.season}>
               <td>{s.season}</td>
               <td>{s.games}</td>
-              <td>{s.ppg.toFixed(1)}</td>
-              <td>{s.targets}</td>
-              <td>{fmtPct(s.target_share)}</td>
-              <td>{s.carries}</td>
-              <td>{s.rec_yards}</td>
-              <td>{s.rush_yards}</td>
-              <td>{s.tds}</td>
-              <td>{s.receptions}</td>
-              <td>{fmt1(s.yards_per_opp)}</td>
-              <td>{fmtPct(s.snap_share)}</td>
+              <td className={ptsShadeClass(s.ppg, careerPpg)}>{s.ppg.toFixed(1)}</td>
+              {columns.map((c) => (
+                <td key={c.label}>{c.value(s)}</td>
+              ))}
             </tr>
           ))}
         </tbody>
