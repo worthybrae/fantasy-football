@@ -16,10 +16,23 @@ export const DEFAULT_WEIGHTS: Weights = {
   production: 0.35, role: 0.25, environment: 0.2, schedule: 0.1, durability: 0.1,
 }
 
+async function detailText(res: Response): Promise<string> {
+  try {
+    const body = await res.json()
+    if (body && typeof body.detail === 'string') return body.detail
+  } catch {
+    // body wasn't JSON (or was empty) -- fall through to a generic message
+  }
+  return res.statusText || 'request failed'
+}
+
 export async function fetchPlayers(w: Weights): Promise<Player[]> {
   const params = new URLSearchParams(
     Object.entries(w).map(([k, v]) => [`w_${k}`, String(v)]))
   const res = await fetch(`/api/players?${params}`)
+  if (!res.ok) {
+    throw new Error(`Failed to load players (${res.status}): ${await detailText(res)}`)
+  }
   return (await res.json()).players
 }
 
@@ -28,5 +41,9 @@ export async function setDrafted(playerId: string, drafted: boolean): Promise<vo
 }
 
 export async function fetchMeta(): Promise<{ sources: { source: string; ok: boolean; rows: number; refreshed_at: string }[] }> {
-  return (await fetch('/api/meta')).json()
+  const res = await fetch('/api/meta')
+  if (!res.ok) {
+    throw new Error(`Failed to load meta (${res.status}): ${await detailText(res)}`)
+  }
+  return res.json()
 }

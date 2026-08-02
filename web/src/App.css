@@ -204,6 +204,62 @@ tr.tier-boundary td {
   border-top: 2px solid var(--accent-border);
 }
 
+th:first-child,
+td:first-child {
+  padding-left: 6px;
+  padding-right: 0;
+  width: 1%;
+}
+
+.expand-toggle {
+  background: transparent;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 3px;
+}
+
+.expand-toggle:hover {
+  color: var(--text-h);
+  background: rgba(192, 132, 252, 0.12);
+}
+
+tr.factor-breakdown-row td {
+  background: var(--code-bg);
+  padding: 10px 16px;
+  cursor: default;
+}
+
+.factor-breakdown {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  margin: 0;
+}
+
+.factor-breakdown-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 90px;
+}
+
+.factor-breakdown-item dt {
+  font-size: 11px;
+  color: var(--text);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.factor-breakdown-item dd {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text-h);
+}
+
 .rookie-badge {
   display: inline-block;
   margin-left: 6px;
