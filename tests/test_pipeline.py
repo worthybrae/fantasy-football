@@ -1,6 +1,7 @@
 import pandas as pd
 from pipeline.db import get_conn, write_table, read_table, record_freshness
 from pipeline.sources import parse_adp, _normalize_weekly
+from pipeline.sources import parse_espn, parse_fp_ecr, parse_sleeper
 
 def test_write_and_read_roundtrip(tmp_path):
     conn = get_conn(str(tmp_path / "t.duckdb"))
@@ -55,3 +56,34 @@ def test_normalize_weekly_filters_to_regular_season():
     out = _normalize_weekly(df)
     assert out["player_id"].tolist() == [1, 3]
     assert (out["season_type"] == "REG").all()
+
+def test_parse_espn():
+    payload = {"players": [
+        {"player": {"id": 4429795, "fullName": "Jahmyr Gibbs", "defaultPositionId": 2,
+                    "ownership": {"averageDraftPosition": 1.77},
+                    "draftRanksByRankType": {"PPR": {"rank": 1}}}},
+        {"player": {"id": 1, "fullName": "Some Lineman", "defaultPositionId": 9}},
+    ]}
+    df = parse_espn(payload)
+    assert len(df) == 1
+    r = df.iloc[0]
+    assert r["espn_id"] == 4429795 and r["position"] == "RB"
+    assert r["espn_adp"] == 1.77 and r["espn_ppr_rank"] == 1
+
+def test_parse_fp_ecr():
+    html = ('<script>var x = 1; var ecrData = {"players": [{"player_name": "JaMarr Chase",'
+            '"player_team_id": "CIN", "player_position_id": "WR", "rank_ecr": 1,'
+            '"rank_ave": "1.77", "rank_std": "1.2", "tier": 1}]};</script>')
+    df = parse_fp_ecr(html)
+    assert df.iloc[0]["rank_ecr"] == 1 and df.iloc[0]["position"] == "WR"
+    assert parse_fp_ecr("<html>no data</html>").empty
+
+def test_parse_sleeper():
+    payload = {
+        "a": {"gsis_id": " 00-0038543", "espn_id": 4429795, "full_name": "Jahmyr Gibbs",
+              "position": "RB", "team": "DET", "active": True},
+        "b": {"gsis_id": None, "espn_id": 99, "full_name": "No Gsis", "position": "WR"},
+        "c": {"gsis_id": "00-1", "espn_id": 5, "full_name": "A Lineman", "position": "OT"},
+    }
+    df = parse_sleeper(payload)
+    assert len(df) == 1 and df.iloc[0]["gsis_id"] == "00-0038543"
