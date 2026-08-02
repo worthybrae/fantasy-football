@@ -36,6 +36,15 @@ export default function PlayerProfile({ playerId, onClose, onToggleDrafted, onSe
   playerIdRef.current = playerId
 
   async function loadProfile(forPlayerId: string) {
+    // Guard at the top too, not just before each state commit below: a
+    // stale invocation (e.g. handleToggleDraftedClick's post-await refetch
+    // for a player the user has since swapped away from) must be a
+    // complete no-op. Without this, setLoading(true)/setError(null) would
+    // still fire for a stale id -- wiping a legitimate error for the
+    // *current* player and flipping loading true -- and since every commit
+    // below is itself guarded, setLoading(false) would never run for that
+    // stale id, leaving the drawer stuck on "Loading profile..." forever.
+    if (playerIdRef.current !== forPlayerId) return
     setLoading(true)
     setError(null)
     try {
