@@ -55,7 +55,7 @@ export interface SeasonSummary {
   yards_per_opp: number | null; snap_share: number | null;
 }
 export interface GameLogRow {
-  season: number; week: number; opponent: string; stat_line: string;
+  season: number; week: number; opponent: string | null; stat_line: string;
   ppr_points: number;
 }
 export interface SimilarPlayer {
@@ -76,8 +76,10 @@ export interface PlayerProfileData {
   outlook: Outlook;
   similar: { mode: 'stat_twins' | 'value_neighbors'; players: SimilarPlayer[] };
 }
-export async function fetchProfile(playerId: string): Promise<PlayerProfileData> {
-  const res = await fetch(`/api/players/${playerId}/profile`)
+export async function fetchProfile(playerId: string, weights: Weights): Promise<PlayerProfileData> {
+  const params = new URLSearchParams(
+    Object.entries(weights).map(([k, v]) => [`w_${k}`, String(v)]))
+  const res = await fetch(`/api/players/${playerId}/profile?${params}`)
   if (!res.ok) throw new Error(`profile ${res.status}: ${await detailText(res)}`)
   return res.json()
 }

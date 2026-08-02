@@ -217,8 +217,17 @@ def build_profile(conn, player_id: str, weights: dict | None = None) -> dict | N
     schedules = read_table(conn, "schedules")
     depth = read_table(conn, "depth_charts")
 
-    seasons = season_summaries(weekly, snaps, player_id)
-    logs = game_log(weekly, player_id)
+    if header["position"] == "K":
+        # Kickers have weekly rows, but the PPR formula doesn't score kicking
+        # stats, so every one of those rows nets 0 points -- a "history" of
+        # zeros is misleading, not informative. Collapse it the same way a
+        # rookie's genuinely-empty history collapses (DST never has weekly
+        # rows at all, so it already returns empty here).
+        seasons = []
+        logs = []
+    else:
+        seasons = season_summaries(weekly, snaps, player_id)
+        logs = game_log(weekly, player_id)
     outlook_out = _outlook(weekly, depth, schedules, header)
 
     if header["position"] in _KDST_POSITIONS:

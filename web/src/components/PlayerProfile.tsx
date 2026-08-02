@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { fetchProfile, type Player, type PlayerProfileData } from '../api'
+import { fetchProfile, type Player, type PlayerProfileData, type Weights } from '../api'
 import FactorBars from './FactorBars'
 import GameLog from './GameLog'
 import SeasonTable from './SeasonTable'
@@ -8,6 +8,7 @@ import WeeklyChart from './WeeklyChart'
 
 interface PlayerProfileProps {
   playerId: string
+  weights: Weights
   onClose: () => void
   onToggleDrafted: (p: Player) => Promise<void>
   onSelectPlayer: (id: string) => void
@@ -20,7 +21,15 @@ function depthSlotLabel(position: string, depthSlot: number | null): string | nu
 
 const fmt1 = (n: number | null) => (n === null ? '—' : n.toFixed(1))
 
-export default function PlayerProfile({ playerId, onClose, onToggleDrafted, onSelectPlayer }: PlayerProfileProps) {
+// Higher sos_raw/sos_pct = opponents allow more fantasy points at this
+// position = an easier ("softer") schedule; lower = a tougher one.
+function sosLabel(sosRaw: number | null, sosPct: number | null): string {
+  if (sosRaw === null || sosPct === null) return 'SoS —'
+  const direction = sosPct >= 50 ? 'softer' : 'tougher'
+  return `SoS ${sosRaw.toFixed(1)} FPA/g (${sosPct.toFixed(0)}th pct — ${direction})`
+}
+
+export default function PlayerProfile({ playerId, weights, onClose, onToggleDrafted, onSelectPlayer }: PlayerProfileProps) {
   const [profile, setProfile] = useState<PlayerProfileData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -51,7 +60,7 @@ export default function PlayerProfile({ playerId, onClose, onToggleDrafted, onSe
     setLoading(true)
     setError(null)
     try {
-      const data = await fetchProfile(forPlayerId)
+      const data = await fetchProfile(forPlayerId, weights)
       if (playerIdRef.current === forPlayerId) setProfile(data)
     } catch (e) {
       if (playerIdRef.current === forPlayerId) {
@@ -62,13 +71,22 @@ export default function PlayerProfile({ playerId, onClose, onToggleDrafted, onSe
     }
   }
 
+  // Tracks the playerId this effect last ran for, so a weights-only change
+  // (slider drag while the drawer is open) can refetch without blanking the
+  // already-rendered profile first -- only an actual player swap resets it.
+  const prevPlayerIdRef = useRef<string | null>(null)
+
   // Reset and refetch whenever the drawer is pointed at a new player (initial
-  // open, or a comp/row click swapping the id while the drawer stays mounted).
+  // open, or a comp/row click swapping the id while the drawer stays
+  // mounted), and refetch (without resetting) whenever the slider weights
+  // change, so the drawer's rank/VOR/composite never contradict the board.
   useEffect(() => {
-    setProfile(null)
+    const isNewPlayer = prevPlayerIdRef.current !== playerId
+    prevPlayerIdRef.current = playerId
+    if (isNewPlayer) setProfile(null)
     loadProfile(playerId)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playerId])
+  }, [playerId, weights])
 
   // Scoped to the drawer being mounted at all -- avoids a global listener
   // (and stray Esc-closes) while the board is the only thing on screen.
@@ -154,7 +172,7 @@ export default function PlayerProfile({ playerId, onClose, onToggleDrafted, onSe
                 {depthSlot && <span className="chip">{depthSlot}</span>}
                 <span className="chip">Implied {fmt1(profile.outlook.implied_points)} pts</span>
                 <span className="chip">
-                  SoS {profile.outlook.sos_pct !== null ? `${profile.outlook.sos_pct.toFixed(0)}th pct` : '—'}
+                  {sosLabel(profile.outlook.sos_raw, profile.outlook.sos_pct)}
                 </span>
                 <span className="chip">Bye {profile.outlook.bye ?? '—'}</span>
               </div>

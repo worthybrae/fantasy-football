@@ -308,6 +308,12 @@ td:first-child {
   color: var(--text-h);
 }
 
+.chip-muted {
+  color: var(--text);
+  font-style: italic;
+  border-style: dashed;
+}
+
 .drawer-draft-btn {
   background: var(--accent-bg);
   border: 1px solid var(--accent-border);

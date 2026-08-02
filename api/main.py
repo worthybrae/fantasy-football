@@ -66,10 +66,23 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
             cur.close()
 
     @app.get("/api/players/{player_id}/profile")
-    def player_profile(player_id: str):
+    def player_profile(player_id: str,
+                        w_production: float = Query(DEFAULT_WEIGHTS["production"], ge=0),
+                        w_role: float = Query(DEFAULT_WEIGHTS["role"], ge=0),
+                        w_environment: float = Query(DEFAULT_WEIGHTS["environment"], ge=0),
+                        w_schedule: float = Query(DEFAULT_WEIGHTS["schedule"], ge=0),
+                        w_durability: float = Query(DEFAULT_WEIGHTS["durability"], ge=0)):
         cur = conn.cursor()
         try:
-            payload = build_profile(cur, player_id)
+            weights = {"production": w_production, "role": w_role,
+                       "environment": w_environment, "schedule": w_schedule,
+                       "durability": w_durability}
+            try:
+                payload = build_profile(cur, player_id, weights)
+            except ValueError as e:
+                # Same as /api/players -- compute_composite raises when
+                # weights sum <= 0, reachable if every slider is at 0.
+                raise HTTPException(status_code=422, detail=str(e))
             if payload is None:
                 raise HTTPException(status_code=404, detail="unknown player_id")
             return payload

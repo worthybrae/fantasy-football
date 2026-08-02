@@ -114,6 +114,7 @@ function App() {
       {selectedPlayerId && (
         <PlayerProfile
           playerId={selectedPlayerId}
+          weights={weights}
           onClose={handleCloseProfile}
           onToggleDrafted={handleToggleDrafted}
           onSelectPlayer={setSelectedPlayerId}

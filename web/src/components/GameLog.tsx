@@ -36,7 +36,7 @@ export default function GameLog({ gameLog }: GameLogProps) {
           <ul className="game-log-list">
             {games.map((g) => (
               <li className="game-log-row mono" key={`${g.season}-${g.week}`}>
-                {seasonTag(g.season)} wk {g.week} · vs {g.opponent} · {g.stat_line} · {g.ppr_points.toFixed(1)}
+                {seasonTag(g.season)} wk {g.week} · vs {g.opponent ?? '—'} · {g.stat_line} · {g.ppr_points.toFixed(1)}
               </li>
             ))}
           </ul>
