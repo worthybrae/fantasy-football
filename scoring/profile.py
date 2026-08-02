@@ -120,6 +120,21 @@ def season_summaries(weekly: pd.DataFrame, snaps: pd.DataFrame, player_id: str) 
     else:
         mine["snap_share"] = np.nan
 
+    # Passing aggregates aren't part of player_season_features (that frame
+    # feeds twin matching in similarity.py and must not change) -- aggregate
+    # them here from the raw weekly rows instead.
+    pass_cols = {"completions": "completions", "attempts": "attempts",
+                 "pass_yards": "passing_yards", "pass_tds": "passing_tds",
+                 "interceptions": "passing_interceptions"}
+    wk_mine = weekly[weekly["player_id"] == player_id].copy()
+    for out, col in pass_cols.items():
+        wk_mine[out] = (pd.to_numeric(wk_mine[col], errors="coerce").fillna(0)
+                        if col in wk_mine.columns else 0.0)
+    passing = wk_mine.groupby("season", as_index=False)[list(pass_cols)].sum()
+    mine = mine.merge(passing, on="season", how="left")
+    for out in pass_cols:
+        mine[out] = mine[out].fillna(0)
+
     mine = mine.sort_values("season", ascending=False)
     rows = []
     for _, r in mine.iterrows():
@@ -127,6 +142,11 @@ def season_summaries(weekly: pd.DataFrame, snaps: pd.DataFrame, player_id: str) 
             "season": int(r["season"]),
             "games": int(r["games"]),
             "ppg": _round_or_none(r["ppg"], 1),
+            "completions": int(r["completions"]),
+            "attempts": int(r["attempts"]),
+            "pass_yards": int(r["pass_yards"]),
+            "pass_tds": int(r["pass_tds"]),
+            "interceptions": int(r["interceptions"]),
             "targets": int(r["targets"]),
             "target_share": _round_or_none(r["target_share"], 3),
             "carries": int(r["carries"]),

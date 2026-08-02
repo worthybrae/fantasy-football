@@ -10,6 +10,17 @@ def _weekly_rows():
           "receiving_tds": 1, "targets": 9, "carries": 0}
          for w in range(1, 11)])
 
+def _qb_weekly_rows():
+    return pd.DataFrame(
+        [{"player_id": "q1", "player_display_name": "QB Guy",
+          "position": "QB", "recent_team": "DET", "opponent_team": "GB",
+          "season": 2025, "week": w, "completions": 20, "attempts": 30,
+          "passing_yards": 250, "passing_tds": 2, "passing_interceptions": 1,
+          "carries": 4, "rushing_yards": 20, "rushing_tds": 0,
+          "targets": 0, "receptions": 0, "receiving_yards": 0,
+          "receiving_tds": 0}
+         for w in range(1, 6)])
+
 def test_season_summaries_math_and_snap_join():
     snaps = pd.DataFrame([{"player": "Amon-Ra St Brown", "team": "DET",
                            "season": 2025, "offense_pct": 0.9}])
@@ -18,6 +29,17 @@ def test_season_summaries_math_and_snap_join():
     assert s["ppg"] == 20.0            # 6 + 8 + 6 = 20 per game
     assert s["snap_share"] == 0.9      # matched despite punctuation
     assert s["target_share"] == 1.0
+
+def test_season_summaries_passing_aggregates():
+    s = season_summaries(_qb_weekly_rows(), pd.DataFrame(), "q1")[0]
+    assert s["completions"] == 100 and s["attempts"] == 150
+    assert s["pass_yards"] == 1250 and s["pass_tds"] == 10
+    assert s["interceptions"] == 5
+
+def test_season_summaries_passing_zero_filled_without_columns():
+    # WR fixture has no passing columns at all -- fields must still exist
+    s = season_summaries(_weekly_rows(), pd.DataFrame(), "p1")[0]
+    assert s["pass_yards"] == 0 and s["attempts"] == 0
 
 def test_game_log_line_and_order():
     rows = game_log(_weekly_rows(), "p1")
