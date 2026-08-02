@@ -67,3 +67,23 @@ def test_no_nan_anywhere(tmp_path):
     import math, json
     p = build_profile(_seed(tmp_path), "p1")
     json.dumps(p, allow_nan=False)  # raises if any NaN survived scrubbing
+
+def test_scrubs_pandas_na_from_empty_adp(tmp_path):
+    import json
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    write_table(conn, "weekly", _weekly_rows())
+    write_table(conn, "schedules", pd.DataFrame([
+        {"home_team": "DET", "away_team": "GB", "week": 1,
+         "total_line": 51.0, "spread_line": 3.0}]))
+    # empty adp -> uni["adp"] = pd.NA for every row (scoring/board.py), which
+    # is not a float NaN and slips past isinstance(v, (np.floating, float))
+    write_table(conn, "adp",
+                pd.DataFrame(columns=["adp_name", "position", "team", "adp"]))
+    write_table(conn, "depth_charts",
+                pd.DataFrame(columns=["gsis_id", "depth_team", "formation",
+                                      "week", "position"]))
+    write_table(conn, "snap_counts",
+                pd.DataFrame(columns=["player", "team", "season", "offense_pct"]))
+    p = build_profile(conn, "p1")
+    json.dumps(p, allow_nan=False)  # must not raise
+    assert p["header"]["adp"] is None

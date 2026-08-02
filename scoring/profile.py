@@ -17,6 +17,11 @@ def _scrub(v):
         return {k: _scrub(x) for k, x in v.items()}
     if isinstance(v, (list, tuple)):
         return [_scrub(x) for x in v]
+    if v is None or (pd.api.types.is_scalar(v) and pd.isna(v)):
+        # Catches pd.NA/NaT (e.g. an empty adp table leaves the whole `adp`
+        # column as pd.NA) in addition to float NaN, which the isinstance
+        # checks below would otherwise miss.
+        return None
     if isinstance(v, (np.integer,)):
         return int(v)
     if isinstance(v, (np.floating, float)):
