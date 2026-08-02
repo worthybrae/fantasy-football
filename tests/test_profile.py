@@ -58,6 +58,12 @@ def test_game_log_includes_structured_stats():
                       "interceptions", "carries", "rush_yards", "rush_tds",
                       "targets", "receptions", "rec_yards", "rec_tds"}
 
+def test_game_log_structured_passing_stats_nonzero():
+    s = game_log(_qb_weekly_rows(), "q1")[0]["stats"]
+    assert s["pass_yards"] == 250 and s["completions"] == 20
+    assert s["attempts"] == 30 and s["pass_tds"] == 2
+    assert s["interceptions"] == 1
+
 def _seed(tmp_path):
     conn = get_conn(str(tmp_path / "t.duckdb"))
     write_table(conn, "weekly", _weekly_rows())

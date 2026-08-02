@@ -189,7 +189,7 @@ export default function WeeklyChart({ gameLog }: WeeklyChartProps) {
               if (positive) top = bottom - MIN_BAR_EXTENT
               else bottom = top + MIN_BAR_EXTENT
             }
-            const title = `${seasonTag(game.season)} wk ${game.week} — ${game.ppr_points.toFixed(1)} pts vs ${game.opponent} — ${game.stat_line}`
+            const title = `${seasonTag(game.season)} wk ${game.week} — ${game.ppr_points.toFixed(1)} pts vs ${game.opponent ?? '—'} — ${game.stat_line}`
             return (
               <path
                 key={`${game.season}-${game.week}`}

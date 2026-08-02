@@ -123,9 +123,8 @@ def season_summaries(weekly: pd.DataFrame, snaps: pd.DataFrame, player_id: str) 
     # Passing aggregates aren't part of player_season_features (that frame
     # feeds twin matching in similarity.py and must not change) -- aggregate
     # them here from the raw weekly rows instead.
-    pass_cols = {"completions": "completions", "attempts": "attempts",
-                 "pass_yards": "passing_yards", "pass_tds": "passing_tds",
-                 "interceptions": "passing_interceptions"}
+    pass_cols = {k: _GAME_STAT_COLS[k] for k in
+                 ("completions", "attempts", "pass_yards", "pass_tds", "interceptions")}
     wk_mine = weekly[weekly["player_id"] == player_id].copy()
     for out, col in pass_cols.items():
         wk_mine[out] = (pd.to_numeric(wk_mine[col], errors="coerce").fillna(0)
