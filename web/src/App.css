@@ -211,53 +211,21 @@ td:first-child {
   width: 1%;
 }
 
-.expand-toggle {
+.drafted-toggle {
   background: transparent;
-  border: none;
+  border: 1px solid var(--border);
   color: var(--text);
   cursor: pointer;
-  font-size: 12px;
+  font-size: 11px;
   line-height: 1;
-  padding: 4px 6px;
+  padding: 3px 6px;
   border-radius: 3px;
 }
 
-.expand-toggle:hover {
+.drafted-toggle:hover {
   color: var(--text-h);
   background: rgba(192, 132, 252, 0.12);
-}
-
-tr.factor-breakdown-row td {
-  background: var(--code-bg);
-  padding: 10px 16px;
-  cursor: default;
-}
-
-.factor-breakdown {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 18px;
-  margin: 0;
-}
-
-.factor-breakdown-item {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 90px;
-}
-
-.factor-breakdown-item dt {
-  font-size: 11px;
-  color: var(--text);
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-}
-
-.factor-breakdown-item dd {
-  margin: 0;
-  font-size: 14px;
-  color: var(--text-h);
+  border-color: var(--accent-border);
 }
 
 .rookie-badge {
@@ -269,4 +237,201 @@ tr.factor-breakdown-row td {
   border-radius: 3px;
   background: var(--accent);
   color: #16171d;
+}
+
+/* -- player profile drawer -- */
+
+.drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 20;
+}
+
+.player-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(70vw, 900px);
+  overflow-y: auto;
+  background: var(--bg);
+  border-left: 1px solid var(--border);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.35);
+  padding: 24px;
+  z-index: 21;
+  text-align: left;
+}
+
+.drawer-close {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 3px;
+  padding: 4px 8px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.drawer-close:hover {
+  color: var(--text-h);
+  border-color: var(--accent-border);
+}
+
+.drawer-header h2 {
+  color: var(--text-h);
+  margin: 0 0 4px;
+  padding-right: 40px;
+}
+
+.drawer-subhead {
+  margin: 0 0 10px;
+  font-size: 13px;
+}
+
+.drawer-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.chip {
+  font-size: 12px;
+  font-family: var(--mono);
+  padding: 2px 9px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  color: var(--text-h);
+}
+
+.drawer-draft-btn {
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-border);
+  color: var(--text-h);
+  border-radius: 4px;
+  padding: 6px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.drawer-draft-btn:hover {
+  background: var(--accent-border);
+}
+
+.drawer-section {
+  margin-top: 24px;
+}
+
+.drawer-section h3 {
+  color: var(--text-h);
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin: 0 0 10px;
+}
+
+.drawer-placeholder {
+  font-size: 13px;
+  font-style: italic;
+}
+
+/* -- factor bars -- */
+
+.factor-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.factor-bar {
+  display: grid;
+  grid-template-columns: 90px 1fr 44px;
+  align-items: center;
+  gap: 10px;
+}
+
+.factor-bar-label {
+  font-size: 12px;
+  color: var(--text);
+}
+
+.factor-bar-track {
+  background: var(--code-bg);
+  border-radius: 4px;
+  height: 8px;
+  overflow: hidden;
+}
+
+.factor-bar-fill {
+  background: var(--accent);
+  height: 100%;
+  border-radius: 4px;
+}
+
+.factor-bar-value {
+  font-size: 12px;
+  text-align: right;
+  color: var(--text-h);
+}
+
+/* -- similar players -- */
+
+.similar-players {
+  font-size: 13px;
+}
+
+.similar-heading {
+  margin: 0 0 8px;
+  color: var(--text-h);
+}
+
+.similar-empty {
+  font-style: italic;
+}
+
+.similar-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.similar-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
+
+.similar-row.clickable {
+  cursor: pointer;
+}
+
+.similar-row.clickable:hover {
+  border-color: var(--accent-border);
+  background: rgba(192, 132, 252, 0.08);
+}
+
+.similar-name {
+  color: var(--text-h);
+}
+
+.similar-stats {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.similar-chips {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
 }

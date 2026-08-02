@@ -1,4 +1,4 @@
-import { Fragment, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import {
   type ColumnDef,
   type SortingState,
@@ -11,7 +11,8 @@ import type { Player } from '../api'
 
 interface PlayerTableProps {
   players: Player[]
-  onToggleDrafted: (p: Player) => void
+  onToggleDrafted: (p: Player) => Promise<void>
+  onSelectPlayer: (p: Player) => void
   /** Tier is computed per-position, so the boundary rule is only meaningful
    *  when a single position is in view -- on ALL/FLEX, adjacent rows are
    *  usually different positions with unrelated tier numbers, so the rule
@@ -23,50 +24,29 @@ const fmt1 = (n: number) => n.toFixed(1)
 const fmtNullable = (n: number | null) => (n === null ? '—' : n)
 const NUMERIC_COLUMNS = new Set(['rank', 'tier', 'bye', 'vor', 'composite', 'adp', 'edge'])
 
-const FACTORS: { key: keyof Player; label: string }[] = [
-  { key: 'production', label: 'Production' },
-  { key: 'durability', label: 'Durability' },
-  { key: 'role', label: 'Role' },
-  { key: 'environment', label: 'Environment' },
-  { key: 'schedule', label: 'Schedule' },
-]
-
-export default function PlayerTable({ players, onToggleDrafted, showTierBreaks }: PlayerTableProps) {
+export default function PlayerTable({ players, onToggleDrafted, onSelectPlayer, showTierBreaks }: PlayerTableProps) {
   const [sorting, setSorting] = useState<SortingState>([{ id: 'rank', desc: false }])
-  // Keyed by player_id rather than row index/id so it plays nicely with
-  // sorting and refetches; resetting on refetch (a new Player[] identity) is
-  // acceptable per spec, so no need to prune stale ids here.
-  const [expanded, setExpanded] = useState<Set<string>>(new Set())
-
-  function toggleExpanded(playerId: string) {
-    setExpanded((prev) => {
-      const next = new Set(prev)
-      if (next.has(playerId)) next.delete(playerId)
-      else next.add(playerId)
-      return next
-    })
-  }
 
   const columns = useMemo<ColumnDef<Player>[]>(
     () => [
       {
-        id: 'expand',
+        id: 'drafted-toggle',
         header: '',
         enableSorting: false,
         cell: ({ row }) => (
           <button
             type="button"
-            className="expand-toggle"
-            aria-label={expanded.has(row.original.player_id) ? 'Collapse factor breakdown' : 'Expand factor breakdown'}
-            aria-expanded={expanded.has(row.original.player_id)}
+            className="drafted-toggle"
+            title="toggle drafted"
+            aria-label={row.original.drafted ? 'Mark undrafted' : 'Mark drafted'}
             onClick={(e) => {
-              // Row itself toggles "drafted" on click -- without this the
-              // chevron click would bubble up and also (un)draft the player.
+              // Row itself opens the profile drawer on click -- without this
+              // the button click would bubble up and open the drawer too.
               e.stopPropagation()
-              toggleExpanded(row.original.player_id)
+              onToggleDrafted(row.original)
             }}
           >
-            {expanded.has(row.original.player_id) ? '▾' : '▸'}
+            ✓
           </button>
         ),
       },
@@ -115,7 +95,7 @@ export default function PlayerTable({ players, onToggleDrafted, showTierBreaks }
         },
       },
     ],
-    [expanded]
+    [onToggleDrafted]
   )
 
   const table = useReactTable({
@@ -158,42 +138,26 @@ export default function PlayerTable({ players, onToggleDrafted, showTierBreaks }
             sorting[0]?.id === 'rank' &&
             prevRow !== null &&
             prevRow.original.tier !== row.original.tier
-          const isExpanded = expanded.has(row.original.player_id)
           return (
-            <Fragment key={row.id}>
-              <tr
-                onClick={() => onToggleDrafted(row.original)}
-                className={isTierBoundary ? 'tier-boundary' : undefined}
-                style={
-                  row.original.drafted
-                    ? { opacity: 0.35, textDecoration: 'line-through', cursor: 'pointer' }
-                    : { cursor: 'pointer' }
-                }
-              >
-                {row.getVisibleCells().map((cell) => (
-                  <td
-                    key={cell.id}
-                    className={NUMERIC_COLUMNS.has(cell.column.id) ? 'mono' : undefined}
-                  >
-                    {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                  </td>
-                ))}
-              </tr>
-              {isExpanded && (
-                <tr className="factor-breakdown-row">
-                  <td colSpan={row.getVisibleCells().length}>
-                    <dl className="factor-breakdown">
-                      {FACTORS.map(({ key, label }) => (
-                        <div className="factor-breakdown-item" key={key}>
-                          <dt>{label}</dt>
-                          <dd className="mono">{fmt1(row.original[key] as number)}</dd>
-                        </div>
-                      ))}
-                    </dl>
-                  </td>
-                </tr>
-              )}
-            </Fragment>
+            <tr
+              key={row.id}
+              onClick={() => onSelectPlayer(row.original)}
+              className={isTierBoundary ? 'tier-boundary' : undefined}
+              style={
+                row.original.drafted
+                  ? { opacity: 0.35, textDecoration: 'line-through', cursor: 'pointer' }
+                  : { cursor: 'pointer' }
+              }
+            >
+              {row.getVisibleCells().map((cell) => (
+                <td
+                  key={cell.id}
+                  className={NUMERIC_COLUMNS.has(cell.column.id) ? 'mono' : undefined}
+                >
+                  {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                </td>
+              ))}
+            </tr>
           )
         })}
       </tbody>

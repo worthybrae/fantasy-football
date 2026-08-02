@@ -47,3 +47,37 @@ export async function fetchMeta(): Promise<{ sources: { source: string; ok: bool
   }
   return res.json()
 }
+
+export interface SeasonSummary {
+  season: number; games: number; ppg: number; targets: number;
+  target_share: number | null; carries: number; rec_yards: number;
+  rush_yards: number; tds: number; receptions: number;
+  yards_per_opp: number | null; snap_share: number | null;
+}
+export interface GameLogRow {
+  season: number; week: number; opponent: string; stat_line: string;
+  ppr_points: number;
+}
+export interface SimilarPlayer {
+  player_id: string | null; name: string; season: number | null;
+  similarity: number | null; ppg: number | null; next_ppg: number | null;
+  rank: number | null; adp: number | null;
+}
+export interface Outlook {
+  depth_slot: number | null; implied_points: number | null;
+  sos_raw: number | null; sos_pct: number | null; bye: number | null;
+}
+export interface PlayerProfileData {
+  header: Player;
+  factors: { production: number; durability: number; role: number;
+             environment: number; schedule: number };
+  seasons: SeasonSummary[];
+  game_log: GameLogRow[];
+  outlook: Outlook;
+  similar: { mode: 'stat_twins' | 'value_neighbors'; players: SimilarPlayer[] };
+}
+export async function fetchProfile(playerId: string): Promise<PlayerProfileData> {
+  const res = await fetch(`/api/players/${playerId}/profile`)
+  if (!res.ok) throw new Error(`profile ${res.status}: ${await detailText(res)}`)
+  return res.json()
+}

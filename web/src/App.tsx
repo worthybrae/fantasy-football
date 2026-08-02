@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { DEFAULT_WEIGHTS, fetchPlayers, setDrafted, type Player, type Weights } from './api'
 import PlayerTable from './components/PlayerTable'
+import PlayerProfile from './components/PlayerProfile'
 import WeightSliders from './components/WeightSliders'
 import PositionTabs from './components/PositionTabs'
 import FreshnessBadge from './components/FreshnessBadge'
@@ -15,6 +16,7 @@ function App() {
   const [error, setError] = useState<string | null>(null)
   const [hideDrafted, setHideDrafted] = useState(false)
   const [positionFilter, setPositionFilter] = useState('ALL')
+  const [selectedPlayerId, setSelectedPlayerId] = useState<string | null>(null)
 
   async function loadPlayers(w: Weights) {
     setLoading(true)
@@ -93,6 +95,7 @@ function App() {
                 <PlayerTable
                   players={filteredPlayers}
                   onToggleDrafted={handleToggleDrafted}
+                  onSelectPlayer={(p) => setSelectedPlayerId(p.player_id)}
                   showTierBreaks={positionFilter !== 'ALL' && positionFilter !== 'FLEX'}
                 />
               </div>
@@ -100,6 +103,17 @@ function App() {
           )}
         </main>
       </div>
+      {/* Overlay, not a route -- mounting/unmounting it never touches
+          PlayerTable, so the board's sort/filter/scroll state survives
+          opening, swapping, or closing the drawer. */}
+      {selectedPlayerId && (
+        <PlayerProfile
+          playerId={selectedPlayerId}
+          onClose={() => setSelectedPlayerId(null)}
+          onToggleDrafted={handleToggleDrafted}
+          onSelectPlayer={setSelectedPlayerId}
+        />
+      )}
     </div>
   )
 }
