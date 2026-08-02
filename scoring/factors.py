@@ -17,7 +17,7 @@ def production_factor(weekly: pd.DataFrame) -> pd.DataFrame:
     ps["w"] = ps["season"].map(RECENCY_WEIGHTS).fillna(0.0)
     ps["wppg"] = ps["ppg"] * ps["w"]
     agg = ps.groupby("player_id").agg(wsum=("wppg", "sum"), wtot=("w", "sum")).reset_index()
-    agg["production_raw"] = agg["wsum"] / agg["wtot"].replace(0, pd.NA)
+    agg["production_raw"] = agg["wsum"] / agg["wtot"].replace(0, float("nan"))
     return agg[["player_id", "production_raw"]]
 
 def durability_factor(weekly: pd.DataFrame) -> pd.DataFrame:
@@ -30,25 +30,30 @@ def durability_factor(weekly: pd.DataFrame) -> pd.DataFrame:
     return out[["player_id", "durability_raw"]]
 
 def role_factor(depth_charts: pd.DataFrame, weekly: pd.DataFrame) -> pd.DataFrame:
+    # Process depth charts if available
     dc = depth_charts.copy()
     if "formation" in dc.columns:
         dc = dc[dc["formation"] == "Offense"]
-    if dc.empty:
-        return pd.DataFrame(columns=["player_id", "role_raw"])
-    if "week" in dc.columns and dc["week"].notna().any():
-        dc = dc[dc["week"] == dc["week"].max()]
-    dc["depth_rank_score"] = 1.0 / pd.to_numeric(dc["depth_team"], errors="coerce").clip(lower=1)
-    dc = dc.rename(columns={"gsis_id": "player_id"})[["player_id", "depth_rank_score"]]
-    dc = dc.groupby("player_id", as_index=False)["depth_rank_score"].max()
+    if not dc.empty:
+        if "week" in dc.columns and dc["week"].notna().any():
+            dc = dc[dc["week"] == dc["week"].max()]
+        dc["depth_rank_score"] = 1.0 / pd.to_numeric(dc["depth_team"], errors="coerce").clip(lower=1)
+        dc = dc.rename(columns={"gsis_id": "player_id"})[["player_id", "depth_rank_score"]]
+        dc = dc.groupby("player_id", as_index=False)["depth_rank_score"].max()
+    else:
+        # Create empty but mergeable dataframe for depth scores when data is absent
+        dc = pd.DataFrame(columns=["player_id", "depth_rank_score"])
 
+    # Always compute opportunity share from weekly data
     wk = weekly[weekly["season"] == weekly["season"].max()].copy()
     for c in ("targets", "carries"):
         wk[c] = pd.to_numeric(wk[c], errors="coerce").fillna(0) if c in wk.columns else 0.0
     wk["opps"] = wk["targets"] + wk["carries"]
     team_opps = wk.groupby("recent_team")["opps"].transform("sum")
-    wk["opp_share"] = wk["opps"] / team_opps.replace(0, pd.NA)
+    wk["opp_share"] = wk["opps"] / team_opps.replace(0, float("nan"))
     share = wk.groupby("player_id", as_index=False)["opp_share"].sum()
 
+    # Outer merge preserves both signals; 50/50 blend handles missing data with skipna
     out = dc.merge(share, on="player_id", how="outer")
     # 50/50 blend; if one side missing, use the other alone
     out["role_raw"] = out[["depth_rank_score", "opp_share"]].mean(axis=1, skipna=True)
