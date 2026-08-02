@@ -20,17 +20,23 @@ def player_season_features(weekly: pd.DataFrame) -> pd.DataFrame:
     for c in _STAT_COLS:
         wk[c] = (pd.to_numeric(wk[c], errors="coerce").fillna(0)
                  if c in wk.columns else 0.0)
-    for c in ("targets", "carries"):
-        wk[f"_team_{c}"] = wk.groupby(["season", "recent_team"])[c].transform("sum")
+    # Compute team totals (per season, per team)
+    team_totals = wk.groupby(["season", "recent_team"])[["targets", "carries"]].sum()
+    # For each player-season, sum targets/carries across distinct teams they played for
+    player_teams = wk.groupby(["player_id", "season", "recent_team"]).size().reset_index(name="dummy").drop("dummy", axis=1)
+    player_teams = player_teams.merge(team_totals.reset_index(), on=["season", "recent_team"])
+    team_totals_by_player_season = player_teams.groupby(["player_id", "season"])[["targets", "carries"]].sum()
+    team_totals_by_player_season = team_totals_by_player_season.rename(columns={"targets": "team_targets", "carries": "team_carries"})
+
     g = wk.groupby(["player_id", "season"]).agg(
         name=("player_display_name", "last"), position=("position", "last"),
         games=("week", "nunique"), points=("ppr_points", "sum"),
         targets=("targets", "sum"), carries=("carries", "sum"),
         rec_yards=("receiving_yards", "sum"), rush_yards=("rushing_yards", "sum"),
         rec_tds=("receiving_tds", "sum"), rush_tds=("rushing_tds", "sum"),
-        receptions=("receptions", "sum"),
-        team_targets=("_team_targets", "last"),
-        team_carries=("_team_carries", "last")).reset_index()
+        receptions=("receptions", "sum")).reset_index()
+
+    g = g.merge(team_totals_by_player_season, left_on=["player_id", "season"], right_index=True, how="left")
     opps = (g["targets"] + g["carries"]).replace(0, np.nan)
     g["ppg"] = g["points"] / g["games"]
     g["tds"] = g["rec_tds"] + g["rush_tds"]
@@ -42,8 +48,8 @@ def player_season_features(weekly: pd.DataFrame) -> pd.DataFrame:
     return g
 
 def find_twins(weekly: pd.DataFrame, player_id: str, top_n: int = 5) -> dict | None:
-    feats = player_season_features(weekly)
-    feats = feats[feats["games"] >= MIN_GAMES]
+    all_feats = player_season_features(weekly)
+    feats = all_feats[all_feats["games"] >= MIN_GAMES]
     mine = feats[feats["player_id"] == player_id]
     if mine.empty:
         return None
@@ -70,7 +76,7 @@ def find_twins(weekly: pd.DataFrame, player_id: str, top_n: int = 5) -> dict | N
     diffs = cand[zcols].to_numpy(dtype=float) - tvec
     cand["distance"] = np.sqrt(((diffs ** 2) * w).sum(axis=1) / w.sum())
     cand["similarity"] = (100 * np.exp(-cand["distance"] / DECAY)).round(1)
-    nxt = feats[["player_id", "season", "ppg"]].copy()
+    nxt = all_feats[["player_id", "season", "ppg"]].copy()
     nxt["season"] = nxt["season"] - 1
     nxt = nxt.rename(columns={"ppg": "next_ppg"})
     cand = cand.merge(nxt, on=["player_id", "season"], how="left")

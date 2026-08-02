@@ -54,3 +54,49 @@ def test_value_neighbors():
     ids = [p["player_id"] for p in out["players"]]
     assert out["mode"] == "value_neighbors"
     assert ids == ["b", "c"]  # same position only, nearest vor first, self excluded
+
+def test_next_ppg_low_games_included():
+    # Target player in 2024 matches "comp" in 2024
+    # "comp" also has 2025 with 2 games (below MIN_GAMES threshold)
+    # next_ppg should show 2025's ppg even though games < MIN_GAMES
+    rows = (_wk("me", "Me", 2024, 10, rec=6, yds=80, tgt=9)
+            + _wk("comp", "Comp", 2024, 10, rec=6, yds=80, tgt=9, team="BBB")
+            + _wk("comp", "Comp", 2025, 2, rec=10, yds=100, tgt=12, team="BBB"))
+    out = find_twins(pd.DataFrame(rows), "me")
+    comp_2024 = next(p for p in out["players"] if p["player_id"] == "comp" and p["season"] == 2024)
+    # comp's next season (2025) has ppg = 10 rec + 100*0.1 = 20.0 despite 2 < MIN_GAMES
+    assert abs(comp_2024["next_ppg"] - 20.0) < 1e-9
+
+def test_target_share_with_trade():
+    # Player plays weeks 1-4 for AAA and weeks 5-8 for BBB
+    # Team totals should sum across both teams
+    rows = (
+        [{"player_id": "me", "player_display_name": "Me", "position": "WR",
+          "recent_team": "AAA", "opponent_team": "ZZZ", "season": 2025,
+          "week": w, "receptions": 5, "receiving_yards": 50, "targets": 8, "carries": 0}
+         for w in range(1, 5)]
+        + [{"player_id": "me", "player_display_name": "Me", "position": "WR",
+            "recent_team": "BBB", "opponent_team": "ZZZ", "season": 2025,
+            "week": w, "receptions": 5, "receiving_yards": 50, "targets": 8, "carries": 0}
+           for w in range(5, 9)]
+        + [{"player_id": "other_aaa", "player_display_name": "OtherAAA", "position": "WR",
+            "recent_team": "AAA", "opponent_team": "ZZZ", "season": 2025,
+            "week": w, "receptions": 2, "receiving_yards": 20, "targets": 4, "carries": 0}
+           for w in range(1, 5)]
+        + [{"player_id": "other_bbb", "player_display_name": "OtherBBB", "position": "WR",
+            "recent_team": "BBB", "opponent_team": "ZZZ", "season": 2025,
+            "week": w, "receptions": 2, "receiving_yards": 20, "targets": 4, "carries": 0}
+           for w in range(5, 9)]
+    )
+    f = player_season_features(pd.DataFrame(rows))
+    me = f[f["player_id"] == "me"].iloc[0]
+    # "me": 8 weeks * 8 targets/week = 64 targets
+    # AAA season: (me 4 weeks * 8) + (other_aaa 4 weeks * 4) = 32 + 16 = 48
+    # BBB season: (me 4 weeks * 8) + (other_bbb 4 weeks * 4) = 32 + 16 = 48
+    # "me" team_targets should count both: 48 + 48 = 96
+    assert me["games"] == 8
+    assert me["targets"] == 64
+    assert me["team_targets"] == 96
+    target_share = me["targets"] / me["team_targets"]
+    assert abs(target_share - 64/96) < 1e-9
+    assert target_share <= 1.0
