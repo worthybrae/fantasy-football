@@ -1,0 +1,28 @@
+"""Refresh all data sources into DuckDB. Run: python -m pipeline.refresh"""
+from pipeline import sources
+from pipeline.db import get_conn, write_table, record_freshness
+from scoring.config import CURRENT_SEASON, HISTORY_SEASONS
+
+def main() -> None:
+    conn = get_conn()
+    jobs = {
+        "weekly": lambda: sources.fetch_weekly(HISTORY_SEASONS),
+        "snap_counts": lambda: sources.fetch_snap_counts(HISTORY_SEASONS),
+        "depth_charts": lambda: sources.fetch_depth_charts(CURRENT_SEASON),
+        "schedules": lambda: sources.fetch_schedules(CURRENT_SEASON),
+        "adp": lambda: sources.fetch_adp(CURRENT_SEASON),
+    }
+    summary = []
+    for name, job in jobs.items():
+        try:
+            df = job()
+            write_table(conn, name, df)
+            record_freshness(conn, name, True, len(df))
+            summary.append(f"  OK   {name}: {len(df)} rows")
+        except Exception as e:  # one source failing must not abort the rest
+            record_freshness(conn, name, False, 0)
+            summary.append(f"  FAIL {name}: {e}")
+    print("Refresh complete:\n" + "\n".join(summary))
+
+if __name__ == "__main__":
+    main()
