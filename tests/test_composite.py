@@ -37,18 +37,27 @@ def test_tiers_break_on_gap():
     assert tiers[0] == tiers[1] == tiers[2] == 1 and tiers[3] == 2
 
 def test_tiers_two_players_huge_gap():
-    """Test that 2-player group with huge gap correctly assigns tier 2 to weaker player."""
+    """Test that 2-player group never splits tiers (designed behavior).
+
+    Tier breaks require at least 3 players (2 real gaps) because mean+std
+    is undefined for a single gap. Groups with ≤2 players remain tier 1 by design,
+    regardless of gap size.
+    """
     df = _df(2)
     df["composite"] = [100.0, 20.0]  # huge gap (80 points)
     df["vor"] = df["composite"]
     out = assign_tiers(df)
     tiers = out.sort_values("vor", ascending=False)["tier"].tolist()
     # With only 2 players, len(gaps) == 1 < 2, so threshold = inf
-    # Both should be tier 1
+    # Both should be tier 1 by design
     assert tiers[0] == 1 and tiers[1] == 1
 
 def test_vor_and_tiers_mixed_positions():
-    """Test VOR and tier assignment with mixed positions (WR and RB) in single DataFrame."""
+    """Test VOR and tier assignment with mixed positions (WR and RB) in single DataFrame.
+
+    Verifies: (a) each position's replacement math is independent,
+    (b) no cross-contamination of VOR values across positions via index misalignment.
+    """
     # Create 30 WRs (replacement rank 24) and 30 RBs (replacement rank 22)
     wr_df = _df(30, pos="WR")
     rb_df = _df(30, pos="RB")
@@ -69,8 +78,18 @@ def test_vor_and_tiers_mixed_positions():
     # 22nd RB (rank index 21) should have vor == 0
     assert rb_data.iloc[21]["vor"] == 0.0, f"22nd RB should have vor=0, got {rb_data.iloc[21]['vor']}"
 
-    # Top WR vor should be greater than top RB vor (WRs are deeper in value)
-    # because WRs ranked 100, 90, 80, ... 10 (top is 100, 24th is 10)
-    # and RBs ranked 100, 90, 80, ... -120 (top is 100, 22nd is -120)
-    assert wr_data.iloc[0]["vor"] > 0, "Top WR should have positive vor"
+    # Cross-contamination guard: compute WR-only frame separately and verify
+    # top WR's VOR matches exactly (no index misalignment)
+    wr_only_df = _df(30, pos="WR")
+    wr_only_df["composite"] = compute_composite(wr_only_df, {"production": 1.0})
+    wr_only_out = apply_vor(wr_only_df)
+    wr_only_sorted = wr_only_out.sort_values("composite", ascending=False)
+
+    top_wr_vor_mixed = wr_data.iloc[0]["vor"]
+    top_wr_vor_alone = wr_only_sorted.iloc[0]["vor"]
+    assert top_wr_vor_mixed == top_wr_vor_alone, \
+        f"Top WR VOR mismatch: mixed={top_wr_vor_mixed}, alone={top_wr_vor_alone} (index misalignment check)"
+
+    # Sanity check: both should be positive
+    assert top_wr_vor_mixed > 0, "Top WR should have positive vor"
     assert rb_data.iloc[0]["vor"] > 0, "Top RB should have positive vor"

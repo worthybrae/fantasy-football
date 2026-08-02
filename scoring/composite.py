@@ -26,6 +26,19 @@ def apply_vor(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 def assign_tiers(df: pd.DataFrame) -> pd.DataFrame:
+    """Assign tiers within each position based on VOR gaps.
+
+    Tiers break where the gap to the next player exceeds mean + std of all gaps
+    in that position. Tier breaks require at least 3 players (2 real consecutive
+    gaps) because you cannot compute meaningful mean + std from a single gap.
+    Groups with ≤2 players remain tier 1 by design.
+
+    Args:
+        df: DataFrame with 'position' and 'vor' columns
+
+    Returns:
+        DataFrame copy with added 'tier' column (1 = best, incrementing downward)
+    """
     out = df.copy()
     out["tier"] = 1
     for pos, grp in out.groupby("position"):
