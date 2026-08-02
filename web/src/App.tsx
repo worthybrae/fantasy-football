@@ -5,9 +5,11 @@ import PlayerProfile from './components/PlayerProfile'
 import WeightSliders from './components/WeightSliders'
 import PositionTabs from './components/PositionTabs'
 import FreshnessBadge from './components/FreshnessBadge'
+import TopBar from './components/TopBar'
 import './App.css'
 
 const FLEX_POSITIONS = new Set(['RB', 'WR', 'TE'])
+const RAIL_COLLAPSED_KEY = 'rail-collapsed'
 
 function App() {
   const [players, setPlayers] = useState<Player[]>([])
@@ -17,6 +19,14 @@ function App() {
   const [hideDrafted, setHideDrafted] = useState(false)
   const [positionFilter, setPositionFilter] = useState('ALL')
   const [selectedPlayerId, setSelectedPlayerId] = useState<string | null>(null)
+  const [search, setSearch] = useState('')
+  const [railCollapsed, setRailCollapsed] = useState(
+    () => localStorage.getItem(RAIL_COLLAPSED_KEY) === '1'
+  )
+
+  useEffect(() => {
+    localStorage.setItem(RAIL_COLLAPSED_KEY, railCollapsed ? '1' : '0')
+  }, [railCollapsed])
 
   async function loadPlayers(w: Weights) {
     setLoading(true)
@@ -56,31 +66,45 @@ function App() {
   const handleCloseProfile = useCallback(() => setSelectedPlayerId(null), [])
 
   const filteredPlayers = useMemo(() => {
+    const query = search.trim().toLowerCase()
     return players.filter((p) => {
+      if (query && !p.name.toLowerCase().includes(query) && !p.team.toLowerCase().includes(query)) {
+        return false
+      }
       if (hideDrafted && p.drafted) return false
       if (positionFilter === 'ALL') return true
       if (positionFilter === 'FLEX') return FLEX_POSITIONS.has(p.position)
       return p.position === positionFilter
     })
-  }, [players, hideDrafted, positionFilter])
+  }, [players, search, hideDrafted, positionFilter])
 
   return (
     <div className="app">
-      <header className="app-header">
-        <h1>Draft Board</h1>
-        <FreshnessBadge />
-      </header>
+      <TopBar search={search} onSearch={setSearch} meta={<FreshnessBadge />} />
       <div className="app-body">
-        <aside className="sidebar">
-          <WeightSliders weights={weights} onChange={setWeights} />
-          <label className="hide-drafted">
-            <input
-              type="checkbox"
-              checked={hideDrafted}
-              onChange={(e) => setHideDrafted(e.target.checked)}
-            />
-            Hide drafted
-          </label>
+        <aside className={railCollapsed ? 'rail rail-collapsed' : 'rail'}>
+          <button
+            type="button"
+            className="rail-toggle"
+            aria-expanded={!railCollapsed}
+            aria-label={railCollapsed ? 'Expand rail' : 'Collapse rail'}
+            onClick={() => setRailCollapsed((c) => !c)}
+          >
+            {railCollapsed ? '»' : '« Collapse'}
+          </button>
+          {!railCollapsed && (
+            <div className="rail-content">
+              <WeightSliders weights={weights} onChange={setWeights} />
+              <label className="hide-drafted">
+                <input
+                  type="checkbox"
+                  checked={hideDrafted}
+                  onChange={(e) => setHideDrafted(e.target.checked)}
+                />
+                Hide drafted
+              </label>
+            </div>
+          )}
         </aside>
         <main className="main">
           <PositionTabs value={positionFilter} onChange={setPositionFilter} />
@@ -103,6 +127,12 @@ function App() {
                   onSelectPlayer={(p) => setSelectedPlayerId(p.player_id)}
                   showTierBreaks={positionFilter !== 'ALL' && positionFilter !== 'FLEX'}
                 />
+                {/* PlayerTable renders header + zero rows on its own when
+                    filteredPlayers is empty; this sits right below it so the
+                    empty state still reads as part of the same table. */}
+                {filteredPlayers.length === 0 && (
+                  <p className="empty-state-row">No players match — Esc to clear</p>
+                )}
               </div>
             </>
           )}

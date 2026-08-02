@@ -1,111 +1,109 @@
+/* Design tokens — "pro terminal" system.
+   One dark theme, always (this is a draft-night tool run in a dim room, not
+   a document that should flip with OS preference) — so unlike the previous
+   version of this file, there is no light palette and no
+   prefers-color-scheme branch to keep in sync with it. */
 :root {
-  --text: #6b6375;
-  --text-h: #08060d;
-  --bg: #fff;
-  --border: #e5e4e7;
-  --code-bg: #f4f3ec;
-  --accent: #aa3bff;
-  --accent-bg: rgba(170, 59, 255, 0.1);
-  --accent-border: rgba(170, 59, 255, 0.5);
-  --social-bg: rgba(244, 243, 236, 0.5);
-  --shadow:
-    rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
+  /* -- surfaces: three elevations, one border -- */
+  --bg-0: #0a0b0e; /* page canvas */
+  --bg-1: #121319; /* panels: top bar, rail, table header, drawer */
+  --bg-2: #1b1d25; /* raised/interactive: inputs, hovered rows, active tab */
+  --border: #262932;
 
-  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --mono: ui-monospace, Consolas, monospace;
+  /* -- text: three levels -- */
+  --text-1: #e8eaef; /* headings, high-emphasis values */
+  --text-2: #98a0b0; /* body, labels */
+  --text-3: #565b69; /* placeholders, disabled, tertiary meta */
 
-  font: 18px/145% var(--sans);
-  letter-spacing: 0.18px;
-  color-scheme: light dark;
-  color: var(--text);
-  background: var(--bg);
+  /* -- accent: reserved for interactive/signal states only (focus, active
+     tab, hover affordance) -- never used for data identity. -- */
+  --accent: #ffb454;
+  --accent-bg: rgba(255, 180, 84, 0.12);
+  --accent-border: rgba(255, 180, 84, 0.5);
+
+  /* -- status: fixed meaning, never reused for anything else -- */
+  --ok: #0ca30c;
+  --fail: #d03b3b;
+
+  /* -- position hues: distinct, dark-legible, CVD-checked (adjacent-pair
+     ΔE >= 8 in this QB/RB/WR/TE/K/DST order — see task-5-report.md).
+     Consumed by badges in the next task; defined now so both tasks draw
+     from one source of truth. -- */
+  --pos-qb: #3987e5;
+  --pos-rb: #d95926;
+  --pos-wr: #199e70;
+  --pos-te: #c98500;
+  --pos-k: #d55181;
+  --pos-dst: #9085e9;
+
+  /* -- type -- */
+  --font-ui: 'Inter Variable', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+
+  /* -- spacing -- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  --radius: 3px;
+
+  color-scheme: dark;
+  color: var(--text-2);
+  background: var(--bg-0);
+  font: var(--text-base) / 1.45 var(--font-ui);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-
-  @media (max-width: 1024px) {
-    font-size: 16px;
-  }
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --text: #9ca3af;
-    --text-h: #f3f4f6;
-    --bg: #16171d;
-    --border: #2e303a;
-    --code-bg: #1f2028;
-    --accent: #c084fc;
-    --accent-bg: rgba(192, 132, 252, 0.15);
-    --accent-border: rgba(192, 132, 252, 0.5);
-    --social-bg: rgba(47, 48, 58, 0.5);
-    --shadow:
-      rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
-  }
-
-  #social .button-icon {
-    filter: invert(1) brightness(2);
-  }
-}
-
-#root {
-  width: 1126px;
-  max-width: 100%;
-  margin: 0 auto;
-  text-align: center;
-  border-inline: 1px solid var(--border);
-  min-height: 100svh;
-  display: flex;
-  flex-direction: column;
+* {
   box-sizing: border-box;
 }
 
+html,
 body {
+  height: 100%;
   margin: 0;
 }
 
-h1,
-h2 {
-  font-family: var(--heading);
-  font-weight: 500;
-  color: var(--text-h);
+#root {
+  min-height: 100svh;
+  display: flex;
+  flex-direction: column;
 }
 
-h1 {
-  font-size: 56px;
-  letter-spacing: -1.68px;
-  margin: 32px 0;
-  @media (max-width: 1024px) {
-    font-size: 36px;
-    margin: 20px 0;
-  }
+h1,
+h2,
+h3 {
+  font-weight: 600;
+  color: var(--text-1);
+  margin: 0;
 }
-h2 {
-  font-size: 24px;
-  line-height: 118%;
-  letter-spacing: -0.24px;
-  margin: 0 0 8px;
-  @media (max-width: 1024px) {
-    font-size: 20px;
-  }
-}
+
 p {
   margin: 0;
 }
 
-code,
-.counter {
-  font-family: var(--mono);
-  display: inline-flex;
-  border-radius: 4px;
-  color: var(--text-h);
+button,
+input {
+  font: inherit;
+  color: inherit;
 }
 
-code {
-  font-size: 15px;
-  line-height: 135%;
-  padding: 4px 8px;
-  background: var(--code-bg);
+/* Numeric content (table cells, stat values) opts into this so ranks/points
+   align on a fixed-width grid instead of drifting with proportional
+   figures -- headings and prose stay on the default sans. */
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
