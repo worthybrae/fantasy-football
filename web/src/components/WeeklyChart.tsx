@@ -18,6 +18,11 @@ const SEASON_GAP = 18
 const BAR_RADIUS = 3
 const PLOT_HEIGHT = 140
 const MARGIN = { top: 10, right: 12, bottom: 30, left: 38 }
+// A 0.0 (or near-zero) game would otherwise collapse to a zero-height bar --
+// invisible and with nothing for the mouse to land on to trigger its
+// <title> tooltip. Every bar keeps at least this much extent, on the
+// appropriate side of the baseline, so it stays visible and hoverable.
+const MIN_BAR_EXTENT = 2
 
 function seasonTag(season: number): string {
   return `'${String(season).slice(-2)}`
@@ -104,7 +109,9 @@ export default function WeeklyChart({ gameLog }: WeeklyChartProps) {
   const seasonMeta: { season: number; startX: number; endX: number; avg: number; color: string }[] = []
 
   groups.forEach((games, i) => {
-    const color = SEASON_COLORS[i % SEASON_COLORS.length]
+    // `groups` is already capped to at most 3 (see `shownSeasons` above),
+    // matching `SEASON_COLORS`'s length one-to-one -- no wraparound needed.
+    const color = SEASON_COLORS[i]
     const startX = cursor
     games.forEach((game) => {
       bars.push({ x: cursor, game, color })
@@ -136,7 +143,8 @@ export default function WeeklyChart({ gameLog }: WeeklyChartProps) {
           height={height}
           viewBox={`0 0 ${width} ${height}`}
           role="img"
-          aria-label={`Weekly PPR points across ${seasonMeta.length} season${seasonMeta.length === 1 ? '' : 's'}`}
+          tabIndex={0}
+          aria-label={`Weekly PPR points across ${seasonMeta.length} season${seasonMeta.length === 1 ? '' : 's'}. Hover a bar for its per-game detail, or see the season table and game log below for the same data.`}
         >
           {ticks.map((t) => (
             <g key={t}>
@@ -169,17 +177,26 @@ export default function WeeklyChart({ gameLog }: WeeklyChartProps) {
 
           {bars.map(({ x, game, color }) => {
             const positive = game.ppr_points >= 0
-            const top = positive ? yScale(game.ppr_points) : baselineY
-            const bottom = positive ? baselineY : yScale(game.ppr_points)
+            let top = positive ? yScale(game.ppr_points) : baselineY
+            let bottom = positive ? baselineY : yScale(game.ppr_points)
+            // A 0.0 (or otherwise sub-pixel) game would collapse to a
+            // zero-height bar -- invisible and with nothing for the mouse
+            // to land on -- so clamp to a minimum visible extent on the
+            // correct side of the baseline. `positive` already treats an
+            // exact 0.0 as "positive" (>=), so it gets a sliver just above
+            // the baseline, per the review's call.
+            if (bottom - top < MIN_BAR_EXTENT) {
+              if (positive) top = bottom - MIN_BAR_EXTENT
+              else bottom = top + MIN_BAR_EXTENT
+            }
             const title = `${seasonTag(game.season)} wk ${game.week} — ${game.ppr_points.toFixed(1)} pts vs ${game.opponent}`
             return (
               <path
                 key={`${game.season}-${game.week}`}
                 d={barPath(x, BAR_WIDTH, top, bottom, positive)}
                 fill={color}
+                fillOpacity={game.ppr_points === 0 ? 0.55 : 1}
                 className="weekly-bar"
-                tabIndex={0}
-                aria-label={title}
               >
                 <title>{title}</title>
               </path>

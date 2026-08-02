@@ -467,6 +467,11 @@ td:first-child {
   display: block;
 }
 
+.weekly-chart-svg:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 2px;
+}
+
 .weekly-chart-gridline {
   stroke: var(--border);
   stroke-width: 1;
@@ -492,10 +497,8 @@ td:first-child {
   transition: filter 0.1s ease;
 }
 
-.weekly-bar:hover,
-.weekly-bar:focus-visible {
+.weekly-bar:hover {
   filter: brightness(1.2);
-  outline: none;
 }
 
 /* -- season table -- */
