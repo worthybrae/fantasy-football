@@ -55,3 +55,42 @@ def test_no_sources_at_all():
     empty = pd.DataFrame()
     out = add_market(board, empty, empty, empty)
     assert out["market_rank"].isna().all()
+
+def test_duplicate_espn_id_lowest_rank_wins():
+    """Regression: duplicate espn_id should not crash; lowest rank wins."""
+    board = _board()
+    sleeper = _sleeper()
+    # Two ESPN rows for same espn_id (101), different ADP → different rank
+    espn = pd.DataFrame({
+        "espn_id": [101, 101, 102],
+        "espn_name": ["Jahmyr Gibbs", "Jahmyr Gibbs (ALT)", "Amon-Ra St Brown"],
+        "position": ["RB", "RB", "WR"],
+        "espn_adp": [1.77, 2.5, 6.0],
+        "espn_ppr_rank": [1, 2, 4]
+    })
+    fp = _fp()
+    out = add_market(board, espn, fp, sleeper)
+    g1 = out[out["player_id"] == "g1"].iloc[0]
+    # Should use rank from lowest espn_adp (1.77 → rank 1), not second one
+    assert g1["market_sources"]["espn"] == 1.0
+
+def test_duplicate_fp_name_position_lowest_rank_wins():
+    """Regression: duplicate (fp_name, position) should not crash; lowest rank wins."""
+    board = _board()
+    sleeper = _sleeper()
+    espn = _espn()
+    # Two FP rows for Amon-Ra St. Brown WR, different rank_ecr
+    fp = pd.DataFrame({
+        "fp_name": ["Amon-Ra St. Brown", "Amon-Ra St. Brown", "Baltimore Ravens"],
+        "team": ["DET", "DET", "BAL"],
+        "position": ["WR", "WR", "DST"],
+        "rank_ecr": [3, 5, 40],
+        "rank_ave": [3.0, 5.0, 41.0],
+        "rank_std": [1.0, 1.5, 5.0],
+        "fp_tier": [1, 2, 5]
+    })
+    out = add_market(board, espn, fp, sleeper)
+    g2 = out[out["player_id"] == "g2"].iloc[0]
+    # Should use lowest rank (3), not second one (5); should use tier 1
+    assert g2["market_sources"]["fp"] == 3.0
+    assert g2["market_sources"]["fp_tier"] == 1

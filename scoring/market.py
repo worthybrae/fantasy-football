@@ -18,6 +18,8 @@ def _espn_ranks(board, espn, sleeper):
         return out
     e = espn.dropna(subset=["espn_adp"]).copy()
     e["espn_rank"] = e["espn_adp"].rank(method="first")
+    # Dedupe by espn_id, keeping lowest rank (best)
+    e = e.sort_values("espn_rank").drop_duplicates("espn_id", keep="first")
     if sleeper is not None and not sleeper.empty:
         xwalk = sleeper[["gsis_id", "espn_id"]].drop_duplicates("espn_id")
         e = e.merge(xwalk, on="espn_id", how="left")
@@ -29,6 +31,8 @@ def _espn_ranks(board, espn, sleeper):
     rest = e[e["gsis_id"].isna() & (e["position"] != "DST")].copy()
     if not rest.empty:
         rest["norm"] = rest["espn_name"].map(_norm)
+        # Dedupe by (norm, position), keeping lowest rank (best)
+        rest = rest.sort_values("espn_rank").drop_duplicates(["norm", "position"], keep="first")
         by_name = rest.set_index(["norm", "position"])["espn_rank"]
         key = pd.MultiIndex.from_arrays([board["name"].map(_norm), board["position"]])
         fallback = pd.Series(by_name.reindex(key).to_numpy(), index=board.index)
@@ -43,11 +47,13 @@ def _fp_ranks(board, fp):
     f = fp.dropna(subset=["rank_ecr"]).copy()
     players = f[f["position"] != "DST"].copy()
     players["norm"] = players["fp_name"].map(_norm)
+    # Dedupe by (norm, position), keeping lowest rank (best)
+    players = players.sort_values("rank_ecr").drop_duplicates(["norm", "position"], keep="first")
     by_name = players.set_index(["norm", "position"])
     key = pd.MultiIndex.from_arrays([board["name"].map(_norm), board["position"]])
     ranks = pd.Series(by_name["rank_ecr"].reindex(key).to_numpy(), index=board.index, dtype=float)
     tiers = pd.Series(by_name["fp_tier"].reindex(key).to_numpy(), index=board.index, dtype=float)
-    dst = f[f["position"] == "DST"].drop_duplicates("team").set_index("team")
+    dst = f[f["position"] == "DST"].sort_values("rank_ecr").drop_duplicates("team", keep="first").set_index("team")
     is_dst = board["position"] == "DST"
     ranks.loc[is_dst] = board.loc[is_dst, "team"].map(dst["rank_ecr"]).astype(float)
     tiers.loc[is_dst] = board.loc[is_dst, "team"].map(dst["fp_tier"]).astype(float)
