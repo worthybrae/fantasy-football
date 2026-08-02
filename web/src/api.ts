@@ -1,9 +1,13 @@
+export interface MarketSources {
+  ffc: number | null; espn: number | null; fp: number | null; fp_tier: number | null;
+}
 export interface Player {
   rank: number; player_id: string; name: string; position: string;
   team: string; bye: number | null; tier: number;
   production: number; durability: number; role: number;
   environment: number; schedule: number;
-  composite: number; vor: number; adp: number | null; edge: number | null;
+  composite: number; vor: number; edge: number | null;
+  market_rank: number | null; market_spread: number | null; market_sources: MarketSources;
   rookie: boolean; drafted: boolean;
 }
 
@@ -61,7 +65,7 @@ export interface GameLogRow {
 export interface SimilarPlayer {
   player_id: string | null; name: string; season: number | null;
   similarity: number | null; ppg: number | null; next_ppg: number | null;
-  rank: number | null; adp: number | null;
+  rank: number | null; market_rank: number | null;
 }
 export interface Outlook {
   depth_slot: number | null; implied_points: number | null;

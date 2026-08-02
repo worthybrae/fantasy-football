@@ -22,7 +22,10 @@ interface PlayerTableProps {
 
 const fmt1 = (n: number) => n.toFixed(1)
 const fmtNullable = (n: number | null) => (n === null ? '—' : n)
-const NUMERIC_COLUMNS = new Set(['rank', 'tier', 'bye', 'vor', 'composite', 'adp', 'edge'])
+// FFC/ESPN ranks are always whole numbers; FP's ECR can carry a decimal --
+// show it only when present so the tooltip doesn't print "12.0".
+const fmtSource = (n: number | null) => (n === null ? '—' : Number.isInteger(n) ? String(n) : n.toFixed(1))
+const NUMERIC_COLUMNS = new Set(['rank', 'tier', 'bye', 'vor', 'composite', 'market_rank', 'edge'])
 
 export default function PlayerTable({ players, onToggleDrafted, onSelectPlayer, showTierBreaks }: PlayerTableProps) {
   const [sorting, setSorting] = useState<SortingState>([{ id: 'rank', desc: false }])
@@ -80,9 +83,23 @@ export default function PlayerTable({ players, onToggleDrafted, onSelectPlayer, 
         cell: ({ getValue }) => fmt1(getValue<number>()),
       },
       {
-        accessorKey: 'adp',
-        header: 'ADP',
-        cell: ({ getValue }) => fmtNullable(getValue<number | null>()),
+        accessorKey: 'market_rank',
+        header: 'Mkt',
+        cell: ({ row }) => {
+          const p = row.original
+          if (p.market_rank === null) return '—'
+          const { ffc, espn, fp, fp_tier } = p.market_sources
+          const title = `FFC ${fmtSource(ffc)} · ESPN ${fmtSource(espn)} · FP ${fmtSource(fp)} · FP tier ${fmtSource(fp_tier)}`
+          const showSpread = p.market_spread !== null && p.market_spread >= 12
+          return (
+            <span title={title}>
+              {fmt1(p.market_rank)}
+              {showSpread && (
+                <span style={{ opacity: 0.6 }}> ±{Math.round((p.market_spread as number) / 2)}</span>
+              )}
+            </span>
+          )
+        },
       },
       {
         accessorKey: 'edge',

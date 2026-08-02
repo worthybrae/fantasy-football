@@ -12,11 +12,11 @@ function seasonTag(season: number | null): string {
 }
 
 function BoardChips({ p }: { p: SimilarPlayer }) {
-  if (p.rank === null && p.adp === null) return null
+  if (p.rank === null && p.market_rank === null) return null
   return (
     <span className="similar-chips">
       {p.rank !== null && <span className="chip">#{p.rank}</span>}
-      {p.adp !== null && <span className="chip">ADP {p.adp.toFixed(1)}</span>}
+      {p.market_rank !== null && <span className="chip">Mkt {p.market_rank.toFixed(1)}</span>}
     </span>
   )
 }

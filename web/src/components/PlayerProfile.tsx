@@ -20,6 +20,9 @@ function depthSlotLabel(position: string, depthSlot: number | null): string | nu
 }
 
 const fmt1 = (n: number | null) => (n === null ? '—' : n.toFixed(1))
+// FFC/ESPN ranks are always whole numbers; FP's ECR can carry a decimal --
+// show it only when present so the Market block doesn't print "12.0".
+const fmtSource = (n: number | null) => (n === null ? '—' : Number.isInteger(n) ? String(n) : n.toFixed(1))
 
 // Higher sos_raw/sos_pct = opponents allow more fantasy points at this
 // position = an easier ("softer") schedule; lower = a tougher one.
@@ -136,7 +139,7 @@ export default function PlayerProfile({ playerId, weights, onClose, onToggleDraf
                 <span className="chip">Tier {header.tier}</span>
                 <span className="chip">VOR {header.vor.toFixed(1)}</span>
                 <span className="chip">Composite {header.composite.toFixed(1)}</span>
-                <span className="chip">ADP {fmt1(header.adp)}</span>
+                <span className="chip">Mkt {fmt1(header.market_rank)}</span>
                 <span className="chip">Edge {fmt1(header.edge)}</span>
               </div>
               <button type="button" className="drawer-draft-btn" onClick={handleToggleDraftedClick}>
@@ -175,6 +178,18 @@ export default function PlayerProfile({ playerId, weights, onClose, onToggleDraf
                   {sosLabel(profile.outlook.sos_raw, profile.outlook.sos_pct)}
                 </span>
                 <span className="chip">Bye {profile.outlook.bye ?? '—'}</span>
+              </div>
+            </section>
+
+            <section className="drawer-section">
+              <h3>Market</h3>
+              <div className="drawer-chips">
+                <span className="chip">FFC {fmtSource(header.market_sources.ffc)}</span>
+                <span className="chip">ESPN {fmtSource(header.market_sources.espn)}</span>
+                <span className="chip">FP {fmtSource(header.market_sources.fp)}</span>
+                {header.market_sources.fp_tier !== null && (
+                  <span className="chip">FP tier {header.market_sources.fp_tier}</span>
+                )}
               </div>
             </section>
 
