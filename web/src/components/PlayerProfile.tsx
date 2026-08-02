@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { fetchProfile, type Player, type PlayerProfileData } from '../api'
 import FactorBars from './FactorBars'
 import SimilarPlayers from './SimilarPlayers'
@@ -22,16 +22,31 @@ export default function PlayerProfile({ playerId, onClose, onToggleDrafted, onSe
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  async function loadProfile() {
+  // Always mirrors the current `playerId` prop, updated synchronously every
+  // render (not via an effect) so it's current *before* any in-flight
+  // fetch's `.then` runs. Every fetch this drawer issues -- the
+  // playerId-change effect below, and the post-toggle refetch in
+  // handleToggleDraftedClick, whose closure can still be holding the id of
+  // a player the user has since swapped away from -- checks this ref before
+  // committing state, so a stale response can never clobber what's
+  // currently on screen (e.g. open A, immediately click a comp for B: A's
+  // slower response is dropped instead of overwriting B's already-rendered
+  // profile).
+  const playerIdRef = useRef(playerId)
+  playerIdRef.current = playerId
+
+  async function loadProfile(forPlayerId: string) {
     setLoading(true)
     setError(null)
     try {
-      const data = await fetchProfile(playerId)
-      setProfile(data)
+      const data = await fetchProfile(forPlayerId)
+      if (playerIdRef.current === forPlayerId) setProfile(data)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to load player profile')
+      if (playerIdRef.current === forPlayerId) {
+        setError(e instanceof Error ? e.message : 'Failed to load player profile')
+      }
     } finally {
-      setLoading(false)
+      if (playerIdRef.current === forPlayerId) setLoading(false)
     }
   }
 
@@ -39,7 +54,7 @@ export default function PlayerProfile({ playerId, onClose, onToggleDrafted, onSe
   // open, or a comp/row click swapping the id while the drawer stays mounted).
   useEffect(() => {
     setProfile(null)
-    loadProfile()
+    loadProfile(playerId)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playerId])
 
@@ -55,11 +70,17 @@ export default function PlayerProfile({ playerId, onClose, onToggleDrafted, onSe
 
   async function handleToggleDraftedClick() {
     if (!profile) return
+    // Use the id this specific profile was fetched for (not the possibly
+    // already-swapped `playerId` prop) -- loadProfile's own playerIdRef
+    // check still guards the commit, but passing the right id means a
+    // still-current toggle isn't needlessly dropped too.
+    const forPlayerId = profile.header.player_id
     await onToggleDrafted(profile.header)
-    await loadProfile()
+    await loadProfile(forPlayerId)
   }
 
   const header = profile?.header
+  const depthSlot = header ? depthSlotLabel(header.position, profile.outlook.depth_slot) : null
 
   return (
     <>
@@ -113,9 +134,7 @@ export default function PlayerProfile({ playerId, onClose, onToggleDrafted, onSe
             <section className="drawer-section">
               <h3>Outlook</h3>
               <div className="drawer-chips">
-                {depthSlotLabel(header.position, profile.outlook.depth_slot) && (
-                  <span className="chip">{depthSlotLabel(header.position, profile.outlook.depth_slot)}</span>
-                )}
+                {depthSlot && <span className="chip">{depthSlot}</span>}
                 <span className="chip">Implied {fmt1(profile.outlook.implied_points)} pts</span>
                 <span className="chip">
                   SoS {profile.outlook.sos_pct !== null ? `${profile.outlook.sos_pct.toFixed(0)}th pct` : '—'}

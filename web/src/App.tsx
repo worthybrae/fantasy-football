@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { DEFAULT_WEIGHTS, fetchPlayers, setDrafted, type Player, type Weights } from './api'
 import PlayerTable from './components/PlayerTable'
 import PlayerProfile from './components/PlayerProfile'
@@ -49,6 +49,11 @@ function App() {
     await setDrafted(p.player_id, next)
     await loadPlayers(weights)
   }
+
+  // Memoized so PlayerProfile's Esc-listener effect (keyed on this prop)
+  // doesn't tear down and re-add its keydown listener on every App
+  // re-render (e.g. every players refetch while the drawer is open).
+  const handleCloseProfile = useCallback(() => setSelectedPlayerId(null), [])
 
   const filteredPlayers = useMemo(() => {
     return players.filter((p) => {
@@ -109,7 +114,7 @@ function App() {
       {selectedPlayerId && (
         <PlayerProfile
           playerId={selectedPlayerId}
-          onClose={() => setSelectedPlayerId(null)}
+          onClose={handleCloseProfile}
           onToggleDrafted={handleToggleDrafted}
           onSelectPlayer={setSelectedPlayerId}
         />
