@@ -160,3 +160,28 @@ def test_profile_endpoint(tmp_path):
 
 def test_profile_404(tmp_path):
     assert _client(tmp_path).get("/api/players/nope/profile").status_code == 404
+
+def test_profile_custom_weights_change_composite(tmp_path):
+    """The profile endpoint must honor the same w_* sliders the board uses --
+    a regression here would mean the drawer's rank/VOR/composite can
+    contradict the clicked row. Reuses the p1/p2 production-vs-durability
+    seed from test_players_custom_weights_change_output."""
+    path = str(tmp_path / "two.duckdb")
+    _seed_two_players(path)
+    c = TestClient(create_app(path))
+
+    default_body = c.get("/api/players/p1/profile").json()
+    custom_body = c.get("/api/players/p1/profile", params={
+        "w_production": 0.0, "w_role": 0.0, "w_environment": 0.0,
+        "w_schedule": 0.0, "w_durability": 1.0}).json()
+
+    assert default_body["header"]["composite"] != custom_body["header"]["composite"]
+
+def test_profile_all_zero_weights_returns_422(tmp_path):
+    c = _client(tmp_path)
+    pid = c.get("/api/players").json()["players"][0]["player_id"]
+    r = c.get(f"/api/players/{pid}/profile", params={
+        "w_production": 0.0, "w_role": 0.0, "w_environment": 0.0,
+        "w_schedule": 0.0, "w_durability": 0.0})
+    assert r.status_code == 422
+    assert "detail" in r.json()
