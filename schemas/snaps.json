@@ -1,6 +1,0 @@
-{
-  "player": "mediumint",
-  "game": "mediumint",
-  "team": "mediumint",
-  "snaps": "smallint"
-}
