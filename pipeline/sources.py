@@ -5,16 +5,22 @@ import requests
 ADP_URL = "https://fantasyfootballcalculator.com/api/v1/adp/ppr"
 WEEKLY_URL = "https://github.com/nflverse/nflverse-data/releases/download/stats_player/stats_player_week_{year}.parquet"
 
-def fetch_weekly(years):
-    # nfl.import_weekly_data reads from the old `player_stats` release, which
-    # nflverse has stopped publishing for the current season. The weekly
-    # player stats now live under the `stats_player` release tag instead.
-    df = pd.concat([pd.read_parquet(WEEKLY_URL.format(year=year)) for year in years])
+def _normalize_weekly(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize the new nflverse `stats_player_week` schema to what
+    downstream code expects: rename `team` -> `recent_team` (the historical
+    column name) when needed, and drop non-regular-season rows."""
     if "recent_team" not in df.columns and "team" in df.columns:
         df = df.rename(columns={"team": "recent_team"})
     if "season_type" in df.columns:
         df = df[df["season_type"] == "REG"]
     return df
+
+def fetch_weekly(years):
+    # nfl.import_weekly_data reads from the old `player_stats` release, which
+    # nflverse has stopped publishing for the current season. The weekly
+    # player stats now live under the `stats_player` release tag instead.
+    df = pd.concat([pd.read_parquet(WEEKLY_URL.format(year=year)) for year in years])
+    return _normalize_weekly(df)
 
 def fetch_snap_counts(years):
     return nfl.import_snap_counts(years)

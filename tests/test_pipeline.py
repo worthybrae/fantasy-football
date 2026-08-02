@@ -1,6 +1,6 @@
 import pandas as pd
 from pipeline.db import get_conn, write_table, read_table, record_freshness
-from pipeline.sources import parse_adp
+from pipeline.sources import parse_adp, _normalize_weekly
 
 def test_write_and_read_roundtrip(tmp_path):
     conn = get_conn(str(tmp_path / "t.duckdb"))
@@ -26,3 +26,32 @@ def test_parse_adp():
     df = parse_adp(payload)
     assert list(df.columns) == ["adp_name", "position", "team", "adp"]
     assert df.iloc[1]["position"] == "DST"  # FFC "DEF" mapped to nflverse "DST"
+
+def test_normalize_weekly_renames_team_to_recent_team():
+    df = pd.DataFrame({"player_id": [1, 2], "team": ["MIN", "SF"]})
+    out = _normalize_weekly(df)
+    assert "recent_team" in out.columns
+    assert "team" not in out.columns
+    assert out["recent_team"].tolist() == ["MIN", "SF"]
+
+def test_normalize_weekly_leaves_existing_recent_team_untouched():
+    df = pd.DataFrame({"player_id": [1, 2], "recent_team": ["MIN", "SF"], "team": ["XXX", "YYY"]})
+    out = _normalize_weekly(df)
+    # recent_team already present: no rename should occur, both columns survive as-is
+    assert out["recent_team"].tolist() == ["MIN", "SF"]
+    assert out["team"].tolist() == ["XXX", "YYY"]
+
+def test_normalize_weekly_no_season_type_column_no_filter():
+    df = pd.DataFrame({"player_id": [1, 2], "team": ["MIN", "SF"]})
+    out = _normalize_weekly(df)
+    assert len(out) == 2
+
+def test_normalize_weekly_filters_to_regular_season():
+    df = pd.DataFrame({
+        "player_id": [1, 2, 3],
+        "team": ["MIN", "SF", "KC"],
+        "season_type": ["REG", "POST", "REG"],
+    })
+    out = _normalize_weekly(df)
+    assert out["player_id"].tolist() == [1, 3]
+    assert (out["season_type"] == "REG").all()
