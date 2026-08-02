@@ -21,6 +21,12 @@ def _seed(path):
         columns=["gsis_id", "depth_team", "formation", "week", "position"]))
     write_table(conn, "snap_counts", pd.DataFrame(
         columns=["player", "team", "season", "offense_pct"]))
+    write_table(conn, "espn_adp", pd.DataFrame(
+        columns=["espn_id", "espn_name", "position", "espn_adp", "espn_ppr_rank"]))
+    write_table(conn, "fp_ecr", pd.DataFrame(
+        columns=["fp_name", "team", "position", "rank_ecr", "rank_ave", "rank_std", "fp_tier"]))
+    write_table(conn, "sleeper_ids", pd.DataFrame(
+        columns=["gsis_id", "espn_id", "sleeper_name", "position", "team"]))
     conn.close()
 
 def _client(tmp_path):
@@ -64,8 +70,10 @@ def _seed_two_players(path):
 def test_players_endpoint(tmp_path):
     c = _client(tmp_path)
     body = c.get("/api/players").json()
-    assert body["players"][0]["name"] == "A Star"
-    assert body["players"][0]["adp"] == 5.1
+    row = body["players"][0]
+    assert row["name"] == "A Star"
+    assert row["market_rank"] == 1.0
+    assert "adp" not in row
 
 def test_players_custom_weights(tmp_path):
     c = _client(tmp_path)

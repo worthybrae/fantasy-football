@@ -49,11 +49,13 @@ def test_value_neighbors():
         "player_id": ["a", "b", "c", "d"], "name": ["A", "B", "C", "D"],
         "position": ["WR", "WR", "WR", "RB"],
         "vor": [10.0, 9.0, 1.0, 9.5], "rank": [1, 2, 3, 4],
-        "adp": [5.0, 8.0, 90.0, 6.0]})
+        "market_rank": [5.0, 8.0, 90.0, 6.0]})
     out = value_neighbors(board, "a", top_n=2)
     ids = [p["player_id"] for p in out["players"]]
     assert out["mode"] == "value_neighbors"
     assert ids == ["b", "c"]  # same position only, nearest vor first, self excluded
+    assert out["players"][0]["market_rank"] == 8.0
+    assert "adp" not in out["players"][0]
 
 def test_next_ppg_low_games_included():
     # Target player in 2024 matches "comp" in 2024

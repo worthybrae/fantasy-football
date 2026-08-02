@@ -100,6 +100,6 @@ def value_neighbors(board: pd.DataFrame, player_id: str, top_n: int = 5) -> dict
     players = [{"player_id": r["player_id"], "name": r["name"], "season": None,
                 "similarity": None, "ppg": None, "next_ppg": None,
                 "rank": int(r["rank"]),
-                "adp": (None if pd.isna(r["adp"]) else float(r["adp"]))}
+                "market_rank": (None if pd.isna(r["market_rank"]) else float(r["market_rank"]))}
                for _, r in pool.iterrows()]
     return {"mode": "value_neighbors", "players": players}

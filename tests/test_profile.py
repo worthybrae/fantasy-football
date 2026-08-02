@@ -40,6 +40,12 @@ def _seed(tmp_path):
                                       "week", "position"]))
     write_table(conn, "snap_counts",
                 pd.DataFrame(columns=["player", "team", "season", "offense_pct"]))
+    write_table(conn, "espn_adp", pd.DataFrame(
+        columns=["espn_id", "espn_name", "position", "espn_adp", "espn_ppr_rank"]))
+    write_table(conn, "fp_ecr", pd.DataFrame(
+        columns=["fp_name", "team", "position", "rank_ecr", "rank_ave", "rank_std", "fp_tier"]))
+    write_table(conn, "sleeper_ids", pd.DataFrame(
+        columns=["gsis_id", "espn_id", "sleeper_name", "position", "team"]))
     return conn
 
 def test_build_profile_shape(tmp_path):
@@ -76,7 +82,10 @@ def test_scrubs_pandas_na_from_empty_adp(tmp_path):
         {"home_team": "DET", "away_team": "GB", "week": 1,
          "total_line": 51.0, "spread_line": 3.0}]))
     # empty adp -> uni["adp"] = pd.NA for every row (scoring/board.py), which
-    # is not a float NaN and slips past isinstance(v, (np.floating, float))
+    # is not a float NaN and slips past isinstance(v, (np.floating, float));
+    # add_market then folds that into market_rank/market_sources -- with
+    # every source table also empty, market_rank stays NaN and the nested
+    # market_sources dict is all-None, both of which must scrub cleanly too.
     write_table(conn, "adp",
                 pd.DataFrame(columns=["adp_name", "position", "team", "adp"]))
     write_table(conn, "depth_charts",
@@ -84,9 +93,17 @@ def test_scrubs_pandas_na_from_empty_adp(tmp_path):
                                       "week", "position"]))
     write_table(conn, "snap_counts",
                 pd.DataFrame(columns=["player", "team", "season", "offense_pct"]))
+    write_table(conn, "espn_adp", pd.DataFrame(
+        columns=["espn_id", "espn_name", "position", "espn_adp", "espn_ppr_rank"]))
+    write_table(conn, "fp_ecr", pd.DataFrame(
+        columns=["fp_name", "team", "position", "rank_ecr", "rank_ave", "rank_std", "fp_tier"]))
+    write_table(conn, "sleeper_ids", pd.DataFrame(
+        columns=["gsis_id", "espn_id", "sleeper_name", "position", "team"]))
     p = build_profile(conn, "p1")
     json.dumps(p, allow_nan=False)  # must not raise
-    assert p["header"]["adp"] is None
+    assert "adp" not in p["header"]
+    assert p["header"]["market_rank"] is None
+    assert p["header"]["market_sources"] == {"ffc": None, "espn": None, "fp": None, "fp_tier": None}
 
 def _twin_weekly_rows():
     # p1: the profiled player, 2025 (latest season).
@@ -131,9 +148,10 @@ def test_build_profile_enriches_stat_twins_on_and_off_board(tmp_path):
     assert "p2" in twins and "p3" in twins
 
     assert isinstance(twins["p2"]["rank"], int)
+    assert "market_rank" in twins["p2"]
 
     assert twins["p3"]["rank"] is None
-    assert twins["p3"]["adp"] is None
+    assert twins["p3"]["market_rank"] is None
 
 def test_stat_line_qb_format_with_rush():
     row = {"completions": 18, "attempts": 25, "passing_yards": 245,

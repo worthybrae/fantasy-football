@@ -194,11 +194,11 @@ def _enrich_twins(twins: dict, board: pd.DataFrame) -> dict:
         if p["player_id"] in board_idx.index:
             r = board_idx.loc[p["player_id"]]
             p["rank"] = int(r["rank"])
-            adp = r["adp"]
-            p["adp"] = None if pd.isna(adp) else float(adp)
+            market_rank = r["market_rank"]
+            p["market_rank"] = None if pd.isna(market_rank) else float(market_rank)
         else:
             p["rank"] = None
-            p["adp"] = None
+            p["market_rank"] = None
     return twins
 
 

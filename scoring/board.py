@@ -49,6 +49,7 @@ from pipeline.db import read_table
 from scoring import factors
 from scoring.composite import compute_composite, apply_vor, assign_tiers
 from scoring.config import DEFAULT_WEIGHTS
+from scoring.market import add_market
 
 _SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
 FANTASY_POSITIONS = {"QB", "RB", "WR", "TE", "K", "DST"}
@@ -58,8 +59,8 @@ _ADP_TEAM_ALIASES = {"LAR": "LA", "WSH": "WAS", "JAC": "JAX", "SD": "LAC", "OAK"
 
 _BOARD_COLUMNS = [
     "player_id", "name", "position", "team", "bye", "production", "durability",
-    "role", "environment", "schedule", "composite", "vor", "tier", "adp",
-    "edge", "rookie", "drafted", "rank",
+    "role", "environment", "schedule", "composite", "vor", "tier", "market_rank",
+    "market_spread", "market_sources", "edge", "rookie", "drafted", "rank",
 ]
 
 
@@ -154,6 +155,9 @@ def build_board(conn, weights: dict | None = None) -> pd.DataFrame:
     sched = read_table(conn, "schedules")
     adp = _adapt_adp(read_table(conn, "adp"))
     drafted = read_table(conn, "drafted")
+    espn = read_table(conn, "espn_adp")
+    fp = read_table(conn, "fp_ecr")
+    sleeper = read_table(conn, "sleeper_ids")
 
     uni = _build_universe(weekly)
     uni["norm"] = uni["name"].map(_norm_name)
@@ -212,8 +216,7 @@ def build_board(conn, weights: dict | None = None) -> pd.DataFrame:
     uni = assign_tiers(uni)
     uni = uni.sort_values("vor", ascending=False).reset_index(drop=True)
     uni["rank"] = uni.index + 1
-    adp_rank = uni["adp"].rank(method="first")
-    uni["edge"] = adp_rank - uni["rank"]
+    uni = add_market(uni, espn, fp, sleeper)
 
     drafted_ids = set(drafted["player_id"]) if not drafted.empty else set()
     uni["drafted"] = uni["player_id"].isin(drafted_ids)
