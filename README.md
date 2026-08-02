@@ -101,8 +101,9 @@ in `scoring/config.py` — update them there if the league format changes.
   weeks.
 - **ADP** comes from Fantasy Football Calculator's public API and is a
   **12-team** consensus, not 8-team — treat it as a rough market-consensus
-  signal (the `edge` column, VOR-rank minus ADP-rank) rather than a literal
-  pick-order prediction for this league.
+  signal (the `edge` column, ADP-rank minus VOR-rank — positive means the
+  market is undervaluing the player relative to this board) rather than a
+  literal pick-order prediction for this league.
 - **K/DST** aren't scored on production, durability, role, or schedule —
   the PPR formula doesn't score kicking or defensive stats, so those factors
   would just be noise. Only **environment** (team implied points) drives

@@ -1,9 +1,10 @@
 """Refresh all data sources into DuckDB. Run: python -m pipeline.refresh"""
+import sys
 from pipeline import sources
 from pipeline.db import get_conn, write_table, record_freshness
 from scoring.config import CURRENT_SEASON, HISTORY_SEASONS
 
-def main() -> None:
+def main() -> int:
     conn = get_conn()
     jobs = {
         "weekly": lambda: sources.fetch_weekly(HISTORY_SEASONS),
@@ -13,6 +14,7 @@ def main() -> None:
         "adp": lambda: sources.fetch_adp(CURRENT_SEASON),
     }
     summary = []
+    any_failed = False
     for name, job in jobs.items():
         try:
             df = job()
@@ -22,7 +24,9 @@ def main() -> None:
         except Exception as e:  # one source failing must not abort the rest
             record_freshness(conn, name, False, 0)
             summary.append(f"  FAIL {name}: {e}")
+            any_failed = True
     print("Refresh complete:\n" + "\n".join(summary))
+    return 1 if any_failed else 0
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

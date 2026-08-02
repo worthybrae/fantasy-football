@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Query
 from pipeline.db import get_conn, read_table, DEFAULT_PATH
 from scoring.board import build_board
 from scoring.config import DEFAULT_WEIGHTS
@@ -8,17 +8,22 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
     conn = get_conn(db_path)
 
     @app.get("/api/players")
-    def players(w_production: float = DEFAULT_WEIGHTS["production"],
-                w_role: float = DEFAULT_WEIGHTS["role"],
-                w_environment: float = DEFAULT_WEIGHTS["environment"],
-                w_schedule: float = DEFAULT_WEIGHTS["schedule"],
-                w_durability: float = DEFAULT_WEIGHTS["durability"]):
+    def players(w_production: float = Query(DEFAULT_WEIGHTS["production"], ge=0),
+                w_role: float = Query(DEFAULT_WEIGHTS["role"], ge=0),
+                w_environment: float = Query(DEFAULT_WEIGHTS["environment"], ge=0),
+                w_schedule: float = Query(DEFAULT_WEIGHTS["schedule"], ge=0),
+                w_durability: float = Query(DEFAULT_WEIGHTS["durability"], ge=0)):
         cur = conn.cursor()
         try:
             weights = {"production": w_production, "role": w_role,
                        "environment": w_environment, "schedule": w_schedule,
                        "durability": w_durability}
-            board = build_board(cur, weights)
+            try:
+                board = build_board(cur, weights)
+            except ValueError as e:
+                # compute_composite raises when weights sum <= 0 -- reachable
+                # from the UI if every slider is dragged to 0.
+                raise HTTPException(status_code=422, detail=str(e))
             # astype(object) first, else float columns silently revert None -> NaN
             # and FastAPI's JSON encoder rejects NaN
             board = board.astype(object).where(board.notna(), None)
