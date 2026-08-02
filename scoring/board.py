@@ -17,6 +17,12 @@ Universe construction:
   3. K/DST get every factor neutral (50) except `environment`, since the PPR
      scoring formula does not score kicking/defense stats, so production,
      durability, role and schedule computed from real data would be noise.
+     `rookie` is also forced False for K/DST: the flag means "skill player
+     with no NFL history," and K/DST enter from ADP by design, so it would
+     otherwise be meaningless noise on every K/DST row.
+
+Column order is not part of the API contract -- consumers must access
+columns by name (Task 7 serializes rows to dicts keyed by column name).
 
 Real-data adapters (discovered smoke-testing against data/nfl.duckdb; the
 task-4/5 factor functions were written and tested against synthetic tables
@@ -114,6 +120,22 @@ def _add_adp_only_players(uni: pd.DataFrame, adp: pd.DataFrame) -> pd.DataFrame:
     return pd.concat([uni, extra], ignore_index=True)
 
 
+def _dedupe_adp(adp: pd.DataFrame) -> pd.DataFrame:
+    """Keep the best-known (lowest) ADP row per join key.
+
+    Player rows join on (norm, position); DST rows join on team only
+    (matching `_merge_adp` and `_add_adp_only_players`). Without this, a
+    duplicate ADP row for the same player/team would silently duplicate the
+    corresponding board row.
+    """
+    if adp.empty:
+        return adp
+    dst = adp[adp["position"] == "DST"].sort_values("adp").drop_duplicates("team", keep="first")
+    players = adp[adp["position"] != "DST"].sort_values("adp").drop_duplicates(
+        ["norm", "position"], keep="first")
+    return pd.concat([players, dst], ignore_index=True)
+
+
 def _merge_adp(uni: pd.DataFrame, adp: pd.DataFrame) -> pd.DataFrame:
     if adp.empty:
         uni["adp"] = pd.NA
@@ -138,6 +160,7 @@ def build_board(conn, weights: dict | None = None) -> pd.DataFrame:
     if not adp.empty:
         adp = adp.copy()
         adp["norm"] = adp["adp_name"].map(_norm_name)
+        adp = _dedupe_adp(adp)
         uni = _add_adp_only_players(uni, adp)
 
     # -- raw factors --
@@ -175,8 +198,11 @@ def build_board(conn, weights: dict | None = None) -> pd.DataFrame:
     # K/DST: the PPR formula doesn't score kicking/defense, so real
     # production/durability/role/schedule signals would just be noise --
     # only environment (team implied points) is a meaningful factor for them.
+    # `rookie` is also meaningless for them (they enter from ADP by design,
+    # not because they lack NFL history), so force it False.
     kdst_mask = uni["position"].isin(["K", "DST"])
     uni.loc[kdst_mask, _NEUTRAL_FACTORS_FOR_KDST] = 50.0
+    uni.loc[kdst_mask, "rookie"] = False
 
     uni = _merge_adp(uni, adp)
 

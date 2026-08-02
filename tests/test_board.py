@@ -111,6 +111,88 @@ def test_adp_team_alias_lar_matches_la(tmp_path):
     assert dst["adp"] == 130.0
     assert dst["team"] == "LA"
     assert dst["environment"] != 50.0  # real environment score, not the neutral default
+    assert dst["rookie"] == False  # noqa: E712 -- rookie is meaningless noise for DST
+    assert dst["production"] == 50.0
+    assert dst["durability"] == 50.0
+    assert dst["role"] == 50.0
+    assert dst["schedule"] == 50.0
+
+def test_kdst_never_flagged_rookie_even_when_adp_only(tmp_path):
+    # `rookie` means "skill player with no NFL history." K/DST enter the
+    # universe purely from ADP by design (never from weekly), so the naive
+    # "no rows in weekly" rule would mark every single one rookie=True --
+    # meaningless noise on the badge. Confirm the K/DST override applies
+    # even when there is no weekly row to match at all (unlike the PK/LAR
+    # alias tests above, where the K happens to also exist in weekly).
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    weekly = pd.DataFrame([
+        {"player_id": "p1", "player_display_name": "Some WR", "position": "WR",
+         "recent_team": "DET", "opponent_team": "GB", "season": 2025, "week": w,
+         "receptions": 5, "receiving_yards": 50, "targets": 8, "carries": 0}
+        for w in range(1, 18)])
+    write_table(conn, "weekly", weekly)
+    write_table(conn, "schedules", pd.DataFrame([
+        {"home_team": "DET", "away_team": "GB", "week": 1,
+         "total_line": 45.0, "spread_line": 3.0}]))
+    write_table(conn, "adp", pd.DataFrame([
+        {"adp_name": "Brand New Kicker", "position": "PK", "team": "DET", "adp": 160.0},
+        {"adp_name": "Detroit Defense", "position": "DST", "team": "DET", "adp": 130.8},
+    ]))
+    write_table(conn, "depth_charts", pd.DataFrame(
+        columns=["gsis_id", "depth_team", "formation", "week", "position"]))
+    board = build_board(conn)
+    k_row = board[board["name"] == "Brand New Kicker"].iloc[0]
+    dst_row = board[board["position"] == "DST"].iloc[0]
+    assert k_row["rookie"] == False  # noqa: E712
+    assert dst_row["rookie"] == False  # noqa: E712
+
+def test_adp_dedupe_keeps_lowest_adp(tmp_path):
+    # A duplicate ADP row for the same normalized (name, position) must not
+    # silently duplicate the corresponding board row; the best-known (lowest)
+    # ADP value wins.
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    weekly = pd.DataFrame([
+        {"player_id": "p1", "player_display_name": "Dupe Player", "position": "WR",
+         "recent_team": "DET", "opponent_team": "GB", "season": 2025, "week": w,
+         "receptions": 5, "receiving_yards": 50, "targets": 8, "carries": 0}
+        for w in range(1, 18)])
+    write_table(conn, "weekly", weekly)
+    write_table(conn, "schedules", pd.DataFrame([
+        {"home_team": "DET", "away_team": "GB", "week": 1,
+         "total_line": 45.0, "spread_line": 3.0}]))
+    write_table(conn, "adp", pd.DataFrame([
+        {"adp_name": "Dupe Player", "position": "WR", "team": "DET", "adp": 12.0},
+        {"adp_name": "Dupe Player", "position": "WR", "team": "DET", "adp": 20.0},
+    ]))
+    write_table(conn, "depth_charts", pd.DataFrame(
+        columns=["gsis_id", "depth_team", "formation", "week", "position"]))
+    board = build_board(conn)
+    matches = board[board["player_id"] == "p1"]
+    assert len(matches) == 1
+    assert matches.iloc[0]["adp"] == 12.0
+
+def test_adp_dedupe_dst_keeps_lowest_adp(tmp_path):
+    # Same guarantee for DST, which joins on team rather than (norm, position).
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    weekly = pd.DataFrame([
+        {"player_id": "p1", "player_display_name": "Some WR", "position": "WR",
+         "recent_team": "DET", "opponent_team": "GB", "season": 2025, "week": w,
+         "receptions": 5, "receiving_yards": 50, "targets": 8, "carries": 0}
+        for w in range(1, 18)])
+    write_table(conn, "weekly", weekly)
+    write_table(conn, "schedules", pd.DataFrame([
+        {"home_team": "DET", "away_team": "GB", "week": 1,
+         "total_line": 45.0, "spread_line": 3.0}]))
+    write_table(conn, "adp", pd.DataFrame([
+        {"adp_name": "Detroit Defense", "position": "DST", "team": "DET", "adp": 100.0},
+        {"adp_name": "Detroit D/ST", "position": "DST", "team": "DET", "adp": 130.8},
+    ]))
+    write_table(conn, "depth_charts", pd.DataFrame(
+        columns=["gsis_id", "depth_team", "formation", "week", "position"]))
+    board = build_board(conn)
+    dst_rows = board[board["position"] == "DST"]
+    assert len(dst_rows) == 1
+    assert dst_rows.iloc[0]["adp"] == 100.0
 
 def test_accented_name_joins_to_single_player(tmp_path):
     conn = get_conn(str(tmp_path / "t.duckdb"))
