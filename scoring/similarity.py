@@ -47,7 +47,16 @@ def player_season_features(weekly: pd.DataFrame) -> pd.DataFrame:
     g["rec_pg"] = g["receptions"] / g["games"]
     return g
 
-def find_twins(weekly: pd.DataFrame, player_id: str, top_n: int = 5) -> dict | None:
+def _age_in_season(birth_date, season: int) -> int | None:
+    """Full years old on Sept 1 (opening week) of the season year."""
+    if birth_date is None or pd.isna(birth_date):
+        return None
+    bd = pd.Timestamp(birth_date)
+    return season - bd.year - (1 if (bd.month, bd.day) > (9, 1) else 0)
+
+
+def find_twins(weekly: pd.DataFrame, player_id: str, top_n: int = 5,
+               players: pd.DataFrame | None = None) -> dict | None:
     all_feats = player_season_features(weekly)
     feats = all_feats[all_feats["games"] >= MIN_GAMES]
     mine = feats[feats["player_id"] == player_id]
@@ -80,16 +89,38 @@ def find_twins(weekly: pd.DataFrame, player_id: str, top_n: int = 5) -> dict | N
     nxt["season"] = nxt["season"] - 1
     nxt = nxt.rename(columns={"ppg": "next_ppg"})
     cand = cand.merge(nxt, on=["player_id", "season"], how="left")
+    # A comp's value is the "what happened next" trend signal. No following
+    # season in the data (retired, out of the league, or the season hasn't
+    # been played yet -- which also drops every same-year comp) means no
+    # signal, so the comp is excluded rather than shown with a dangling arrow.
+    cand = cand[cand["next_ppg"].notna()]
+    # Age matching: comps must have been exactly the target's age during
+    # their comp season, so the trend signal tracks the age curve. Missing
+    # birth dates (or no players table yet) degrade to the unfiltered pool
+    # for the target, and exclude only the individual unknown candidates.
+    target_age = None
+    if players is not None and not players.empty and "birth_date" in players.columns:
+        births = players.set_index("gsis_id")["birth_date"]
+        target_age = _age_in_season(births.get(player_id), int(target["season"]))
+        cand["age"] = [
+            _age_in_season(births.get(pid), int(s))
+            for pid, s in zip(cand["player_id"], cand["season"])]
+        if target_age is not None:
+            cand = cand[cand["age"] == target_age]
+    else:
+        cand["age"] = None
     cand = cand.sort_values("distance").head(top_n)
-    players = [{"player_id": r["player_id"], "name": r["name"],
-                "season": int(r["season"]),
-                "similarity": float(r["similarity"]),
-                "ppg": round(float(r["ppg"]), 1),
-                "next_ppg": (None if pd.isna(r["next_ppg"])
-                             else round(float(r["next_ppg"]), 1))}
-               for _, r in cand.iterrows()]
+    comps = [{"player_id": r["player_id"], "name": r["name"],
+              "season": int(r["season"]),
+              "similarity": float(r["similarity"]),
+              "ppg": round(float(r["ppg"]), 1),
+              "next_ppg": (None if pd.isna(r["next_ppg"])
+                           else round(float(r["next_ppg"]), 1)),
+              "age": (None if r["age"] is None or pd.isna(r["age"])
+                      else int(r["age"]))}
+             for _, r in cand.iterrows()]
     return {"mode": "stat_twins", "target_season": int(target["season"]),
-            "players": players}
+            "target_age": target_age, "players": comps}
 
 def value_neighbors(board: pd.DataFrame, player_id: str, top_n: int = 5) -> dict:
     me = board[board["player_id"] == player_id].iloc[0]

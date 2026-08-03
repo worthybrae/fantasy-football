@@ -18,8 +18,11 @@ def test_features_shares_and_ppg():
     assert abs(f["yards_per_opp"] - 50 / 8) < 1e-9
 
 def test_clone_is_top_twin_with_100():
+    # clone needs a 2024 season on file: comps without a next season are
+    # excluded outright (see test_twins_without_next_season_excluded).
     rows = (_wk("me", "Me", 2025, 10, rec=6, yds=80, tgt=9, team="AAA")
             + _wk("clone", "Clone", 2023, 10, rec=6, yds=80, tgt=9, team="BBB")
+            + _wk("clone", "Clone", 2024, 10, rec=4, yds=50, tgt=6, team="BBB")
             + _wk("other", "Other", 2024, 10, rec=2, yds=20, tgt=3, team="CCC"))
     out = find_twins(pd.DataFrame(rows), "me")
     assert out["mode"] == "stat_twins" and out["target_season"] == 2025
@@ -27,9 +30,13 @@ def test_clone_is_top_twin_with_100():
     assert top["player_id"] == "clone" and top["similarity"] == 100.0
 
 def test_own_seasons_excluded():
+    # x gets a 2025 season so its 2024 comp survives the next-season filter
+    # and the players list is non-empty (an empty list would pass trivially).
     rows = _wk("me", "Me", 2025, 10, rec=6, yds=80, tgt=9) + _wk("me", "Me", 2024, 10, rec=6, yds=80, tgt=9) \
-           + _wk("x", "X", 2024, 10, rec=5, yds=70, tgt=8, team="BBB")
+           + _wk("x", "X", 2024, 10, rec=5, yds=70, tgt=8, team="BBB") \
+           + _wk("x", "X", 2025, 10, rec=5, yds=70, tgt=8, team="BBB")
     out = find_twins(pd.DataFrame(rows), "me")
+    assert len(out["players"]) > 0
     assert all(p["player_id"] != "me" for p in out["players"])
 
 def test_next_ppg():
@@ -102,3 +109,55 @@ def test_target_share_with_trade():
     target_share = me["targets"] / me["team_targets"]
     assert abs(target_share - 64/96) < 1e-9
     assert target_share <= 1.0
+
+def test_twins_without_next_season_excluded():
+    # The whole point of a comp is the "what happened next" trend signal --
+    # a comp with no following season in the data (retired, injured out of
+    # the league, or the season simply hasn't been played yet) shows a
+    # dangling arrow instead of a signal, so it is dropped entirely.
+    rows = (_wk("me", "Me", 2025, 10, rec=6, yds=80, tgt=9)
+            + _wk("nonext", "NoNext", 2024, 10, rec=6, yds=80, tgt=9, team="BBB")
+            + _wk("hasnext", "HasNext", 2023, 10, rec=5, yds=70, tgt=8, team="CCC")
+            + _wk("hasnext", "HasNext", 2024, 10, rec=7, yds=90, tgt=10, team="CCC"))
+    out = find_twins(pd.DataFrame(rows), "me")
+    ids = [(p["player_id"], p["season"]) for p in out["players"]]
+    assert ("nonext", 2024) not in ids       # perfect match, but no next season
+    assert ("hasnext", 2023) in ids
+    assert all(p["next_ppg"] is not None for p in out["players"])
+
+def _players(*rows):
+    return pd.DataFrame(list(rows), columns=["gsis_id", "display_name", "birth_date", "rookie_season"])
+
+def test_twins_age_filter_exact_match():
+    # "me" is 25 during 2025 (born Jan 2000). "sameage" was also 25 during
+    # its 2023 comp season; "offage" was 33. Only the same-age comp remains.
+    rows = (_wk("me", "Me", 2025, 10, rec=6, yds=80, tgt=9)
+            + _wk("sameage", "Same Age", 2023, 10, rec=6, yds=80, tgt=9, team="BBB")
+            + _wk("sameage", "Same Age", 2024, 10, rec=5, yds=60, tgt=7, team="BBB")
+            + _wk("offage", "Off Age", 2023, 10, rec=6, yds=80, tgt=9, team="CCC")
+            + _wk("offage", "Off Age", 2024, 10, rec=5, yds=60, tgt=7, team="CCC"))
+    players = _players(("me", "Me", "2000-01-01", 2022),
+                       ("sameage", "Same Age", "1998-01-01", 2020),
+                       ("offage", "Off Age", "1990-01-01", 2012))
+    out = find_twins(pd.DataFrame(rows), "me", players=players)
+    ids = {p["player_id"] for p in out["players"]}
+    assert ids == {"sameage"}
+    assert out["target_age"] == 25
+    assert out["players"][0]["age"] == 25
+
+def test_twins_age_filter_skipped_without_target_birthdate():
+    # Target absent from the players table: age matching degrades to the
+    # plain stat-similarity pool instead of returning nothing.
+    rows = (_wk("me", "Me", 2025, 10, rec=6, yds=80, tgt=9)
+            + _wk("comp", "Comp", 2023, 10, rec=6, yds=80, tgt=9, team="BBB")
+            + _wk("comp", "Comp", 2024, 10, rec=5, yds=60, tgt=7, team="BBB"))
+    players = _players(("comp", "Comp", "1998-01-01", 2020))
+    out = find_twins(pd.DataFrame(rows), "me", players=players)
+    assert {p["player_id"] for p in out["players"]} == {"comp"}
+    assert out["target_age"] is None
+
+def test_age_counts_full_years_at_september_first():
+    from scoring.similarity import _age_in_season
+    assert _age_in_season("2000-08-15", 2025) == 25   # birthday before opening week
+    assert _age_in_season("2000-09-15", 2025) == 24   # birthday after Sept 1
+    assert _age_in_season(None, 2025) is None

@@ -36,6 +36,12 @@ def fetch_weekly(years):
 def fetch_snap_counts(years):
     return nfl.import_snap_counts(years)
 
+def fetch_players(_=None):
+    # Static bio data; birth_date drives age-matched stat twins.
+    df = nfl.import_players()
+    return df[["gsis_id", "display_name", "birth_date", "rookie_season"]].dropna(
+        subset=["gsis_id"])
+
 def fetch_depth_charts(season):
     return nfl.import_depth_charts([season])
 
@@ -54,7 +60,16 @@ def fetch_adp(year: int, teams: int = 12) -> pd.DataFrame:
     resp.raise_for_status()
     return parse_adp(resp.json())
 
-def parse_espn(payload: dict) -> pd.DataFrame:
+def _espn_season_projection(p: dict, year: int):
+    # statSourceId 1 = projection (0 = actuals), statSplitTypeId 0 = full
+    # season (1 = weekly); appliedTotal is the projected season points.
+    for st in p.get("stats") or []:
+        if (st.get("statSourceId") == 1 and st.get("statSplitTypeId") == 0
+                and st.get("seasonId") == year):
+            return st.get("appliedTotal")
+    return None
+
+def parse_espn(payload: dict, year: int | None = None) -> pd.DataFrame:
     rows = []
     for entry in payload.get("players", []):
         p = entry.get("player") or {}
@@ -65,9 +80,10 @@ def parse_espn(payload: dict) -> pd.DataFrame:
             "espn_id": p.get("id"), "espn_name": p.get("fullName"), "position": pos,
             "espn_adp": (p.get("ownership") or {}).get("averageDraftPosition"),
             "espn_ppr_rank": ((p.get("draftRanksByRankType") or {}).get("PPR") or {}).get("rank"),
+            "espn_proj": _espn_season_projection(p, year) if year else None,
         })
     return pd.DataFrame(rows, columns=["espn_id", "espn_name", "position",
-                                       "espn_adp", "espn_ppr_rank"])
+                                       "espn_adp", "espn_ppr_rank", "espn_proj"])
 
 def fetch_espn_adp(year: int, limit: int = 500) -> pd.DataFrame:
     headers = {**UA, "X-Fantasy-Filter": json.dumps(
@@ -75,9 +91,83 @@ def fetch_espn_adp(year: int, limit: int = 500) -> pd.DataFrame:
                      "sortAdp": {"sortAsc": True, "sortPriority": 1}}})}
     resp = requests.get(ESPN_URL.format(year=year), headers=headers, timeout=30)
     resp.raise_for_status()
-    df = parse_espn(resp.json())
+    df = parse_espn(resp.json(), year=year)
     if df.empty:
         raise ValueError("no rows parsed - upstream schema drift?")
+    return df
+
+MFL_ADP_URL = "https://api.myfantasyleague.com/{year}/export?TYPE=adp&JSON=1"
+MFL_PLAYERS_URL = "https://api.myfantasyleague.com/{year}/export?TYPE=players&JSON=1"
+CBS_URL = "https://www.cbssports.com/fantasy/football/rankings/ppr/top200/"
+_MFL_POS = {"QB": "QB", "RB": "RB", "WR": "WR", "TE": "TE", "PK": "K"}
+
+def parse_mfl(adp_payload: dict, players_payload: dict) -> pd.DataFrame:
+    """Join MFL's adp export to its player directory.
+
+    Names arrive "Last, First"; positions use PK for kickers; team-defense
+    rows (position "Def") and ids missing from the directory are dropped --
+    the board joins by (name, position), which team defenses can't do.
+    """
+    directory = {p.get("id"): p for p in
+                 (players_payload.get("players") or {}).get("player", [])}
+    rows = []
+    for entry in (adp_payload.get("adp") or {}).get("player", []):
+        p = directory.get(entry.get("id"))
+        pos = _MFL_POS.get((p or {}).get("position"))
+        if p is None or pos is None:
+            continue
+        last, _, first = (p.get("name") or "").partition(", ")
+        rows.append({"mfl_name": f"{first} {last}".strip(), "position": pos,
+                     "avg_pick": pd.to_numeric(entry.get("averagePick"), errors="coerce")})
+    df = pd.DataFrame(rows, columns=["mfl_name", "position", "avg_pick"])
+    if df.empty:
+        return pd.DataFrame(columns=["mfl_name", "position", "mfl_rank"])
+    df = df.dropna(subset=["avg_pick"]).sort_values("avg_pick").reset_index(drop=True)
+    df["mfl_rank"] = df.index + 1
+    return df[["mfl_name", "position", "mfl_rank"]]
+
+def fetch_mfl_adp(year: int) -> pd.DataFrame:
+    adp = requests.get(MFL_ADP_URL.format(year=year), headers=UA, timeout=30)
+    adp.raise_for_status()
+    players = requests.get(MFL_PLAYERS_URL.format(year=year), headers=UA, timeout=60)
+    players.raise_for_status()
+    df = parse_mfl(adp.json(), players.json())
+    if df.empty:
+        raise ValueError("no rows parsed - upstream schema drift?")
+    return df
+
+_CBS_RANK = re.compile(r'<div class="rank">(\d+)</div>')
+_CBS_PLAYER = re.compile(r'href="/nfl/players/[^/]+/([a-z0-9-]+)/')
+_CBS_POS = re.compile(r'<span class="team position">\s*([A-Z]+)')
+
+def parse_cbs(html: str) -> pd.DataFrame:
+    """Rank + full name (from the href slug -- the visible name is
+    abbreviated to "J. Gibbs") + position, per player-row block.
+
+    Matched within each block, not across the whole page, so a row without
+    a /nfl/players/ href (e.g. a team-defense row) is skipped instead of
+    bleeding its rank onto the next player.
+    """
+    rows = []
+    for block in html.split('class="player-row')[1:]:
+        rank = _CBS_RANK.search(block)
+        player = _CBS_PLAYER.search(block)
+        pos = _CBS_POS.search(block)
+        if rank and player and pos:
+            rows.append({"cbs_name": player.group(1).replace("-", " "),
+                         "position": pos.group(1),
+                         "cbs_rank": int(rank.group(1))})
+    df = pd.DataFrame(rows, columns=["cbs_name", "position", "cbs_rank"])
+    # The page embeds each player several times (responsive layout copies).
+    return df.sort_values("cbs_rank").drop_duplicates(
+        ["cbs_name", "position"], keep="first").reset_index(drop=True)
+
+def fetch_cbs() -> pd.DataFrame:
+    resp = requests.get(CBS_URL, headers=UA, timeout=30)
+    resp.raise_for_status()
+    df = parse_cbs(resp.text)
+    if df.empty:
+        raise ValueError("no rows parsed - upstream markup drift?")
     return df
 
 def parse_fp_ecr(html: str) -> pd.DataFrame:

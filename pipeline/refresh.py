@@ -12,6 +12,7 @@ def main() -> int:
         "depth_charts": lambda: sources.fetch_depth_charts(CURRENT_SEASON),
         "schedules": lambda: sources.fetch_schedules(CURRENT_SEASON),
         "adp": lambda: sources.fetch_adp(CURRENT_SEASON),
+        "players": lambda: sources.fetch_players(),
         "espn_adp": lambda: sources.fetch_espn_adp(CURRENT_SEASON),
         "fp_ecr": sources.fetch_fp_ecr,
         "sleeper_ids": sources.fetch_sleeper_ids,

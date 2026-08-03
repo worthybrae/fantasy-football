@@ -150,19 +150,21 @@ def _twin_weekly_rows():
            "recent_team": "DET", "opponent_team": "GB", "season": 2025, "week": w,
            "receptions": 6, "receiving_yards": 80, "receiving_tds": 1, "targets": 9,
            "carries": 0} for w in range(1, 11)]
-    # p2: an on-board twin -- also present in 2025 (the latest season), so it
-    # enters the board universe and gets a real rank.
+    # p2: an on-board twin -- present in 2025 (the latest season), so it
+    # enters the board universe and gets a real rank. Its *comp* season is
+    # 2024, since comps must have a following season on file to survive the
+    # next-season filter (2025 comps never can -- 2026 hasn't been played).
     p2 = [{"player_id": "p2", "player_display_name": "On Board Twin", "position": "WR",
-           "recent_team": "GB", "opponent_team": "DET", "season": 2025, "week": w,
+           "recent_team": "GB", "opponent_team": "DET", "season": season, "week": w,
            "receptions": 6, "receiving_yards": 78, "receiving_tds": 1, "targets": 9,
-           "carries": 0} for w in range(1, 11)]
-    # p3: an off-board twin -- present only in 2023 (not the latest season)
-    # and absent from ADP, so it never enters the board universe even though
-    # its stat-similarity to p1 qualifies it as a twin candidate.
+           "carries": 0} for season in (2024, 2025) for w in range(1, 11)]
+    # p3: an off-board twin -- present only in 2023/2024 (not the latest
+    # season) and absent from ADP, so it never enters the board universe even
+    # though its stat-similarity to p1 qualifies it as a twin candidate.
     p3 = [{"player_id": "p3", "player_display_name": "Off Board Twin", "position": "WR",
-           "recent_team": "GB", "opponent_team": "DET", "season": 2023, "week": w,
+           "recent_team": "GB", "opponent_team": "DET", "season": season, "week": w,
            "receptions": 6, "receiving_yards": 79, "receiving_tds": 1, "targets": 9,
-           "carries": 0} for w in range(1, 11)]
+           "carries": 0} for season in (2023, 2024) for w in range(1, 11)]
     return pd.DataFrame(p1 + p2 + p3)
 
 def test_build_profile_enriches_stat_twins_on_and_off_board(tmp_path):
@@ -240,3 +242,132 @@ def test_build_profile_kicker_has_no_history(tmp_path):
     # "history" is factually misleading and must collapse instead.
     assert prof["seasons"] == []
     assert prof["game_log"] == []
+
+def test_game_log_zero_fills_missed_weeks():
+    # p1 misses week 2 while the league (p2) plays through week 4: the log
+    # must still show week 2 as a zeroed dnp row, and cover weeks 3-4 too.
+    rows = pd.DataFrame(
+        [{"player_id": "p1", "player_display_name": "Fragile Guy",
+          "position": "WR", "recent_team": "DET", "opponent_team": "GB",
+          "season": 2025, "week": w, "receptions": 6, "receiving_yards": 80,
+          "receiving_tds": 0, "targets": 9, "carries": 0}
+         for w in (1, 3)]
+        + [{"player_id": "p2", "player_display_name": "Iron Man",
+            "position": "WR", "recent_team": "GB", "opponent_team": "DET",
+            "season": 2025, "week": w, "receptions": 4, "receiving_yards": 40,
+            "receiving_tds": 0, "targets": 6, "carries": 0}
+           for w in range(1, 5)])
+    logs = game_log(rows, "p1")
+    assert [r["week"] for r in logs] == [4, 3, 2, 1]   # newest first, no gaps
+    missed = next(r for r in logs if r["week"] == 2)
+    assert missed["dnp"] is True
+    assert missed["ppr_points"] == 0.0 and missed["opponent"] is None
+    assert missed["stats"]["receptions"] == 0 and missed["stats"]["targets"] == 0
+    played = next(r for r in logs if r["week"] == 3)
+    assert played["dnp"] is False and played["ppr_points"] > 0
+
+def test_season_summaries_ppg_std():
+    # points per game: 8, 12, 16, 20 -> mean 14, sample var 80/3
+    rows = pd.DataFrame(
+        [{"player_id": "p1", "player_display_name": "Boom Bust", "position": "WR",
+          "recent_team": "DET", "opponent_team": "GB", "season": 2025, "week": w,
+          "receptions": r, "receiving_yards": r * 10, "receiving_tds": 0,
+          "targets": r + 2, "carries": 0}
+         for w, r in [(1, 4), (2, 6), (3, 8), (4, 10)]])
+    s = season_summaries(rows, pd.DataFrame(), "p1")[0]
+    assert abs(s["ppg_std"] - round((80 / 3) ** 0.5, 2)) < 1e-9
+
+def test_season_summaries_ppg_std_single_game_is_none():
+    rows = pd.DataFrame(
+        [{"player_id": "p1", "player_display_name": "One Game", "position": "WR",
+          "recent_team": "DET", "opponent_team": "GB", "season": 2025, "week": 1,
+          "receptions": 5, "receiving_yards": 50, "receiving_tds": 0,
+          "targets": 7, "carries": 0}])
+    s = season_summaries(rows, pd.DataFrame(), "p1")[0]
+    assert s["ppg_std"] is None
+
+def test_build_profile_passes_players_for_age_matching(tmp_path):
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    write_table(conn, "weekly", _twin_weekly_rows())
+    write_table(conn, "schedules", pd.DataFrame([
+        {"home_team": "DET", "away_team": "GB", "week": 1,
+         "total_line": 51.0, "spread_line": 3.0}]))
+    write_table(conn, "adp", pd.DataFrame([
+        {"adp_name": "Star One", "position": "WR", "team": "DET", "adp": 5.1}]))
+    write_table(conn, "depth_charts", pd.DataFrame(
+        columns=["gsis_id", "depth_team", "formation", "week", "position"]))
+    write_table(conn, "snap_counts", pd.DataFrame(
+        columns=["player", "team", "season", "offense_pct"]))
+    # p1 is 25 in 2025; p3 was 25 during its 2023 comp season; p2 was 30 in
+    # 2024 -> only the same-age comp survives.
+    write_table(conn, "players", pd.DataFrame([
+        {"gsis_id": "p1", "display_name": "Star One", "birth_date": "2000-01-01", "rookie_season": 2022},
+        {"gsis_id": "p2", "display_name": "On Board Twin", "birth_date": "1994-01-01", "rookie_season": 2016},
+        {"gsis_id": "p3", "display_name": "Off Board Twin", "birth_date": "1998-01-01", "rookie_season": 2020},
+    ]))
+    prof = build_profile(conn, "p1")
+    assert prof["similar"]["mode"] == "stat_twins"
+    assert prof["similar"]["target_age"] == 25
+    ids = {p["player_id"] for p in prof["similar"]["players"]}
+    assert ids == {"p3"} and prof["similar"]["players"][0]["age"] == 25
+
+def test_season_summaries_position_finish_rank():
+    # p1 out-scores p2 in 2025 (both WR); the QB must not affect WR ranks.
+    mk = lambda pid, name, pos, rec: [
+        {"player_id": pid, "player_display_name": name, "position": pos,
+         "recent_team": "DET", "opponent_team": "GB", "season": 2025, "week": w,
+         "receptions": rec, "receiving_yards": rec * 10, "receiving_tds": 0,
+         "targets": rec + 2, "carries": 0}
+        for w in range(1, 5)]
+    rows = pd.DataFrame(mk("p1", "Better WR", "WR", 8)
+                        + mk("p2", "Worse WR", "WR", 3)
+                        + mk("q1", "Some QB", "QB", 9))
+    assert season_summaries(rows, pd.DataFrame(), "p1")[0]["pos_finish"] == 1
+    assert season_summaries(rows, pd.DataFrame(), "p2")[0]["pos_finish"] == 2
+    assert season_summaries(rows, pd.DataFrame(), "q1")[0]["pos_finish"] == 1
+
+def test_career_summary_weighted_math():
+    from scoring.profile import career_summary
+    # 2025 w=0.5, 2024 w=0.3 -> renormalized 0.625/0.375
+    seasons = [
+        {"season": 2025, "games": 10, "ppg": 20.0, "completions": 0, "attempts": 0,
+         "pass_yards": 0, "pass_tds": 0, "interceptions": 0, "carries": 100,
+         "rush_yards": 500, "targets": 30, "receptions": 20, "rec_yards": 150, "tds": 5},
+        {"season": 2024, "games": 5, "ppg": 12.0, "completions": 0, "attempts": 0,
+         "pass_yards": 0, "pass_tds": 0, "interceptions": 0, "carries": 25,
+         "rush_yards": 100, "targets": 10, "receptions": 5, "rec_yards": 40, "tds": 1},
+        {"season": 2016, "games": 17, "ppg": 99.0, "completions": 0, "attempts": 0,
+         "pass_yards": 0, "pass_tds": 0, "interceptions": 0, "carries": 400,
+         "rush_yards": 2000, "targets": 90, "receptions": 80, "rec_yards": 700, "tds": 20},
+    ]
+    s = career_summary(seasons)
+    assert abs(s["w_ppg"] - 17.0) < 1e-9        # 20*.625 + 12*.375 = 17.0
+    assert abs(s["w_stats"]["carries"] - 8.1) < 1e-9   # 10*.625 + 5*.375 = 8.125 -> 8.1
+    # 2016 is outside the recency window and must not leak in
+
+def test_career_summary_empty_window():
+    from scoring.profile import career_summary
+    s = career_summary([])
+    assert s["w_ppg"] is None and s["w_stats"] == {}
+
+def test_build_profile_summary_with_espn_projection(tmp_path):
+    conn = _seed(tmp_path)
+    conn.execute("DROP TABLE espn_adp")
+    write_table(conn, "espn_adp", pd.DataFrame([
+        {"espn_id": 99, "espn_name": "Amon-Ra St. Brown", "position": "WR",
+         "espn_adp": 5.0, "espn_ppr_rank": 4, "espn_proj": 340.0}]))
+    write_table(conn, "sleeper_ids", pd.DataFrame([
+        {"gsis_id": "p1", "espn_id": 99, "sleeper_name": "Amon-Ra St. Brown",
+         "position": "WR", "team": "DET"}]))
+    p = build_profile(conn, "p1")
+    s = p["summary"]
+    assert s["proj_ppg"] == 20.0                # 340 / 17
+    assert s["w_ppg"] == 20.0                   # single 2025 season at 20 ppg
+    assert s["proj_delta"] == 0.0
+    assert s["w_stats"]["receptions"] == 6.0
+
+def test_build_profile_summary_degrades_without_proj_column(tmp_path):
+    # Old espn_adp schema (pre-refresh) has no espn_proj column at all.
+    p = build_profile(_seed(tmp_path), "p1")
+    assert p["summary"]["proj_ppg"] is None and p["summary"]["proj_delta"] is None
+    assert p["summary"]["w_ppg"] == 20.0

@@ -115,3 +115,76 @@ def test_fetch_fp_ecr_raises_on_empty_parse(monkeypatch):
                          lambda *a, **k: _StubResponse(text="<html>no data</html>"))
     with pytest.raises(ValueError):
         sources.fetch_fp_ecr()
+
+def test_parse_espn_extracts_season_projection():
+    # The kona payload carries many stats entries; the season projection is
+    # statSourceId=1 (projection), statSplitTypeId=0 (season), seasonId=year.
+    payload = {"players": [
+        {"player": {"id": 4429795, "fullName": "Jahmyr Gibbs", "defaultPositionId": 2,
+                    "ownership": {"averageDraftPosition": 1.77},
+                    "draftRanksByRankType": {"PPR": {"rank": 1}},
+                    "stats": [
+                        {"statSourceId": 0, "statSplitTypeId": 0, "seasonId": 2025, "appliedTotal": 366.9},
+                        {"statSourceId": 1, "statSplitTypeId": 1, "seasonId": 2026, "appliedTotal": 22.0},
+                        {"statSourceId": 1, "statSplitTypeId": 0, "seasonId": 2026, "appliedTotal": 365.5},
+                    ]}},
+        {"player": {"id": 2, "fullName": "No Stats Guy", "defaultPositionId": 3}},
+    ]}
+    df = parse_espn(payload, year=2026)
+    assert df.iloc[0]["espn_proj"] == 365.5
+    assert pd.isna(df.iloc[1]["espn_proj"])
+
+def test_parse_mfl():
+    from pipeline.sources import parse_mfl
+    adp = {"adp": {"player": [
+        {"id": "100", "averagePick": "2.85", "rank": "1"},
+        {"id": "200", "averagePick": "3.90", "rank": "2"},
+        {"id": "300", "averagePick": "5.00", "rank": "3"},   # a kicker (PK)
+        {"id": "400", "averagePick": "9.00", "rank": "4"},   # team defense -> dropped
+        {"id": "999", "averagePick": "9.50", "rank": "5"},   # not in directory -> dropped
+    ]}}
+    players = {"players": {"player": [
+        {"id": "100", "name": "Gibbs, Jahmyr", "position": "RB", "team": "DET"},
+        {"id": "200", "name": "Chase, Ja'Marr", "position": "WR", "team": "CIN"},
+        {"id": "300", "name": "Aubrey, Brandon", "position": "PK", "team": "DAL"},
+        {"id": "400", "name": "Ravens, Baltimore", "position": "Def", "team": "BAL"},
+    ]}}
+    df = parse_mfl(adp, players)
+    assert df["mfl_name"].tolist() == ["Jahmyr Gibbs", "Ja'Marr Chase", "Brandon Aubrey"]
+    assert df["position"].tolist() == ["RB", "WR", "K"]
+    assert df["mfl_rank"].tolist() == [1, 2, 3]
+
+def test_parse_cbs():
+    from pipeline.sources import parse_cbs
+    html = (
+        '<div class="player-row first"><div class="rank">1</div>'
+        '<a href="/nfl/players/3162723/jahmyr-gibbs/fantasy/"><span class="player-name">J. Gibbs</span></a>'
+        '<span class="team position">RB $34</span></div>'
+        '<div class="player-row"><div class="rank">2</div>'
+        '<a href="/nfl/players/28drt/jamarr-chase/fantasy/"><span class="player-name">J. Chase</span></a>'
+        '<span class="team position">WR $38</span></div>'
+    )
+    df = parse_cbs(html)
+    assert df["cbs_name"].tolist() == ["jahmyr gibbs", "jamarr chase"]
+    assert df["position"].tolist() == ["RB", "WR"]
+    assert df["cbs_rank"].tolist() == [1, 2]
+    assert parse_cbs("<html>nothing</html>").empty
+
+def test_parse_cbs_row_without_player_href_does_not_bleed():
+    from pipeline.sources import parse_cbs
+    # A DST-style row (team link, no /nfl/players/ href) sits between two
+    # players; its rank must not be attributed to the next player's name.
+    html = (
+        '<div class="player-row"><div class="rank">1</div>'
+        '<a href="/nfl/players/1/jahmyr-gibbs/fantasy/"><span class="player-name">J. Gibbs</span></a>'
+        '<span class="team position">RB $34</span></div>'
+        '<div class="player-row"><div class="rank">2</div>'
+        '<a href="/nfl/teams/BAL/baltimore-ravens/"><span class="player-name">Ravens DST</span></a>'
+        '<span class="team position">DST</span></div>'
+        '<div class="player-row"><div class="rank">3</div>'
+        '<a href="/nfl/players/2/jamarr-chase/fantasy/"><span class="player-name">J. Chase</span></a>'
+        '<span class="team position">WR $38</span></div>'
+    )
+    df = parse_cbs(html)
+    assert df["cbs_rank"].tolist() == [1, 3]
+    assert df["cbs_name"].tolist() == ["jahmyr gibbs", "jamarr chase"]
