@@ -2,13 +2,25 @@ import pandas as pd
 from pipeline.db import get_conn, write_table
 from scoring.board import build_board, _norm_name
 
-def _seed(tmp_path):
+def _seed(tmp_path, include_qb=False):
     conn = get_conn(str(tmp_path / "t.duckdb"))
-    weekly = pd.DataFrame([
+    rows = [
         {"player_id": "p1", "player_display_name": "Amon-Ra St. Brown", "position": "WR",
          "recent_team": "DET", "opponent_team": "GB", "season": 2025, "week": w,
          "receptions": 8, "receiving_yards": 90, "targets": 10, "carries": 0}
-        for w in range(1, 18)])
+        for w in range(1, 18)]
+    if include_qb:
+        # Exercises _PASS_COLS' real-column (pd.to_numeric) branch in
+        # _latest_season_stats -- the plain _seed() fixture above has no
+        # passing columns at all, so that branch only runs when this flag
+        # is set.
+        rows += [
+            {"player_id": "q1", "player_display_name": "Some QB", "position": "QB",
+             "recent_team": "DET", "opponent_team": "GB", "season": 2025, "week": w,
+             "completions": 20, "attempts": 30, "passing_yards": 250,
+             "passing_tds": 2, "passing_interceptions": 1, "carries": 0}
+            for w in range(1, 4)]
+    weekly = pd.DataFrame(rows)
     write_table(conn, "weekly", weekly)
     write_table(conn, "schedules", pd.DataFrame([
         {"home_team": "DET", "away_team": "GB", "week": 1,
@@ -363,3 +375,17 @@ def test_board_stats_summary(tmp_path):
     # ADP-only player has no weekly rows -> no stats dict at all
     rook = board[board["name"] == "Rookie Guy"].iloc[0]
     assert not isinstance(rook["stats"], dict)
+
+def test_board_stats_summary_passing_cols(tmp_path):
+    # test_board_stats_summary above only exercises the "no passing columns
+    # present" zero-fill path; this covers the real-column pd.to_numeric
+    # aggregation branch in _latest_season_stats/_PASS_COLS.
+    board = build_board(_seed(tmp_path, include_qb=True))
+    qb = board[board["player_id"] == "q1"].iloc[0]["stats"]
+    weeks = 3
+    assert qb["games"] == weeks
+    assert qb["completions"] == 20 * weeks
+    assert qb["attempts"] == 30 * weeks
+    assert qb["pass_yards"] == 250 * weeks
+    assert qb["pass_tds"] == 2 * weeks
+    assert qb["interceptions"] == 1 * weeks

@@ -10,7 +10,9 @@ interface SourceMeta {
 
 // Kept small and deliberate -- not "any source failing is critical":
 //   - schedules feeds environment/strength-of-schedule scoring directly, so
-//     a failed pull skews every player's composite/VOR, not just ranking.
+//     a failed pull skews the underlying ranking math for every player, not
+//     just the one team's game (composite/VOR are computed internally but
+//     no longer rendered in the UI).
 //   - adp (FFC) is how rookies and K/DST enter the board at all (see
 //     scoring/board.py: _add_adp_only_players) -- a failed pull doesn't just
 //     drop one of three market-consensus inputs, it can make whole players

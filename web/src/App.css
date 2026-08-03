@@ -300,17 +300,6 @@ tbody tr:hover {
   background: var(--bg-2);
 }
 
-/* Alternating faint background per tier group -- only applied while the
-   board is sorted by rank on a single position (see PlayerTable's
-   tierBandGate; ALL/FLEX views and other sort columns render no bands). */
-tr.tier-band {
-  background: var(--bg-1);
-}
-
-tr.tier-band:hover {
-  background: var(--bg-2);
-}
-
 /* Drafted rows stay in place (still selectable/clickable, still counted for
    keyboard nav) but read as "done" -- dimmed and struck through. */
 tr.row-drafted {
@@ -410,66 +399,6 @@ td:first-child {
 .pos-badge-dst {
   background: color-mix(in srgb, var(--pos-dst) 16%, transparent);
   color: var(--pos-dst);
-}
-
-/* -- edge chips -- */
-
-.edge-chip {
-  display: inline-block;
-  padding: 1px 7px;
-  border-radius: var(--radius);
-  font-weight: 600;
-}
-
-.edge-chip.edge-pos {
-  background: color-mix(in srgb, var(--ok) 16%, transparent);
-  color: var(--ok);
-}
-
-.edge-chip.edge-neg {
-  background: color-mix(in srgb, var(--fail) 16%, transparent);
-  color: var(--fail);
-}
-
-/* |edge| < 3: not a meaningful signal either way, so it reads as inert gray
-   rather than a weak green/red. A border rather than a solid fill -- the
-   positive/negative chips' `--bg-2`-toned fills would otherwise disappear
-   into `tbody tr:hover`'s identical background on the one row the user is
-   actually pointing at. (A player with no market data at all gets no chip:
-   PlayerTable's cell returns a bare em dash before this class is ever
-   applied.) */
-.edge-chip.edge-neutral {
-  border: 1px solid var(--border);
-  color: var(--text-3);
-}
-
-/* -- VOR micro-bar -- */
-
-.vor-cell {
-  position: relative;
-  display: inline-block;
-  /* Fixed, not min-width -- the bar's percentage width is relative to this
-     box, so every row in the column needs the identical track width for
-     the bars to be comparable at a glance. (Not `overflow: hidden`: if a
-     value's text ever ran wider than this, it should spill visibly rather
-     than silently clip a number.) */
-  width: 56px;
-}
-
-.vor-bar {
-  position: absolute;
-  inset: 0;
-  right: auto;
-  border-radius: var(--radius);
-  /* Quiet and quantitative, not a signal -- unlike the edge chips' status
-     colors or the accent's interactive-only reservation, this is just a
-     scale reference, so it stays a neutral tint of body text. */
-  background: color-mix(in srgb, var(--text-2) 16%, transparent);
-}
-
-.vor-value {
-  position: relative;
-  padding-left: 4px;
 }
 
 .rookie-badge {
@@ -592,45 +521,6 @@ td:first-child {
   color: var(--text-3);
 }
 
-/* -- factor bars -- */
-
-.factor-bars {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.factor-bar {
-  display: grid;
-  grid-template-columns: 90px 1fr 44px;
-  align-items: center;
-  gap: 10px;
-}
-
-.factor-bar-label {
-  font-size: var(--text-sm);
-  color: var(--text-2);
-}
-
-.factor-bar-track {
-  background: var(--bg-2);
-  border-radius: var(--radius);
-  height: 8px;
-  overflow: hidden;
-}
-
-.factor-bar-fill {
-  background: var(--accent);
-  height: 100%;
-  border-radius: var(--radius);
-}
-
-.factor-bar-value {
-  font-size: var(--text-sm);
-  text-align: right;
-  color: var(--text-1);
-}
-
 /* -- similar players -- */
 
 .similar-players {
@@ -692,20 +582,6 @@ td:first-child {
 
 /* -- weekly chart -- */
 
-.weekly-chart-legend {
-  display: flex;
-  gap: 14px;
-  margin-bottom: var(--space-2);
-  font-size: var(--text-sm);
-  color: var(--text-2);
-}
-
-.weekly-chart-legend-item {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-}
-
 .weekly-chart-swatch {
   display: inline-block;
   width: 10px;
@@ -765,14 +641,6 @@ td:first-child {
 .weekly-chart-season-label {
   fill: var(--text-1);
   font-size: 11px;
-}
-
-.weekly-bar {
-  transition: filter 0.1s ease;
-}
-
-.weekly-bar:hover {
-  filter: brightness(1.2);
 }
 
 /* -- season table -- */
@@ -858,8 +726,7 @@ td:first-child {
   color: var(--text-2);
 }
 
-/* boom/bust shading -- --ok/--fail hues at low alpha so text stays legible,
-   same color-mix pattern as the edge-chips above. */
+/* boom/bust shading -- --ok/--fail hues at low alpha so text stays legible. */
 .pts-hot-1 { background: color-mix(in srgb, var(--ok) 12%, transparent); }
 .pts-hot-2 { background: color-mix(in srgb, var(--ok) 28%, transparent); }
 .pts-cold-1 { background: color-mix(in srgb, var(--fail) 10%, transparent); }

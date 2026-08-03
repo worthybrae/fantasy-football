@@ -14,7 +14,7 @@ interface PlayerTableProps {
   players: Player[]
   onToggleDrafted: (p: Player) => Promise<void>
   onSelectPlayer: (p: Player) => void
-  /** Drives which position-specific stat columns (Task 3) are appended after
+  /** Drives which position-specific stat columns are appended after
    *  the market columns -- ALL/FLEX/K/DST show the summary stats only. */
   positionFilter: string
   /** Keyboard-cursor row, as an index into the current sorted row order --
@@ -38,6 +38,12 @@ const NUMERIC_COLUMNS = new Set([
   'bye', 'market_rank', 'espn_ppr_rank',
   ...['QB', 'RB', 'WR'].flatMap((p) => boardColumnsFor(p).map((c) => c.id)),
 ])
+// Column ids that exist regardless of positionFilter -- used below to decide
+// whether a stale sort (e.g. sorted by an RB-only stat column) still applies
+// after switching tabs.
+const STATIC_COLUMN_IDS = [
+  'drafted-toggle', 'espn_ppr_rank', 'name', 'position', 'team', 'bye', 'market_rank',
+]
 
 export default function PlayerTable({
   players,
@@ -154,6 +160,23 @@ export default function PlayerTable({
     ],
     [onToggleDrafted, positionFilter]
   )
+
+  // TanStack drops an active sort when its column disappears from the
+  // column set (e.g. sorted RB by a rushing stat, then switched to ALL,
+  // which has no rushing columns) -- rows silently fall back to raw payload
+  // (VOR) order with no sort indicator. Reset to the default rank sort
+  // whenever the sorted column id isn't in the new position's column set.
+  useEffect(() => {
+    const validIds = new Set([
+      ...STATIC_COLUMN_IDS,
+      ...boardColumnsFor(positionFilter).map((c) => c.id),
+    ])
+    const sortedId = sorting[0]?.id
+    if (sortedId && !validIds.has(sortedId)) {
+      setSorting([{ id: 'espn_ppr_rank', desc: false }])
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [positionFilter])
 
   const table = useReactTable({
     data: players,
