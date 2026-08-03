@@ -130,60 +130,9 @@
 
 .app-body {
   display: flex;
+  flex-direction: column;
   flex: 1;
   min-height: 0;
-  align-items: stretch;
-}
-
-.rail {
-  width: 220px;
-  flex-shrink: 0;
-  position: sticky;
-  top: 48px;
-  align-self: flex-start;
-  max-height: calc(100svh - 48px);
-  overflow-y: auto;
-  overflow-x: hidden;
-  background: var(--bg-1);
-  border-right: 1px solid var(--border);
-  padding: var(--space-4);
-  transition: width 0.15s ease, padding 0.15s ease;
-}
-
-.rail.rail-collapsed {
-  width: 40px;
-  padding: var(--space-3) 0;
-}
-
-.rail-toggle {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-2);
-  width: 100%;
-  background: transparent;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--text-3);
-  cursor: pointer;
-  padding: 4px 0;
-  margin-bottom: var(--space-4);
-  font-size: var(--text-sm);
-}
-
-.rail.rail-collapsed .rail-toggle {
-  margin-bottom: 0;
-}
-
-.rail-toggle:hover {
-  color: var(--text-1);
-  border-color: var(--accent-border);
-}
-
-.rail-content {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
 }
 
 .main {
@@ -191,41 +140,23 @@
   min-width: 0;
   padding: var(--space-4);
   overflow-x: auto;
-  /* Cap against the viewport directly (matches .rail's own 48px-topbar
-     math below) rather than relying on the flex chain to hand this a
-     definite height -- #root only sets `min-height: 100svh`, a floor, so
-     without this the whole chain grows to fit content and the *document*
-     ends up as the scroll container instead of `.main`. That would leave
-     the table's `position: sticky` header pinning to the viewport's top
-     edge -- the same spot the sticky top bar pins to, and behind it,
-     since the top bar's z-index is higher -- instead of to the top of
-     this pane, right under the top bar. */
+  /* Cap against the viewport directly rather than relying on the flex chain
+     to hand this a definite height -- #root only sets `min-height: 100svh`,
+     a floor, so without this the whole chain grows to fit content and the
+     *document* ends up as the scroll container instead of `.main`. That
+     would leave the table's `position: sticky` header pinning to the
+     viewport's top edge -- the same spot the sticky top bar pins to, and
+     behind it, since the top bar's z-index is higher -- instead of to the
+     top of this pane, right under the top bar. */
   overflow-y: auto;
   max-height: calc(100svh - 48px);
 }
 
-/* -- weight sliders -- */
-
-.weight-sliders h2 {
-  font-size: var(--text-md);
-  margin-bottom: var(--space-3);
-}
-
-.weight-slider {
-  margin-bottom: var(--space-3);
-}
-
-.weight-slider label {
+.board-controls {
   display: flex;
+  align-items: center;
   justify-content: space-between;
-  font-size: var(--text-sm);
-  margin-bottom: 4px;
-  color: var(--text-2);
-}
-
-.weight-slider input[type='range'] {
-  width: 100%;
-  accent-color: var(--accent);
+  gap: 16px;
 }
 
 .hide-drafted {
@@ -790,6 +721,26 @@ td:first-child {
   display: block;
 }
 
+/* Full-width season charts: fixed viewBox scaled to the drawer width. */
+.season-chart-wide {
+  width: 100%;
+  height: auto;
+}
+
+.summary-strip .summary-stat-row {
+  margin-top: var(--space-2);
+}
+
+.chip-up {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
+}
+
+.chip-down {
+  color: var(--fail);
+  border-color: color-mix(in srgb, var(--fail) 45%, transparent);
+}
+
 .weekly-chart-svg:focus-visible {
   outline: 2px solid var(--accent-border);
   outline-offset: 2px;
@@ -890,6 +841,21 @@ td:first-child {
   text-transform: uppercase;
   letter-spacing: 0.03em;
   padding-top: var(--space-3);
+}
+
+.game-log-season-toggle {
+  cursor: pointer;
+  user-select: none;
+}
+
+.game-log-season-toggle:hover td {
+  color: var(--accent, var(--text-0));
+}
+
+.game-log-chevron {
+  display: inline-block;
+  width: 1em;
+  color: var(--text-2);
 }
 
 /* boom/bust shading -- --ok/--fail hues at low alpha so text stays legible,

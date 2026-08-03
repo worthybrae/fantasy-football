@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
-import { fetchProfile, type Player, type PlayerProfileData, type Weights } from '../api'
-import FactorBars from './FactorBars'
+import { fetchProfile, type Player, type PlayerProfileData } from '../api'
+import SeasonRangeChart from './SeasonRangeChart'
 import GameLog from './GameLog'
 import SeasonTable from './SeasonTable'
 import SimilarPlayers from './SimilarPlayers'
-import WeeklyChart from './WeeklyChart'
+import SnapShareChart from './SnapShareChart'
+import SummaryStrip from './SummaryStrip'
 
 interface PlayerProfileProps {
   playerId: string
-  weights: Weights
   onClose: () => void
   onToggleDrafted: (p: Player) => Promise<void>
   onSelectPlayer: (id: string) => void
@@ -32,7 +32,7 @@ function sosLabel(sosRaw: number | null, sosPct: number | null): string {
   return `SoS ${sosRaw.toFixed(1)} FPA/g (${sosPct.toFixed(0)}th pct — ${direction})`
 }
 
-export default function PlayerProfile({ playerId, weights, onClose, onToggleDrafted, onSelectPlayer }: PlayerProfileProps) {
+export default function PlayerProfile({ playerId, onClose, onToggleDrafted, onSelectPlayer }: PlayerProfileProps) {
   const [profile, setProfile] = useState<PlayerProfileData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -63,7 +63,7 @@ export default function PlayerProfile({ playerId, weights, onClose, onToggleDraf
     setLoading(true)
     setError(null)
     try {
-      const data = await fetchProfile(forPlayerId, weights)
+      const data = await fetchProfile(forPlayerId)
       if (playerIdRef.current === forPlayerId) setProfile(data)
     } catch (e) {
       if (playerIdRef.current === forPlayerId) {
@@ -74,22 +74,14 @@ export default function PlayerProfile({ playerId, weights, onClose, onToggleDraf
     }
   }
 
-  // Tracks the playerId this effect last ran for, so a weights-only change
-  // (slider drag while the drawer is open) can refetch without blanking the
-  // already-rendered profile first -- only an actual player swap resets it.
-  const prevPlayerIdRef = useRef<string | null>(null)
-
   // Reset and refetch whenever the drawer is pointed at a new player (initial
   // open, or a comp/row click swapping the id while the drawer stays
-  // mounted), and refetch (without resetting) whenever the slider weights
-  // change, so the drawer's rank/VOR/composite never contradict the board.
+  // mounted).
   useEffect(() => {
-    const isNewPlayer = prevPlayerIdRef.current !== playerId
-    prevPlayerIdRef.current = playerId
-    if (isNewPlayer) setProfile(null)
+    setProfile(null)
     loadProfile(playerId)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playerId, weights])
+  }, [playerId])
 
   // Scoped to the drawer being mounted at all -- avoids a global listener
   // (and stray Esc-closes) while the board is the only thing on screen.
@@ -150,15 +142,25 @@ export default function PlayerProfile({ playerId, weights, onClose, onToggleDraf
               </button>
             </div>
 
-            <section className="drawer-section">
-              <h3>Factors</h3>
-              <FactorBars factors={profile.factors} />
-            </section>
-
-            {profile.game_log.length > 0 && (
+            {(profile.summary.w_ppg !== null || profile.summary.proj_ppg !== null) && (
               <section className="drawer-section">
-                <h3>Weekly points</h3>
-                <WeeklyChart gameLog={profile.game_log} />
+                <h3>Weighted per-game (last 3 yrs)</h3>
+                <SummaryStrip summary={profile.summary} position={header.position} />
+              </section>
+            )}
+
+            {profile.seasons.length > 0 && (
+              <section className="drawer-section">
+                <h3>Avg &amp; volatility by season</h3>
+                <SeasonRangeChart seasons={profile.seasons} position={header.position} />
+              </section>
+            )}
+
+            {['RB', 'WR', 'TE'].includes(header.position) &&
+              profile.seasons.some((s) => s.snap_share !== null) && (
+              <section className="drawer-section">
+                <h3>Snap share</h3>
+                <SnapShareChart seasons={profile.seasons} />
               </section>
             )}
 
@@ -201,6 +203,7 @@ export default function PlayerProfile({ playerId, weights, onClose, onToggleDraf
               <SimilarPlayers
                 mode={profile.similar.mode}
                 players={profile.similar.players}
+                targetAge={profile.similar.target_age ?? null}
                 onSelectPlayer={onSelectPlayer}
               />
             </section>
