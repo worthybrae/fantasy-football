@@ -261,3 +261,50 @@ def test_depth_charts_real_schema_pos_rank(tmp_path):
     board = build_board(conn)  # must not raise KeyError('depth_team')
     row = board[board["player_id"] == "p1"].iloc[0]
     assert row["role"] > 50.0  # starter (rank 1) beats the neutral default
+
+def test_traded_player_gets_current_team_from_latest_depth_chart(tmp_path):
+    # A player's team must come from the newest depth-chart snapshot, not
+    # from last season's weekly stats -- offseason trades (e.g. a DET player
+    # moving to HOU) are invisible to weekly data until games are played.
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    weekly = pd.DataFrame([
+        {"player_id": "p1", "player_display_name": "Traded Back", "position": "RB",
+         "recent_team": "DET", "opponent_team": "GB", "season": 2025, "week": w,
+         "receptions": 3, "receiving_yards": 20, "targets": 4, "carries": 15}
+        for w in range(1, 18)])
+    write_table(conn, "weekly", weekly)
+    write_table(conn, "schedules", pd.DataFrame([
+        {"home_team": "DET", "away_team": "GB", "week": 1,
+         "total_line": 45.0, "spread_line": 3.0},
+        {"home_team": "HOU", "away_team": "TEN", "week": 1,
+         "total_line": 48.0, "spread_line": 6.0}]))
+    write_table(conn, "adp", pd.DataFrame(
+        [{"adp_name": "Traded Back", "position": "RB", "team": "HOU", "adp": 60.0}]))
+    write_table(conn, "depth_charts", pd.DataFrame([
+        {"dt": "2026-07-01T09:00:00Z", "team": "DET", "gsis_id": "p1",
+         "pos_abb": "RB", "pos_slot": 1, "pos_rank": 1},
+        {"dt": "2026-08-02T09:00:00Z", "team": "HOU", "gsis_id": "p1",
+         "pos_abb": "RB", "pos_slot": 1, "pos_rank": 1},
+    ]))
+    row = build_board(conn).set_index("player_id").loc["p1"]
+    assert row["team"] == "HOU"  # newest snapshot wins over both weekly and older snapshots
+
+def test_traded_player_falls_back_to_adp_team_without_depth_chart(tmp_path):
+    # If the player has no depth-chart row, the ADP feed's team is still
+    # more current than last season's weekly stats.
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    weekly = pd.DataFrame([
+        {"player_id": "p1", "player_display_name": "Traded Back", "position": "RB",
+         "recent_team": "DET", "opponent_team": "GB", "season": 2025, "week": w,
+         "receptions": 3, "receiving_yards": 20, "targets": 4, "carries": 15}
+        for w in range(1, 18)])
+    write_table(conn, "weekly", weekly)
+    write_table(conn, "schedules", pd.DataFrame([
+        {"home_team": "HOU", "away_team": "TEN", "week": 1,
+         "total_line": 48.0, "spread_line": 6.0}]))
+    write_table(conn, "adp", pd.DataFrame(
+        [{"adp_name": "Traded Back", "position": "RB", "team": "HOU", "adp": 60.0}]))
+    write_table(conn, "depth_charts", pd.DataFrame(
+        columns=["dt", "team", "gsis_id", "pos_abb", "pos_slot", "pos_rank"]))
+    row = build_board(conn).set_index("player_id").loc["p1"]
+    assert row["team"] == "HOU"

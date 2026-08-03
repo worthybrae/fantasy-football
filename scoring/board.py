@@ -96,6 +96,24 @@ def _adapt_adp(adp: pd.DataFrame) -> pd.DataFrame:
     return adp
 
 
+def _current_teams(depth: pd.DataFrame) -> pd.DataFrame:
+    """Latest known team per player from the newest depth-chart snapshot.
+
+    Weekly stats say who a player *last played* for, so offseason trades and
+    signings are invisible there until games are played. The current-season
+    depth chart is the authority on `team`; build_board falls back to the
+    ADP feed's team, then to the historical weekly team.
+    """
+    if depth.empty or not {"gsis_id", "team"}.issubset(depth.columns):
+        return pd.DataFrame(columns=["player_id", "cur_team"])
+    cur = depth
+    if "dt" in cur.columns:
+        cur = cur.sort_values("dt")
+    cur = cur.drop_duplicates("gsis_id", keep="last").dropna(subset=["team"])
+    return cur[["gsis_id", "team"]].rename(
+        columns={"gsis_id": "player_id", "team": "cur_team"})
+
+
 def _build_universe(weekly: pd.DataFrame) -> pd.DataFrame:
     cols = ["player_id", "name", "position", "team"]
     if weekly.empty:
@@ -166,6 +184,19 @@ def build_board(conn, weights: dict | None = None) -> pd.DataFrame:
         adp["norm"] = adp["adp_name"].map(_norm_name)
         adp = _dedupe_adp(adp)
         uni = _add_adp_only_players(uni, adp)
+
+    # Override the historical team with the current one (depth chart first,
+    # ADP second). Must happen before the environment/schedule/bye merges
+    # below, which all join on `team`.
+    uni = uni.merge(_current_teams(depth), on="player_id", how="left")
+    if not adp.empty:
+        adp_teams = adp[adp["position"] != "DST"][["norm", "position", "team"]].rename(
+            columns={"team": "adp_team"})
+        uni = uni.merge(adp_teams, on=["norm", "position"], how="left")
+    else:
+        uni["adp_team"] = pd.NA
+    uni["team"] = uni["cur_team"].fillna(uni["adp_team"]).fillna(uni["team"])
+    uni = uni.drop(columns=["cur_team", "adp_team"])
 
     # -- raw factors --
     if weekly.empty:
