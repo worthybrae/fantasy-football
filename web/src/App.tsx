@@ -211,6 +211,10 @@ function App() {
   const filteredPlayers = useMemo(() => {
     const query = search.trim().toLowerCase()
     return players.filter((p) => {
+      // Players ESPN doesn't rank are deep-bench noise on this board --
+      // except DSTs, which ESPN never ranks at all (an espn_ppr_rank
+      // filter would empty the DST tab).
+      if (p.espn_ppr_rank === null && p.position !== 'DST') return false
       if (query && !p.name.toLowerCase().includes(query) && !p.team.toLowerCase().includes(query)) {
         return false
       }
