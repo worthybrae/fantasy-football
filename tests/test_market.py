@@ -77,6 +77,9 @@ def test_duplicate_espn_id_lowest_rank_wins():
     g1 = out[out["player_id"] == "g1"].iloc[0]
     # Should use rank from lowest espn_adp (1.77 → rank 1), not second one
     assert g1["market_sources"]["espn"] == 1.0
+    # espn_ppr_rank must travel with the same winning row as espn_rank (1),
+    # not the duplicate's (2).
+    assert g1["espn_ppr_rank"] == 1.0
 
 def test_duplicate_gsis_id_in_crosswalk_lowest_rank_wins():
     """Regression: a junk crosswalk row mapping two different espn_ids to the
@@ -89,7 +92,7 @@ def test_duplicate_gsis_id_in_crosswalk_lowest_rank_wins():
         "espn_name": ["Jahmyr Gibbs", "Duplicate Player"],
         "position": ["RB", "RB"],
         "espn_adp": [1.77, 0.5],   # the duplicate has the better (lower) ADP
-        "espn_ppr_rank": [1, 1],
+        "espn_ppr_rank": [1, 7],   # distinct per-row, so a misaligned pick is observable
     })
     # Crosswalk maps BOTH espn_ids to the same gsis_id "g1".
     sleeper = pd.DataFrame({
@@ -101,6 +104,9 @@ def test_duplicate_gsis_id_in_crosswalk_lowest_rank_wins():
     out = add_market(board, espn, fp, sleeper)  # must not raise
     g1 = out[out["player_id"] == "g1"].iloc[0]
     assert g1["market_sources"]["espn"] == 1.0
+    # espn_ppr_rank must come from the same winning row (espn_id 999, the
+    # lower-ADP duplicate) as espn_rank, i.e. 7 -- not 1 from the loser.
+    assert g1["espn_ppr_rank"] == 7.0
 
 def test_duplicate_fp_name_position_lowest_rank_wins():
     """Regression: duplicate (fp_name, position) should not crash; lowest rank wins."""

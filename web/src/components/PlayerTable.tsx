@@ -107,7 +107,7 @@ export default function PlayerTable({
         // here so ranks (which mostly come back present) sort correctly
         // without a bespoke sortingFn.
         accessorFn: (row) => row.espn_ppr_rank ?? undefined,
-        header: 'ESPN',
+        header: 'ESPN PPR',
         sortUndefined: 'last',
         cell: ({ row }) => fmtRank(row.original.espn_ppr_rank),
       },
@@ -164,7 +164,7 @@ export default function PlayerTable({
           const p = row.original
           if (p.market_rank === null) return '—'
           const { ffc, espn, fp, fp_tier } = p.market_sources
-          const title = `FFC ${fmtSource(ffc)} · ESPN ${fmtSource(espn)} · FP ${fmtSource(fp)} · FP tier ${fmtSource(fp_tier)}`
+          const title = `FFC ${fmtSource(ffc)} · ESPN ADP ${fmtSource(espn)} · FP ${fmtSource(fp)} · FP tier ${fmtSource(fp_tier)}`
           const showSpread = p.market_spread !== null && p.market_spread >= 12
           return (
             <span title={title}>
