@@ -1,14 +1,18 @@
 export interface MarketSources {
   ffc: number | null; espn: number | null; fp: number | null; fp_tier: number | null;
 }
+export interface BoardStats {
+  season: number; games: number; ppg: number; points: number;
+  carries: number; rush_yards: number; targets: number; receptions: number;
+  rec_yards: number; tds: number; completions: number; attempts: number;
+  pass_yards: number; pass_tds: number; interceptions: number;
+}
 export interface Player {
-  rank: number; player_id: string; name: string; position: string;
-  team: string; bye: number | null; tier: number;
-  production: number; durability: number; role: number;
-  environment: number; schedule: number;
-  composite: number; vor: number; edge: number | null;
+  player_id: string; name: string; position: string;
+  team: string; bye: number | null;
   market_rank: number | null; market_spread: number | null; market_sources: MarketSources;
   espn_ppr_rank: number | null;
+  stats: BoardStats | null;
   rookie: boolean; drafted: boolean;
 }
 

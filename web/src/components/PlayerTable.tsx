@@ -8,16 +8,15 @@ import {
   useReactTable,
 } from '@tanstack/react-table'
 import type { Player } from '../api'
+import { boardColumnsFor } from '../statColumns'
 
 interface PlayerTableProps {
   players: Player[]
   onToggleDrafted: (p: Player) => Promise<void>
   onSelectPlayer: (p: Player) => void
-  /** Tier is computed per-position, so the boundary rule is only meaningful
-   *  when a single position is in view -- on ALL/FLEX, adjacent rows are
-   *  usually different positions with unrelated tier numbers, so the rule
-   *  would fire almost everywhere and just be noise. */
-  showTierBreaks: boolean
+  /** Drives which position-specific stat columns (Task 3) are appended after
+   *  the market columns -- ALL/FLEX/K/DST show the summary stats only. */
+  positionFilter: string
   /** Keyboard-cursor row, as an index into the current sorted row order --
    *  owned by App so it survives this component re-rendering, and null
    *  means "no keyboard selection yet." */
@@ -26,11 +25,6 @@ interface PlayerTableProps {
    *  can map arrow-key movement and Enter/D to the right player without
    *  duplicating TanStack's sort here. */
   onVisibleRowsChange: (ids: string[]) => void
-  /** Position -> max VOR across the FULL board (unfiltered by search/tab/
-   *  hide-drafted), used to scale the VOR micro-bars. Owned by App rather
-   *  than derived from `players` here so a search or hide-drafted filter
-   *  doesn't rescale every bar on the board out from under the user. */
-  maxVorByPosition: Map<string, number>
 }
 
 const fmt1 = (n: number) => n.toFixed(1)
@@ -40,24 +34,18 @@ const fmtRank = (n: number | null) => (n === null ? '—' : String(Math.round(n)
 // FFC/ESPN ranks are always whole numbers; FP's ECR can carry a decimal --
 // show it only when present so the tooltip doesn't print "12.0".
 const fmtSource = (n: number | null) => (n === null ? '—' : Number.isInteger(n) ? String(n) : n.toFixed(1))
-const NUMERIC_COLUMNS = new Set(['rank', 'tier', 'bye', 'vor', 'composite', 'market_rank', 'edge', 'espn_ppr_rank'])
-
-// |edge| < 3 is inside the market's normal rank-vs-rank noise for this board
-// -- not a real signal either way, so it reads as neutral rather than a
-// weak green/red that would imply more confidence than the number carries.
-function edgeClass(v: number | null): string {
-  if (v === null || Math.abs(v) < 3) return 'edge-neutral'
-  return v > 0 ? 'edge-pos' : 'edge-neg'
-}
+const NUMERIC_COLUMNS = new Set([
+  'bye', 'market_rank', 'espn_ppr_rank',
+  ...['QB', 'RB', 'WR'].flatMap((p) => boardColumnsFor(p).map((c) => c.id)),
+])
 
 export default function PlayerTable({
   players,
   onToggleDrafted,
   onSelectPlayer,
-  showTierBreaks,
+  positionFilter,
   selectedIndex,
   onVisibleRowsChange,
-  maxVorByPosition,
 }: PlayerTableProps) {
   const [sorting, setSorting] = useState<SortingState>([{ id: 'espn_ppr_rank', desc: false }])
   const tableRef = useRef<HTMLTableElement>(null)
@@ -111,8 +99,6 @@ export default function PlayerTable({
         sortUndefined: 'last',
         cell: ({ row }) => fmtRank(row.original.espn_ppr_rank),
       },
-      { accessorKey: 'rank', header: 'Rank' },
-      { accessorKey: 'tier', header: 'Tier' },
       {
         accessorKey: 'name',
         header: 'Name',
@@ -138,26 +124,6 @@ export default function PlayerTable({
         cell: ({ getValue }) => fmtNullable(getValue<number | null>()),
       },
       {
-        accessorKey: 'vor',
-        header: 'VOR',
-        cell: ({ row }) => {
-          const v = row.original.vor
-          const max = maxVorByPosition.get(row.original.position) ?? 0
-          const pct = max > 0 ? Math.max(0, Math.min(100, (v / max) * 100)) : 0
-          return (
-            <span className="vor-cell">
-              <span className="vor-bar" style={{ width: `${pct}%` }} aria-hidden="true" />
-              <span className="vor-value">{fmt1(v)}</span>
-            </span>
-          )
-        },
-      },
-      {
-        accessorKey: 'composite',
-        header: 'Composite',
-        cell: ({ getValue }) => fmt1(getValue<number>()),
-      },
-      {
         accessorKey: 'market_rank',
         header: 'Mkt',
         cell: ({ row }) => {
@@ -176,18 +142,17 @@ export default function PlayerTable({
           )
         },
       },
-      {
-        accessorKey: 'edge',
-        header: 'Edge',
-        cell: ({ getValue }) => {
-          const v = getValue<number | null>()
-          if (v === null) return '—'
-          const sign = v > 0 ? '+' : ''
-          return <span className={`edge-chip ${edgeClass(v)}`}>{sign}{fmt1(v)}</span>
-        },
-      },
+      ...boardColumnsFor(positionFilter).map((c): ColumnDef<Player> => ({
+        id: c.id,
+        // null stats (rookies/K/DST) -> undefined so sortUndefined applies
+        accessorFn: (row) => (row.stats ? c.sortValue(row.stats) : undefined),
+        header: c.label,
+        sortUndefined: 'last',
+        sortDescFirst: true,
+        cell: ({ row }) => (row.original.stats ? c.cell(row.original.stats) : '—'),
+      })),
     ],
-    [onToggleDrafted, maxVorByPosition]
+    [onToggleDrafted, positionFilter]
   )
 
   const table = useReactTable({
@@ -200,26 +165,6 @@ export default function PlayerTable({
   })
 
   const rows = table.getRowModel().rows
-
-  // Tier boundaries only make sense when the board is in rank order within a
-  // single position -- sorting by another column would scatter tiers
-  // non-contiguously, and on ALL/FLEX views tier numbers reset per position
-  // so the rule would fire on nearly every row. One pass over the
-  // already-sorted rows, toggling on each tier change, rather than
-  // per-row lookback -- same result, one pass; memoized so it only
-  // recomputes when the row order or the gate itself actually changes,
-  // not on every unrelated App/PlayerTable re-render.
-  const tierBandGate = showTierBreaks && sorting[0]?.id === 'rank'
-  const tierBandFlags = useMemo(() => {
-    if (!tierBandGate) return []
-    const flags: boolean[] = []
-    let bandOn = false
-    rows.forEach((row, i) => {
-      if (i > 0 && rows[i - 1].original.tier !== row.original.tier) bandOn = !bandOn
-      flags.push(bandOn)
-    })
-    return flags
-  }, [rows, tierBandGate])
 
   // Report the visible sorted order up to App, which owns the keyboard
   // cursor and needs to map arrow-key movement / Enter / D to a player id
@@ -267,7 +212,6 @@ export default function PlayerTable({
         {rows.map((row, i) => {
           const classNames = [
             row.original.drafted && 'row-drafted',
-            tierBandGate && tierBandFlags[i] && 'tier-band',
             selectedIndex === i && 'row-selected',
           ]
             .filter(Boolean)

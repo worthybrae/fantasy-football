@@ -130,12 +130,8 @@ export default function PlayerProfile({ playerId, onClose, onToggleDrafted, onSe
                 · {header.team} · Bye {header.bye ?? '—'}
               </p>
               <div className="drawer-chips">
-                <span className="chip">Rank #{header.rank}</span>
-                <span className="chip">Tier {header.tier}</span>
-                <span className="chip">VOR {header.vor.toFixed(1)}</span>
-                <span className="chip">Composite {header.composite.toFixed(1)}</span>
+                <span className="chip">ESPN PPR {header.espn_ppr_rank !== null ? `#${Math.round(header.espn_ppr_rank)}` : '—'}</span>
                 <span className="chip">Mkt {fmt1(header.market_rank)}</span>
-                <span className="chip">Edge {fmt1(header.edge)}</span>
               </div>
               <button type="button" className="drawer-draft-btn" onClick={handleToggleDraftedClick}>
                 {header.drafted ? 'Undo draft' : 'Mark drafted'}

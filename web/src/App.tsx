@@ -205,7 +205,7 @@ function App() {
     if (selectedIndex === null) return ''
     const id = visibleIds[selectedIndex]
     const p = players.find((pl) => pl.player_id === id)
-    return p ? `${p.name}, ${p.position} ${p.team}, rank ${p.rank}` : ''
+    return p ? `${p.name}, ${p.position} ${p.team}, ESPN rank ${p.espn_ppr_rank ?? 'unranked'}` : ''
   }, [selectedIndex, visibleIds, players])
 
   const filteredPlayers = useMemo(() => {
@@ -220,19 +220,6 @@ function App() {
       return p.position === positionFilter
     })
   }, [players, search, hideDrafted, positionFilter])
-
-  // Position-max VOR for PlayerTable's micro-bars, computed over the FULL
-  // (unfiltered) board rather than `filteredPlayers` -- so a bar's width
-  // reflects a player's VOR relative to the whole position, and doesn't
-  // rescale/jump every time a search or hide-drafted filter shrinks the
-  // set the max is drawn from.
-  const maxVorByPosition = useMemo(() => {
-    const m = new Map<string, number>()
-    for (const p of players) {
-      if (p.vor > (m.get(p.position) ?? -Infinity)) m.set(p.position, p.vor)
-    }
-    return m
-  }, [players])
 
   return (
     <div className="app">
@@ -275,10 +262,9 @@ function App() {
                   players={filteredPlayers}
                   onToggleDrafted={handleToggleDrafted}
                   onSelectPlayer={handleSelectPlayer}
-                  showTierBreaks={positionFilter !== 'ALL' && positionFilter !== 'FLEX'}
+                  positionFilter={positionFilter}
                   selectedIndex={selectedIndex}
                   onVisibleRowsChange={handleVisibleRowsChange}
-                  maxVorByPosition={maxVorByPosition}
                 />
                 {/* PlayerTable renders header + zero rows on its own when
                     filteredPlayers is empty; this sits right below it so the
