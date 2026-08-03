@@ -132,7 +132,10 @@ export default function PlayerProfile({ playerId, weights, onClose, onToggleDraf
                 {header.rookie && <span className="rookie-badge">R</span>}
               </h2>
               <p className="drawer-subhead">
-                {header.position} · {header.team} · Bye {header.bye ?? '—'}
+                <span className={`pos-badge pos-badge-${header.position.toLowerCase()}`}>
+                  {header.position}
+                </span>{' '}
+                · {header.team} · Bye {header.bye ?? '—'}
               </p>
               <div className="drawer-chips">
                 <span className="chip">Rank #{header.rank}</span>

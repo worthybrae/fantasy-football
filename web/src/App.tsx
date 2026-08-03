@@ -23,6 +23,12 @@ function App() {
   const [railCollapsed, setRailCollapsed] = useState(
     () => localStorage.getItem(RAIL_COLLAPSED_KEY) === '1'
   )
+  // Keyboard cursor over the board's VISIBLE (filtered+sorted) row order --
+  // an index into `visibleIds`, not into `players`, since sorting lives
+  // inside PlayerTable. `visibleIds` is that order, reported up by
+  // PlayerTable every time it changes (filter, sort, or data reload).
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(null)
+  const [visibleIds, setVisibleIds] = useState<string[]>([])
 
   useEffect(() => {
     localStorage.setItem(RAIL_COLLAPSED_KEY, railCollapsed ? '1' : '0')
@@ -51,19 +57,149 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [weights])
 
-  async function handleToggleDrafted(p: Player) {
-    const next = !p.drafted
-    setPlayers((prev) =>
-      prev.map((pl) => (pl.player_id === p.player_id ? { ...pl, drafted: next } : pl))
-    )
-    await setDrafted(p.player_id, next)
-    await loadPlayers(weights)
-  }
+  // Stable identity (deps: [weights]) -- the keyboard effect below reads it
+  // via closure every render regardless (its own deps churn on nearly every
+  // keystroke anyway), but PlayerTable's `columns` memo is keyed on this
+  // prop, so a stable identity here is what keeps that memo from
+  // recomputing on every App render.
+  const handleToggleDrafted = useCallback(
+    async (p: Player) => {
+      const next = !p.drafted
+      setPlayers((prev) =>
+        prev.map((pl) => (pl.player_id === p.player_id ? { ...pl, drafted: next } : pl))
+      )
+      await setDrafted(p.player_id, next)
+      await loadPlayers(weights)
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [weights]
+  )
 
   // Memoized so PlayerProfile's Esc-listener effect (keyed on this prop)
   // doesn't tear down and re-add its keydown listener on every App
   // re-render (e.g. every players refetch while the drawer is open).
   const handleCloseProfile = useCallback(() => setSelectedPlayerId(null), [])
+
+  // Passed to PlayerTable; called whenever the sorted+filtered row order
+  // changes so the keyboard cursor always maps to what's actually on
+  // screen. `[selectedIndex === i]` setState calls below are no-ops when
+  // the value doesn't change, so a stable identity here isn't load-bearing
+  // for render count -- it's memoized simply because there's no reason not
+  // to be.
+  const handleVisibleRowsChange = useCallback((ids: string[]) => setVisibleIds(ids), [])
+
+  // Any path that points the drawer at a player -- a row click, a keyboard
+  // Enter, or clicking a "similar player" inside the drawer itself -- also
+  // moves the keyboard cursor there, so arrowing right afterward continues
+  // from that row instead of jumping back to wherever the cursor last was.
+  const handleSelectPlayerId = useCallback(
+    (id: string) => {
+      setSelectedPlayerId(id)
+      setSelectedIndex((i) => {
+        const idx = visibleIds.indexOf(id)
+        return idx === -1 ? i : idx
+      })
+    },
+    [visibleIds]
+  )
+  const handleSelectPlayer = useCallback(
+    (p: Player) => handleSelectPlayerId(p.player_id),
+    [handleSelectPlayerId]
+  )
+
+  // Clamp (not preserve) the cursor whenever the visible set changes shape --
+  // a filter/sort/tab change can shrink the list out from under the current
+  // index, or make it stale in a way that isn't worth chasing the same
+  // player across; landing on the nearest valid row is simpler and matches
+  // how every other keyboard-driven list (mail, file pickers) behaves.
+  useEffect(() => {
+    setSelectedIndex((i) => {
+      if (i === null) return null
+      if (visibleIds.length === 0) return null
+      return Math.min(i, visibleIds.length - 1)
+    })
+  }, [visibleIds])
+
+  // Board keyboard shortcuts: ↑/↓ move the cursor, Enter opens its profile,
+  // D toggles drafted. All inert while typing in an input (search, a weight
+  // slider), while a button/link already has focus (its own Enter/Space
+  // semantics would otherwise double-fire alongside ours -- e.g. Enter right
+  // after clicking a row's drafted-toggle button), or while the drawer is
+  // open -- Enter/D acting on a row you can't see behind the drawer would be
+  // surprising, and arrow keys should adjust a focused slider, not the
+  // board, while one has focus.
+  //
+  // Esc is the one exception: it's always live (regardless of focus, as
+  // long as it's not already inside the search box -- TopBar's own scoped
+  // Esc handler stops propagation before this listener sees the event in
+  // that case), with a fixed priority: close the drawer if it's open, else
+  // clear search if it has text, else do nothing. The drawer's own close
+  // (PlayerProfile's window-level Esc listener, mounted only while it's
+  // open) handles the first case; this effect only ever needs to handle the
+  // second, and skips entirely while the drawer is open so the two don't
+  // both fire off one keypress.
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      // Never hijack a browser/OS chord (Cmd+D bookmark, Ctrl+D, Alt+D, ...)
+      // -- every shortcut below is a bare, unmodified key.
+      if (e.metaKey || e.ctrlKey || e.altKey) return
+
+      const target = e.target as HTMLElement | null
+      const isTyping = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable
+      const isControlFocused = !!target?.closest?.('button, a, select')
+
+      if (e.key === 'Escape') {
+        if (selectedPlayerId || isTyping) return
+        if (search.trim()) setSearch('')
+        return
+      }
+
+      if (isTyping || isControlFocused || selectedPlayerId) return
+
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        if (visibleIds.length === 0) return
+        e.preventDefault()
+        const delta = e.key === 'ArrowDown' ? 1 : -1
+        setSelectedIndex((i) => {
+          const base = i === null ? (delta > 0 ? -1 : 0) : i
+          return Math.min(Math.max(base + delta, 0), visibleIds.length - 1)
+        })
+        return
+      }
+
+      if (e.key === 'Enter') {
+        if (selectedIndex === null) return
+        const id = visibleIds[selectedIndex]
+        if (id) setSelectedPlayerId(id)
+        return
+      }
+
+      // Ignore key-repeat -- this one persists to disk (a POST per
+      // keydown), unlike the arrow keys above, which only ever move local
+      // state and are fine to auto-repeat.
+      if (e.key.toLowerCase() === 'd' && !e.repeat) {
+        if (selectedIndex === null) return
+        const id = visibleIds[selectedIndex]
+        const player = players.find((p) => p.player_id === id)
+        if (player) handleToggleDrafted(player)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [selectedPlayerId, search, selectedIndex, visibleIds, players, handleToggleDrafted])
+
+  // Screen-reader-only announcement of the keyboard cursor, since its
+  // on-screen indicator (PlayerTable's `.row-selected` outline) is purely
+  // visual and the table isn't (and, given only the cursor moving, isn't
+  // worth becoming) a full ARIA grid. `aria-live` on a plain `<div>` is
+  // valid in any context, unlike `aria-selected` on a `<tr>` outside
+  // `role="grid"`/`row`, which several screen readers ignore or misreport.
+  const selectedAnnouncement = useMemo(() => {
+    if (selectedIndex === null) return ''
+    const id = visibleIds[selectedIndex]
+    const p = players.find((pl) => pl.player_id === id)
+    return p ? `${p.name}, ${p.position} ${p.team}, rank ${p.rank}` : ''
+  }, [selectedIndex, visibleIds, players])
 
   const filteredPlayers = useMemo(() => {
     const query = search.trim().toLowerCase()
@@ -80,6 +216,9 @@ function App() {
 
   return (
     <div className="app">
+      <div className="sr-only" aria-live="polite">
+        {selectedAnnouncement}
+      </div>
       <TopBar search={search} onSearch={setSearch} meta={<FreshnessBadge />} />
       <div className="app-body">
         <aside className={railCollapsed ? 'rail rail-collapsed' : 'rail'}>
@@ -125,8 +264,10 @@ function App() {
                 <PlayerTable
                   players={filteredPlayers}
                   onToggleDrafted={handleToggleDrafted}
-                  onSelectPlayer={(p) => setSelectedPlayerId(p.player_id)}
+                  onSelectPlayer={handleSelectPlayer}
                   showTierBreaks={positionFilter !== 'ALL' && positionFilter !== 'FLEX'}
+                  selectedIndex={selectedIndex}
+                  onVisibleRowsChange={handleVisibleRowsChange}
                 />
                 {/* PlayerTable renders header + zero rows on its own when
                     filteredPlayers is empty; this sits right below it so the
@@ -155,7 +296,7 @@ function App() {
           weights={weights}
           onClose={handleCloseProfile}
           onToggleDrafted={handleToggleDrafted}
-          onSelectPlayer={setSelectedPlayerId}
+          onSelectPlayer={handleSelectPlayerId}
         />
       )}
     </div>

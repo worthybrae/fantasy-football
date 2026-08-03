@@ -2,32 +2,59 @@
 
 A personal draft-night tool for an 8-team PPR league (roster: QB / 2 RB / 2 WR
 / TE / 2 FLEX (W-R-T) / K / DST, 5 bench). It pulls a few years of NFL stats
-and ADP data, scores every player on a handful of tunable factors, and serves
-an interactive draft board you can run live during your draft.
+and market consensus rankings, scores every player on a handful of tunable
+factors, and serves an interactive draft board you can run live during your
+draft.
 
 The pipeline stages are:
 
 1. **refresh** — pull player stats, snap counts, depth charts, schedules, and
-   ADP into a local DuckDB file.
+   market consensus rankings (Fantasy Football Calculator ADP, ESPN ADP,
+   FantasyPros ECR) into a local DuckDB file.
 2. **api** — compute PPR points, per-player scoring factors, value over
-   replacement (VOR), and tiers; serve it all over HTTP.
-3. **web** — a React draft board: sortable table, live weight sliders,
-   position filters, and drafted-player tracking that persists to disk.
+   replacement (VOR), tiers, and market consensus; serve it all over HTTP.
+3. **web** — a React draft board: sortable table with market consensus and
+   edge columns, live weight sliders, position filters, search, keyboard
+   navigation, and drafted-player tracking that persists to disk.
 
 ## Player profiles
 
-Clicking a row opens that player's profile drawer: header chips (rank, tier,
-VOR, composite, ADP, edge), the five scoring factors as bars, a weekly
-PPR-points chart across up to three seasons with a per-season average line,
-full season-by-season stat totals, an expandable game log, next-season
-outlook (depth slot, implied points, strength of schedule, bye), and a list
-of similar players. For skill positions with stat history, "similar players"
-are cross-year **stat twins** — other player-seasons nearest by a weighted
-z-score distance over per-game production, target/carry share, and
-efficiency — shown next to what that twin's *next* season's PPG turned out
-to be, a quick gut check on what a comparable stat line tends to become;
-rookies and K/DST (no stat history) instead get similar-value neighbors from
-the board.
+Clicking a row (or pressing `Enter` on the keyboard-selected row) opens that
+player's profile drawer: header chips (rank, tier, VOR, composite, Mkt,
+edge), the five scoring factors as bars, a weekly PPR-points chart across up
+to three seasons with a per-season average line, full season-by-season stat
+totals, an expandable game log, next-season outlook (depth slot, implied
+points, strength of schedule, bye), a market-consensus breakdown by source,
+and a list of similar players. For skill positions with stat history,
+"similar players" are cross-year **stat twins** — other player-seasons
+nearest by a weighted z-score distance over per-game production,
+target/carry share, and efficiency — shown next to what that twin's *next*
+season's PPG turned out to be, a quick gut check on what a comparable stat
+line tends to become; rookies and K/DST (no stat history) instead get
+similar-value neighbors from the board.
+
+## Search and keyboard shortcuts
+
+Type into the search box to narrow the board by player name or team — it
+composes with the position tabs and "hide drafted" checkbox rather than
+replacing them. The board also has a keyboard cursor, independent of the
+mouse, that moves over whatever rows are currently visible (i.e. after
+search/tab/hide-drafted filtering, in the current sort order):
+
+| Key     | Action                                                   |
+| ------- | --------------------------------------------------------- |
+| `/`     | Focus the search box                                     |
+| `↑` `↓` | Move the board cursor, scrolling it into view as needed  |
+| `Enter` | Open the selected player's profile drawer                |
+| `D`     | Toggle the selected player's drafted status               |
+| `Esc`   | Close the profile drawer if it's open; else clear search |
+
+The cursor/toggle/open shortcuts are inert while an input or a button has
+focus (the search box, a weight slider, a drafted-toggle button) or while
+the profile drawer is open. `Esc` mostly ignores that rule: with the search
+box focused, it always just clears and blurs search, drawer or no; with
+focus anywhere else, it closes the drawer if one's open, else clears search
+if it has text, else does nothing.
 
 ## Project structure
 
@@ -101,8 +128,9 @@ player at that position (`scoring/config.py: REPLACEMENT_RANK`, calibrated
 to this league's 8-team starting lineup). Players are then bucketed into
 **tiers** per position, breaking wherever the VOR gap to the next player is
 unusually large (mean + one standard deviation of that position's gaps).
-The board is ranked by VOR overall, and the table shows a horizontal rule
-between tiers when sorted by rank.
+The board is ranked by VOR overall; when sorted by rank on a single
+position, the table also bands rows by tier (a faint alternating
+background) so a tier boundary is visible at a glance.
 
 League size and roster shape (`LEAGUE_TEAMS`, `REPLACEMENT_RANK`) also live
 in `scoring/config.py` — update them there if the league format changes.
@@ -114,11 +142,25 @@ in `scoring/config.py` — update them there if the league format changes.
   (`scoring/config.py: HISTORY_SEASONS`), used for production and durability;
   the current season's schedule feeds environment, schedule strength, and bye
   weeks.
-- **ADP** comes from Fantasy Football Calculator's public API and is a
-  **12-team** consensus, not 8-team — treat it as a rough market-consensus
-  signal (the `edge` column, ADP-rank minus VOR-rank — positive means the
-  market is undervaluing the player relative to this board) rather than a
-  literal pick-order prediction for this league.
+- **Market consensus** blends up to three independent sources — Fantasy
+  Football Calculator (FFC) ADP, ESPN ADP, and FantasyPros' expert consensus
+  rankings (ECR) — averaged per player into the board's **Mkt** rank (the
+  drawer's Market section and the board's Mkt-column tooltip both show each
+  source's raw rank so you can see where they agree or don't, and how many
+  actually had the player — a Mkt rank can come from just one source with no
+  warning on the board itself beyond that tooltip). FFC is explicitly a
+  **12-team** consensus feed, not 8-team (`pipeline/sources.py:
+  fetch_adp`); ESPN and FantasyPros don't publish a team-count parameter to
+  check against, but treat all of Mkt as a rough market-consensus signal
+  rather than a literal pick-order prediction for this league either way.
+  When at least two sources have a player, the board also tracks their
+  **spread** (max rank − min rank); a muted `±N` (half the spread) appears
+  next to Mkt whenever it's 12 or more, flagging players the market itself
+  doesn't agree on. Separately, the **edge** column (Mkt rank minus VOR
+  rank) compares the market to this board specifically: positive means the
+  market is undervaluing the player relative to this board's VOR ranking (a
+  potential value), negative means the opposite; `|edge| < 3` isn't a
+  meaningful signal either way and renders neutral in the table.
 - **K/DST** aren't scored on production, durability, role, or schedule —
   the PPR formula doesn't score kicking or defensive stats, so those factors
   would just be noise. Only **environment** (team implied points) drives
