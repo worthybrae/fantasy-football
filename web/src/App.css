@@ -833,45 +833,68 @@ td:first-child {
 .season-table {
   font-size: var(--text-sm);
   white-space: nowrap;
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.season-table th,
+.season-table td {
+  text-align: right;
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.season-table th {
+  color: var(--text-1);
+  font-weight: 600;
+}
+
+.season-table th:first-child,
+.season-table td:first-child {
+  text-align: left;
 }
 
 /* -- game log -- */
 
-.game-log-summary {
-  cursor: pointer;
-  color: var(--text-1);
+.game-log-wrap {
+  overflow-x: auto;
+}
+
+.game-log-table {
   font-size: var(--text-sm);
+  white-space: nowrap;
+  border-collapse: collapse;
+  width: 100%;
 }
 
-.game-log-summary:hover {
-  color: var(--accent);
-}
-
-.game-log-season {
-  margin-top: var(--space-3);
-}
-
-.game-log-season-header {
-  margin: 0 0 4px;
-  font-size: var(--text-sm);
-  font-weight: 600;
-  color: var(--text-1);
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-}
-
-.game-log-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.game-log-row {
-  font-size: var(--text-sm);
-  color: var(--text-2);
-  padding: 3px 0;
+.game-log-table th,
+.game-log-table td {
+  text-align: right;
+  padding: 3px 8px;
   border-bottom: 1px solid var(--border);
 }
+
+.game-log-table th {
+  color: var(--text-1);
+  font-weight: 600;
+}
+
+.game-log-table .game-log-opp {
+  text-align: left;
+}
+
+.game-log-season-row td {
+  text-align: left;
+  color: var(--text-1);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding-top: var(--space-3);
+}
+
+/* boom/bust shading -- --ok/--fail hues at low alpha so text stays legible,
+   same color-mix pattern as the edge-chips above. */
+.pts-hot-1 { background: color-mix(in srgb, var(--ok) 12%, transparent); }
+.pts-hot-2 { background: color-mix(in srgb, var(--ok) 28%, transparent); }
+.pts-cold-1 { background: color-mix(in srgb, var(--fail) 10%, transparent); }
+.pts-cold-2 { background: color-mix(in srgb, var(--fail) 24%, transparent); }

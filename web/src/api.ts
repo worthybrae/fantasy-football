@@ -57,10 +57,18 @@ export interface SeasonSummary {
   target_share: number | null; carries: number; rec_yards: number;
   rush_yards: number; tds: number; receptions: number;
   yards_per_opp: number | null; snap_share: number | null;
+  completions: number; attempts: number; pass_yards: number;
+  pass_tds: number; interceptions: number;
+}
+export interface GameStats {
+  completions: number; attempts: number; pass_yards: number;
+  pass_tds: number; interceptions: number; carries: number;
+  rush_yards: number; rush_tds: number; targets: number;
+  receptions: number; rec_yards: number; rec_tds: number;
 }
 export interface GameLogRow {
   season: number; week: number; opponent: string | null; stat_line: string;
-  ppr_points: number;
+  stats: GameStats; ppr_points: number;
 }
 export interface SimilarPlayer {
   player_id: string | null; name: string; season: number | null;

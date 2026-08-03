@@ -77,6 +77,24 @@ def _stat_line(row, position):
     return line
 
 
+# Payload key -> weekly-table column. Every game_log row carries all 12 keys
+# (zero-filled when the column is absent) so the frontend's position-aware
+# column configs can index into a uniform shape.
+_GAME_STAT_COLS = {
+    "completions": "completions", "attempts": "attempts",
+    "pass_yards": "passing_yards", "pass_tds": "passing_tds",
+    "interceptions": "passing_interceptions",
+    "carries": "carries", "rush_yards": "rushing_yards",
+    "rush_tds": "rushing_tds", "targets": "targets",
+    "receptions": "receptions", "rec_yards": "receiving_yards",
+    "rec_tds": "receiving_tds",
+}
+
+
+def _game_stats(row):
+    return {k: int(_num(row, col)) for k, col in _GAME_STAT_COLS.items()}
+
+
 def season_summaries(weekly: pd.DataFrame, snaps: pd.DataFrame, player_id: str) -> list[dict]:
     if weekly.empty:
         return []
@@ -102,6 +120,20 @@ def season_summaries(weekly: pd.DataFrame, snaps: pd.DataFrame, player_id: str) 
     else:
         mine["snap_share"] = np.nan
 
+    # Passing aggregates aren't part of player_season_features (that frame
+    # feeds twin matching in similarity.py and must not change) -- aggregate
+    # them here from the raw weekly rows instead.
+    pass_cols = {k: _GAME_STAT_COLS[k] for k in
+                 ("completions", "attempts", "pass_yards", "pass_tds", "interceptions")}
+    wk_mine = weekly[weekly["player_id"] == player_id].copy()
+    for out, col in pass_cols.items():
+        wk_mine[out] = (pd.to_numeric(wk_mine[col], errors="coerce").fillna(0)
+                        if col in wk_mine.columns else 0.0)
+    passing = wk_mine.groupby("season", as_index=False)[list(pass_cols)].sum()
+    mine = mine.merge(passing, on="season", how="left")
+    for out in pass_cols:
+        mine[out] = mine[out].fillna(0)
+
     mine = mine.sort_values("season", ascending=False)
     rows = []
     for _, r in mine.iterrows():
@@ -109,6 +141,11 @@ def season_summaries(weekly: pd.DataFrame, snaps: pd.DataFrame, player_id: str) 
             "season": int(r["season"]),
             "games": int(r["games"]),
             "ppg": _round_or_none(r["ppg"], 1),
+            "completions": int(r["completions"]),
+            "attempts": int(r["attempts"]),
+            "pass_yards": int(r["pass_yards"]),
+            "pass_tds": int(r["pass_tds"]),
+            "interceptions": int(r["interceptions"]),
             "targets": int(r["targets"]),
             "target_share": _round_or_none(r["target_share"], 3),
             "carries": int(r["carries"]),
@@ -137,6 +174,7 @@ def game_log(weekly: pd.DataFrame, player_id: str) -> list[dict]:
             "week": int(r["week"]),
             "opponent": r.get("opponent_team"),
             "stat_line": _stat_line(r, r.get("position")),
+            "stats": _game_stats(r),
             "ppr_points": round(float(r["ppr_points"]), 1),
         })
     return rows

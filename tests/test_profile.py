@@ -10,6 +10,17 @@ def _weekly_rows():
           "receiving_tds": 1, "targets": 9, "carries": 0}
          for w in range(1, 11)])
 
+def _qb_weekly_rows():
+    return pd.DataFrame(
+        [{"player_id": "q1", "player_display_name": "QB Guy",
+          "position": "QB", "recent_team": "DET", "opponent_team": "GB",
+          "season": 2025, "week": w, "completions": 20, "attempts": 30,
+          "passing_yards": 250, "passing_tds": 2, "passing_interceptions": 1,
+          "carries": 4, "rushing_yards": 20, "rushing_tds": 0,
+          "targets": 0, "receptions": 0, "receiving_yards": 0,
+          "receiving_tds": 0}
+         for w in range(1, 6)])
+
 def test_season_summaries_math_and_snap_join():
     snaps = pd.DataFrame([{"player": "Amon-Ra St Brown", "team": "DET",
                            "season": 2025, "offense_pct": 0.9}])
@@ -19,11 +30,39 @@ def test_season_summaries_math_and_snap_join():
     assert s["snap_share"] == 0.9      # matched despite punctuation
     assert s["target_share"] == 1.0
 
+def test_season_summaries_passing_aggregates():
+    s = season_summaries(_qb_weekly_rows(), pd.DataFrame(), "q1")[0]
+    assert s["completions"] == 100 and s["attempts"] == 150
+    assert s["pass_yards"] == 1250 and s["pass_tds"] == 10
+    assert s["interceptions"] == 5
+
+def test_season_summaries_passing_zero_filled_without_columns():
+    # WR fixture has no passing columns at all -- fields must still exist
+    s = season_summaries(_weekly_rows(), pd.DataFrame(), "p1")[0]
+    assert s["pass_yards"] == 0 and s["attempts"] == 0
+
 def test_game_log_line_and_order():
     rows = game_log(_weekly_rows(), "p1")
     assert rows[0]["week"] == 10       # newest first
     assert rows[0]["stat_line"] == "9 tgt, 6 rec, 80 yds, 1 TD"
     assert rows[0]["ppr_points"] == 20.0
+
+def test_game_log_includes_structured_stats():
+    rows = game_log(_weekly_rows(), "p1")
+    s = rows[0]["stats"]
+    assert s["targets"] == 9 and s["receptions"] == 6
+    assert s["rec_yards"] == 80 and s["rec_tds"] == 1
+    # columns absent from the weekly frame zero-fill
+    assert s["pass_yards"] == 0 and s["completions"] == 0 and s["carries"] == 0
+    assert set(s) == {"completions", "attempts", "pass_yards", "pass_tds",
+                      "interceptions", "carries", "rush_yards", "rush_tds",
+                      "targets", "receptions", "rec_yards", "rec_tds"}
+
+def test_game_log_structured_passing_stats_nonzero():
+    s = game_log(_qb_weekly_rows(), "q1")[0]["stats"]
+    assert s["pass_yards"] == 250 and s["completions"] == 20
+    assert s["attempts"] == 30 and s["pass_tds"] == 2
+    assert s["interceptions"] == 1
 
 def _seed(tmp_path):
     conn = get_conn(str(tmp_path / "t.duckdb"))

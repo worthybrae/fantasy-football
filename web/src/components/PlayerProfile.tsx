@@ -164,12 +164,12 @@ export default function PlayerProfile({ playerId, weights, onClose, onToggleDraf
 
             <section className="drawer-section">
               <h3>Season history</h3>
-              <SeasonTable seasons={profile.seasons} />
+              <SeasonTable seasons={profile.seasons} position={header.position} />
             </section>
 
             <section className="drawer-section">
               <h3>Game log</h3>
-              <GameLog gameLog={profile.game_log} />
+              <GameLog gameLog={profile.game_log} position={header.position} />
             </section>
 
             <section className="drawer-section">
