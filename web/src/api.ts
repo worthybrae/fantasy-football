@@ -8,6 +8,7 @@ export interface Player {
   environment: number; schedule: number;
   composite: number; vor: number; edge: number | null;
   market_rank: number | null; market_spread: number | null; market_sources: MarketSources;
+  espn_ppr_rank: number | null;
   rookie: boolean; drafted: boolean;
 }
 

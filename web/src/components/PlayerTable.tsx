@@ -35,10 +35,12 @@ interface PlayerTableProps {
 
 const fmt1 = (n: number) => n.toFixed(1)
 const fmtNullable = (n: number | null) => (n === null ? '—' : n)
+// ESPN's PPR rank is always a whole number.
+const fmtRank = (n: number | null) => (n === null ? '—' : String(Math.round(n)))
 // FFC/ESPN ranks are always whole numbers; FP's ECR can carry a decimal --
 // show it only when present so the tooltip doesn't print "12.0".
 const fmtSource = (n: number | null) => (n === null ? '—' : Number.isInteger(n) ? String(n) : n.toFixed(1))
-const NUMERIC_COLUMNS = new Set(['rank', 'tier', 'bye', 'vor', 'composite', 'market_rank', 'edge'])
+const NUMERIC_COLUMNS = new Set(['rank', 'tier', 'bye', 'vor', 'composite', 'market_rank', 'edge', 'espn_ppr_rank'])
 
 // |edge| < 3 is inside the market's normal rank-vs-rank noise for this board
 // -- not a real signal either way, so it reads as neutral rather than a
@@ -57,7 +59,7 @@ export default function PlayerTable({
   onVisibleRowsChange,
   maxVorByPosition,
 }: PlayerTableProps) {
-  const [sorting, setSorting] = useState<SortingState>([{ id: 'rank', desc: false }])
+  const [sorting, setSorting] = useState<SortingState>([{ id: 'espn_ppr_rank', desc: false }])
   const tableRef = useRef<HTMLTableElement>(null)
 
   const columns = useMemo<ColumnDef<Player>[]>(
@@ -97,6 +99,17 @@ export default function PlayerTable({
             </button>
           )
         },
+      },
+      {
+        id: 'espn_ppr_rank',
+        // TanStack's `sortUndefined` nulls-last handling only special-cases
+        // `undefined`, not `null` -- map the API's `null` to `undefined`
+        // here so ranks (which mostly come back present) sort correctly
+        // without a bespoke sortingFn.
+        accessorFn: (row) => row.espn_ppr_rank ?? undefined,
+        header: 'ESPN',
+        sortUndefined: 'last',
+        cell: ({ row }) => fmtRank(row.original.espn_ppr_rank),
       },
       { accessorKey: 'rank', header: 'Rank' },
       { accessorKey: 'tier', header: 'Tier' },

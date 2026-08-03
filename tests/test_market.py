@@ -28,13 +28,16 @@ def test_consensus_all_paths():
     out = add_market(_board(), _espn(), _fp(), _sleeper())
     g1 = out[out["player_id"] == "g1"].iloc[0]   # FFC rank 1, ESPN rank 1 (via crosswalk)
     assert g1["market_rank"] == 1.0 and g1["market_sources"]["espn"] == 1.0
+    assert g1["espn_ppr_rank"] == 1.0             # crosswalk path carries espn_ppr_rank
     g2 = out[out["player_id"] == "g2"].iloc[0]   # FFC 2, ESPN 2 (name fallback), FP 3
     assert g2["market_rank"] == round((2 + 2 + 3) / 3, 1)
     assert g2["market_spread"] == 1.0
     assert g2["market_sources"]["fp_tier"] == 1
+    assert g2["espn_ppr_rank"] == 4.0              # name-fallback path carries espn_ppr_rank
     dst = out[out["player_id"] == "g3"].iloc[0]  # FP only, joined by team
     assert dst["market_sources"]["fp"] == 40.0 and dst["market_rank"] == 40.0
     assert pd.isna(dst["market_spread"])         # single source
+    assert pd.isna(dst["espn_ppr_rank"])          # no ESPN match at all
     assert "adp" not in out.columns
 
 def test_edge_uses_market_rank():
@@ -49,6 +52,7 @@ def test_all_sources_empty():
     assert r["market_rank"] == 1.0              # FFC alone still ranks
     assert out[out["player_id"] == "g3"].iloc[0]["market_sources"]["ffc"] is None or \
            pd.isna(out[out["player_id"] == "g3"].iloc[0]["market_sources"]["ffc"])
+    assert out["espn_ppr_rank"].isna().all()     # no espn table -> all NaN, not missing column
 
 def test_no_sources_at_all():
     board = _board().assign(adp=np.nan)

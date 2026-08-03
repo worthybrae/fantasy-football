@@ -18,8 +18,9 @@ def _seed(tmp_path):
         {"adp_name": "Rookie Guy", "position": "WR", "team": "GB", "adp": 90.0}]))
     write_table(conn, "depth_charts", pd.DataFrame(
         columns=["gsis_id", "depth_team", "formation", "week", "position"]))
-    write_table(conn, "espn_adp", pd.DataFrame(
-        columns=["espn_id", "espn_name", "position", "espn_adp", "espn_ppr_rank"]))
+    write_table(conn, "espn_adp", pd.DataFrame([
+        {"espn_id": 501, "espn_name": "Amon-Ra St Brown", "position": "WR",
+         "espn_adp": 1.0, "espn_ppr_rank": 2}]))
     write_table(conn, "fp_ecr", pd.DataFrame(
         columns=["fp_name", "team", "position", "rank_ecr", "rank_ave", "rank_std", "fp_tier"]))
     write_table(conn, "sleeper_ids", pd.DataFrame(
@@ -39,15 +40,19 @@ def test_norm_name_folds_accents():
 def test_board_shape_and_join(tmp_path):
     board = build_board(_seed(tmp_path))
     star = board[board["player_id"] == "p1"].iloc[0]
-    # single-source seed (FFC only): star's FFC adp (5.1) is lowest -> rank 1
+    # single-source-ranked seed (FFC only): star's FFC adp (5.1) is lowest -> rank 1
     assert star["market_rank"] == 1.0
     assert star["market_sources"]["ffc"] == 1.0
     assert not star["rookie"]
+    # espn_ppr_rank flows through the name-fallback join path (no sleeper
+    # crosswalk in this fixture) and is display data, not a ranking input.
+    assert star["espn_ppr_rank"] == 2.0
     rook = board[board["name"] == "Rookie Guy"].iloc[0]
+    assert pd.isna(rook["espn_ppr_rank"])  # no ESPN row for this player
     assert rook["rookie"] and rook["production"] == 50.0
     assert list(board["rank"]) == sorted(board["rank"].tolist())
     for col in ["vor", "tier", "composite", "edge", "drafted", "bye",
-                "market_rank", "market_spread", "market_sources"]:
+                "market_rank", "market_spread", "market_sources", "espn_ppr_rank"]:
         assert col in board.columns
     assert "adp" not in board.columns
 
@@ -56,7 +61,7 @@ def test_board_column_contract(tmp_path):
     expected = ["player_id", "name", "position", "team", "bye", "production",
                 "durability", "role", "environment", "schedule", "composite",
                 "vor", "tier", "market_rank", "market_spread", "market_sources",
-                "edge", "rookie", "drafted", "rank"]
+                "espn_ppr_rank", "edge", "rookie", "drafted", "rank"]
     assert list(board.columns) == expected
     assert board["rank"].tolist() == list(range(1, len(board) + 1))
 
@@ -67,7 +72,7 @@ def test_empty_database_does_not_crash(tmp_path):
     for col in ["player_id", "name", "position", "team", "bye", "production",
                 "durability", "role", "environment", "schedule", "composite",
                 "vor", "tier", "market_rank", "market_spread", "market_sources",
-                "edge", "rookie", "drafted", "rank"]:
+                "espn_ppr_rank", "edge", "rookie", "drafted", "rank"]:
         assert col in board.columns
 
 def test_adp_position_alias_pk_matches_k(tmp_path):
