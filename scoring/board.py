@@ -48,7 +48,7 @@ import pandas as pd
 from pipeline.db import read_table
 from scoring import factors
 from scoring.composite import compute_composite, apply_vor, assign_tiers
-from scoring.config import DEFAULT_WEIGHTS
+from scoring.config import DEFAULT_WEIGHTS, RECENCY_WEIGHTS
 from scoring.market import add_market
 
 _SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
@@ -168,7 +168,14 @@ def _merge_adp(uni: pd.DataFrame, adp: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_board(conn, weights: dict | None = None) -> pd.DataFrame:
+    # The weekly table reaches back to 2016 for profiles/stat twins, but the
+    # board scores on the RECENCY_WEIGHTS window only: production would zero
+    # out older seasons anyway, and durability counts "possible games" from a
+    # player's first season in the data, so deep history would punish
+    # veterans for decade-old injuries.
     weekly = read_table(conn, "weekly")
+    if not weekly.empty:
+        weekly = weekly[weekly["season"].isin(RECENCY_WEIGHTS)]
     depth = _adapt_depth_charts(read_table(conn, "depth_charts"))
     sched = read_table(conn, "schedules")
     adp = _adapt_adp(read_table(conn, "adp"))

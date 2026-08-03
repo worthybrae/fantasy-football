@@ -1,5 +1,7 @@
 CURRENT_SEASON = 2026
-HISTORY_SEASONS = [2023, 2024, 2025]
+# Deep history for profiles, game logs, and stat twins. The draft board
+# scores on the RECENCY_WEIGHTS window only (see build_board).
+HISTORY_SEASONS = list(range(2016, 2026))
 RECENCY_WEIGHTS = {2025: 0.5, 2024: 0.3, 2023: 0.2}
 
 # League: 8 teams, QB/2RB/2WR/TE/2Flex(W-R-T)/K/DST, PPR, 5 bench

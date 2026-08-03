@@ -308,3 +308,37 @@ def test_traded_player_falls_back_to_adp_team_without_depth_chart(tmp_path):
         columns=["dt", "team", "gsis_id", "pos_abb", "pos_slot", "pos_rank"]))
     row = build_board(conn).set_index("player_id").loc["p1"]
     assert row["team"] == "HOU"
+
+def test_old_seasons_do_not_affect_board_factors(tmp_path):
+    # HISTORY_SEASONS now reaches back to 2016 for profiles/stat twins, but
+    # the board must score on the RECENCY_WEIGHTS window only -- without the
+    # filter, durability_factor would count a decade of "possible games" and
+    # production would see seasons the recency weights zero out anyway.
+    # Two RBs, else normalize_within_position collapses any raw change to the
+    # same percentile and the assertion can't see the difference.
+    recent = pd.DataFrame([
+        {"player_id": pid, "player_display_name": name, "position": "RB",
+         "recent_team": "DET", "opponent_team": "GB", "season": 2025, "week": w,
+         "receptions": 3, "receiving_yards": 20, "targets": 4, "carries": 15}
+        for pid, name in [("p1", "Old Vet"), ("p2", "Steady Guy")]
+        for w in range(1, 18)])
+    ancient = pd.DataFrame([
+        {"player_id": "p1", "player_display_name": "Old Vet", "position": "RB",
+         "recent_team": "CHI", "opponent_team": "MIN", "season": 2016, "week": w,
+         "receptions": 10, "receiving_yards": 150, "targets": 12, "carries": 25}
+        for w in range(1, 18)])
+    boards = {}
+    for label, weekly in [("recent_only", recent), ("with_ancient", pd.concat([recent, ancient]))]:
+        conn = get_conn(str(tmp_path / f"{label}.duckdb"))
+        write_table(conn, "weekly", weekly)
+        write_table(conn, "schedules", pd.DataFrame([
+            {"home_team": "DET", "away_team": "GB", "week": 1,
+             "total_line": 45.0, "spread_line": 3.0}]))
+        write_table(conn, "adp", pd.DataFrame(
+            [{"adp_name": "Old Vet", "position": "RB", "team": "DET", "adp": 60.0},
+             {"adp_name": "Steady Guy", "position": "RB", "team": "DET", "adp": 61.0}]))
+        write_table(conn, "depth_charts", pd.DataFrame(
+            columns=["dt", "team", "gsis_id", "pos_abb", "pos_slot", "pos_rank"]))
+        boards[label] = build_board(conn).set_index("player_id").loc["p1"]
+    for col in ["production", "durability", "role", "schedule", "composite", "vor"]:
+        assert boards["with_ancient"][col] == boards["recent_only"][col], col
