@@ -26,6 +26,11 @@ interface PlayerTableProps {
    *  can map arrow-key movement and Enter/D to the right player without
    *  duplicating TanStack's sort here. */
   onVisibleRowsChange: (ids: string[]) => void
+  /** Position -> max VOR across the FULL board (unfiltered by search/tab/
+   *  hide-drafted), used to scale the VOR micro-bars. Owned by App rather
+   *  than derived from `players` here so a search or hide-drafted filter
+   *  doesn't rescale every bar on the board out from under the user. */
+  maxVorByPosition: Map<string, number>
 }
 
 const fmt1 = (n: number) => n.toFixed(1)
@@ -50,20 +55,10 @@ export default function PlayerTable({
   showTierBreaks,
   selectedIndex,
   onVisibleRowsChange,
+  maxVorByPosition,
 }: PlayerTableProps) {
   const [sorting, setSorting] = useState<SortingState>([{ id: 'rank', desc: false }])
   const tableRef = useRef<HTMLTableElement>(null)
-
-  // Position-max VOR for the micro-bars, computed over whatever's currently
-  // passed in (already search/tab/hide-drafted filtered by App) so the bars
-  // stay scaled to what's actually on screen rather than the whole board.
-  const maxVorByPosition = useMemo(() => {
-    const m = new Map<string, number>()
-    for (const p of players) {
-      if (p.vor > (m.get(p.position) ?? -Infinity)) m.set(p.position, p.vor)
-    }
-    return m
-  }, [players])
 
   const columns = useMemo<ColumnDef<Player>[]>(
     () => [
@@ -84,6 +79,10 @@ export default function PlayerTable({
                 // this the button click would bubble up and open it too.
                 e.stopPropagation()
                 onToggleDrafted(row.original)
+                // Blur so keyboard nav (App's board keydown effect) stays
+                // live for the very next keypress instead of this button
+                // holding focus.
+                e.currentTarget.blur()
               }}
             >
               {/* U+FE0E forces text presentation -- without it, this glyph

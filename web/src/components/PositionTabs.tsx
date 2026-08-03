@@ -13,7 +13,12 @@ export default function PositionTabs({ value, onChange }: PositionTabsProps) {
           key={pos}
           type="button"
           className={pos === value ? 'active' : undefined}
-          onClick={() => onChange(pos)}
+          onClick={(e) => {
+            onChange(pos)
+            // Keep board keyboard nav (↑/↓/Enter/D) live immediately after
+            // clicking a tab, instead of this button holding focus.
+            e.currentTarget.blur()
+          }}
         >
           {pos}
         </button>

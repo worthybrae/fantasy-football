@@ -49,12 +49,14 @@ search/tab/hide-drafted filtering, in the current sort order):
 | `D`     | Toggle the selected player's drafted status               |
 | `Esc`   | Close the profile drawer if it's open; else clear search |
 
-The cursor/toggle/open shortcuts are inert while an input or a button has
-focus (the search box, a weight slider, a drafted-toggle button) or while
-the profile drawer is open. `Esc` mostly ignores that rule: with the search
-box focused, it always just clears and blurs search, drawer or no; with
-focus anywhere else, it closes the drawer if one's open, else clears search
-if it has text, else does nothing.
+The cursor/toggle/open shortcuts are inert while an input has focus (the
+search box, a weight slider) or while the profile drawer is open — but not
+after clicking a button (a position tab, the rail toggle, a row's
+drafted-toggle ✓), which stays live for the very next keypress. `Esc`
+mostly ignores the input/drawer rule: with the search box focused, it
+always just clears and blurs search, drawer or no; with focus anywhere
+else, it closes the drawer if one's open, else clears search if it has
+text, else does nothing.
 
 ## Project structure
 

@@ -122,12 +122,18 @@ function App() {
 
   // Board keyboard shortcuts: ↑/↓ move the cursor, Enter opens its profile,
   // D toggles drafted. All inert while typing in an input (search, a weight
-  // slider), while a button/link already has focus (its own Enter/Space
-  // semantics would otherwise double-fire alongside ours -- e.g. Enter right
-  // after clicking a row's drafted-toggle button), or while the drawer is
-  // open -- Enter/D acting on a row you can't see behind the drawer would be
-  // surprising, and arrow keys should adjust a focused slider, not the
-  // board, while one has focus.
+  // slider) or while the drawer is open -- Enter/D acting on a row you can't
+  // see behind the drawer would be surprising, and arrow keys should adjust
+  // a focused slider, not the board, while one has focus.
+  //
+  // Deliberately NOT gated on "a button/link has focus" -- that blanket
+  // guard used to make the whole board go dead after clicking any button
+  // (a tab, the rail toggle, a row's drafted-toggle ✓) since focus lingers
+  // on the clicked element with no visual cue that keyboard nav had gone
+  // inert. Instead, the few buttons whose own click handler would otherwise
+  // double-fire alongside Enter/D (tab buttons, rail toggle, drafted ✓)
+  // blur themselves at the end of their onClick, so this listener never
+  // sees them as the event target on a subsequent keypress.
   //
   // Esc is the one exception: it's always live (regardless of focus, as
   // long as it's not already inside the search box -- TopBar's own scoped
@@ -146,7 +152,6 @@ function App() {
 
       const target = e.target as HTMLElement | null
       const isTyping = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable
-      const isControlFocused = !!target?.closest?.('button, a, select')
 
       if (e.key === 'Escape') {
         if (selectedPlayerId || isTyping) return
@@ -154,7 +159,7 @@ function App() {
         return
       }
 
-      if (isTyping || isControlFocused || selectedPlayerId) return
+      if (isTyping || selectedPlayerId) return
 
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         if (visibleIds.length === 0) return
@@ -214,6 +219,19 @@ function App() {
     })
   }, [players, search, hideDrafted, positionFilter])
 
+  // Position-max VOR for PlayerTable's micro-bars, computed over the FULL
+  // (unfiltered) board rather than `filteredPlayers` -- so a bar's width
+  // reflects a player's VOR relative to the whole position, and doesn't
+  // rescale/jump every time a search or hide-drafted filter shrinks the
+  // set the max is drawn from.
+  const maxVorByPosition = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const p of players) {
+      if (p.vor > (m.get(p.position) ?? -Infinity)) m.set(p.position, p.vor)
+    }
+    return m
+  }, [players])
+
   return (
     <div className="app">
       <div className="sr-only" aria-live="polite">
@@ -228,7 +246,13 @@ function App() {
             aria-expanded={!railCollapsed}
             aria-label={railCollapsed ? 'Expand rail' : 'Collapse rail'}
             title={railCollapsed ? 'Expand rail' : 'Collapse rail'}
-            onClick={() => setRailCollapsed((c) => !c)}
+            onClick={(e) => {
+              setRailCollapsed((c) => !c)
+              // Keep keyboard nav live immediately after this click -- see
+              // the board keydown effect's comment for why buttons that
+              // stay focused after a click blur themselves.
+              e.currentTarget.blur()
+            }}
           >
             {railCollapsed ? '»' : '«'}
           </button>
@@ -268,6 +292,7 @@ function App() {
                   showTierBreaks={positionFilter !== 'ALL' && positionFilter !== 'FLEX'}
                   selectedIndex={selectedIndex}
                   onVisibleRowsChange={handleVisibleRowsChange}
+                  maxVorByPosition={maxVorByPosition}
                 />
                 {/* PlayerTable renders header + zero rows on its own when
                     filteredPlayers is empty; this sits right below it so the
