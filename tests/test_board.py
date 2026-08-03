@@ -52,7 +52,7 @@ def test_board_shape_and_join(tmp_path):
     assert rook["rookie"] and rook["production"] == 50.0
     assert list(board["rank"]) == sorted(board["rank"].tolist())
     for col in ["vor", "tier", "composite", "edge", "drafted", "bye",
-                "market_rank", "market_spread", "market_sources", "espn_ppr_rank"]:
+                "market_rank", "market_spread", "market_sources", "espn_ppr_rank", "stats"]:
         assert col in board.columns
     assert "adp" not in board.columns
 
@@ -61,7 +61,7 @@ def test_board_column_contract(tmp_path):
     expected = ["player_id", "name", "position", "team", "bye", "production",
                 "durability", "role", "environment", "schedule", "composite",
                 "vor", "tier", "market_rank", "market_spread", "market_sources",
-                "espn_ppr_rank", "edge", "rookie", "drafted", "rank"]
+                "espn_ppr_rank", "edge", "rookie", "drafted", "rank", "stats"]
     assert list(board.columns) == expected
     assert board["rank"].tolist() == list(range(1, len(board) + 1))
 
@@ -72,7 +72,7 @@ def test_empty_database_does_not_crash(tmp_path):
     for col in ["player_id", "name", "position", "team", "bye", "production",
                 "durability", "role", "environment", "schedule", "composite",
                 "vor", "tier", "market_rank", "market_spread", "market_sources",
-                "espn_ppr_rank", "edge", "rookie", "drafted", "rank"]:
+                "espn_ppr_rank", "edge", "rookie", "drafted", "rank", "stats"]:
         assert col in board.columns
 
 def test_adp_position_alias_pk_matches_k(tmp_path):
@@ -347,3 +347,19 @@ def test_old_seasons_do_not_affect_board_factors(tmp_path):
         boards[label] = build_board(conn).set_index("player_id").loc["p1"]
     for col in ["production", "durability", "role", "schedule", "composite", "vor"]:
         assert boards["with_ancient"][col] == boards["recent_only"][col], col
+
+def test_board_stats_summary(tmp_path):
+    board = build_board(_seed(tmp_path))
+    s = board[board["player_id"] == "p1"].iloc[0]["stats"]
+    assert s["season"] == 2025 and s["games"] == 17
+    assert s["receptions"] == 8 * 17
+    assert s["rec_yards"] == 90 * 17
+    assert s["targets"] == 10 * 17
+    # PPR: 8 rec + 9.0 rec-yd pts = 17.0 per game
+    assert s["ppg"] == 17.0
+    assert s["points"] == 17.0 * 17
+    # no passing columns in this fixture -> zero-filled, not missing
+    assert s["pass_yards"] == 0 and s["attempts"] == 0
+    # ADP-only player has no weekly rows -> no stats dict at all
+    rook = board[board["name"] == "Rookie Guy"].iloc[0]
+    assert not isinstance(rook["stats"], dict)

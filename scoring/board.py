@@ -50,6 +50,7 @@ from scoring import factors
 from scoring.composite import compute_composite, apply_vor, assign_tiers
 from scoring.config import DEFAULT_WEIGHTS, RECENCY_WEIGHTS
 from scoring.market import add_market
+from scoring.similarity import player_season_features
 
 _SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
 FANTASY_POSITIONS = {"QB", "RB", "WR", "TE", "K", "DST"}
@@ -61,6 +62,7 @@ _BOARD_COLUMNS = [
     "player_id", "name", "position", "team", "bye", "production", "durability",
     "role", "environment", "schedule", "composite", "vor", "tier", "market_rank",
     "market_spread", "market_sources", "espn_ppr_rank", "edge", "rookie", "drafted", "rank",
+    "stats",
 ]
 
 
@@ -167,6 +169,49 @@ def _merge_adp(uni: pd.DataFrame, adp: pd.DataFrame) -> pd.DataFrame:
     return uni.drop(columns=["adp_dst"])
 
 
+# Payload key -> weekly-table column for passing aggregates, which aren't
+# part of player_season_features (that frame feeds twin matching in
+# similarity.py and must not change).
+_PASS_COLS = {
+    "completions": "completions", "attempts": "attempts",
+    "pass_yards": "passing_yards", "pass_tds": "passing_tds",
+    "interceptions": "passing_interceptions",
+}
+
+
+def _latest_season_stats(weekly: pd.DataFrame) -> pd.DataFrame:
+    """Per-player latest-season stat summary, one nested dict per row.
+
+    Serialized like market_sources: the API's NaN->None pass turns a
+    missing merge (rookie/K/DST with no weekly rows) into JSON null.
+    """
+    if weekly.empty:
+        return pd.DataFrame(columns=["player_id", "stats"])
+    feats = player_season_features(weekly)
+    latest = feats[feats["season"] == feats["season"].max()].copy()
+
+    wk = weekly[weekly["season"] == weekly["season"].max()].copy()
+    for out, col in _PASS_COLS.items():
+        wk[out] = (pd.to_numeric(wk[col], errors="coerce").fillna(0)
+                   if col in wk.columns else 0.0)
+    passing = wk.groupby("player_id", as_index=False)[list(_PASS_COLS)].sum()
+    latest = latest.merge(passing, on="player_id", how="left")
+    for out in _PASS_COLS:
+        latest[out] = latest[out].fillna(0)
+
+    latest["stats"] = latest.apply(lambda r: {
+        "season": int(r["season"]), "games": int(r["games"]),
+        "ppg": round(float(r["ppg"]), 1), "points": round(float(r["points"]), 1),
+        "carries": int(r["carries"]), "rush_yards": int(r["rush_yards"]),
+        "targets": int(r["targets"]), "receptions": int(r["receptions"]),
+        "rec_yards": int(r["rec_yards"]), "tds": int(r["tds"]),
+        "completions": int(r["completions"]), "attempts": int(r["attempts"]),
+        "pass_yards": int(r["pass_yards"]), "pass_tds": int(r["pass_tds"]),
+        "interceptions": int(r["interceptions"]),
+    }, axis=1)
+    return latest[["player_id", "stats"]]
+
+
 def build_board(conn, weights: dict | None = None) -> pd.DataFrame:
     # The weekly table reaches back to 2016 for profiles/stat twins, but the
     # board scores on the RECENCY_WEIGHTS window only: production would zero
@@ -255,6 +300,7 @@ def build_board(conn, weights: dict | None = None) -> pd.DataFrame:
     uni = uni.sort_values("vor", ascending=False).reset_index(drop=True)
     uni["rank"] = uni.index + 1
     uni = add_market(uni, espn, fp, sleeper)
+    uni = uni.merge(_latest_season_stats(weekly), on="player_id", how="left")
 
     drafted_ids = set(drafted["player_id"]) if not drafted.empty else set()
     uni["drafted"] = uni["player_id"].isin(drafted_ids)
