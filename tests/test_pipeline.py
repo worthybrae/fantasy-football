@@ -1,4 +1,6 @@
 import pandas as pd
+import pytest
+from pipeline import sources
 from pipeline.db import get_conn, write_table, read_table, record_freshness
 from pipeline.sources import parse_adp, _normalize_weekly
 from pipeline.sources import parse_espn, parse_fp_ecr, parse_sleeper
@@ -87,3 +89,29 @@ def test_parse_sleeper():
     }
     df = parse_sleeper(payload)
     assert len(df) == 1 and df.iloc[0]["gsis_id"] == "00-0038543"
+
+class _StubResponse:
+    """Minimal stand-in for requests.Response -- just enough surface for
+    fetch_espn_adp/fetch_fp_ecr (.raise_for_status(), .json(), .text)."""
+    def __init__(self, *, json_data=None, text=""):
+        self._json = json_data
+        self.text = text
+    def raise_for_status(self):
+        pass
+    def json(self):
+        return self._json
+
+def test_fetch_espn_adp_raises_on_empty_parse(monkeypatch):
+    """A schema-drift response that parses to zero rows must fail loud (so
+    refresh records it as FAIL/red-dot) instead of silently writing an
+    empty table that reports OK."""
+    monkeypatch.setattr(sources.requests, "get",
+                         lambda *a, **k: _StubResponse(json_data={"players": []}))
+    with pytest.raises(ValueError):
+        sources.fetch_espn_adp(2026)
+
+def test_fetch_fp_ecr_raises_on_empty_parse(monkeypatch):
+    monkeypatch.setattr(sources.requests, "get",
+                         lambda *a, **k: _StubResponse(text="<html>no data</html>"))
+    with pytest.raises(ValueError):
+        sources.fetch_fp_ecr()

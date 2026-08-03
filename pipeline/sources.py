@@ -75,7 +75,10 @@ def fetch_espn_adp(year: int, limit: int = 500) -> pd.DataFrame:
                      "sortAdp": {"sortAsc": True, "sortPriority": 1}}})}
     resp = requests.get(ESPN_URL.format(year=year), headers=headers, timeout=30)
     resp.raise_for_status()
-    return parse_espn(resp.json())
+    df = parse_espn(resp.json())
+    if df.empty:
+        raise ValueError("no rows parsed - upstream schema drift?")
+    return df
 
 def parse_fp_ecr(html: str) -> pd.DataFrame:
     cols = ["fp_name", "team", "position", "rank_ecr", "rank_ave", "rank_std", "fp_tier"]
@@ -95,7 +98,10 @@ def parse_fp_ecr(html: str) -> pd.DataFrame:
 def fetch_fp_ecr() -> pd.DataFrame:
     resp = requests.get(FP_URL, headers=UA, timeout=30)
     resp.raise_for_status()
-    return parse_fp_ecr(resp.text)
+    df = parse_fp_ecr(resp.text)
+    if df.empty:
+        raise ValueError("no rows parsed - upstream schema drift?")
+    return df
 
 def parse_sleeper(payload: dict) -> pd.DataFrame:
     rows = []

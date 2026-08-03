@@ -25,7 +25,17 @@ def _espn_ranks(board, espn, sleeper):
         e = e.merge(xwalk, on="espn_id", how="left")
     else:
         e["gsis_id"] = None
-    by_id = e.dropna(subset=["gsis_id"]).set_index("gsis_id")["espn_rank"]
+    # The crosswalk itself can carry a junk duplicate: two different espn_ids
+    # mapped to the same gsis_id (seen in the live sleeper_ids table). Left
+    # unhandled that makes by_id's index non-unique, and board["player_id"]
+    # .map(by_id) below raises InvalidIndexError. Dedupe the non-null-gsis
+    # rows by gsis_id, keeping the best (lowest) rank; rows with no gsis_id
+    # at all must survive untouched -- they still feed the name-fallback
+    # path further down.
+    has_id = e[e["gsis_id"].notna()].sort_values("espn_rank").drop_duplicates("gsis_id", keep="first")
+    no_id = e[e["gsis_id"].isna()]
+    e = pd.concat([has_id, no_id], ignore_index=True)
+    by_id = has_id.set_index("gsis_id")["espn_rank"]
     mapped = board["player_id"].map(by_id)
     # name+position fallback for espn rows without a crosswalk hit (never DST)
     rest = e[e["gsis_id"].isna() & (e["position"] != "DST")].copy()

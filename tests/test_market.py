@@ -74,6 +74,30 @@ def test_duplicate_espn_id_lowest_rank_wins():
     # Should use rank from lowest espn_adp (1.77 → rank 1), not second one
     assert g1["market_sources"]["espn"] == 1.0
 
+def test_duplicate_gsis_id_in_crosswalk_lowest_rank_wins():
+    """Regression: a junk crosswalk row mapping two different espn_ids to the
+    same gsis_id (seen live: 00-0029981 "Duplicate Player") must not crash
+    board building via a non-unique index in `.map()`; lowest espn_rank
+    wins for that player."""
+    board = _board()
+    espn = pd.DataFrame({
+        "espn_id": [101, 999],
+        "espn_name": ["Jahmyr Gibbs", "Duplicate Player"],
+        "position": ["RB", "RB"],
+        "espn_adp": [1.77, 0.5],   # the duplicate has the better (lower) ADP
+        "espn_ppr_rank": [1, 1],
+    })
+    # Crosswalk maps BOTH espn_ids to the same gsis_id "g1".
+    sleeper = pd.DataFrame({
+        "gsis_id": ["g1", "g1"], "espn_id": [101, 999],
+        "sleeper_name": ["Jahmyr Gibbs", "Duplicate Player"],
+        "position": ["RB", "RB"], "team": ["DET", "DET"],
+    })
+    fp = _fp()
+    out = add_market(board, espn, fp, sleeper)  # must not raise
+    g1 = out[out["player_id"] == "g1"].iloc[0]
+    assert g1["market_sources"]["espn"] == 1.0
+
 def test_duplicate_fp_name_position_lowest_rank_wins():
     """Regression: duplicate (fp_name, position) should not crash; lowest rank wins."""
     board = _board()
