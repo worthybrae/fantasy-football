@@ -74,6 +74,7 @@ def test_players_endpoint(tmp_path):
     assert row["name"] == "A Star"
     assert row["market_rank"] == 1.0
     assert "adp" not in row
+    assert "espn_ppr_rank" in row  # None here (empty espn_adp seed), but key must be present
 
 def test_players_custom_weights(tmp_path):
     c = _client(tmp_path)

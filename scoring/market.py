@@ -14,8 +14,9 @@ def _norm(name):
 
 def _espn_ranks(board, espn, sleeper):
     out = pd.Series(np.nan, index=board.index)
+    ppr = pd.Series(np.nan, index=board.index)
     if espn is None or espn.empty:
-        return out
+        return out, ppr
     e = espn.dropna(subset=["espn_adp"]).copy()
     e["espn_rank"] = e["espn_adp"].rank(method="first")
     # Dedupe by espn_id, keeping lowest rank (best)
@@ -37,6 +38,8 @@ def _espn_ranks(board, espn, sleeper):
     e = pd.concat([has_id, no_id], ignore_index=True)
     by_id = has_id.set_index("gsis_id")["espn_rank"]
     mapped = board["player_id"].map(by_id)
+    by_id_ppr = has_id.set_index("gsis_id")["espn_ppr_rank"]
+    mapped_ppr = board["player_id"].map(by_id_ppr)
     # name+position fallback for espn rows without a crosswalk hit (never DST)
     rest = e[e["gsis_id"].isna() & (e["position"] != "DST")].copy()
     if not rest.empty:
@@ -44,10 +47,13 @@ def _espn_ranks(board, espn, sleeper):
         # Dedupe by (norm, position), keeping lowest rank (best)
         rest = rest.sort_values("espn_rank").drop_duplicates(["norm", "position"], keep="first")
         by_name = rest.set_index(["norm", "position"])["espn_rank"]
+        by_name_ppr = rest.set_index(["norm", "position"])["espn_ppr_rank"]
         key = pd.MultiIndex.from_arrays([board["name"].map(_norm), board["position"]])
         fallback = pd.Series(by_name.reindex(key).to_numpy(), index=board.index)
+        fallback_ppr = pd.Series(by_name_ppr.reindex(key).to_numpy(), index=board.index)
         mapped = mapped.fillna(fallback)
-    return mapped
+        mapped_ppr = mapped_ppr.fillna(fallback_ppr)
+    return mapped, mapped_ppr
 
 def _fp_ranks(board, fp):
     ranks = pd.Series(np.nan, index=board.index)
@@ -72,7 +78,7 @@ def _fp_ranks(board, fp):
 def add_market(board, espn, fp, sleeper):
     out = board.copy()
     out["ffc_rank"] = out["adp"].rank(method="first")
-    out["espn_rank"] = _espn_ranks(out, espn, sleeper)
+    out["espn_rank"], out["espn_ppr_rank"] = _espn_ranks(out, espn, sleeper)
     out["fp_rank"], out["fp_tier"] = _fp_ranks(out, fp)
     ranks = out[_RANK_COLS].astype(float)
     out["market_rank"] = ranks.mean(axis=1, skipna=True).round(1)

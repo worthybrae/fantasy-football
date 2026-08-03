@@ -28,13 +28,16 @@ def test_consensus_all_paths():
     out = add_market(_board(), _espn(), _fp(), _sleeper())
     g1 = out[out["player_id"] == "g1"].iloc[0]   # FFC rank 1, ESPN rank 1 (via crosswalk)
     assert g1["market_rank"] == 1.0 and g1["market_sources"]["espn"] == 1.0
+    assert g1["espn_ppr_rank"] == 1.0             # crosswalk path carries espn_ppr_rank
     g2 = out[out["player_id"] == "g2"].iloc[0]   # FFC 2, ESPN 2 (name fallback), FP 3
     assert g2["market_rank"] == round((2 + 2 + 3) / 3, 1)
     assert g2["market_spread"] == 1.0
     assert g2["market_sources"]["fp_tier"] == 1
+    assert g2["espn_ppr_rank"] == 4.0              # name-fallback path carries espn_ppr_rank
     dst = out[out["player_id"] == "g3"].iloc[0]  # FP only, joined by team
     assert dst["market_sources"]["fp"] == 40.0 and dst["market_rank"] == 40.0
     assert pd.isna(dst["market_spread"])         # single source
+    assert pd.isna(dst["espn_ppr_rank"])          # no ESPN match at all
     assert "adp" not in out.columns
 
 def test_edge_uses_market_rank():
@@ -49,6 +52,7 @@ def test_all_sources_empty():
     assert r["market_rank"] == 1.0              # FFC alone still ranks
     assert out[out["player_id"] == "g3"].iloc[0]["market_sources"]["ffc"] is None or \
            pd.isna(out[out["player_id"] == "g3"].iloc[0]["market_sources"]["ffc"])
+    assert out["espn_ppr_rank"].isna().all()     # no espn table -> all NaN, not missing column
 
 def test_no_sources_at_all():
     board = _board().assign(adp=np.nan)
@@ -73,6 +77,9 @@ def test_duplicate_espn_id_lowest_rank_wins():
     g1 = out[out["player_id"] == "g1"].iloc[0]
     # Should use rank from lowest espn_adp (1.77 → rank 1), not second one
     assert g1["market_sources"]["espn"] == 1.0
+    # espn_ppr_rank must travel with the same winning row as espn_rank (1),
+    # not the duplicate's (2).
+    assert g1["espn_ppr_rank"] == 1.0
 
 def test_duplicate_gsis_id_in_crosswalk_lowest_rank_wins():
     """Regression: a junk crosswalk row mapping two different espn_ids to the
@@ -85,7 +92,7 @@ def test_duplicate_gsis_id_in_crosswalk_lowest_rank_wins():
         "espn_name": ["Jahmyr Gibbs", "Duplicate Player"],
         "position": ["RB", "RB"],
         "espn_adp": [1.77, 0.5],   # the duplicate has the better (lower) ADP
-        "espn_ppr_rank": [1, 1],
+        "espn_ppr_rank": [1, 7],   # distinct per-row, so a misaligned pick is observable
     })
     # Crosswalk maps BOTH espn_ids to the same gsis_id "g1".
     sleeper = pd.DataFrame({
@@ -97,6 +104,9 @@ def test_duplicate_gsis_id_in_crosswalk_lowest_rank_wins():
     out = add_market(board, espn, fp, sleeper)  # must not raise
     g1 = out[out["player_id"] == "g1"].iloc[0]
     assert g1["market_sources"]["espn"] == 1.0
+    # espn_ppr_rank must come from the same winning row (espn_id 999, the
+    # lower-ADP duplicate) as espn_rank, i.e. 7 -- not 1 from the loser.
+    assert g1["espn_ppr_rank"] == 7.0
 
 def test_duplicate_fp_name_position_lowest_rank_wins():
     """Regression: duplicate (fp_name, position) should not crash; lowest rank wins."""
