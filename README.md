@@ -174,7 +174,7 @@ in `scoring/config.py` — update them there if the league format changes.
 - **Rookies and K/DST** enter the board from the ADP feed even though they
   have no weekly stat history (rookies) or no player-level stats at all
   (K/DST, which is scored at the team level via `team`, not name matching).
-- The `/api/meta` endpoint (surfaced as chips in the UI header) reports
+- The `/api/meta` endpoint (surfaced as dots in the UI header) reports
   whether each source's last refresh succeeded and how many rows it pulled —
   useful for confirming a refresh actually got fresh ADP before your draft
   starts. A failed **adp** or **schedules** refresh triggers a visible

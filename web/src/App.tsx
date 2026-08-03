@@ -256,7 +256,12 @@ function App() {
       <div className="sr-only" aria-live="polite">
         {selectedAnnouncement}
       </div>
-      <TopBar search={search} onSearch={setSearch} meta={<FreshnessBadge />} />
+      <TopBar
+        search={search}
+        onSearch={setSearch}
+        meta={<FreshnessBadge />}
+        searchShortcutDisabled={selectedPlayerId !== null}
+      />
       <div className="app-body">
         <aside className={railCollapsed ? 'rail rail-collapsed' : 'rail'}>
           <button

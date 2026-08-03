@@ -283,10 +283,12 @@
   justify-content: flex-end;
 }
 
-/* Each source is a small dot -- the source name stays in the DOM (still
-   readable by assistive tech and still the native tooltip via `title`) but
-   is visually collapsed off the box so the top bar shows only a compact
-   status row. */
+/* Each source is a small dot -- the source name stays in the DOM as the
+   dot's text content (hidden here via text-indent, but still exposed to
+   assistive tech) and is separately repeated at the front of the `title`
+   attribute (see FreshnessBadge.tsx) so a sighted mouse user hovering the
+   dot gets the native tooltip naming which source it is, not just its
+   rows/refreshed-at. */
 .freshness-chip {
   display: inline-block;
   width: 8px;

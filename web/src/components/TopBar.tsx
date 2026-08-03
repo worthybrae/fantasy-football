@@ -6,17 +6,24 @@ interface TopBarProps {
   /** Right-hand slot -- App passes <FreshnessBadge /> here so TopBar stays
    *  a plain layout shell rather than owning that fetch itself. */
   meta?: ReactNode
+  /** True while the profile drawer is open. App owns selectedPlayerId, not
+   *  TopBar, so it's threaded in as a prop -- the `/` shortcut is inert in
+   *  that state since the search box it would focus is hidden behind the
+   *  drawer. */
+  searchShortcutDisabled?: boolean
 }
 
-export default function TopBar({ search, onSearch, meta }: TopBarProps) {
+export default function TopBar({ search, onSearch, meta, searchShortcutDisabled }: TopBarProps) {
   const inputRef = useRef<HTMLInputElement>(null)
 
   // Document-level so `/` works no matter where focus currently is on the
   // board -- except while the user is already typing somewhere (this input
   // included; browsers report it as INPUT too), where a literal "/" should
-  // just be typed.
+  // just be typed, or while the profile drawer is open (searchShortcutDisabled),
+  // where the search box it would focus isn't even visible.
   useEffect(() => {
     function onKeyDown(e: globalThis.KeyboardEvent) {
+      if (searchShortcutDisabled) return
       if (e.key !== '/') return
       const target = e.target as HTMLElement | null
       const tag = target?.tagName
@@ -27,7 +34,7 @@ export default function TopBar({ search, onSearch, meta }: TopBarProps) {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [])
+  }, [searchShortcutDisabled])
 
   function handleInputKeyDown(e: KeyboardEvent<HTMLInputElement>) {
     if (e.key !== 'Escape') return

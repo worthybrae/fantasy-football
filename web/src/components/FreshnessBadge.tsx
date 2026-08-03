@@ -8,8 +8,16 @@ interface SourceMeta {
   refreshed_at: string | null
 }
 
-// adp and schedules feed player ranking directly; a stale/failed pull for
-// either one means the board itself is untrustworthy, so call it out.
+// Kept small and deliberate -- not "any source failing is critical":
+//   - schedules feeds environment/strength-of-schedule scoring directly, so
+//     a failed pull skews every player's composite/VOR, not just ranking.
+//   - adp (FFC) is how rookies and K/DST enter the board at all (see
+//     scoring/board.py: _add_adp_only_players) -- a failed pull doesn't just
+//     drop one of three market-consensus inputs, it can make whole players
+//     vanish from the board.
+// espn_adp and fp_ecr, by contrast, are now just 2-of-3 market-consensus
+// inputs each; either one failing degrades the Mkt/edge columns but leaves
+// the board itself (roster + VOR ranking) intact, so neither is in this set.
 const CRITICAL_SOURCES = new Set(['adp', 'schedules'])
 
 export default function FreshnessBadge() {
@@ -31,7 +39,7 @@ export default function FreshnessBadge() {
           <span
             key={s.source}
             className={`freshness-chip ${s.ok ? 'ok' : 'fail'}`}
-            title={`${s.rows} rows · refreshed ${s.refreshed_at ?? 'never'}`}
+            title={`${s.source}: ${s.rows} rows · refreshed ${s.refreshed_at ?? 'never'}`}
           >
             {s.source}
           </span>
