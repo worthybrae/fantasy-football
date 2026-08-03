@@ -16,8 +16,12 @@ export default function PositionTabs({ value, onChange }: PositionTabsProps) {
           onClick={(e) => {
             onChange(pos)
             // Keep board keyboard nav (↑/↓/Enter/D) live immediately after
-            // clicking a tab, instead of this button holding focus.
-            e.currentTarget.blur()
+            // a mouse click on a tab, instead of this button holding focus.
+            // Pointer-only (`detail` is 0 for a keyboard-synthesized click)
+            // so Tab order is preserved for keyboard users -- they keep
+            // focus here and are covered by App's Enter/D activeElement
+            // guard instead.
+            if (e.detail > 0) e.currentTarget.blur()
           }}
         >
           {pos}

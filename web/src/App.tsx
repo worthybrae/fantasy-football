@@ -126,14 +126,22 @@ function App() {
   // see behind the drawer would be surprising, and arrow keys should adjust
   // a focused slider, not the board, while one has focus.
   //
-  // Deliberately NOT gated on "a button/link has focus" -- that blanket
-  // guard used to make the whole board go dead after clicking any button
-  // (a tab, the rail toggle, a row's drafted-toggle ✓) since focus lingers
-  // on the clicked element with no visual cue that keyboard nav had gone
-  // inert. Instead, the few buttons whose own click handler would otherwise
-  // double-fire alongside Enter/D (tab buttons, rail toggle, drafted ✓)
-  // blur themselves at the end of their onClick, so this listener never
-  // sees them as the event target on a subsequent keypress.
+  // Deliberately NOT gated on "a button/link has focus" at the top level --
+  // that blanket guard used to make the whole board go dead after clicking
+  // any button (a tab, the rail toggle, a row's drafted-toggle ✓) since
+  // focus lingers on the clicked element with no visual cue that keyboard
+  // nav had gone inert. Two narrower rules replace it, split across mouse
+  // and keyboard activation since they leave focus in different states:
+  //   - Mouse clicks on those three buttons blur themselves at the end of
+  //     their onClick (pointer-only -- `e.detail > 0` -- so this doesn't
+  //     regress Tab order for keyboard users), so this listener never sees
+  //     them as `e.target` on a subsequent keypress.
+  //   - Keyboard activation of a focused button (Tab, then Enter/Space)
+  //     keeps focus there by design -- instead, the Enter and D branches
+  //     below early-return when `document.activeElement` is itself a
+  //     button/link/select, since a keyboard user pressing Enter on a
+  //     focused control means to activate *that control*, never the board
+  //     cursor underneath it.
   //
   // Esc is the one exception: it's always live (regardless of focus, as
   // long as it's not already inside the search box -- TopBar's own scoped
@@ -172,7 +180,17 @@ function App() {
         return
       }
 
+      // A Tab-focused button/link/select intercepting Enter (or Space) is
+      // the browser's own activation gesture for that control -- e.g.
+      // Tabbing to a position tab or a row's drafted-toggle ✓ and pressing
+      // Enter should activate *that control*, not also fire the board
+      // cursor's Enter/D action underneath it. Scoped to just these two
+      // branches (not arrows) since arrow keys have no competing default
+      // behavior on a focused button.
+      const isControlActivation = !!document.activeElement?.matches?.('button, a, select')
+
       if (e.key === 'Enter') {
+        if (isControlActivation) return
         if (selectedIndex === null) return
         const id = visibleIds[selectedIndex]
         if (id) setSelectedPlayerId(id)
@@ -183,6 +201,7 @@ function App() {
       // keydown), unlike the arrow keys above, which only ever move local
       // state and are fine to auto-repeat.
       if (e.key.toLowerCase() === 'd' && !e.repeat) {
+        if (isControlActivation) return
         if (selectedIndex === null) return
         const id = visibleIds[selectedIndex]
         const player = players.find((p) => p.player_id === id)
@@ -248,10 +267,12 @@ function App() {
             title={railCollapsed ? 'Expand rail' : 'Collapse rail'}
             onClick={(e) => {
               setRailCollapsed((c) => !c)
-              // Keep keyboard nav live immediately after this click -- see
-              // the board keydown effect's comment for why buttons that
-              // stay focused after a click blur themselves.
-              e.currentTarget.blur()
+              // Keep keyboard nav live immediately after a mouse click --
+              // see the board keydown effect's comment. Pointer-only
+              // (`detail` is 0 for a keyboard-synthesized click) so Tab
+              // order is preserved for keyboard users, who keep focus here
+              // and are covered by the Enter/D activeElement guard instead.
+              if (e.detail > 0) e.currentTarget.blur()
             }}
           >
             {railCollapsed ? '»' : '«'}

@@ -81,8 +81,12 @@ export default function PlayerTable({
                 onToggleDrafted(row.original)
                 // Blur so keyboard nav (App's board keydown effect) stays
                 // live for the very next keypress instead of this button
-                // holding focus.
-                e.currentTarget.blur()
+                // holding focus. Pointer-only (`detail` is 0 for a
+                // keyboard-synthesized click) -- Tab/Enter activation keeps
+                // focus here by design, covered instead by App's Enter/D
+                // activeElement guard, so blurring unconditionally would
+                // have broken Tab order for keyboard users.
+                if (e.detail > 0) e.currentTarget.blur()
               }}
             >
               {/* U+FE0E forces text presentation -- without it, this glyph

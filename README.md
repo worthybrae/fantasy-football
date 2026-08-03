@@ -52,10 +52,14 @@ search/tab/hide-drafted filtering, in the current sort order):
 The cursor/toggle/open shortcuts are inert while an input has focus (the
 search box, a weight slider) or while the profile drawer is open — but not
 after clicking a button (a position tab, the rail toggle, a row's
-drafted-toggle ✓), which stays live for the very next keypress. `Esc`
-mostly ignores the input/drawer rule: with the search box focused, it
-always just clears and blurs search, drawer or no; with focus anywhere
-else, it closes the drawer if one's open, else clears search if it has
+drafted-toggle ✓), which stays live for the very next keypress. Tabbing to
+one of those buttons and pressing `Enter` activates the button itself
+instead (drafts/undrafts the row, switches the tab) rather than also
+opening the drawer or toggling drafted on whatever row the board cursor
+happens to be on. `Esc` mostly ignores the input/drawer rule: with the
+search box focused, it always just clears and blurs search, drawer or no;
+with focus anywhere else, it closes the drawer if one's open, else clears
+search if it has
 text, else does nothing.
 
 ## Project structure
