@@ -1,14 +1,18 @@
 import { useEffect, useRef, useState } from 'react'
-import { fetchProfile, type Player, type PlayerProfileData, type Weights } from '../api'
-import FactorBars from './FactorBars'
+import { fetchProfile, type Player, type PlayerProfileData } from '../api'
+import SeasonRangeChart from './SeasonRangeChart'
 import GameLog from './GameLog'
 import SeasonTable from './SeasonTable'
 import SimilarPlayers from './SimilarPlayers'
-import WeeklyChart from './WeeklyChart'
+import SnapShareChart from './SnapShareChart'
+import StatTiles from './StatTiles'
+import RankingsPanel from './RankingsPanel'
+import DepthChartCard from './DepthChartCard'
+import ScheduleCalendar from './ScheduleCalendar'
+import PageSkeleton from './PageSkeleton'
 
 interface PlayerProfileProps {
   playerId: string
-  weights: Weights
   onClose: () => void
   onToggleDrafted: (p: Player) => Promise<void>
   onSelectPlayer: (id: string) => void
@@ -19,11 +23,6 @@ function depthSlotLabel(position: string, depthSlot: number | null): string | nu
   return `${position}${depthSlot}`
 }
 
-const fmt1 = (n: number | null) => (n === null ? '—' : n.toFixed(1))
-// FFC/ESPN ranks are always whole numbers; FP's ECR can carry a decimal --
-// show it only when present so the Market block doesn't print "12.0".
-const fmtSource = (n: number | null) => (n === null ? '—' : Number.isInteger(n) ? String(n) : n.toFixed(1))
-
 // Higher sos_raw/sos_pct = opponents allow more fantasy points at this
 // position = an easier ("softer") schedule; lower = a tougher one.
 function sosLabel(sosRaw: number | null, sosPct: number | null): string {
@@ -32,7 +31,7 @@ function sosLabel(sosRaw: number | null, sosPct: number | null): string {
   return `SoS ${sosRaw.toFixed(1)} FPA/g (${sosPct.toFixed(0)}th pct — ${direction})`
 }
 
-export default function PlayerProfile({ playerId, weights, onClose, onToggleDrafted, onSelectPlayer }: PlayerProfileProps) {
+export default function PlayerProfile({ playerId, onClose, onToggleDrafted, onSelectPlayer }: PlayerProfileProps) {
   const [profile, setProfile] = useState<PlayerProfileData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -63,7 +62,7 @@ export default function PlayerProfile({ playerId, weights, onClose, onToggleDraf
     setLoading(true)
     setError(null)
     try {
-      const data = await fetchProfile(forPlayerId, weights)
+      const data = await fetchProfile(forPlayerId)
       if (playerIdRef.current === forPlayerId) setProfile(data)
     } catch (e) {
       if (playerIdRef.current === forPlayerId) {
@@ -74,22 +73,14 @@ export default function PlayerProfile({ playerId, weights, onClose, onToggleDraf
     }
   }
 
-  // Tracks the playerId this effect last ran for, so a weights-only change
-  // (slider drag while the drawer is open) can refetch without blanking the
-  // already-rendered profile first -- only an actual player swap resets it.
-  const prevPlayerIdRef = useRef<string | null>(null)
-
   // Reset and refetch whenever the drawer is pointed at a new player (initial
   // open, or a comp/row click swapping the id while the drawer stays
-  // mounted), and refetch (without resetting) whenever the slider weights
-  // change, so the drawer's rank/VOR/composite never contradict the board.
+  // mounted).
   useEffect(() => {
-    const isNewPlayer = prevPlayerIdRef.current !== playerId
-    prevPlayerIdRef.current = playerId
-    if (isNewPlayer) setProfile(null)
+    setProfile(null)
     loadProfile(playerId)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playerId, weights])
+  }, [playerId])
 
   // Scoped to the drawer being mounted at all -- avoids a global listener
   // (and stray Esc-closes) while the board is the only thing on screen.
@@ -115,19 +106,19 @@ export default function PlayerProfile({ playerId, weights, onClose, onToggleDraf
   const header = profile?.header
   const depthSlot = header ? depthSlotLabel(header.position, profile.outlook.depth_slot) : null
 
+  if (loading && !profile) return <PageSkeleton />
+
   return (
-    <>
-      <div className="drawer-backdrop" onClick={onClose} />
-      <aside className="player-drawer">
-        <button type="button" className="drawer-close" aria-label="Close" onClick={onClose}>
-          ✕
-        </button>
-        {loading && !profile && <p>Loading profile…</p>}
-        {error && <p className="error">{error}</p>}
-        {header && profile && (
-          <>
-            <div className="drawer-header">
-              <h2>
+    <div className="player-page">
+      <button type="button" className="player-page-back" onClick={onClose}>
+        ← Back to board
+      </button>
+      {error && <p className="error">{error}</p>}
+      {header && profile && (
+        <>
+          <div className="pp-header">
+            <div>
+              <h2 className="pp-name">
                 {header.name}
                 {header.rookie && <span className="rookie-badge">R</span>}
               </h2>
@@ -136,77 +127,82 @@ export default function PlayerProfile({ playerId, weights, onClose, onToggleDraf
                   {header.position}
                 </span>{' '}
                 · {header.team} · Bye {header.bye ?? '—'}
+                {depthSlot && <> · {depthSlot}</>}
+                {' · '}
+                {sosLabel(profile.outlook.sos_raw, profile.outlook.sos_pct)}
               </p>
-              <div className="drawer-chips">
-                <span className="chip">Rank #{header.rank}</span>
-                <span className="chip">Tier {header.tier}</span>
-                <span className="chip">VOR {header.vor.toFixed(1)}</span>
-                <span className="chip">Composite {header.composite.toFixed(1)}</span>
-                <span className="chip">Mkt {fmt1(header.market_rank)}</span>
-                <span className="chip">Edge {fmt1(header.edge)}</span>
-              </div>
-              <button type="button" className="drawer-draft-btn" onClick={handleToggleDraftedClick}>
-                {header.drafted ? 'Undo draft' : 'Mark drafted'}
-              </button>
             </div>
+            <button type="button" className="drawer-draft-btn" onClick={handleToggleDraftedClick}>
+              {header.drafted ? 'Undo draft' : 'Mark drafted'}
+            </button>
+          </div>
 
-            <section className="drawer-section">
-              <h3>Factors</h3>
-              <FactorBars factors={profile.factors} />
+          <div className="pp-grid">
+            <section className="pp-card pp-span7">
+              <h3>Production</h3>
+              <StatTiles summary={profile.summary} outlook={profile.outlook} position={header.position} />
             </section>
 
-            {profile.game_log.length > 0 && (
-              <section className="drawer-section">
-                <h3>Weekly points</h3>
-                <WeeklyChart gameLog={profile.game_log} />
+            <section className="pp-card pp-span5">
+              <h3>Rankings</h3>
+              <RankingsPanel
+                marketRank={header.market_rank}
+                marketSpread={header.market_spread}
+                sources={header.market_sources}
+              />
+            </section>
+
+            {profile.seasons.length > 0 && (
+              <section className="pp-card pp-span7">
+                <h3>Avg &amp; volatility by season</h3>
+                <SeasonRangeChart seasons={profile.seasons} position={header.position} />
               </section>
             )}
 
-            <section className="drawer-section">
+            {['RB', 'WR', 'TE'].includes(header.position) &&
+              profile.seasons.some((s) => s.snap_share !== null) && (
+              <section className="pp-card pp-span5">
+                <h3>Snap share</h3>
+                <SnapShareChart seasons={profile.seasons} />
+              </section>
+            )}
+
+            {profile.depth_chart.length > 0 && (
+              <section className="pp-card pp-span5">
+                <h3>Depth chart</h3>
+                <DepthChartCard team={header.team} groups={profile.depth_chart} />
+              </section>
+            )}
+
+            {profile.schedule.length > 0 && (
+              <section className="pp-card pp-span7">
+                <h3>2026 matchups</h3>
+                <ScheduleCalendar weeks={profile.schedule} position={header.position} bye={profile.outlook.bye} />
+              </section>
+            )}
+
+            <section className="pp-card pp-span12">
               <h3>Season history</h3>
               <SeasonTable seasons={profile.seasons} position={header.position} />
             </section>
 
-            <section className="drawer-section">
+            <section className="pp-card pp-span12">
               <h3>Game log</h3>
               <GameLog gameLog={profile.game_log} position={header.position} />
             </section>
 
-            <section className="drawer-section">
-              <h3>Outlook</h3>
-              <div className="drawer-chips">
-                {depthSlot && <span className="chip">{depthSlot}</span>}
-                <span className="chip">Implied {fmt1(profile.outlook.implied_points)} pts</span>
-                <span className="chip">
-                  {sosLabel(profile.outlook.sos_raw, profile.outlook.sos_pct)}
-                </span>
-                <span className="chip">Bye {profile.outlook.bye ?? '—'}</span>
-              </div>
-            </section>
-
-            <section className="drawer-section">
-              <h3>Market</h3>
-              <div className="drawer-chips">
-                <span className="chip">FFC {fmtSource(header.market_sources.ffc)}</span>
-                <span className="chip">ESPN {fmtSource(header.market_sources.espn)}</span>
-                <span className="chip">FP {fmtSource(header.market_sources.fp)}</span>
-                {header.market_sources.fp_tier !== null && (
-                  <span className="chip">FP tier {header.market_sources.fp_tier}</span>
-                )}
-              </div>
-            </section>
-
-            <section className="drawer-section">
+            <section className="pp-card pp-span12">
               <h3>Similar players</h3>
               <SimilarPlayers
                 mode={profile.similar.mode}
                 players={profile.similar.players}
+                targetAge={profile.similar.target_age ?? null}
                 onSelectPlayer={onSelectPlayer}
               />
             </section>
-          </>
-        )}
-      </aside>
-    </>
+          </div>
+        </>
+      )}
+    </div>
   )
 }

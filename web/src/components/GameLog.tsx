@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import type { GameLogRow } from '../api'
 import { gameColumnsFor, ptsShadeClass } from '../statColumns'
 
@@ -7,8 +8,19 @@ interface GameLogProps {
 }
 
 export default function GameLog({ gameLog, position }: GameLogProps) {
+  // Seasons start collapsed to their aggregate row; clicking a season row
+  // toggles its per-game detail.
+  const [expanded, setExpanded] = useState<Set<number>>(new Set())
   if (gameLog.length === 0) {
     return <p className="drawer-placeholder">No game log available.</p>
+  }
+  const toggleSeason = (season: number) => {
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(season)) next.delete(season)
+      else next.add(season)
+      return next
+    })
   }
 
   const columns = gameColumnsFor(position)
@@ -46,15 +58,23 @@ export default function GameLog({ gameLog, position }: GameLogProps) {
           </tr>
         </thead>
         {groups.map(({ season, games }) => {
-          const avg = games.reduce((sum, g) => sum + g.ppr_points, 0) / games.length
+          // Per-game average means games actually played -- dnp rows are
+          // shown for coverage but must not drag the average down.
+          const played = games.filter((g) => !g.dnp)
+          const avg = played.reduce((sum, g) => sum + g.ppr_points, 0) / Math.max(played.length, 1)
+          const isOpen = expanded.has(season)
           return (
             <tbody key={season}>
-              <tr className="game-log-season-row">
+              <tr
+                className="game-log-season-row game-log-season-toggle"
+                onClick={() => toggleSeason(season)}
+              >
                 <td colSpan={columns.length + 3}>
-                  {season} · avg {avg.toFixed(1)} pts
+                  <span className="game-log-chevron">{isOpen ? '▾' : '▸'}</span>{' '}
+                  {season} · {played.length} gp · avg {avg.toFixed(1)} pts
                 </td>
               </tr>
-              {games.map((g) => (
+              {isOpen && games.map((g) => (
                 <tr key={`${g.season}-${g.week}`}>
                   <td>{g.week}</td>
                   <td className="game-log-opp">{g.opponent ?? '—'}</td>

@@ -8,16 +8,33 @@ import {
   useReactTable,
 } from '@tanstack/react-table'
 import type { Player } from '../api'
+import { boardColumnsFor } from '../statColumns'
+
+// Selectable sort/rank sources for the board's rank column. 'agg' is the
+// blended market_rank; the rest read straight from market_sources.
+export const RANK_SOURCES = [
+  { id: 'agg', label: 'Aggregate', short: 'Mkt' },
+  { id: 'ffc', label: 'FFC ADP', short: 'FFC' },
+  { id: 'espn', label: 'ESPN PPR', short: 'ESPN' },
+  { id: 'fp', label: 'FantasyPros', short: 'FP' },
+  { id: 'mfl', label: 'MFL ADP', short: 'MFL' },
+  { id: 'cbs', label: 'CBS', short: 'CBS' },
+] as const
+export type RankSourceId = (typeof RANK_SOURCES)[number]['id']
+
+function rankValue(p: Player, source: RankSourceId): number | null {
+  return source === 'agg' ? p.market_rank : p.market_sources[source]
+}
 
 interface PlayerTableProps {
   players: Player[]
   onToggleDrafted: (p: Player) => Promise<void>
   onSelectPlayer: (p: Player) => void
-  /** Tier is computed per-position, so the boundary rule is only meaningful
-   *  when a single position is in view -- on ALL/FLEX, adjacent rows are
-   *  usually different positions with unrelated tier numbers, so the rule
-   *  would fire almost everywhere and just be noise. */
-  showTierBreaks: boolean
+  /** Which ranking populates and sorts the rank column ('agg' = blended). */
+  rankSource: RankSourceId
+  /** Drives which position-specific stat columns are appended after
+   *  the market columns -- ALL/FLEX/K/DST show the summary stats only. */
+  positionFilter: string
   /** Keyboard-cursor row, as an index into the current sorted row order --
    *  owned by App so it survives this component re-rendering, and null
    *  means "no keyboard selection yet." */
@@ -26,11 +43,6 @@ interface PlayerTableProps {
    *  can map arrow-key movement and Enter/D to the right player without
    *  duplicating TanStack's sort here. */
   onVisibleRowsChange: (ids: string[]) => void
-  /** Position -> max VOR across the FULL board (unfiltered by search/tab/
-   *  hide-drafted), used to scale the VOR micro-bars. Owned by App rather
-   *  than derived from `players` here so a search or hide-drafted filter
-   *  doesn't rescale every bar on the board out from under the user. */
-  maxVorByPosition: Map<string, number>
 }
 
 const fmt1 = (n: number) => n.toFixed(1)
@@ -40,26 +52,44 @@ const fmtRank = (n: number | null) => (n === null ? '—' : String(Math.round(n)
 // FFC/ESPN ranks are always whole numbers; FP's ECR can carry a decimal --
 // show it only when present so the tooltip doesn't print "12.0".
 const fmtSource = (n: number | null) => (n === null ? '—' : Number.isInteger(n) ? String(n) : n.toFixed(1))
-const NUMERIC_COLUMNS = new Set(['rank', 'tier', 'bye', 'vor', 'composite', 'market_rank', 'edge', 'espn_ppr_rank'])
+// The rank column's id embeds the selected source (rank_agg, rank_ffc, …).
+// TanStack caches each row's accessor values BY column id, so reusing one id
+// while swapping the accessor serves stale cached values to the sorter --
+// the header and cells update but the row order doesn't. A per-source id
+// gets a fresh cache slot instead.
+const rankColumnId = (source: RankSourceId) => `rank_${source}`
 
-// |edge| < 3 is inside the market's normal rank-vs-rank noise for this board
-// -- not a real signal either way, so it reads as neutral rather than a
-// weak green/red that would imply more confidence than the number carries.
-function edgeClass(v: number | null): string {
-  if (v === null || Math.abs(v) < 3) return 'edge-neutral'
-  return v > 0 ? 'edge-pos' : 'edge-neg'
-}
+const NUMERIC_COLUMNS = new Set([
+  'bye', 'espn_ppr_rank',
+  ...RANK_SOURCES.map((s) => rankColumnId(s.id)),
+  ...['QB', 'RB', 'WR'].flatMap((p) => boardColumnsFor(p).map((c) => c.id)),
+])
+// Column ids that exist regardless of positionFilter -- used below to decide
+// whether a stale sort (e.g. sorted by an RB-only stat column) still applies
+// after switching tabs.
+const STATIC_COLUMN_IDS = [
+  'drafted-toggle', 'espn_ppr_rank', 'name', 'position', 'team', 'bye',
+  ...RANK_SOURCES.map((s) => rankColumnId(s.id)),
+]
 
 export default function PlayerTable({
   players,
   onToggleDrafted,
   onSelectPlayer,
-  showTierBreaks,
+  rankSource,
+  positionFilter,
   selectedIndex,
   onVisibleRowsChange,
-  maxVorByPosition,
 }: PlayerTableProps) {
-  const [sorting, setSorting] = useState<SortingState>([{ id: 'espn_ppr_rank', desc: false }])
+  // Default order is the aggregated market rank -- the mean of every
+  // PPR-native source (FFC/ESPN PPR/FP/MFL/CBS) -- not any single site.
+  const [sorting, setSorting] = useState<SortingState>([{ id: rankColumnId('agg'), desc: false }])
+
+  // Picking a rank source is a request to sort by it -- snap the sort back
+  // to the rank column even if the user had sorted by some stat column.
+  useEffect(() => {
+    setSorting([{ id: rankColumnId(rankSource), desc: false }])
+  }, [rankSource])
   const tableRef = useRef<HTMLTableElement>(null)
 
   const columns = useMemo<ColumnDef<Player>[]>(
@@ -111,8 +141,6 @@ export default function PlayerTable({
         sortUndefined: 'last',
         cell: ({ row }) => fmtRank(row.original.espn_ppr_rank),
       },
-      { accessorKey: 'rank', header: 'Rank' },
-      { accessorKey: 'tier', header: 'Tier' },
       {
         accessorKey: 'name',
         header: 'Name',
@@ -138,37 +166,25 @@ export default function PlayerTable({
         cell: ({ getValue }) => fmtNullable(getValue<number | null>()),
       },
       {
-        accessorKey: 'vor',
-        header: 'VOR',
-        cell: ({ row }) => {
-          const v = row.original.vor
-          const max = maxVorByPosition.get(row.original.position) ?? 0
-          const pct = max > 0 ? Math.max(0, Math.min(100, (v / max) * 100)) : 0
-          return (
-            <span className="vor-cell">
-              <span className="vor-bar" style={{ width: `${pct}%` }} aria-hidden="true" />
-              <span className="vor-value">{fmt1(v)}</span>
-            </span>
-          )
-        },
-      },
-      {
-        accessorKey: 'composite',
-        header: 'Composite',
-        cell: ({ getValue }) => fmt1(getValue<number>()),
-      },
-      {
-        accessorKey: 'market_rank',
-        header: 'Mkt',
+        id: rankColumnId(rankSource),
+        // null -> undefined so sortUndefined 'last' applies (TanStack only
+        // special-cases undefined), same as the espn_ppr_rank column.
+        accessorFn: (row) => rankValue(row, rankSource) ?? undefined,
+        header: RANK_SOURCES.find((s) => s.id === rankSource)?.short ?? 'Mkt',
+        sortUndefined: 'last',
         cell: ({ row }) => {
           const p = row.original
-          if (p.market_rank === null) return '—'
-          const { ffc, espn, fp, fp_tier } = p.market_sources
-          const title = `FFC ${fmtSource(ffc)} · ESPN ADP ${fmtSource(espn)} · FP ${fmtSource(fp)} · FP tier ${fmtSource(fp_tier)}`
+          const value = rankValue(p, rankSource)
+          if (value === null) return '—'
+          const { ffc, espn, fp, mfl, cbs, fp_tier } = p.market_sources
+          const title = `FFC ${fmtSource(ffc)} · ESPN PPR ${fmtSource(espn)} · FP ${fmtSource(fp)} · MFL ${fmtSource(mfl)} · CBS ${fmtSource(cbs)} · FP tier ${fmtSource(fp_tier)}`
+          if (rankSource !== 'agg') {
+            return <span title={title}>{fmtSource(value)}</span>
+          }
           const showSpread = p.market_spread !== null && p.market_spread >= 12
           return (
             <span title={title}>
-              {fmt1(p.market_rank)}
+              {fmt1(value)}
               {showSpread && (
                 <span style={{ opacity: 0.6 }}> ±{Math.round((p.market_spread as number) / 2)}</span>
               )}
@@ -176,19 +192,35 @@ export default function PlayerTable({
           )
         },
       },
-      {
-        accessorKey: 'edge',
-        header: 'Edge',
-        cell: ({ getValue }) => {
-          const v = getValue<number | null>()
-          if (v === null) return '—'
-          const sign = v > 0 ? '+' : ''
-          return <span className={`edge-chip ${edgeClass(v)}`}>{sign}{fmt1(v)}</span>
-        },
-      },
+      ...boardColumnsFor(positionFilter).map((c): ColumnDef<Player> => ({
+        id: c.id,
+        // null stats (rookies/K/DST) -> undefined so sortUndefined applies
+        accessorFn: (row) => (row.stats ? c.sortValue(row.stats) : undefined),
+        header: c.label,
+        sortUndefined: 'last',
+        sortDescFirst: true,
+        cell: ({ row }) => (row.original.stats ? c.cell(row.original.stats) : '—'),
+      })),
     ],
-    [onToggleDrafted, maxVorByPosition]
+    [onToggleDrafted, positionFilter, rankSource]
   )
+
+  // TanStack drops an active sort when its column disappears from the
+  // column set (e.g. sorted RB by a rushing stat, then switched to ALL,
+  // which has no rushing columns) -- rows silently fall back to raw payload
+  // (VOR) order with no sort indicator. Reset to the default rank sort
+  // whenever the sorted column id isn't in the new position's column set.
+  useEffect(() => {
+    const validIds = new Set([
+      ...STATIC_COLUMN_IDS,
+      ...boardColumnsFor(positionFilter).map((c) => c.id),
+    ])
+    const sortedId = sorting[0]?.id
+    if (sortedId && !validIds.has(sortedId)) {
+      setSorting([{ id: 'espn_ppr_rank', desc: false }])
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [positionFilter])
 
   const table = useReactTable({
     data: players,
@@ -200,26 +232,6 @@ export default function PlayerTable({
   })
 
   const rows = table.getRowModel().rows
-
-  // Tier boundaries only make sense when the board is in rank order within a
-  // single position -- sorting by another column would scatter tiers
-  // non-contiguously, and on ALL/FLEX views tier numbers reset per position
-  // so the rule would fire on nearly every row. One pass over the
-  // already-sorted rows, toggling on each tier change, rather than
-  // per-row lookback -- same result, one pass; memoized so it only
-  // recomputes when the row order or the gate itself actually changes,
-  // not on every unrelated App/PlayerTable re-render.
-  const tierBandGate = showTierBreaks && sorting[0]?.id === 'rank'
-  const tierBandFlags = useMemo(() => {
-    if (!tierBandGate) return []
-    const flags: boolean[] = []
-    let bandOn = false
-    rows.forEach((row, i) => {
-      if (i > 0 && rows[i - 1].original.tier !== row.original.tier) bandOn = !bandOn
-      flags.push(bandOn)
-    })
-    return flags
-  }, [rows, tierBandGate])
 
   // Report the visible sorted order up to App, which owns the keyboard
   // cursor and needs to map arrow-key movement / Enter / D to a player id
@@ -267,7 +279,6 @@ export default function PlayerTable({
         {rows.map((row, i) => {
           const classNames = [
             row.original.drafted && 'row-drafted',
-            tierBandGate && tierBandFlags[i] && 'tier-band',
             selectedIndex === i && 'row-selected',
           ]
             .filter(Boolean)

@@ -1,0 +1,50 @@
+- generic [ref=e3]:
+  - banner [ref=e5]:
+    - heading "Draft Board" [level=1] [ref=e8]
+    - textbox "Search players by name or team" [ref=e10]:
+      - /placeholder: Search players…  /
+  - generic [ref=e11]:
+    - complementary [ref=e12]:
+      - button "Collapse rail" [expanded] [ref=e13] [cursor=pointer]: «
+      - generic [ref=e14]:
+        - generic [ref=e15]:
+          - heading "Weights" [level=2] [ref=e16]
+          - generic [ref=e17]:
+            - generic [ref=e18]:
+              - generic [ref=e19]: Production
+              - generic [ref=e20]: "0.35"
+            - slider "Production 0.35" [ref=e21]: "0.35"
+          - generic [ref=e22]:
+            - generic [ref=e23]:
+              - generic [ref=e24]: Role
+              - generic [ref=e25]: "0.25"
+            - slider "Role 0.25" [ref=e26]: "0.25"
+          - generic [ref=e27]:
+            - generic [ref=e28]:
+              - generic [ref=e29]: Environment
+              - generic [ref=e30]: "0.20"
+            - slider "Environment 0.20" [ref=e31]: "0.2"
+          - generic [ref=e32]:
+            - generic [ref=e33]:
+              - generic [ref=e34]: Schedule
+              - generic [ref=e35]: "0.10"
+            - slider "Schedule 0.10" [ref=e36]: "0.1"
+          - generic [ref=e37]:
+            - generic [ref=e38]:
+              - generic [ref=e39]: Durability
+              - generic [ref=e40]: "0.10"
+            - slider "Durability 0.10" [ref=e41]: "0.1"
+        - generic [ref=e42]:
+          - checkbox "Hide drafted" [ref=e43]
+          - text: Hide drafted
+    - main [ref=e44]:
+      - generic [ref=e45]:
+        - button "ALL" [ref=e46] [cursor=pointer]
+        - button "QB" [ref=e47] [cursor=pointer]
+        - button "RB" [ref=e48] [cursor=pointer]
+        - button "WR" [ref=e49] [cursor=pointer]
+        - button "TE" [ref=e50] [cursor=pointer]
+        - button "FLEX" [ref=e51] [cursor=pointer]
+        - button "K" [ref=e52] [cursor=pointer]
+        - button "DST" [ref=e53] [cursor=pointer]
+      - paragraph [ref=e54]: Loading players…

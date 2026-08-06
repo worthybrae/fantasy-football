@@ -1,0 +1,3 @@
+- generic [ref=f18e40]:
+  - button "← Back to board" [ref=f18e41] [cursor=pointer]
+  - paragraph [ref=f18e42]: Loading profile…

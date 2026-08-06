@@ -2,13 +2,25 @@ import pandas as pd
 from pipeline.db import get_conn, write_table
 from scoring.board import build_board, _norm_name
 
-def _seed(tmp_path):
+def _seed(tmp_path, include_qb=False):
     conn = get_conn(str(tmp_path / "t.duckdb"))
-    weekly = pd.DataFrame([
+    rows = [
         {"player_id": "p1", "player_display_name": "Amon-Ra St. Brown", "position": "WR",
          "recent_team": "DET", "opponent_team": "GB", "season": 2025, "week": w,
          "receptions": 8, "receiving_yards": 90, "targets": 10, "carries": 0}
-        for w in range(1, 18)])
+        for w in range(1, 18)]
+    if include_qb:
+        # Exercises _PASS_COLS' real-column (pd.to_numeric) branch in
+        # _latest_season_stats -- the plain _seed() fixture above has no
+        # passing columns at all, so that branch only runs when this flag
+        # is set.
+        rows += [
+            {"player_id": "q1", "player_display_name": "Some QB", "position": "QB",
+             "recent_team": "DET", "opponent_team": "GB", "season": 2025, "week": w,
+             "completions": 20, "attempts": 30, "passing_yards": 250,
+             "passing_tds": 2, "passing_interceptions": 1, "carries": 0}
+            for w in range(1, 4)]
+    weekly = pd.DataFrame(rows)
     write_table(conn, "weekly", weekly)
     write_table(conn, "schedules", pd.DataFrame([
         {"home_team": "DET", "away_team": "GB", "week": 1,
@@ -40,19 +52,21 @@ def test_norm_name_folds_accents():
 def test_board_shape_and_join(tmp_path):
     board = build_board(_seed(tmp_path))
     star = board[board["player_id"] == "p1"].iloc[0]
-    # single-source-ranked seed (FFC only): star's FFC adp (5.1) is lowest -> rank 1
-    assert star["market_rank"] == 1.0
+    # star: FFC adp (5.1) is lowest -> FFC rank 1; ESPN PPR rank 2 is a
+    # consensus input too (the PPR-native ESPN component) -> mean 1.5
+    assert star["market_rank"] == 1.5
     assert star["market_sources"]["ffc"] == 1.0
+    assert star["market_sources"]["espn"] == 2.0
     assert not star["rookie"]
-    # espn_ppr_rank flows through the name-fallback join path (no sleeper
-    # crosswalk in this fixture) and is display data, not a ranking input.
+    # espn_ppr_rank still flows through the name-fallback join path (no
+    # sleeper crosswalk in this fixture) as its own column.
     assert star["espn_ppr_rank"] == 2.0
     rook = board[board["name"] == "Rookie Guy"].iloc[0]
     assert pd.isna(rook["espn_ppr_rank"])  # no ESPN row for this player
     assert rook["rookie"] and rook["production"] == 50.0
     assert list(board["rank"]) == sorted(board["rank"].tolist())
     for col in ["vor", "tier", "composite", "edge", "drafted", "bye",
-                "market_rank", "market_spread", "market_sources", "espn_ppr_rank"]:
+                "market_rank", "market_spread", "market_sources", "espn_ppr_rank", "stats"]:
         assert col in board.columns
     assert "adp" not in board.columns
 
@@ -61,7 +75,7 @@ def test_board_column_contract(tmp_path):
     expected = ["player_id", "name", "position", "team", "bye", "production",
                 "durability", "role", "environment", "schedule", "composite",
                 "vor", "tier", "market_rank", "market_spread", "market_sources",
-                "espn_ppr_rank", "edge", "rookie", "drafted", "rank"]
+                "espn_ppr_rank", "edge", "rookie", "drafted", "rank", "stats"]
     assert list(board.columns) == expected
     assert board["rank"].tolist() == list(range(1, len(board) + 1))
 
@@ -72,7 +86,7 @@ def test_empty_database_does_not_crash(tmp_path):
     for col in ["player_id", "name", "position", "team", "bye", "production",
                 "durability", "role", "environment", "schedule", "composite",
                 "vor", "tier", "market_rank", "market_spread", "market_sources",
-                "espn_ppr_rank", "edge", "rookie", "drafted", "rank"]:
+                "espn_ppr_rank", "edge", "rookie", "drafted", "rank", "stats"]:
         assert col in board.columns
 
 def test_adp_position_alias_pk_matches_k(tmp_path):
@@ -347,3 +361,33 @@ def test_old_seasons_do_not_affect_board_factors(tmp_path):
         boards[label] = build_board(conn).set_index("player_id").loc["p1"]
     for col in ["production", "durability", "role", "schedule", "composite", "vor"]:
         assert boards["with_ancient"][col] == boards["recent_only"][col], col
+
+def test_board_stats_summary(tmp_path):
+    board = build_board(_seed(tmp_path))
+    s = board[board["player_id"] == "p1"].iloc[0]["stats"]
+    assert s["season"] == 2025 and s["games"] == 17
+    assert s["receptions"] == 8 * 17
+    assert s["rec_yards"] == 90 * 17
+    assert s["targets"] == 10 * 17
+    # PPR: 8 rec + 9.0 rec-yd pts = 17.0 per game
+    assert s["ppg"] == 17.0
+    assert s["points"] == 17.0 * 17
+    # no passing columns in this fixture -> zero-filled, not missing
+    assert s["pass_yards"] == 0 and s["attempts"] == 0
+    # ADP-only player has no weekly rows -> no stats dict at all
+    rook = board[board["name"] == "Rookie Guy"].iloc[0]
+    assert not isinstance(rook["stats"], dict)
+
+def test_board_stats_summary_passing_cols(tmp_path):
+    # test_board_stats_summary above only exercises the "no passing columns
+    # present" zero-fill path; this covers the real-column pd.to_numeric
+    # aggregation branch in _latest_season_stats/_PASS_COLS.
+    board = build_board(_seed(tmp_path, include_qb=True))
+    qb = board[board["player_id"] == "q1"].iloc[0]["stats"]
+    weeks = 3
+    assert qb["games"] == weeks
+    assert qb["completions"] == 20 * weeks
+    assert qb["attempts"] == 30 * weeks
+    assert qb["pass_yards"] == 250 * weeks
+    assert qb["pass_tds"] == 2 * weeks
+    assert qb["interceptions"] == 1 * weeks

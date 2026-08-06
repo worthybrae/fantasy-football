@@ -3,6 +3,7 @@ import type { SimilarPlayer } from '../api'
 interface SimilarPlayersProps {
   mode: 'stat_twins' | 'value_neighbors'
   players: SimilarPlayer[]
+  targetAge?: number | null
   onSelectPlayer: (id: string) => void
 }
 
@@ -21,7 +22,7 @@ function BoardChips({ p }: { p: SimilarPlayer }) {
   )
 }
 
-export default function SimilarPlayers({ mode, players, onSelectPlayer }: SimilarPlayersProps) {
+export default function SimilarPlayers({ mode, players, targetAge, onSelectPlayer }: SimilarPlayersProps) {
   if (players.length === 0) {
     return (
       <div className="similar-players">
@@ -54,6 +55,9 @@ export default function SimilarPlayers({ mode, players, onSelectPlayer }: Simila
 
   return (
     <div className="similar-players">
+      {targetAge != null && (
+        <p className="similar-heading">Same-age seasons (age {targetAge})</p>
+      )}
       <ul className="similar-list">
         {players.map((p, i) => {
           // Historical stat twins can predate the current draft board (e.g.
@@ -76,6 +80,7 @@ export default function SimilarPlayers({ mode, players, onSelectPlayer }: Simila
               </span>
               <span className="similar-stats mono">
                 {p.similarity !== null ? `${p.similarity.toFixed(1)} sim` : '— sim'} ·{' '}
+                {p.age != null ? `age ${p.age} · ` : ''}
                 {p.ppg !== null ? `${p.ppg.toFixed(1)} ppg` : '— ppg'} →{' '}
                 {p.next_ppg !== null ? `${p.next_ppg.toFixed(1)} next` : '—'}
               </span>

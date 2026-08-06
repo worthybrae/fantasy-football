@@ -1,0 +1,59 @@
+- generic [ref=f2e3]:
+  - banner [ref=f2e5]:
+    - heading "Draft Board" [level=1] [ref=f2e8]
+    - textbox "Search players by name or team" [ref=f2e10]:
+      - /placeholder: Search players…  /
+    - generic [ref=f2e13]:
+      - 'generic "weekly: 174373 rows · refreshed 2026-08-02 21:51:28.477190" [ref=f2e14]': weekly
+      - 'generic "snap_counts: 253106 rows · refreshed 2026-08-02 21:51:31.471265" [ref=f2e15]': snap_counts
+      - 'generic "depth_charts: 394390 rows · refreshed 2026-08-02 21:51:32.105167" [ref=f2e16]': depth_charts
+      - 'generic "schedules: 272 rows · refreshed 2026-08-02 21:51:32.378289" [ref=f2e17]': schedules
+      - 'generic "adp: 246 rows · refreshed 2026-08-02 21:51:32.557771" [ref=f2e18]': adp
+      - 'generic "espn_adp: 500 rows · refreshed 2026-08-02 21:51:33.549996" [ref=f2e19]': espn_adp
+      - 'generic "fp_ecr: 517 rows · refreshed 2026-08-02 21:51:33.661649" [ref=f2e20]': fp_ecr
+      - 'generic "sleeper_ids: 1316 rows · refreshed 2026-08-02 21:51:33.903245" [ref=f2e21]': sleeper_ids
+  - generic [ref=f2e22]:
+    - complementary [ref=f2e23]:
+      - button "Collapse rail" [expanded] [ref=f2e24] [cursor=pointer]: «
+      - generic [ref=f2e25]:
+        - generic [ref=f2e26]:
+          - heading "Weights" [level=2] [ref=f2e27]
+          - generic [ref=f2e28]:
+            - generic [ref=f2e29]:
+              - generic [ref=f2e30]: Production
+              - generic [ref=f2e31]: "0.35"
+            - slider "Production 0.35" [ref=f2e32]: "0.35"
+          - generic [ref=f2e33]:
+            - generic [ref=f2e34]:
+              - generic [ref=f2e35]: Role
+              - generic [ref=f2e36]: "0.25"
+            - slider "Role 0.25" [ref=f2e37]: "0.25"
+          - generic [ref=f2e38]:
+            - generic [ref=f2e39]:
+              - generic [ref=f2e40]: Environment
+              - generic [ref=f2e41]: "0.20"
+            - slider "Environment 0.20" [ref=f2e42]: "0.2"
+          - generic [ref=f2e43]:
+            - generic [ref=f2e44]:
+              - generic [ref=f2e45]: Schedule
+              - generic [ref=f2e46]: "0.10"
+            - slider "Schedule 0.10" [ref=f2e47]: "0.1"
+          - generic [ref=f2e48]:
+            - generic [ref=f2e49]:
+              - generic [ref=f2e50]: Durability
+              - generic [ref=f2e51]: "0.10"
+            - slider "Durability 0.10" [ref=f2e52]: "0.1"
+        - generic [ref=f2e53]:
+          - checkbox "Hide drafted" [ref=f2e54]
+          - text: Hide drafted
+    - main [ref=f2e55]:
+      - generic [ref=f2e56]:
+        - button "ALL" [ref=f2e57] [cursor=pointer]
+        - button "QB" [ref=f2e58] [cursor=pointer]
+        - button "RB" [ref=f2e59] [cursor=pointer]
+        - button "WR" [ref=f2e60] [cursor=pointer]
+        - button "TE" [ref=f2e61] [cursor=pointer]
+        - button "FLEX" [ref=f2e62] [cursor=pointer]
+        - button "K" [ref=f2e63] [cursor=pointer]
+        - button "DST" [ref=f2e64] [cursor=pointer]
+      - paragraph [ref=f2e65]: Loading players…

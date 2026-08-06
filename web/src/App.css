@@ -130,60 +130,9 @@
 
 .app-body {
   display: flex;
+  flex-direction: column;
   flex: 1;
   min-height: 0;
-  align-items: stretch;
-}
-
-.rail {
-  width: 220px;
-  flex-shrink: 0;
-  position: sticky;
-  top: 48px;
-  align-self: flex-start;
-  max-height: calc(100svh - 48px);
-  overflow-y: auto;
-  overflow-x: hidden;
-  background: var(--bg-1);
-  border-right: 1px solid var(--border);
-  padding: var(--space-4);
-  transition: width 0.15s ease, padding 0.15s ease;
-}
-
-.rail.rail-collapsed {
-  width: 40px;
-  padding: var(--space-3) 0;
-}
-
-.rail-toggle {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-2);
-  width: 100%;
-  background: transparent;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--text-3);
-  cursor: pointer;
-  padding: 4px 0;
-  margin-bottom: var(--space-4);
-  font-size: var(--text-sm);
-}
-
-.rail.rail-collapsed .rail-toggle {
-  margin-bottom: 0;
-}
-
-.rail-toggle:hover {
-  color: var(--text-1);
-  border-color: var(--accent-border);
-}
-
-.rail-content {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
 }
 
 .main {
@@ -191,41 +140,52 @@
   min-width: 0;
   padding: var(--space-4);
   overflow-x: auto;
-  /* Cap against the viewport directly (matches .rail's own 48px-topbar
-     math below) rather than relying on the flex chain to hand this a
-     definite height -- #root only sets `min-height: 100svh`, a floor, so
-     without this the whole chain grows to fit content and the *document*
-     ends up as the scroll container instead of `.main`. That would leave
-     the table's `position: sticky` header pinning to the viewport's top
-     edge -- the same spot the sticky top bar pins to, and behind it,
-     since the top bar's z-index is higher -- instead of to the top of
-     this pane, right under the top bar. */
+  /* Cap against the viewport directly rather than relying on the flex chain
+     to hand this a definite height -- #root only sets `min-height: 100svh`,
+     a floor, so without this the whole chain grows to fit content and the
+     *document* ends up as the scroll container instead of `.main`. That
+     would leave the table's `position: sticky` header pinning to the
+     viewport's top edge -- the same spot the sticky top bar pins to, and
+     behind it, since the top bar's z-index is higher -- instead of to the
+     top of this pane, right under the top bar. */
   overflow-y: auto;
   max-height: calc(100svh - 48px);
 }
 
-/* -- weight sliders -- */
-
-.weight-sliders h2 {
-  font-size: var(--text-md);
-  margin-bottom: var(--space-3);
-}
-
-.weight-slider {
-  margin-bottom: var(--space-3);
-}
-
-.weight-slider label {
+.board-controls {
   display: flex;
+  align-items: center;
   justify-content: space-between;
-  font-size: var(--text-sm);
-  margin-bottom: 4px;
-  color: var(--text-2);
+  gap: 16px;
 }
 
-.weight-slider input[type='range'] {
-  width: 100%;
-  accent-color: var(--accent);
+.board-controls-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.rank-source {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+
+.rank-source select {
+  background: var(--bg-2);
+  color: var(--text-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: var(--text-sm);
+  padding: 3px 6px;
+  outline: none;
+}
+
+.rank-source select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-bg);
 }
 
 .hide-drafted {
@@ -369,17 +329,6 @@ tbody tr:hover {
   background: var(--bg-2);
 }
 
-/* Alternating faint background per tier group -- only applied while the
-   board is sorted by rank on a single position (see PlayerTable's
-   tierBandGate; ALL/FLEX views and other sort columns render no bands). */
-tr.tier-band {
-  background: var(--bg-1);
-}
-
-tr.tier-band:hover {
-  background: var(--bg-2);
-}
-
 /* Drafted rows stay in place (still selectable/clickable, still counted for
    keyboard nav) but read as "done" -- dimmed and struck through. */
 tr.row-drafted {
@@ -481,66 +430,6 @@ td:first-child {
   color: var(--pos-dst);
 }
 
-/* -- edge chips -- */
-
-.edge-chip {
-  display: inline-block;
-  padding: 1px 7px;
-  border-radius: var(--radius);
-  font-weight: 600;
-}
-
-.edge-chip.edge-pos {
-  background: color-mix(in srgb, var(--ok) 16%, transparent);
-  color: var(--ok);
-}
-
-.edge-chip.edge-neg {
-  background: color-mix(in srgb, var(--fail) 16%, transparent);
-  color: var(--fail);
-}
-
-/* |edge| < 3: not a meaningful signal either way, so it reads as inert gray
-   rather than a weak green/red. A border rather than a solid fill -- the
-   positive/negative chips' `--bg-2`-toned fills would otherwise disappear
-   into `tbody tr:hover`'s identical background on the one row the user is
-   actually pointing at. (A player with no market data at all gets no chip:
-   PlayerTable's cell returns a bare em dash before this class is ever
-   applied.) */
-.edge-chip.edge-neutral {
-  border: 1px solid var(--border);
-  color: var(--text-3);
-}
-
-/* -- VOR micro-bar -- */
-
-.vor-cell {
-  position: relative;
-  display: inline-block;
-  /* Fixed, not min-width -- the bar's percentage width is relative to this
-     box, so every row in the column needs the identical track width for
-     the bars to be comparable at a glance. (Not `overflow: hidden`: if a
-     value's text ever ran wider than this, it should spill visibly rather
-     than silently clip a number.) */
-  width: 56px;
-}
-
-.vor-bar {
-  position: absolute;
-  inset: 0;
-  right: auto;
-  border-radius: var(--radius);
-  /* Quiet and quantitative, not a signal -- unlike the edge chips' status
-     colors or the accent's interactive-only reservation, this is just a
-     scale reference, so it stays a neutral tint of body text. */
-  background: color-mix(in srgb, var(--text-2) 16%, transparent);
-}
-
-.vor-value {
-  position: relative;
-  padding-left: 4px;
-}
-
 .rookie-badge {
   display: inline-block;
   margin-left: 6px;
@@ -554,49 +443,365 @@ td:first-child {
 
 /* -- player profile drawer -- */
 
-/* Both sit above .topbar's z-index: 30 -- the drawer is a full-viewport
-   overlay and needs to cover the sticky top bar too (including the close
-   button, which lines up with the top bar's right side), not just the
-   board content below it. */
-.drawer-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.5);
-  z-index: 40;
-}
-
-.player-drawer {
-  position: fixed;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: min(70vw, 900px);
+/* Full-width standalone player page (route /players/:slug). Replaces the
+   old slide-in drawer; the drawer-section styles below are shared. */
+.player-page {
+  width: 100%;
+  min-height: 100svh;
   overflow-y: auto;
-  background: var(--bg-1);
-  border-left: 1px solid var(--border);
-  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.35);
-  padding: var(--space-5);
-  z-index: 41;
+  background: var(--bg-0);
+  padding: var(--space-5) max(var(--space-5), 4vw);
   text-align: left;
 }
 
-.drawer-close {
-  position: absolute;
-  top: var(--space-4);
-  right: var(--space-4);
+.player-page-back {
   background: transparent;
-  border: 1px solid var(--border);
   color: var(--text-2);
+  border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 4px 8px;
-  cursor: pointer;
+  padding: 4px 12px;
   font-size: var(--text-sm);
+  cursor: pointer;
+  margin-bottom: var(--space-4);
 }
 
-.drawer-close:hover {
-  color: var(--text-1);
+.player-page-back:hover {
   border-color: var(--accent-border);
+  color: var(--text-1);
 }
+
+/* -- player page: dossier grid -- */
+
+@keyframes pp-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+.player-page {
+  animation: pp-fade-in 0.18s ease-out;
+}
+
+.pp-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+.pp-name {
+  margin: 0 0 4px;
+  font-size: 28px;
+  letter-spacing: -0.01em;
+}
+
+.pp-grid {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.pp-span5 { grid-column: span 5; }
+.pp-span7 { grid-column: span 7; }
+.pp-span12 { grid-column: span 12; }
+
+@media (max-width: 1000px) {
+  .pp-span5, .pp-span7 { grid-column: span 12; }
+}
+
+.pp-card {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-4);
+  min-width: 0;
+}
+
+.pp-card > h3 {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-2);
+}
+
+.card-footnote {
+  margin: var(--space-3) 0 0;
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+
+/* -- stat tiles -- */
+
+.stat-tiles-hero {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.stat-tiles-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(86px, 1fr));
+  gap: var(--space-3);
+}
+
+.stat-tile {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.stat-tile-value {
+  font-size: var(--text-lg, 18px);
+  font-weight: 600;
+  color: var(--text-1);
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.stat-tile-hero .stat-tile-value {
+  font-size: 30px;
+}
+
+.stat-tile-label {
+  font-size: var(--text-sm);
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.stat-tile-delta {
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.stat-tile-delta.up { color: var(--ok); }
+.stat-tile-delta.down { color: var(--fail); }
+
+/* -- rankings panel -- */
+
+.rankings-agg {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.rankings-agg-value {
+  font-size: 40px;
+  font-weight: 600;
+  color: var(--text-1);
+  line-height: 1;
+}
+
+.rankings-agg-label {
+  font-size: var(--text-sm);
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.rankings-spread {
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.rankings-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rankings-row {
+  display: grid;
+  grid-template-columns: 96px 1fr 44px;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.rankings-row-label {
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+
+.rankings-row-bar {
+  height: 8px;
+  background: var(--bg-2);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.rankings-row-fill {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  background: var(--accent);
+}
+
+.rankings-row-value {
+  text-align: right;
+  color: var(--text-1);
+  font-weight: 600;
+}
+
+.rankings-footnote {
+  margin: var(--space-3) 0 0;
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+
+/* -- depth chart card -- */
+
+/* Two columns, not four: at four the card is ~110px per column and real
+   names ("Xavier Hutchinson") truncate to ellipsis, which defeats the
+   point of showing the room a player is competing in. */
+.depth-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3) var(--space-4);
+}
+
+.depth-list {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.depth-player {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 6px;
+  border-radius: var(--radius);
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+
+.depth-player.depth-me {
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-border);
+  color: var(--text-1);
+  font-weight: 600;
+}
+
+.depth-rank {
+  color: var(--text-3);
+  width: 1em;
+  flex-shrink: 0;
+}
+
+.depth-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* -- schedule calendar -- */
+
+.sched-grid {
+  display: grid;
+  grid-template-columns: repeat(9, 1fr);
+  gap: 6px;
+}
+
+@media (max-width: 700px) {
+  .sched-grid { grid-template-columns: repeat(6, 1fr); }
+}
+
+.sched-cell {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 4px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.sched-week {
+  font-size: 10px;
+  color: var(--text-3);
+}
+
+.sched-opp {
+  font-size: var(--text-sm);
+  color: var(--text-1);
+  white-space: nowrap;
+}
+
+.sched-bye .sched-opp,
+.sched-empty .sched-opp {
+  color: var(--text-3);
+}
+
+.sched-bye {
+  border-style: dashed;
+}
+
+.sched-key {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  vertical-align: middle;
+}
+
+/* -- skeleton loading -- */
+
+/* One highlight band sweeping across each block, not a tiled gradient --
+   `background-size: 200% 100%` + no-repeat is what keeps it a single pass
+   regardless of the block's width. */
+@keyframes sk-shimmer {
+  from { background-position: 150% 0; }
+  to { background-position: -50% 0; }
+}
+
+.skeleton {
+  border-radius: var(--radius);
+  background-color: var(--bg-1);
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--bg-2) 85%, transparent) 50%,
+    transparent 100%);
+  background-size: 200% 100%;
+  background-repeat: no-repeat;
+  animation: sk-shimmer 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton { animation: none; }
+  .player-page { animation: none; }
+}
+
+.board-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sk-row { height: 32px; }
+.sk-head { height: 34px; margin-bottom: 4px; }
+.sk-back { width: 120px; height: 28px; margin-bottom: var(--space-4); }
+.sk-title { width: 280px; height: 30px; margin-bottom: 8px; }
+.sk-subtitle { width: 200px; height: 16px; margin-bottom: var(--space-4); }
+.sk-block { height: 180px; }
+.sk-chart { height: 220px; }
 
 .drawer-header h2 {
   margin: 0 0 4px;
@@ -661,45 +866,6 @@ td:first-child {
   color: var(--text-3);
 }
 
-/* -- factor bars -- */
-
-.factor-bars {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.factor-bar {
-  display: grid;
-  grid-template-columns: 90px 1fr 44px;
-  align-items: center;
-  gap: 10px;
-}
-
-.factor-bar-label {
-  font-size: var(--text-sm);
-  color: var(--text-2);
-}
-
-.factor-bar-track {
-  background: var(--bg-2);
-  border-radius: var(--radius);
-  height: 8px;
-  overflow: hidden;
-}
-
-.factor-bar-fill {
-  background: var(--accent);
-  height: 100%;
-  border-radius: var(--radius);
-}
-
-.factor-bar-value {
-  font-size: var(--text-sm);
-  text-align: right;
-  color: var(--text-1);
-}
-
 /* -- similar players -- */
 
 .similar-players {
@@ -761,20 +927,6 @@ td:first-child {
 
 /* -- weekly chart -- */
 
-.weekly-chart-legend {
-  display: flex;
-  gap: 14px;
-  margin-bottom: var(--space-2);
-  font-size: var(--text-sm);
-  color: var(--text-2);
-}
-
-.weekly-chart-legend-item {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-}
-
 .weekly-chart-swatch {
   display: inline-block;
   width: 10px;
@@ -788,6 +940,29 @@ td:first-child {
 
 .weekly-chart-svg {
   display: block;
+}
+
+/* Full-width season charts: fixed viewBox scaled to the container. Capped
+   so the full-page player view doesn't blow marks and labels up to poster
+   scale on wide screens. */
+.season-chart-wide {
+  width: 100%;
+  max-width: 960px;
+  height: auto;
+}
+
+.summary-strip .summary-stat-row {
+  margin-top: var(--space-2);
+}
+
+.chip-up {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
+}
+
+.chip-down {
+  color: var(--fail);
+  border-color: color-mix(in srgb, var(--fail) 45%, transparent);
 }
 
 .weekly-chart-svg:focus-visible {
@@ -814,14 +989,6 @@ td:first-child {
 .weekly-chart-season-label {
   fill: var(--text-1);
   font-size: 11px;
-}
-
-.weekly-bar {
-  transition: filter 0.1s ease;
-}
-
-.weekly-bar:hover {
-  filter: brightness(1.2);
 }
 
 /* -- season table -- */
@@ -892,8 +1059,22 @@ td:first-child {
   padding-top: var(--space-3);
 }
 
-/* boom/bust shading -- --ok/--fail hues at low alpha so text stays legible,
-   same color-mix pattern as the edge-chips above. */
+.game-log-season-toggle {
+  cursor: pointer;
+  user-select: none;
+}
+
+.game-log-season-toggle:hover td {
+  color: var(--accent, var(--text-0));
+}
+
+.game-log-chevron {
+  display: inline-block;
+  width: 1em;
+  color: var(--text-2);
+}
+
+/* boom/bust shading -- --ok/--fail hues at low alpha so text stays legible. */
 .pts-hot-1 { background: color-mix(in srgb, var(--ok) 12%, transparent); }
 .pts-hot-2 { background: color-mix(in srgb, var(--ok) 28%, transparent); }
 .pts-cold-1 { background: color-mix(in srgb, var(--fail) 10%, transparent); }

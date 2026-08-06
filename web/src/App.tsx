@@ -1,28 +1,34 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { DEFAULT_WEIGHTS, fetchPlayers, setDrafted, type Player, type Weights } from './api'
-import PlayerTable from './components/PlayerTable'
-import PlayerProfile from './components/PlayerProfile'
-import WeightSliders from './components/WeightSliders'
+import { Route, Routes, useNavigate } from 'react-router-dom'
+import { fetchPlayers, playerSlug, setDrafted, type Player } from './api'
+import PlayerTable, { RANK_SOURCES, type RankSourceId } from './components/PlayerTable'
+import PlayerPage from './components/PlayerPage'
+import { BoardSkeleton } from './components/PageSkeleton'
 import PositionTabs from './components/PositionTabs'
 import FreshnessBadge from './components/FreshnessBadge'
 import TopBar from './components/TopBar'
 import './App.css'
 
 const FLEX_POSITIONS = new Set(['RB', 'WR', 'TE'])
-const RAIL_COLLAPSED_KEY = 'rail-collapsed'
 
 function App() {
+  return (
+    <Routes>
+      <Route path="/" element={<Board />} />
+      <Route path="/players/:slug" element={<PlayerPage />} />
+    </Routes>
+  )
+}
+
+function Board() {
+  const navigate = useNavigate()
   const [players, setPlayers] = useState<Player[]>([])
-  const [weights, setWeights] = useState<Weights>(DEFAULT_WEIGHTS)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [hideDrafted, setHideDrafted] = useState(false)
   const [positionFilter, setPositionFilter] = useState('ALL')
-  const [selectedPlayerId, setSelectedPlayerId] = useState<string | null>(null)
+  const [rankSource, setRankSource] = useState<RankSourceId>('agg')
   const [search, setSearch] = useState('')
-  const [railCollapsed, setRailCollapsed] = useState(
-    () => localStorage.getItem(RAIL_COLLAPSED_KEY) === '1'
-  )
   // Keyboard cursor over the board's VISIBLE (filtered+sorted) row order --
   // an index into `visibleIds`, not into `players`, since sorting lives
   // inside PlayerTable. `visibleIds` is that order, reported up by
@@ -30,15 +36,11 @@ function App() {
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null)
   const [visibleIds, setVisibleIds] = useState<string[]>([])
 
-  useEffect(() => {
-    localStorage.setItem(RAIL_COLLAPSED_KEY, railCollapsed ? '1' : '0')
-  }, [railCollapsed])
-
-  async function loadPlayers(w: Weights) {
+  async function loadPlayers() {
     setLoading(true)
     setError(null)
     try {
-      const data = await fetchPlayers(w)
+      const data = await fetchPlayers()
       setPlayers(data)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load players')
@@ -47,18 +49,13 @@ function App() {
     }
   }
 
-  // Debounce refetches while the user is dragging a slider; also covers the
-  // initial load since effects run once on mount regardless of deps.
   useEffect(() => {
-    const timer = setTimeout(() => {
-      loadPlayers(weights)
-    }, 300)
-    return () => clearTimeout(timer)
+    loadPlayers()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [weights])
+  }, [])
 
-  // Stable identity (deps: [weights]) -- the keyboard effect below reads it
-  // via closure every render regardless (its own deps churn on nearly every
+  // Stable identity (deps: []) -- the keyboard effect below reads it via
+  // closure every render regardless (its own deps churn on nearly every
   // keystroke anyway), but PlayerTable's `columns` memo is keyed on this
   // prop, so a stable identity here is what keeps that memo from
   // recomputing on every App render.
@@ -69,16 +66,10 @@ function App() {
         prev.map((pl) => (pl.player_id === p.player_id ? { ...pl, drafted: next } : pl))
       )
       await setDrafted(p.player_id, next)
-      await loadPlayers(weights)
+      await loadPlayers()
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [weights]
+    []
   )
-
-  // Memoized so PlayerProfile's Esc-listener effect (keyed on this prop)
-  // doesn't tear down and re-add its keydown listener on every App
-  // re-render (e.g. every players refetch while the drawer is open).
-  const handleCloseProfile = useCallback(() => setSelectedPlayerId(null), [])
 
   // Passed to PlayerTable; called whenever the sorted+filtered row order
   // changes so the keyboard cursor always maps to what's actually on
@@ -88,23 +79,10 @@ function App() {
   // to be.
   const handleVisibleRowsChange = useCallback((ids: string[]) => setVisibleIds(ids), [])
 
-  // Any path that points the drawer at a player -- a row click, a keyboard
-  // Enter, or clicking a "similar player" inside the drawer itself -- also
-  // moves the keyboard cursor there, so arrowing right afterward continues
-  // from that row instead of jumping back to wherever the cursor last was.
-  const handleSelectPlayerId = useCallback(
-    (id: string) => {
-      setSelectedPlayerId(id)
-      setSelectedIndex((i) => {
-        const idx = visibleIds.indexOf(id)
-        return idx === -1 ? i : idx
-      })
-    },
-    [visibleIds]
-  )
+  // Opening a player (row click or keyboard Enter) navigates to their page.
   const handleSelectPlayer = useCallback(
-    (p: Player) => handleSelectPlayerId(p.player_id),
-    [handleSelectPlayerId]
+    (p: Player) => navigate(`/players/${playerSlug(p.name)}`),
+    [navigate]
   )
 
   // Clamp (not preserve) the cursor whenever the visible set changes shape --
@@ -121,18 +99,17 @@ function App() {
   }, [visibleIds])
 
   // Board keyboard shortcuts: ↑/↓ move the cursor, Enter opens its profile,
-  // D toggles drafted. All inert while typing in an input (search, a weight
-  // slider) or while the drawer is open -- Enter/D acting on a row you can't
-  // see behind the drawer would be surprising, and arrow keys should adjust
-  // a focused slider, not the board, while one has focus.
+  // D toggles drafted. All inert while typing in an input (search) or while
+  // the drawer is open -- Enter/D acting on a row you can't see behind the
+  // drawer would be surprising.
   //
   // Deliberately NOT gated on "a button/link has focus" at the top level --
   // that blanket guard used to make the whole board go dead after clicking
-  // any button (a tab, the rail toggle, a row's drafted-toggle ✓) since
-  // focus lingers on the clicked element with no visual cue that keyboard
-  // nav had gone inert. Two narrower rules replace it, split across mouse
-  // and keyboard activation since they leave focus in different states:
-  //   - Mouse clicks on those three buttons blur themselves at the end of
+  // any button (a tab, a row's drafted-toggle ✓) since focus lingers on the
+  // clicked element with no visual cue that keyboard nav had gone inert. Two
+  // narrower rules replace it, split across mouse and keyboard activation
+  // since they leave focus in different states:
+  //   - Mouse clicks on those two buttons blur themselves at the end of
   //     their onClick (pointer-only -- `e.detail > 0` -- so this doesn't
   //     regress Tab order for keyboard users), so this listener never sees
   //     them as `e.target` on a subsequent keypress.
@@ -146,12 +123,9 @@ function App() {
   // Esc is the one exception: it's always live (regardless of focus, as
   // long as it's not already inside the search box -- TopBar's own scoped
   // Esc handler stops propagation before this listener sees the event in
-  // that case), with a fixed priority: close the drawer if it's open, else
-  // clear search if it has text, else do nothing. The drawer's own close
-  // (PlayerProfile's window-level Esc listener, mounted only while it's
-  // open) handles the first case; this effect only ever needs to handle the
-  // second, and skips entirely while the drawer is open so the two don't
-  // both fire off one keypress.
+  // that case) and clears the search if it has text. The player page is a
+  // separate route with its own Esc handling, so there is no drawer state
+  // to coordinate with here anymore.
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       // Never hijack a browser/OS chord (Cmd+D bookmark, Ctrl+D, Alt+D, ...)
@@ -162,12 +136,12 @@ function App() {
       const isTyping = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable
 
       if (e.key === 'Escape') {
-        if (selectedPlayerId || isTyping) return
+        if (isTyping) return
         if (search.trim()) setSearch('')
         return
       }
 
-      if (isTyping || selectedPlayerId) return
+      if (isTyping) return
 
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         if (visibleIds.length === 0) return
@@ -193,7 +167,8 @@ function App() {
         if (isControlActivation) return
         if (selectedIndex === null) return
         const id = visibleIds[selectedIndex]
-        if (id) setSelectedPlayerId(id)
+        const player = players.find((p) => p.player_id === id)
+        if (player) navigate(`/players/${playerSlug(player.name)}`)
         return
       }
 
@@ -210,7 +185,7 @@ function App() {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [selectedPlayerId, search, selectedIndex, visibleIds, players, handleToggleDrafted])
+  }, [search, selectedIndex, visibleIds, players, handleToggleDrafted, navigate])
 
   // Screen-reader-only announcement of the keyboard cursor, since its
   // on-screen indicator (PlayerTable's `.row-selected` outline) is purely
@@ -222,12 +197,16 @@ function App() {
     if (selectedIndex === null) return ''
     const id = visibleIds[selectedIndex]
     const p = players.find((pl) => pl.player_id === id)
-    return p ? `${p.name}, ${p.position} ${p.team}, rank ${p.rank}` : ''
+    return p ? `${p.name}, ${p.position} ${p.team}, ESPN rank ${p.espn_ppr_rank ?? 'unranked'}` : ''
   }, [selectedIndex, visibleIds, players])
 
   const filteredPlayers = useMemo(() => {
     const query = search.trim().toLowerCase()
     return players.filter((p) => {
+      // Players ESPN doesn't rank are deep-bench noise on this board --
+      // except DSTs, which ESPN never ranks at all (an espn_ppr_rank
+      // filter would empty the DST tab).
+      if (p.espn_ppr_rank === null && p.position !== 'DST') return false
       if (query && !p.name.toLowerCase().includes(query) && !p.team.toLowerCase().includes(query)) {
         return false
       }
@@ -238,19 +217,6 @@ function App() {
     })
   }, [players, search, hideDrafted, positionFilter])
 
-  // Position-max VOR for PlayerTable's micro-bars, computed over the FULL
-  // (unfiltered) board rather than `filteredPlayers` -- so a bar's width
-  // reflects a player's VOR relative to the whole position, and doesn't
-  // rescale/jump every time a search or hide-drafted filter shrinks the
-  // set the max is drawn from.
-  const maxVorByPosition = useMemo(() => {
-    const m = new Map<string, number>()
-    for (const p of players) {
-      if (p.vor > (m.get(p.position) ?? -Infinity)) m.set(p.position, p.vor)
-    }
-    return m
-  }, [players])
-
   return (
     <div className="app">
       <div className="sr-only" aria-live="polite">
@@ -260,31 +226,26 @@ function App() {
         search={search}
         onSearch={setSearch}
         meta={<FreshnessBadge />}
-        searchShortcutDisabled={selectedPlayerId !== null}
+        searchShortcutDisabled={false}
       />
       <div className="app-body">
-        <aside className={railCollapsed ? 'rail rail-collapsed' : 'rail'}>
-          <button
-            type="button"
-            className="rail-toggle"
-            aria-expanded={!railCollapsed}
-            aria-label={railCollapsed ? 'Expand rail' : 'Collapse rail'}
-            title={railCollapsed ? 'Expand rail' : 'Collapse rail'}
-            onClick={(e) => {
-              setRailCollapsed((c) => !c)
-              // Keep keyboard nav live immediately after a mouse click --
-              // see the board keydown effect's comment. Pointer-only
-              // (`detail` is 0 for a keyboard-synthesized click) so Tab
-              // order is preserved for keyboard users, who keep focus here
-              // and are covered by the Enter/D activeElement guard instead.
-              if (e.detail > 0) e.currentTarget.blur()
-            }}
-          >
-            {railCollapsed ? '»' : '«'}
-          </button>
-          {!railCollapsed && (
-            <div className="rail-content">
-              <WeightSliders weights={weights} onChange={setWeights} />
+        <main className="main">
+          <div className="board-controls">
+            <PositionTabs value={positionFilter} onChange={setPositionFilter} />
+            <div className="board-controls-right">
+              <label className="rank-source">
+                Rank by{' '}
+                <select
+                  value={rankSource}
+                  onChange={(e) => setRankSource(e.target.value as RankSourceId)}
+                >
+                  {RANK_SOURCES.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
               <label className="hide-drafted">
                 <input
                   type="checkbox"
@@ -294,18 +255,15 @@ function App() {
                 Hide drafted
               </label>
             </div>
-          )}
-        </aside>
-        <main className="main">
-          <PositionTabs value={positionFilter} onChange={setPositionFilter} />
+          </div>
           {/* First load / fatal error with nothing to show yet: no table to
-              keep mounted, so a full-page message is the only option. */}
-          {players.length === 0 && loading && <p>Loading players…</p>}
+              keep mounted, so a skeleton stands in for it. */}
+          {players.length === 0 && loading && <BoardSkeleton />}
           {players.length === 0 && !loading && error && <p className="error">{error}</p>}
           {/* Once we have data, keep PlayerTable mounted across every
-              refetch (slider debounce, drafted toggle) so its internal sort
-              state survives -- swapping it for a loading message would
-              remount the table and reset sorting back to rank. */}
+              refetch (drafted toggle) so its internal sort state survives --
+              swapping it for a loading message would remount the table and
+              reset sorting back to rank. */}
           {players.length > 0 && (
             <>
               {error && <p className="error">{error}</p>}
@@ -315,10 +273,10 @@ function App() {
                   players={filteredPlayers}
                   onToggleDrafted={handleToggleDrafted}
                   onSelectPlayer={handleSelectPlayer}
-                  showTierBreaks={positionFilter !== 'ALL' && positionFilter !== 'FLEX'}
+                  rankSource={rankSource}
+                  positionFilter={positionFilter}
                   selectedIndex={selectedIndex}
                   onVisibleRowsChange={handleVisibleRowsChange}
-                  maxVorByPosition={maxVorByPosition}
                 />
                 {/* PlayerTable renders header + zero rows on its own when
                     filteredPlayers is empty; this sits right below it so the
@@ -338,18 +296,6 @@ function App() {
           )}
         </main>
       </div>
-      {/* Overlay, not a route -- mounting/unmounting it never touches
-          PlayerTable, so the board's sort/filter/scroll state survives
-          opening, swapping, or closing the drawer. */}
-      {selectedPlayerId && (
-        <PlayerProfile
-          playerId={selectedPlayerId}
-          weights={weights}
-          onClose={handleCloseProfile}
-          onToggleDrafted={handleToggleDrafted}
-          onSelectPlayer={handleSelectPlayerId}
-        />
-      )}
     </div>
   )
 }
