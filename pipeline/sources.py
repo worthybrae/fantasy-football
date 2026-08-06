@@ -96,7 +96,9 @@ def fetch_espn_adp(year: int, limit: int = 500) -> pd.DataFrame:
         raise ValueError("no rows parsed - upstream schema drift?")
     return df
 
-MFL_ADP_URL = "https://api.myfantasyleague.com/{year}/export?TYPE=adp&JSON=1"
+# IS_PPR=1 restricts to PPR-scored leagues; PERIOD=DRAFT widens the sample
+# to the whole draft season (~2.8k drafts vs ~280 for the recent window).
+MFL_ADP_URL = "https://api.myfantasyleague.com/{year}/export?TYPE=adp&JSON=1&IS_PPR=1&PERIOD=DRAFT"
 MFL_PLAYERS_URL = "https://api.myfantasyleague.com/{year}/export?TYPE=players&JSON=1"
 CBS_URL = "https://www.cbssports.com/fantasy/football/rankings/ppr/top200/"
 _MFL_POS = {"QB": "QB", "RB": "RB", "WR": "WR", "TE": "TE", "PK": "K"}

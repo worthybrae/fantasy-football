@@ -1,5 +1,6 @@
 export interface MarketSources {
-  ffc: number | null; espn: number | null; fp: number | null; fp_tier: number | null;
+  ffc: number | null; espn: number | null; fp: number | null;
+  mfl: number | null; cbs: number | null; fp_tier: number | null;
 }
 export interface BoardStats {
   season: number; games: number; ppg: number; points: number;
@@ -14,6 +15,18 @@ export interface Player {
   espn_ppr_rank: number | null;
   stats: BoardStats | null;
   rookie: boolean; drafted: boolean;
+}
+
+// URL slug for a player page: accent-folded kebab-case name
+// ("Amon-Ra St. Brown" -> "amon-ra-st-brown"). Resolved back to a player by
+// scanning the board list, so it must be a pure function of the name.
+export function playerSlug(name: string): string {
+  return name
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
 }
 
 async function detailText(res: Response): Promise<string> {
@@ -81,6 +94,14 @@ export interface ProfileSummary {
   proj_ppg: number | null;
   proj_delta: number | null;
 }
+export interface DepthChartGroup {
+  position: string;
+  players: { name: string; rank: number; is_me: boolean }[];
+}
+export interface ScheduleWeek {
+  week: number; opponent: string | null; home: boolean | null;
+  fpa_pg: number | null; pct: number | null;
+}
 export interface PlayerProfileData {
   header: Player;
   factors: { production: number; durability: number; role: number;
@@ -89,6 +110,8 @@ export interface PlayerProfileData {
   seasons: SeasonSummary[];
   game_log: GameLogRow[];
   outlook: Outlook;
+  depth_chart: DepthChartGroup[];
+  schedule: ScheduleWeek[];
   similar: { mode: 'stat_twins' | 'value_neighbors'; target_age?: number | null;
              players: SimilarPlayer[] };
 }

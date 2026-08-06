@@ -5,7 +5,11 @@ import GameLog from './GameLog'
 import SeasonTable from './SeasonTable'
 import SimilarPlayers from './SimilarPlayers'
 import SnapShareChart from './SnapShareChart'
-import SummaryStrip from './SummaryStrip'
+import StatTiles from './StatTiles'
+import RankingsPanel from './RankingsPanel'
+import DepthChartCard from './DepthChartCard'
+import ScheduleCalendar from './ScheduleCalendar'
+import PageSkeleton from './PageSkeleton'
 
 interface PlayerProfileProps {
   playerId: string
@@ -18,11 +22,6 @@ function depthSlotLabel(position: string, depthSlot: number | null): string | nu
   if (depthSlot === null) return null
   return `${position}${depthSlot}`
 }
-
-const fmt1 = (n: number | null) => (n === null ? '—' : n.toFixed(1))
-// FFC/ESPN ranks are always whole numbers; FP's ECR can carry a decimal --
-// show it only when present so the Market block doesn't print "12.0".
-const fmtSource = (n: number | null) => (n === null ? '—' : Number.isInteger(n) ? String(n) : n.toFixed(1))
 
 // Higher sos_raw/sos_pct = opponents allow more fantasy points at this
 // position = an easier ("softer") schedule; lower = a tougher one.
@@ -107,19 +106,19 @@ export default function PlayerProfile({ playerId, onClose, onToggleDrafted, onSe
   const header = profile?.header
   const depthSlot = header ? depthSlotLabel(header.position, profile.outlook.depth_slot) : null
 
+  if (loading && !profile) return <PageSkeleton />
+
   return (
-    <>
-      <div className="drawer-backdrop" onClick={onClose} />
-      <aside className="player-drawer">
-        <button type="button" className="drawer-close" aria-label="Close" onClick={onClose}>
-          ✕
-        </button>
-        {loading && !profile && <p>Loading profile…</p>}
-        {error && <p className="error">{error}</p>}
-        {header && profile && (
-          <>
-            <div className="drawer-header">
-              <h2>
+    <div className="player-page">
+      <button type="button" className="player-page-back" onClick={onClose}>
+        ← Back to board
+      </button>
+      {error && <p className="error">{error}</p>}
+      {header && profile && (
+        <>
+          <div className="pp-header">
+            <div>
+              <h2 className="pp-name">
                 {header.name}
                 {header.rookie && <span className="rookie-badge">R</span>}
               </h2>
@@ -128,25 +127,33 @@ export default function PlayerProfile({ playerId, onClose, onToggleDrafted, onSe
                   {header.position}
                 </span>{' '}
                 · {header.team} · Bye {header.bye ?? '—'}
+                {depthSlot && <> · {depthSlot}</>}
+                {' · '}
+                {sosLabel(profile.outlook.sos_raw, profile.outlook.sos_pct)}
               </p>
-              <div className="drawer-chips">
-                <span className="chip">ESPN PPR {header.espn_ppr_rank !== null ? `#${Math.round(header.espn_ppr_rank)}` : '—'}</span>
-                <span className="chip">Mkt {fmt1(header.market_rank)}</span>
-              </div>
-              <button type="button" className="drawer-draft-btn" onClick={handleToggleDraftedClick}>
-                {header.drafted ? 'Undo draft' : 'Mark drafted'}
-              </button>
             </div>
+            <button type="button" className="drawer-draft-btn" onClick={handleToggleDraftedClick}>
+              {header.drafted ? 'Undo draft' : 'Mark drafted'}
+            </button>
+          </div>
 
-            {(profile.summary.w_ppg !== null || profile.summary.proj_ppg !== null) && (
-              <section className="drawer-section">
-                <h3>Weighted per-game (last 3 yrs)</h3>
-                <SummaryStrip summary={profile.summary} position={header.position} />
-              </section>
-            )}
+          <div className="pp-grid">
+            <section className="pp-card pp-span7">
+              <h3>Production</h3>
+              <StatTiles summary={profile.summary} outlook={profile.outlook} position={header.position} />
+            </section>
+
+            <section className="pp-card pp-span5">
+              <h3>Rankings</h3>
+              <RankingsPanel
+                marketRank={header.market_rank}
+                marketSpread={header.market_spread}
+                sources={header.market_sources}
+              />
+            </section>
 
             {profile.seasons.length > 0 && (
-              <section className="drawer-section">
+              <section className="pp-card pp-span7">
                 <h3>Avg &amp; volatility by season</h3>
                 <SeasonRangeChart seasons={profile.seasons} position={header.position} />
               </section>
@@ -154,47 +161,37 @@ export default function PlayerProfile({ playerId, onClose, onToggleDrafted, onSe
 
             {['RB', 'WR', 'TE'].includes(header.position) &&
               profile.seasons.some((s) => s.snap_share !== null) && (
-              <section className="drawer-section">
+              <section className="pp-card pp-span5">
                 <h3>Snap share</h3>
                 <SnapShareChart seasons={profile.seasons} />
               </section>
             )}
 
-            <section className="drawer-section">
+            {profile.depth_chart.length > 0 && (
+              <section className="pp-card pp-span5">
+                <h3>Depth chart</h3>
+                <DepthChartCard team={header.team} groups={profile.depth_chart} />
+              </section>
+            )}
+
+            {profile.schedule.length > 0 && (
+              <section className="pp-card pp-span7">
+                <h3>2026 matchups</h3>
+                <ScheduleCalendar weeks={profile.schedule} position={header.position} bye={profile.outlook.bye} />
+              </section>
+            )}
+
+            <section className="pp-card pp-span12">
               <h3>Season history</h3>
               <SeasonTable seasons={profile.seasons} position={header.position} />
             </section>
 
-            <section className="drawer-section">
+            <section className="pp-card pp-span12">
               <h3>Game log</h3>
               <GameLog gameLog={profile.game_log} position={header.position} />
             </section>
 
-            <section className="drawer-section">
-              <h3>Outlook</h3>
-              <div className="drawer-chips">
-                {depthSlot && <span className="chip">{depthSlot}</span>}
-                <span className="chip">Implied {fmt1(profile.outlook.implied_points)} pts</span>
-                <span className="chip">
-                  {sosLabel(profile.outlook.sos_raw, profile.outlook.sos_pct)}
-                </span>
-                <span className="chip">Bye {profile.outlook.bye ?? '—'}</span>
-              </div>
-            </section>
-
-            <section className="drawer-section">
-              <h3>Market</h3>
-              <div className="drawer-chips">
-                <span className="chip">FFC {fmtSource(header.market_sources.ffc)}</span>
-                <span className="chip">ESPN {fmtSource(header.market_sources.espn)}</span>
-                <span className="chip">FP {fmtSource(header.market_sources.fp)}</span>
-                {header.market_sources.fp_tier !== null && (
-                  <span className="chip">FP tier {header.market_sources.fp_tier}</span>
-                )}
-              </div>
-            </section>
-
-            <section className="drawer-section">
+            <section className="pp-card pp-span12">
               <h3>Similar players</h3>
               <SimilarPlayers
                 mode={profile.similar.mode}
@@ -203,9 +200,9 @@ export default function PlayerProfile({ playerId, onClose, onToggleDrafted, onSe
                 onSelectPlayer={onSelectPlayer}
               />
             </section>
-          </>
-        )}
-      </aside>
-    </>
+          </div>
+        </>
+      )}
+    </div>
   )
 }

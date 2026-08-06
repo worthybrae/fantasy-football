@@ -258,6 +258,74 @@ def game_log(weekly: pd.DataFrame, player_id: str) -> list[dict]:
     return rows
 
 
+_DEPTH_POSITIONS = ["QB", "RB", "WR", "TE"]
+
+
+def team_depth_chart(depth: pd.DataFrame, team: str, player_id: str) -> list[dict]:
+    """Latest-snapshot offensive depth chart for the player's team.
+
+    Works on the RAW depth_charts schema (dt/team/pos_abb/pos_rank); older
+    or unknown schemas degrade to an empty list and the UI hides the card.
+    """
+    need = {"gsis_id", "team", "pos_abb", "pos_rank", "player_name"}
+    if depth.empty or not need.issubset(depth.columns):
+        return []
+    d = depth[depth["team"] == team].copy()
+    if d.empty:
+        return []
+    if "dt" in d.columns:
+        d = d[d["dt"] == d["dt"].max()]
+    d["pos_rank"] = pd.to_numeric(d["pos_rank"], errors="coerce")
+    out = []
+    for pos in _DEPTH_POSITIONS:
+        rows = (d[d["pos_abb"] == pos].dropna(subset=["pos_rank"])
+                .sort_values("pos_rank").drop_duplicates("gsis_id").head(4))
+        players = [{"name": r["player_name"], "rank": int(r["pos_rank"]),
+                    "is_me": r["gsis_id"] == player_id}
+                   for _, r in rows.iterrows()]
+        if players:
+            out.append({"position": pos, "players": players})
+    return out
+
+
+def weekly_difficulty(schedules: pd.DataFrame, prior_weekly: pd.DataFrame,
+                      team: str, position: str) -> list[dict]:
+    """Week-by-week matchup difficulty for the player's team and position.
+
+    fpa_pg = opponent's prior-season PPR points allowed per game to this
+    position; pct = its percentile among all teams (high = allows a lot =
+    soft matchup). Weeks without a game (bye) carry a null opponent. K/DST
+    have no meaningful positional FPA -- empty list, card hidden.
+    """
+    if schedules.empty or prior_weekly.empty or position not in _DEPTH_POSITIONS:
+        return []
+    wk = prior_weekly.copy()
+    wk["ppr_points"] = compute_ppr_points(wk)
+    def_games = wk.groupby("opponent_team")["week"].nunique()
+    allowed = (wk[wk["position"] == position]
+               .groupby("opponent_team")["ppr_points"].sum() / def_games).dropna()
+    if allowed.empty:
+        return []
+    pct = allowed.rank(pct=True) * 100
+    games = {}
+    mine = schedules[(schedules["home_team"] == team) | (schedules["away_team"] == team)]
+    for _, g in mine.iterrows():
+        week = int(g["week"])
+        if week > 18:
+            continue
+        home = g["home_team"] == team
+        games[week] = (g["away_team"] if home else g["home_team"], home)
+    rows = []
+    for week in range(1, 19):
+        opp, home = games.get(week, (None, None))
+        rows.append({
+            "week": week, "opponent": opp, "home": home,
+            "fpa_pg": round(float(allowed[opp]), 1) if opp in allowed.index else None,
+            "pct": round(float(pct[opp])) if opp in pct.index else None,
+        })
+    return rows
+
+
 def _outlook(weekly: pd.DataFrame, depth: pd.DataFrame, schedules: pd.DataFrame,
              player_row: dict) -> dict:
     team = player_row.get("team")
@@ -362,6 +430,7 @@ def build_profile(conn, player_id: str, weights: dict | None = None) -> dict | N
                              if summary["proj_ppg"] is not None and summary["w_ppg"] is not None
                              else None)
 
+    prior = weekly[weekly["season"] == weekly["season"].max()] if not weekly.empty else weekly
     payload = {
         "header": header,
         "factors": factors_out,
@@ -369,6 +438,8 @@ def build_profile(conn, player_id: str, weights: dict | None = None) -> dict | N
         "seasons": seasons,
         "game_log": logs,
         "outlook": outlook_out,
+        "depth_chart": team_depth_chart(depth, header["team"], player_id),
+        "schedule": weekly_difficulty(schedules, prior, header["team"], header["position"]),
         "similar": similar,
     }
     return _scrub(payload)

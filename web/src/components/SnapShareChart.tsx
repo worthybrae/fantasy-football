@@ -5,11 +5,11 @@ interface SnapShareChartProps {
 }
 
 const BAR_COLOR = '#3987e5'
-const SLOT_WIDTH = 56
+const SLOT_WIDTH = 48
 const MIN_SLOTS = 6
-const BAR_WIDTH = 28
-const PLOT_HEIGHT = 120
-const MARGIN = { top: 12, right: 12, bottom: 26, left: 38 }
+const BAR_WIDTH = 22
+const PLOT_HEIGHT = 100
+const MARGIN = { top: 10, right: 10, bottom: 24, left: 34 }
 
 function seasonTag(season: number): string {
   return `'${String(season).slice(-2)}`

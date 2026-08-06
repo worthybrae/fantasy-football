@@ -228,6 +228,8 @@ def build_board(conn, weights: dict | None = None) -> pd.DataFrame:
     espn = read_table(conn, "espn_adp")
     fp = read_table(conn, "fp_ecr")
     sleeper = read_table(conn, "sleeper_ids")
+    mfl = read_table(conn, "mfl_adp")
+    cbs = read_table(conn, "cbs_ranks")
 
     uni = _build_universe(weekly)
     uni["norm"] = uni["name"].map(_norm_name)
@@ -299,7 +301,7 @@ def build_board(conn, weights: dict | None = None) -> pd.DataFrame:
     uni = assign_tiers(uni)
     uni = uni.sort_values("vor", ascending=False).reset_index(drop=True)
     uni["rank"] = uni.index + 1
-    uni = add_market(uni, espn, fp, sleeper)
+    uni = add_market(uni, espn, fp, sleeper, mfl=mfl, cbs=cbs)
     uni = uni.merge(_latest_season_stats(weekly), on="player_id", how="left")
 
     drafted_ids = set(drafted["player_id"]) if not drafted.empty else set()

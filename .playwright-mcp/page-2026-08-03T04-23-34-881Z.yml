@@ -1,0 +1,39 @@
+- generic [ref=f18e3]:
+  - banner [ref=f18e5]:
+    - heading "Draft Board" [level=1] [ref=f18e8]
+    - textbox "Search players by name or team" [ref=f18e10]:
+      - /placeholder: Search players…  /
+    - generic [ref=f18e13]:
+      - 'generic "weekly: 174373 rows · refreshed 2026-08-02 21:51:28.477190" [ref=f18e14]': weekly
+      - 'generic "snap_counts: 253106 rows · refreshed 2026-08-02 21:51:31.471265" [ref=f18e15]': snap_counts
+      - 'generic "depth_charts: 394390 rows · refreshed 2026-08-02 21:51:32.105167" [ref=f18e16]': depth_charts
+      - 'generic "schedules: 272 rows · refreshed 2026-08-02 21:51:32.378289" [ref=f18e17]': schedules
+      - 'generic "adp: 246 rows · refreshed 2026-08-02 21:51:32.557771" [ref=f18e18]': adp
+      - 'generic "espn_adp: 500 rows · refreshed 2026-08-02 21:51:33.549996" [ref=f18e19]': espn_adp
+      - 'generic "fp_ecr: 517 rows · refreshed 2026-08-02 21:51:33.661649" [ref=f18e20]': fp_ecr
+      - 'generic "sleeper_ids: 1316 rows · refreshed 2026-08-02 21:51:33.903245" [ref=f18e21]': sleeper_ids
+  - main [ref=f18e23]:
+    - generic [ref=f18e24]:
+      - generic [ref=f18e25]:
+        - button "ALL" [ref=f18e26] [cursor=pointer]
+        - button "QB" [ref=f18e27] [cursor=pointer]
+        - button "RB" [ref=f18e28] [cursor=pointer]
+        - button "WR" [ref=f18e29] [cursor=pointer]
+        - button "TE" [ref=f18e30] [cursor=pointer]
+        - button "FLEX" [ref=f18e31] [cursor=pointer]
+        - button "K" [ref=f18e32] [cursor=pointer]
+        - button "DST" [ref=f18e33] [cursor=pointer]
+      - generic [ref=f18e34]:
+        - generic [ref=f18e35]:
+          - text: Rank by
+          - combobox "Rank by" [ref=f18e36]:
+            - option "Aggregate" [selected]
+            - option "FFC ADP"
+            - option "ESPN PPR"
+            - option "FantasyPros"
+            - option "MFL ADP"
+            - option "CBS"
+        - generic [ref=f18e37]:
+          - checkbox "Hide drafted" [ref=f18e38]
+          - text: Hide drafted
+    - paragraph [ref=f18e39]: Loading players…

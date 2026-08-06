@@ -159,6 +159,35 @@
   gap: 16px;
 }
 
+.board-controls-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.rank-source {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+
+.rank-source select {
+  background: var(--bg-2);
+  color: var(--text-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: var(--text-sm);
+  padding: 3px 6px;
+  outline: none;
+}
+
+.rank-source select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-bg);
+}
+
 .hide-drafted {
   display: flex;
   align-items: center;
@@ -414,49 +443,365 @@ td:first-child {
 
 /* -- player profile drawer -- */
 
-/* Both sit above .topbar's z-index: 30 -- the drawer is a full-viewport
-   overlay and needs to cover the sticky top bar too (including the close
-   button, which lines up with the top bar's right side), not just the
-   board content below it. */
-.drawer-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.5);
-  z-index: 40;
-}
-
-.player-drawer {
-  position: fixed;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: min(70vw, 900px);
+/* Full-width standalone player page (route /players/:slug). Replaces the
+   old slide-in drawer; the drawer-section styles below are shared. */
+.player-page {
+  width: 100%;
+  min-height: 100svh;
   overflow-y: auto;
-  background: var(--bg-1);
-  border-left: 1px solid var(--border);
-  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.35);
-  padding: var(--space-5);
-  z-index: 41;
+  background: var(--bg-0);
+  padding: var(--space-5) max(var(--space-5), 4vw);
   text-align: left;
 }
 
-.drawer-close {
-  position: absolute;
-  top: var(--space-4);
-  right: var(--space-4);
+.player-page-back {
   background: transparent;
-  border: 1px solid var(--border);
   color: var(--text-2);
+  border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 4px 8px;
-  cursor: pointer;
+  padding: 4px 12px;
   font-size: var(--text-sm);
+  cursor: pointer;
+  margin-bottom: var(--space-4);
 }
 
-.drawer-close:hover {
-  color: var(--text-1);
+.player-page-back:hover {
   border-color: var(--accent-border);
+  color: var(--text-1);
 }
+
+/* -- player page: dossier grid -- */
+
+@keyframes pp-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+.player-page {
+  animation: pp-fade-in 0.18s ease-out;
+}
+
+.pp-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+.pp-name {
+  margin: 0 0 4px;
+  font-size: 28px;
+  letter-spacing: -0.01em;
+}
+
+.pp-grid {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.pp-span5 { grid-column: span 5; }
+.pp-span7 { grid-column: span 7; }
+.pp-span12 { grid-column: span 12; }
+
+@media (max-width: 1000px) {
+  .pp-span5, .pp-span7 { grid-column: span 12; }
+}
+
+.pp-card {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-4);
+  min-width: 0;
+}
+
+.pp-card > h3 {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-2);
+}
+
+.card-footnote {
+  margin: var(--space-3) 0 0;
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+
+/* -- stat tiles -- */
+
+.stat-tiles-hero {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.stat-tiles-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(86px, 1fr));
+  gap: var(--space-3);
+}
+
+.stat-tile {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.stat-tile-value {
+  font-size: var(--text-lg, 18px);
+  font-weight: 600;
+  color: var(--text-1);
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.stat-tile-hero .stat-tile-value {
+  font-size: 30px;
+}
+
+.stat-tile-label {
+  font-size: var(--text-sm);
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.stat-tile-delta {
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.stat-tile-delta.up { color: var(--ok); }
+.stat-tile-delta.down { color: var(--fail); }
+
+/* -- rankings panel -- */
+
+.rankings-agg {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.rankings-agg-value {
+  font-size: 40px;
+  font-weight: 600;
+  color: var(--text-1);
+  line-height: 1;
+}
+
+.rankings-agg-label {
+  font-size: var(--text-sm);
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.rankings-spread {
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.rankings-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rankings-row {
+  display: grid;
+  grid-template-columns: 96px 1fr 44px;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.rankings-row-label {
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+
+.rankings-row-bar {
+  height: 8px;
+  background: var(--bg-2);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.rankings-row-fill {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  background: var(--accent);
+}
+
+.rankings-row-value {
+  text-align: right;
+  color: var(--text-1);
+  font-weight: 600;
+}
+
+.rankings-footnote {
+  margin: var(--space-3) 0 0;
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+
+/* -- depth chart card -- */
+
+/* Two columns, not four: at four the card is ~110px per column and real
+   names ("Xavier Hutchinson") truncate to ellipsis, which defeats the
+   point of showing the room a player is competing in. */
+.depth-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3) var(--space-4);
+}
+
+.depth-list {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.depth-player {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 6px;
+  border-radius: var(--radius);
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+
+.depth-player.depth-me {
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-border);
+  color: var(--text-1);
+  font-weight: 600;
+}
+
+.depth-rank {
+  color: var(--text-3);
+  width: 1em;
+  flex-shrink: 0;
+}
+
+.depth-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* -- schedule calendar -- */
+
+.sched-grid {
+  display: grid;
+  grid-template-columns: repeat(9, 1fr);
+  gap: 6px;
+}
+
+@media (max-width: 700px) {
+  .sched-grid { grid-template-columns: repeat(6, 1fr); }
+}
+
+.sched-cell {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 4px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.sched-week {
+  font-size: 10px;
+  color: var(--text-3);
+}
+
+.sched-opp {
+  font-size: var(--text-sm);
+  color: var(--text-1);
+  white-space: nowrap;
+}
+
+.sched-bye .sched-opp,
+.sched-empty .sched-opp {
+  color: var(--text-3);
+}
+
+.sched-bye {
+  border-style: dashed;
+}
+
+.sched-key {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  vertical-align: middle;
+}
+
+/* -- skeleton loading -- */
+
+/* One highlight band sweeping across each block, not a tiled gradient --
+   `background-size: 200% 100%` + no-repeat is what keeps it a single pass
+   regardless of the block's width. */
+@keyframes sk-shimmer {
+  from { background-position: 150% 0; }
+  to { background-position: -50% 0; }
+}
+
+.skeleton {
+  border-radius: var(--radius);
+  background-color: var(--bg-1);
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--bg-2) 85%, transparent) 50%,
+    transparent 100%);
+  background-size: 200% 100%;
+  background-repeat: no-repeat;
+  animation: sk-shimmer 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton { animation: none; }
+  .player-page { animation: none; }
+}
+
+.board-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sk-row { height: 32px; }
+.sk-head { height: 34px; margin-bottom: 4px; }
+.sk-back { width: 120px; height: 28px; margin-bottom: var(--space-4); }
+.sk-title { width: 280px; height: 30px; margin-bottom: 8px; }
+.sk-subtitle { width: 200px; height: 16px; margin-bottom: var(--space-4); }
+.sk-block { height: 180px; }
+.sk-chart { height: 220px; }
 
 .drawer-header h2 {
   margin: 0 0 4px;
@@ -597,9 +942,12 @@ td:first-child {
   display: block;
 }
 
-/* Full-width season charts: fixed viewBox scaled to the drawer width. */
+/* Full-width season charts: fixed viewBox scaled to the container. Capped
+   so the full-page player view doesn't blow marks and labels up to poster
+   scale on wide screens. */
 .season-chart-wide {
   width: 100%;
+  max-width: 960px;
   height: auto;
 }
 

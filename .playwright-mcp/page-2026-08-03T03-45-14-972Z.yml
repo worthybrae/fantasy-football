@@ -1,0 +1,29 @@
+- generic [ref=f8e3]:
+  - banner [ref=f8e5]:
+    - heading "Draft Board" [level=1] [ref=f8e8]
+    - textbox "Search players by name or team" [ref=f8e10]:
+      - /placeholder: Search players…  /
+    - generic [ref=f8e13]:
+      - 'generic "weekly: 174373 rows · refreshed 2026-08-02 21:51:28.477190" [ref=f8e14]': weekly
+      - 'generic "snap_counts: 253106 rows · refreshed 2026-08-02 21:51:31.471265" [ref=f8e15]': snap_counts
+      - 'generic "depth_charts: 394390 rows · refreshed 2026-08-02 21:51:32.105167" [ref=f8e16]': depth_charts
+      - 'generic "schedules: 272 rows · refreshed 2026-08-02 21:51:32.378289" [ref=f8e17]': schedules
+      - 'generic "adp: 246 rows · refreshed 2026-08-02 21:51:32.557771" [ref=f8e18]': adp
+      - 'generic "espn_adp: 500 rows · refreshed 2026-08-02 21:51:33.549996" [ref=f8e19]': espn_adp
+      - 'generic "fp_ecr: 517 rows · refreshed 2026-08-02 21:51:33.661649" [ref=f8e20]': fp_ecr
+      - 'generic "sleeper_ids: 1316 rows · refreshed 2026-08-02 21:51:33.903245" [ref=f8e21]': sleeper_ids
+  - main [ref=f8e23]:
+    - generic [ref=f8e24]:
+      - generic [ref=f8e25]:
+        - button "ALL" [ref=f8e26] [cursor=pointer]
+        - button "QB" [ref=f8e27] [cursor=pointer]
+        - button "RB" [ref=f8e28] [cursor=pointer]
+        - button "WR" [ref=f8e29] [cursor=pointer]
+        - button "TE" [ref=f8e30] [cursor=pointer]
+        - button "FLEX" [ref=f8e31] [cursor=pointer]
+        - button "K" [ref=f8e32] [cursor=pointer]
+        - button "DST" [ref=f8e33] [cursor=pointer]
+      - generic [ref=f8e34]:
+        - checkbox "Hide drafted" [ref=f8e35]
+        - text: Hide drafted
+    - paragraph [ref=f8e36]: Loading players…

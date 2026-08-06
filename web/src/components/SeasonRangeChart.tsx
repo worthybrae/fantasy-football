@@ -9,16 +9,16 @@ interface SeasonRangeChartProps {
 // validated palette, same as the weekly chart's oldest recent season).
 const POINT_COLOR = '#3987e5'
 
-const SLOT_WIDTH = 56
+const SLOT_WIDTH = 48
 // Padding the slot count keeps a short career (rookie with one season)
 // from scaling its few marks and labels up to poster size when the svg
-// stretches to the full drawer width.
+// stretches to the full card width.
 const MIN_SLOTS = 6
-const PLOT_HEIGHT = 200
+const PLOT_HEIGHT = 130
 // Extra top room for the positional-finish labels above the whiskers.
-const MARGIN = { top: 28, right: 12, bottom: 26, left: 38 }
-const POINT_RADIUS = 5
-const WHISKER_CAP = 10
+const MARGIN = { top: 24, right: 10, bottom: 24, left: 34 }
+const POINT_RADIUS = 4
+const WHISKER_CAP = 8
 
 function seasonTag(season: number): string {
   return `'${String(season).slice(-2)}`

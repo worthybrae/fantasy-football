@@ -10,10 +10,28 @@ import {
 import type { Player } from '../api'
 import { boardColumnsFor } from '../statColumns'
 
+// Selectable sort/rank sources for the board's rank column. 'agg' is the
+// blended market_rank; the rest read straight from market_sources.
+export const RANK_SOURCES = [
+  { id: 'agg', label: 'Aggregate', short: 'Mkt' },
+  { id: 'ffc', label: 'FFC ADP', short: 'FFC' },
+  { id: 'espn', label: 'ESPN PPR', short: 'ESPN' },
+  { id: 'fp', label: 'FantasyPros', short: 'FP' },
+  { id: 'mfl', label: 'MFL ADP', short: 'MFL' },
+  { id: 'cbs', label: 'CBS', short: 'CBS' },
+] as const
+export type RankSourceId = (typeof RANK_SOURCES)[number]['id']
+
+function rankValue(p: Player, source: RankSourceId): number | null {
+  return source === 'agg' ? p.market_rank : p.market_sources[source]
+}
+
 interface PlayerTableProps {
   players: Player[]
   onToggleDrafted: (p: Player) => Promise<void>
   onSelectPlayer: (p: Player) => void
+  /** Which ranking populates and sorts the rank column ('agg' = blended). */
+  rankSource: RankSourceId
   /** Drives which position-specific stat columns are appended after
    *  the market columns -- ALL/FLEX/K/DST show the summary stats only. */
   positionFilter: string
@@ -34,26 +52,44 @@ const fmtRank = (n: number | null) => (n === null ? '—' : String(Math.round(n)
 // FFC/ESPN ranks are always whole numbers; FP's ECR can carry a decimal --
 // show it only when present so the tooltip doesn't print "12.0".
 const fmtSource = (n: number | null) => (n === null ? '—' : Number.isInteger(n) ? String(n) : n.toFixed(1))
+// The rank column's id embeds the selected source (rank_agg, rank_ffc, …).
+// TanStack caches each row's accessor values BY column id, so reusing one id
+// while swapping the accessor serves stale cached values to the sorter --
+// the header and cells update but the row order doesn't. A per-source id
+// gets a fresh cache slot instead.
+const rankColumnId = (source: RankSourceId) => `rank_${source}`
+
 const NUMERIC_COLUMNS = new Set([
-  'bye', 'market_rank', 'espn_ppr_rank',
+  'bye', 'espn_ppr_rank',
+  ...RANK_SOURCES.map((s) => rankColumnId(s.id)),
   ...['QB', 'RB', 'WR'].flatMap((p) => boardColumnsFor(p).map((c) => c.id)),
 ])
 // Column ids that exist regardless of positionFilter -- used below to decide
 // whether a stale sort (e.g. sorted by an RB-only stat column) still applies
 // after switching tabs.
 const STATIC_COLUMN_IDS = [
-  'drafted-toggle', 'espn_ppr_rank', 'name', 'position', 'team', 'bye', 'market_rank',
+  'drafted-toggle', 'espn_ppr_rank', 'name', 'position', 'team', 'bye',
+  ...RANK_SOURCES.map((s) => rankColumnId(s.id)),
 ]
 
 export default function PlayerTable({
   players,
   onToggleDrafted,
   onSelectPlayer,
+  rankSource,
   positionFilter,
   selectedIndex,
   onVisibleRowsChange,
 }: PlayerTableProps) {
-  const [sorting, setSorting] = useState<SortingState>([{ id: 'espn_ppr_rank', desc: false }])
+  // Default order is the aggregated market rank -- the mean of every
+  // PPR-native source (FFC/ESPN PPR/FP/MFL/CBS) -- not any single site.
+  const [sorting, setSorting] = useState<SortingState>([{ id: rankColumnId('agg'), desc: false }])
+
+  // Picking a rank source is a request to sort by it -- snap the sort back
+  // to the rank column even if the user had sorted by some stat column.
+  useEffect(() => {
+    setSorting([{ id: rankColumnId(rankSource), desc: false }])
+  }, [rankSource])
   const tableRef = useRef<HTMLTableElement>(null)
 
   const columns = useMemo<ColumnDef<Player>[]>(
@@ -130,17 +166,25 @@ export default function PlayerTable({
         cell: ({ getValue }) => fmtNullable(getValue<number | null>()),
       },
       {
-        accessorKey: 'market_rank',
-        header: 'Mkt',
+        id: rankColumnId(rankSource),
+        // null -> undefined so sortUndefined 'last' applies (TanStack only
+        // special-cases undefined), same as the espn_ppr_rank column.
+        accessorFn: (row) => rankValue(row, rankSource) ?? undefined,
+        header: RANK_SOURCES.find((s) => s.id === rankSource)?.short ?? 'Mkt',
+        sortUndefined: 'last',
         cell: ({ row }) => {
           const p = row.original
-          if (p.market_rank === null) return '—'
-          const { ffc, espn, fp, fp_tier } = p.market_sources
-          const title = `FFC ${fmtSource(ffc)} · ESPN ADP ${fmtSource(espn)} · FP ${fmtSource(fp)} · FP tier ${fmtSource(fp_tier)}`
+          const value = rankValue(p, rankSource)
+          if (value === null) return '—'
+          const { ffc, espn, fp, mfl, cbs, fp_tier } = p.market_sources
+          const title = `FFC ${fmtSource(ffc)} · ESPN PPR ${fmtSource(espn)} · FP ${fmtSource(fp)} · MFL ${fmtSource(mfl)} · CBS ${fmtSource(cbs)} · FP tier ${fmtSource(fp_tier)}`
+          if (rankSource !== 'agg') {
+            return <span title={title}>{fmtSource(value)}</span>
+          }
           const showSpread = p.market_spread !== null && p.market_spread >= 12
           return (
             <span title={title}>
-              {fmt1(p.market_rank)}
+              {fmt1(value)}
               {showSpread && (
                 <span style={{ opacity: 0.6 }}> ±{Math.round((p.market_spread as number) / 2)}</span>
               )}
@@ -158,7 +202,7 @@ export default function PlayerTable({
         cell: ({ row }) => (row.original.stats ? c.cell(row.original.stats) : '—'),
       })),
     ],
-    [onToggleDrafted, positionFilter]
+    [onToggleDrafted, positionFilter, rankSource]
   )
 
   // TanStack drops an active sort when its column disappears from the

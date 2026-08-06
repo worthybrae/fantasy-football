@@ -52,12 +52,14 @@ def test_norm_name_folds_accents():
 def test_board_shape_and_join(tmp_path):
     board = build_board(_seed(tmp_path))
     star = board[board["player_id"] == "p1"].iloc[0]
-    # single-source-ranked seed (FFC only): star's FFC adp (5.1) is lowest -> rank 1
-    assert star["market_rank"] == 1.0
+    # star: FFC adp (5.1) is lowest -> FFC rank 1; ESPN PPR rank 2 is a
+    # consensus input too (the PPR-native ESPN component) -> mean 1.5
+    assert star["market_rank"] == 1.5
     assert star["market_sources"]["ffc"] == 1.0
+    assert star["market_sources"]["espn"] == 2.0
     assert not star["rookie"]
-    # espn_ppr_rank flows through the name-fallback join path (no sleeper
-    # crosswalk in this fixture) and is display data, not a ranking input.
+    # espn_ppr_rank still flows through the name-fallback join path (no
+    # sleeper crosswalk in this fixture) as its own column.
     assert star["espn_ppr_rank"] == 2.0
     rook = board[board["name"] == "Rookie Guy"].iloc[0]
     assert pd.isna(rook["espn_ppr_rank"])  # no ESPN row for this player

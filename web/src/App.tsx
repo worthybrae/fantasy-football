@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { fetchPlayers, setDrafted, type Player } from './api'
-import PlayerTable from './components/PlayerTable'
-import PlayerProfile from './components/PlayerProfile'
+import { Route, Routes, useNavigate } from 'react-router-dom'
+import { fetchPlayers, playerSlug, setDrafted, type Player } from './api'
+import PlayerTable, { RANK_SOURCES, type RankSourceId } from './components/PlayerTable'
+import PlayerPage from './components/PlayerPage'
+import { BoardSkeleton } from './components/PageSkeleton'
 import PositionTabs from './components/PositionTabs'
 import FreshnessBadge from './components/FreshnessBadge'
 import TopBar from './components/TopBar'
@@ -10,12 +12,22 @@ import './App.css'
 const FLEX_POSITIONS = new Set(['RB', 'WR', 'TE'])
 
 function App() {
+  return (
+    <Routes>
+      <Route path="/" element={<Board />} />
+      <Route path="/players/:slug" element={<PlayerPage />} />
+    </Routes>
+  )
+}
+
+function Board() {
+  const navigate = useNavigate()
   const [players, setPlayers] = useState<Player[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [hideDrafted, setHideDrafted] = useState(false)
   const [positionFilter, setPositionFilter] = useState('ALL')
-  const [selectedPlayerId, setSelectedPlayerId] = useState<string | null>(null)
+  const [rankSource, setRankSource] = useState<RankSourceId>('agg')
   const [search, setSearch] = useState('')
   // Keyboard cursor over the board's VISIBLE (filtered+sorted) row order --
   // an index into `visibleIds`, not into `players`, since sorting lives
@@ -59,11 +71,6 @@ function App() {
     []
   )
 
-  // Memoized so PlayerProfile's Esc-listener effect (keyed on this prop)
-  // doesn't tear down and re-add its keydown listener on every App
-  // re-render (e.g. every players refetch while the drawer is open).
-  const handleCloseProfile = useCallback(() => setSelectedPlayerId(null), [])
-
   // Passed to PlayerTable; called whenever the sorted+filtered row order
   // changes so the keyboard cursor always maps to what's actually on
   // screen. `[selectedIndex === i]` setState calls below are no-ops when
@@ -72,23 +79,10 @@ function App() {
   // to be.
   const handleVisibleRowsChange = useCallback((ids: string[]) => setVisibleIds(ids), [])
 
-  // Any path that points the drawer at a player -- a row click, a keyboard
-  // Enter, or clicking a "similar player" inside the drawer itself -- also
-  // moves the keyboard cursor there, so arrowing right afterward continues
-  // from that row instead of jumping back to wherever the cursor last was.
-  const handleSelectPlayerId = useCallback(
-    (id: string) => {
-      setSelectedPlayerId(id)
-      setSelectedIndex((i) => {
-        const idx = visibleIds.indexOf(id)
-        return idx === -1 ? i : idx
-      })
-    },
-    [visibleIds]
-  )
+  // Opening a player (row click or keyboard Enter) navigates to their page.
   const handleSelectPlayer = useCallback(
-    (p: Player) => handleSelectPlayerId(p.player_id),
-    [handleSelectPlayerId]
+    (p: Player) => navigate(`/players/${playerSlug(p.name)}`),
+    [navigate]
   )
 
   // Clamp (not preserve) the cursor whenever the visible set changes shape --
@@ -129,12 +123,9 @@ function App() {
   // Esc is the one exception: it's always live (regardless of focus, as
   // long as it's not already inside the search box -- TopBar's own scoped
   // Esc handler stops propagation before this listener sees the event in
-  // that case), with a fixed priority: close the drawer if it's open, else
-  // clear search if it has text, else do nothing. The drawer's own close
-  // (PlayerProfile's window-level Esc listener, mounted only while it's
-  // open) handles the first case; this effect only ever needs to handle the
-  // second, and skips entirely while the drawer is open so the two don't
-  // both fire off one keypress.
+  // that case) and clears the search if it has text. The player page is a
+  // separate route with its own Esc handling, so there is no drawer state
+  // to coordinate with here anymore.
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       // Never hijack a browser/OS chord (Cmd+D bookmark, Ctrl+D, Alt+D, ...)
@@ -145,12 +136,12 @@ function App() {
       const isTyping = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable
 
       if (e.key === 'Escape') {
-        if (selectedPlayerId || isTyping) return
+        if (isTyping) return
         if (search.trim()) setSearch('')
         return
       }
 
-      if (isTyping || selectedPlayerId) return
+      if (isTyping) return
 
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         if (visibleIds.length === 0) return
@@ -176,7 +167,8 @@ function App() {
         if (isControlActivation) return
         if (selectedIndex === null) return
         const id = visibleIds[selectedIndex]
-        if (id) setSelectedPlayerId(id)
+        const player = players.find((p) => p.player_id === id)
+        if (player) navigate(`/players/${playerSlug(player.name)}`)
         return
       }
 
@@ -193,7 +185,7 @@ function App() {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [selectedPlayerId, search, selectedIndex, visibleIds, players, handleToggleDrafted])
+  }, [search, selectedIndex, visibleIds, players, handleToggleDrafted, navigate])
 
   // Screen-reader-only announcement of the keyboard cursor, since its
   // on-screen indicator (PlayerTable's `.row-selected` outline) is purely
@@ -234,24 +226,39 @@ function App() {
         search={search}
         onSearch={setSearch}
         meta={<FreshnessBadge />}
-        searchShortcutDisabled={selectedPlayerId !== null}
+        searchShortcutDisabled={false}
       />
       <div className="app-body">
         <main className="main">
           <div className="board-controls">
             <PositionTabs value={positionFilter} onChange={setPositionFilter} />
-            <label className="hide-drafted">
-              <input
-                type="checkbox"
-                checked={hideDrafted}
-                onChange={(e) => setHideDrafted(e.target.checked)}
-              />
-              Hide drafted
-            </label>
+            <div className="board-controls-right">
+              <label className="rank-source">
+                Rank by{' '}
+                <select
+                  value={rankSource}
+                  onChange={(e) => setRankSource(e.target.value as RankSourceId)}
+                >
+                  {RANK_SOURCES.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="hide-drafted">
+                <input
+                  type="checkbox"
+                  checked={hideDrafted}
+                  onChange={(e) => setHideDrafted(e.target.checked)}
+                />
+                Hide drafted
+              </label>
+            </div>
           </div>
           {/* First load / fatal error with nothing to show yet: no table to
-              keep mounted, so a full-page message is the only option. */}
-          {players.length === 0 && loading && <p>Loading players…</p>}
+              keep mounted, so a skeleton stands in for it. */}
+          {players.length === 0 && loading && <BoardSkeleton />}
           {players.length === 0 && !loading && error && <p className="error">{error}</p>}
           {/* Once we have data, keep PlayerTable mounted across every
               refetch (drafted toggle) so its internal sort state survives --
@@ -266,6 +273,7 @@ function App() {
                   players={filteredPlayers}
                   onToggleDrafted={handleToggleDrafted}
                   onSelectPlayer={handleSelectPlayer}
+                  rankSource={rankSource}
                   positionFilter={positionFilter}
                   selectedIndex={selectedIndex}
                   onVisibleRowsChange={handleVisibleRowsChange}
@@ -288,17 +296,6 @@ function App() {
           )}
         </main>
       </div>
-      {/* Overlay, not a route -- mounting/unmounting it never touches
-          PlayerTable, so the board's sort/filter/scroll state survives
-          opening, swapping, or closing the drawer. */}
-      {selectedPlayerId && (
-        <PlayerProfile
-          playerId={selectedPlayerId}
-          onClose={handleCloseProfile}
-          onToggleDrafted={handleToggleDrafted}
-          onSelectPlayer={handleSelectPlayerId}
-        />
-      )}
     </div>
   )
 }

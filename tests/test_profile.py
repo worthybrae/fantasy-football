@@ -142,7 +142,8 @@ def test_scrubs_pandas_na_from_empty_adp(tmp_path):
     json.dumps(p, allow_nan=False)  # must not raise
     assert "adp" not in p["header"]
     assert p["header"]["market_rank"] is None
-    assert p["header"]["market_sources"] == {"ffc": None, "espn": None, "fp": None, "fp_tier": None}
+    assert p["header"]["market_sources"] == {"ffc": None, "espn": None, "fp": None,
+                                             "mfl": None, "cbs": None, "fp_tier": None}
 
 def _twin_weekly_rows():
     # p1: the profiled player, 2025 (latest season).
@@ -371,3 +372,55 @@ def test_build_profile_summary_degrades_without_proj_column(tmp_path):
     p = build_profile(_seed(tmp_path), "p1")
     assert p["summary"]["proj_ppg"] is None and p["summary"]["proj_delta"] is None
     assert p["summary"]["w_ppg"] == 20.0
+
+def _depth_fixture():
+    rows = []
+    for dt, rb1 in [("2026-08-01T09:00:00Z", "Old Starter"), ("2026-08-02T09:00:00Z", "New Starter")]:
+        rows += [
+            {"dt": dt, "team": "HOU", "gsis_id": "qb1", "player_name": "Some QB",
+             "pos_abb": "QB", "pos_rank": 1},
+            {"dt": dt, "team": "HOU", "gsis_id": "rb1", "player_name": rb1,
+             "pos_abb": "RB", "pos_rank": 1},
+            {"dt": dt, "team": "HOU", "gsis_id": "rb2", "player_name": "Me Backup",
+             "pos_abb": "RB", "pos_rank": 2},
+            {"dt": dt, "team": "DAL", "gsis_id": "x1", "player_name": "Other Team Guy",
+             "pos_abb": "RB", "pos_rank": 1},
+        ]
+    return pd.DataFrame(rows)
+
+def test_team_depth_chart_latest_snapshot_grouped_and_flagged():
+    from scoring.profile import team_depth_chart
+    out = team_depth_chart(_depth_fixture(), "HOU", "rb2")
+    by_pos = {g["position"]: g["players"] for g in out}
+    assert [p["name"] for p in by_pos["RB"]] == ["New Starter", "Me Backup"]  # latest dt wins
+    assert by_pos["RB"][1]["is_me"] is True and by_pos["RB"][0]["is_me"] is False
+    assert by_pos["QB"][0]["rank"] == 1
+    assert all(g["position"] in ("QB", "RB", "WR", "TE") for g in out)
+
+def test_team_depth_chart_old_schema_degrades_empty():
+    from scoring.profile import team_depth_chart
+    old = pd.DataFrame(columns=["gsis_id", "depth_team", "formation", "week", "position"])
+    assert team_depth_chart(old, "HOU", "p1") == []
+
+def test_weekly_difficulty_rows_and_percentiles():
+    from scoring.profile import weekly_difficulty
+    # Prior season: WRs score 30 pts/wk vs SOFT, 10 pts/wk vs TUFF (2 games each).
+    prior = pd.DataFrame(
+        [{"player_id": "w1", "player_display_name": "WR One", "position": "WR",
+          "recent_team": "AAA", "opponent_team": opp, "season": 2025, "week": w,
+          "receptions": rec, "receiving_yards": rec * 10, "targets": rec, "carries": 0}
+         for opp, rec in [("SOFT", 15), ("TUFF", 5)] for w in (1, 2)])
+    sched = pd.DataFrame([
+        {"home_team": "HOU", "away_team": "SOFT", "week": 1, "total_line": 45.0, "spread_line": 3.0},
+        {"home_team": "TUFF", "away_team": "HOU", "week": 2, "total_line": 45.0, "spread_line": 3.0},
+        # no HOU game week 3 -> bye row
+    ])
+    out = weekly_difficulty(sched, prior, "HOU", "WR")
+    assert len(out) == 18
+    wk1, wk2, wk3 = out[0], out[1], out[2]
+    assert wk1["opponent"] == "SOFT" and wk1["home"] is True
+    assert wk2["opponent"] == "TUFF" and wk2["home"] is False
+    assert wk3["opponent"] is None
+    assert wk1["fpa_pg"] == 30.0 and wk2["fpa_pg"] == 10.0
+    assert wk1["pct"] > wk2["pct"]          # high FPA = soft = high percentile
+    assert weekly_difficulty(sched, prior, "HOU", "K") == []
