@@ -14,3 +14,7 @@ DEFAULT_WEIGHTS = {
 
 # starters*8 + flex allocation (16 flex slots ~ RB 6 / WR 8 / TE 2) + 1 buffer for single-slot
 REPLACEMENT_RANK = {"QB": 9, "RB": 22, "WR": 24, "TE": 10, "K": 9, "DST": 9}
+
+# How the league's FLEX slots historically get filled, by position. Used to
+# derive REPLACEMENT_RANK from roster shape instead of hardcoding it.
+FLEX_SHARES = {"RB": 0.375, "WR": 0.5, "TE": 0.125}

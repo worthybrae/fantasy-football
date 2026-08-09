@@ -1,12 +1,13 @@
 import pandas as pd
 
-_RULES = {
+DEFAULT_RULES = {
     "passing_yards": 0.04, "passing_tds": 4.0, "passing_interceptions": -2.0,
     "rushing_yards": 0.1, "rushing_tds": 6.0,
     "receptions": 1.0, "receiving_yards": 0.1, "receiving_tds": 6.0,
     "sack_fumbles_lost": -2.0, "rushing_fumbles_lost": -2.0, "receiving_fumbles_lost": -2.0,
     "passing_2pt_conversions": 2.0, "rushing_2pt_conversions": 2.0, "receiving_2pt_conversions": 2.0,
 }
+_RULES = DEFAULT_RULES  # back-compat for existing imports
 
 def _col(df: pd.DataFrame, name: str) -> pd.Series:
     if name in df.columns:

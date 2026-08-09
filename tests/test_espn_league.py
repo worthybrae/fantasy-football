@@ -59,3 +59,13 @@ def test_parse_player_directory_maps_positions_and_skips_unknown():
     assert list(df.columns) == ["espn_player_id", "player_name", "position", "nfl_team"]
     assert df.set_index("espn_player_id")["position"].to_dict() == {4046537: "WR", 16018: "DST"}
     assert df.set_index("espn_player_id")["nfl_team"].to_dict() == {4046537: "MIN", 16018: "MIN"}
+
+def test_parse_settings_extracts_pick_order_and_draft_type():
+    from pipeline.espn_league import parse_settings
+    from tests.test_league import ESPN_SETTINGS
+    out = parse_settings(ESPN_SETTINGS, 2026)
+    assert out["season"] == 2026
+    assert out["teams"] == 8
+    assert out["draft_type"] == "SNAKE"
+    assert out["pick_order"] == [3, 7, 1, 2, 4, 5, 6, 8]
+    assert out["lineup_slots"]["23"] == 2

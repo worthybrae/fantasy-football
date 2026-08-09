@@ -77,3 +77,15 @@ def parse_player_directory(payload) -> pd.DataFrame:
                      "nfl_team": ESPN_PRO_TEAMS.get(p.get("proTeamId"))})
     return pd.DataFrame(rows, columns=["espn_player_id", "player_name",
                                        "position", "nfl_team"])
+
+
+def parse_settings(payload: dict, season: int) -> dict:
+    s = payload.get("settings") or {}
+    return {
+        "season": season,
+        "teams": (s.get("size") or 0),
+        "lineup_slots": (s.get("rosterSettings") or {}).get("lineupSlotCounts") or {},
+        "scoring_items": (s.get("scoringSettings") or {}).get("scoringItems") or [],
+        "draft_type": (s.get("draftSettings") or {}).get("type"),
+        "pick_order": (s.get("draftSettings") or {}).get("pickOrder") or [],
+    }
