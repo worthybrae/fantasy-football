@@ -65,10 +65,15 @@ text, else does nothing.
 ## Project structure
 
 - `pipeline/` — data ingestion and refresh workflow (`sources.py`, `db.py`,
-  `refresh.py`)
-- `scoring/` — PPR calculations, per-factor scoring, composite/VOR/tiers, and
-  league config (`scoring/config.py`)
-- `api/` — FastAPI backend serving the draft board and drafted-player state
+  `refresh.py`), plus ESPN draft history import (`espn_league.py`,
+  `import_league.py`), manager fitting (`fit_managers.py`), and the
+  simulator CLI (`run_sim.py`)
+- `scoring/` — PPR calculations, per-factor scoring, composite/VOR/tiers,
+  league config (`scoring/config.py`), ESPN-derived league structure
+  (`league.py`), the per-manager pick model (`draft_model.py`), and the
+  draft simulator (`draft_sim.py`)
+- `api/` — FastAPI backend serving the draft board, drafted-player state,
+  and draft simulation endpoints
 - `web/` — Vite + React + TypeScript frontend
 - `tests/` — pytest suite for the Python side
 
@@ -77,10 +82,15 @@ text, else does nothing.
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
+.venv/bin/playwright install chromium
 
 cd web
 npm install
 ```
+
+The Playwright browser install is a one-time step. It's only needed for
+`make espn-import` (below), which drives a real Chromium window to log in to
+ESPN. Everything else in this repo works without it.
 
 ## Usage
 
@@ -140,6 +150,128 @@ background) so a tier boundary is visible at a glance.
 
 League size and roster shape (`LEAGUE_TEAMS`, `REPLACEMENT_RANK`) also live
 in `scoring/config.py` — update them there if the league format changes.
+
+## Draft simulation
+
+On top of the season-long scouting board, the tool can import your own
+league's ESPN draft history, learn how each manager in your league actually
+drafts, and simulate the upcoming draft from any slot. Think of it as a
+pre-draft study you run in the days before your draft, not a live
+draft-room client — it doesn't poll an active ESPN draft room, and it
+doesn't cover auctions, keeper leagues, or in-draft trades.
+
+### Importing draft history
+
+```bash
+make espn-import LEAGUE=<your-league-url-or-id>
+```
+
+This pulls your league's draft picks, team rosters, league settings, and
+that season's ADP for every season it can find, walking seasons back from
+the current one and stopping after two consecutive misses (so one gap year
+in ESPN's history won't cut the walk short). It writes four tables:
+`draft_picks`, `draft_teams`, `league`, and `historic_adp`. Historic ADP is
+what makes "reach" measurable at all — a pick only means something relative
+to where the market had that player *that* year.
+
+The first run opens a real Chromium window at the ESPN login page and waits
+for you to sign in. Disney SSO's 2FA and bot checks need a human, and a
+visible browser is the only place to answer them. Once you're signed in, it
+saves the session to `data/espn_state.json` — gitignored, since it's
+effectively a login token — and every run after that is headless.
+
+The import prints a validation summary per season: pick count against
+`teams x rounds`, manager count, and ADP match rate. A season under 80% ADP
+match gets flagged in the output. Picks that don't match an ADP row stay in
+`draft_picks` but are excluded from model fitting, and a bad match rate
+usually means a name-matching problem worth checking before trusting
+anything built on top of it.
+
+### League structure becomes derived
+
+Once a league is imported, team count, starting lineup, FLEX slots, bench
+size, round count, and scoring rules all come from ESPN's own settings
+(`scoring/league.py`) instead of the hardcoded constants in
+`scoring/config.py`. ESPN scoring items that don't map to an nflverse stat
+column are reported at import time by name, not silently dropped, so a
+league running TE premium or a stat this tool doesn't recognize yet won't
+produce a quietly wrong board. Replacement ranks (used for VOR) are
+recomputed from the derived roster shape the same way. With no league
+imported, everything falls back to `scoring/config.py`'s constants and
+reproduces today's 8-team board exactly.
+
+### Fitting manager models
+
+```bash
+make fit-managers
+```
+
+This fits a conditional logit to each manager's picks: given who was
+available at that moment, which player did they take, and does that follow
+a consistent pattern of reaching for need, chasing players who fell,
+favoring a position early, or following a run. Each manager's model is
+ridge-shrunk toward a fit pooled across the whole league, so a manager with
+few or noisy picks lands close to league average instead of overfitting to
+a handful of decisions.
+
+**Read the printed backtest line before trusting anything downstream.** It
+holds out the most recent season and reports top-1 and top-5 pick accuracy
+and log-loss against a pure-ADP baseline. If the fitted model doesn't beat
+that baseline out of sample, the command prints a warning, and it means
+what it says: treat the simulator's output as indicative only, not as a
+real prediction, until more seasons are imported.
+
+Not every manager gets a personal model. A manager needs enough picks, and
+needs their own fit to actually beat the pooled fit on held-out seasons —
+if it doesn't, the simulator falls back to the pooled model for that
+manager, and their card in the rail says "league average, not enough
+signal" rather than pretending otherwise. That's expected, not a bug: with
+roughly 105 picks per manager (7 seasons of 15 rounds), there's enough
+signal for around a dozen coefficients with shrinkage, and no more. It's
+nowhere near enough to learn player-level preferences, like a manager's
+favorite NFL team, which is why the model doesn't attempt that.
+
+### Running a simulation
+
+```bash
+make sim SLOT=4 ROLLOUTS=300
+```
+
+or click "Run simulation" in the draft rail on the board itself, after
+setting your slot and (optionally) editing the draft order — it's seeded
+from ESPN's published order but you can override any slot, so "what if I'm
+picking third instead" is answerable before the real order is out.
+
+A real run at the default 300 rollouts takes roughly a minute: about 10
+seconds fitting manager models and about 50 seconds searching. At each of
+your own picks, the simulator forces roughly a dozen plausible candidates
+in turn, rolls the rest of the draft forward against the fitted opponent
+models N times per candidate, and scores each one by the projected points
+of your best legal starting lineup at the end (with an insurance term so
+picks past the first several rounds still matter instead of scoring as
+noise). `ROLLOUTS` trades runtime for resolution — more rollouts, tighter
+standard error on each candidate's score.
+
+The board picks up two new columns once a sim has run, and the header strip
+above it shows your slot, your next pick, and how old the last run is:
+
+- **Avail%** — the probability the player is still on the board at your
+  next pick.
+- **ΔEV** — expected end-of-draft starting-lineup points relative to the
+  best available candidate at your current pick. Populated only for the
+  players the simulator actually evaluated; blank means that player wasn't
+  in contention, and both columns blank together just means no sim has run
+  yet.
+
+### A known open question
+
+The simulator dense-ranks the board's "market-known" players 1..k to match
+the scale the pick model was fitted on (`historic_adp`'s per-season dense
+rank over that season's ADP pool). Whether k, for your league, actually
+lines up with the population size that scale assumes hasn't been confirmed
+against a real import yet — only against test fixtures. If reach/fall
+behavior looks off once you run this against your own league's real
+history, that's the first thing to check.
 
 ## Data sources and quirks
 
