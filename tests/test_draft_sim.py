@@ -986,8 +986,14 @@ def test_run_sim_writes_sim_results_and_sim_survival_and_returns_the_run_id(
     to fit) are replaced.
     """
     conn = get_conn(str(tmp_path / "t.duckdb"))
+    zeros = np.zeros(len(FEATURE_NAMES))
+    # fit_all must return at least one per-manager fit: run_sim now refuses
+    # to run when there are none, because with none every opponent draws
+    # uniformly over the whole pool. This mock's job is to stand in for
+    # "manager models exist", not to make that check vacuous.
     monkeypatch.setattr(draft_model_mod, "fit_all",
-                        lambda conn, settings=None: {"__pooled__": np.zeros(len(FEATURE_NAMES))})
+                        lambda conn, settings=None: {"__pooled__": zeros,
+                                                     **{f"m{i}": zeros for i in range(1, 9)}})
     monkeypatch.setattr(board_mod, "build_board",
                         lambda conn, weights=None, settings=None: pd.DataFrame())
     monkeypatch.setattr(draft_sim_mod, "build_pool",
@@ -1003,8 +1009,30 @@ def test_run_sim_writes_sim_results_and_sim_survival_and_returns_the_run_id(
     assert not results.empty
     assert (results["run_id"] == run_id).all()
     assert (results["my_slot"] == 1).all()
+    # Provenance: which pick this run was for, and when it ran.
+    assert (results["pick_no"] == 1).all()          # slot 1, nothing drafted
+    assert results["created_at"].notna().all()
     assert not avail.empty
     assert (avail["run_id"] == run_id).all()
+
+
+def test_run_sim_refuses_to_run_with_no_fitted_manager_models(tmp_path, monkeypatch):
+    """No draft history means fit_all returns {} and every opponent's beta is
+    zeros -- a uniform draw over roughly 500 available players. Measured on a
+    500-player pool, the consensus number one's Avail% at slot 8 comes back
+    100% and the top ten average 98.75%. That is a confidently wrong answer,
+    not a degraded one, and the board merges it with no way to tell.
+    """
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    monkeypatch.setattr(draft_model_mod, "fit_all", lambda conn, settings=None: {})
+    monkeypatch.setattr(board_mod, "build_board",
+                        lambda conn, weights=None, settings=None: pd.DataFrame())
+    monkeypatch.setattr(draft_sim_mod, "build_pool",
+                        lambda conn, board, settings: _pool(12))
+
+    with pytest.raises(ValueError, match="fit-managers"):
+        run_sim(conn, my_slot=1, slot_managers={1: "m1"}, n_rollouts=2, seed=0)
+    assert read_table(conn, "sim_results").empty
 
 
 def test_run_sim_falls_back_to_pooled_when_manager_profiles_has_not_been_written(

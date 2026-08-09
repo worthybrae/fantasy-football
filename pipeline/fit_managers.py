@@ -2,7 +2,7 @@
 import sys
 
 from pipeline.db import get_conn, record_freshness
-from scoring.draft_model import backtest, write_profiles
+from scoring.draft_model import write_backtest, write_profiles
 
 
 def main() -> int:
@@ -13,7 +13,9 @@ def main() -> int:
         return 1
     record_freshness(conn, "manager_profiles", True, len(profiles))
 
-    report = backtest(conn)
+    # Persisted, not just printed: the board reads it back through
+    # /api/model and says so in the rail when the model loses to ADP.
+    report = write_backtest(conn)
     personal = profiles[profiles["uses_personal"]]["manager"].nunique()
     total = profiles["manager"].nunique()
     print(f"Fitted {total} managers ({personal} with personal models, "

@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  fetchDraftOrder, fetchLeague, fetchManagers, pollSim, saveDraftOrder, startSim,
-  type DraftOrderEntry, type LeagueInfo, type Manager,
+  fetchDraftOrder, fetchLeague, fetchManagers, fetchModel, fetchSimLatest, pollSim,
+  saveDraftOrder, startSim,
+  type DraftOrderEntry, type LeagueInfo, type Manager, type ModelStatus,
 } from '../api'
 
 // Coefficients worth showing on a card. The rest are position dummies that
@@ -34,11 +35,30 @@ function nextPickLabel(slot: number, drafted: number, teams: number, rounds: num
   return '—'
 }
 
+// Same notation for a pick we already know the overall number of (the one a
+// stored run was computed for), rather than one we have to search the snake
+// order for. `overall` is 1-indexed.
+function pickLabel(overall: number, teams: number): string {
+  const offset = overall - 1
+  return `${Math.floor(offset / teams) + 1}.${(offset % teams) + 1}`
+}
+
+function ageLabel(createdAt: string): string {
+  const ms = Date.now() - new Date(createdAt).getTime()
+  if (!Number.isFinite(ms) || ms < 60_000) return 'just now'
+  const minutes = Math.floor(ms / 60_000)
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  return `${Math.floor(hours / 24)}d ago`
+}
+
 interface DraftRailProps {
   onSimComplete: () => void
-  /** Header status text ("Slot 4 · next pick 2.13 · sim just now"). Never
-   *  called until a run has actually started, so the header stays
-   *  unchanged for a user who hasn't run a sim yet. */
+  /** Header status text ("Slot 4 · next pick 2.13 · sim 12m ago"). Called on
+   *  load with the provenance of whatever run the board's Avail%/ΔEV columns
+   *  currently come from, and again while and after a run. Stays uncalled --
+   *  header unchanged -- only when no sim has ever been run. */
   onStatus: (text: string) => void
   /** Number of players already marked drafted on the board -- owned by App
    *  (it has the player list), needed here only to find *this* slot's next
@@ -51,6 +71,7 @@ export default function DraftRail({ onSimComplete, onStatus, draftedCount }: Dra
   const [order, setOrder] = useState<DraftOrderEntry[]>([])
   const [mySlot, setMySlot] = useState<number | null>(null)
   const [league, setLeague] = useState<LeagueInfo | null>(null)
+  const [model, setModel] = useState<ModelStatus | null>(null)
   const [rollouts, setRollouts] = useState(300)
   const [running, setRunning] = useState(false)
   const [elapsed, setElapsed] = useState(0)
@@ -64,14 +85,26 @@ export default function DraftRail({ onSimComplete, onStatus, draftedCount }: Dra
   draftedCountRef.current = draftedCount
 
   useEffect(() => {
-    Promise.all([fetchManagers(), fetchDraftOrder(), fetchLeague()])
-      .then(([m, o, l]) => {
+    Promise.all([fetchManagers(), fetchDraftOrder(), fetchLeague(), fetchModel(),
+                 fetchSimLatest()])
+      .then(([m, o, l, mod, run]) => {
         setManagers(m)
         setOrder(o.order)
         setMySlot(o.my_slot)
         setLeague(l)
+        setModel(mod)
+        // The board's Avail%/ΔEV columns are merged from whatever run last
+        // wrote sim_results, so on a fresh load say which one that is rather
+        // than leaving the header blank next to populated columns.
+        if (run && run.my_slot !== null) {
+          const pick = run.pick_no !== null ? pickLabel(run.pick_no, l.teams) : '—'
+          onStatus(`Slot ${run.my_slot} · next pick ${pick} · sim ${ageLabel(run.created_at)}`)
+        }
       })
       .catch((e) => setError(e instanceof Error ? e.message : 'Load failed'))
+    // onStatus is a stable setState updater from App; this effect is a
+    // one-time load either way.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   function label(slot: number): string {
@@ -131,28 +164,52 @@ export default function DraftRail({ onSimComplete, onStatus, draftedCount }: Dra
 
   const names = managers.map((m) => m.manager)
   const byName = new Map(managers.map((m) => [m.manager, m]))
+  // `model === null` is still loading -- don't claim anything either way yet.
+  const unfitted = model !== null && !model.fitted
+  const losesToAdp = model?.backtest ? !model.backtest.beats_adp : false
 
   return (
     <aside className="draft-rail">
       <section className="rail-section">
         <h2>Draft order</h2>
         {order.length === 0 && <p className="rail-empty">Run `make espn-import` to load your league.</p>}
+        {unfitted && (
+          <p className="rail-warning">
+            No manager models fitted — run <code>make fit-managers</code>.
+            Until then the simulator has no opponents to model and will
+            refuse to run.
+          </p>
+        )}
+        {!unfitted && losesToAdp && (
+          <p className="rail-warning">
+            The fitted model does not beat the ADP baseline out of sample
+            {model?.backtest?.holdout_season ? ` (${model.backtest.holdout_season} held out)` : ''}.
+            Treat Avail% and ΔEV as indicative only, not as predictions.
+          </p>
+        )}
         <ol className="order-list">
           {order.map((entry, i) => (
             <li key={entry.slot}>
               <span className="slot-no">{entry.slot}</span>
-              <select
-                value={entry.manager}
-                onChange={(e) => {
-                  const next = [...order]
-                  next[i] = { ...entry, manager: e.target.value }
-                  setOrder(next)
-                }}
-              >
-                {names.map((n) => (
-                  <option key={n} value={n}>{n}</option>
-                ))}
-              </select>
+              {names.length === 0 ? (
+                // An empty <select> reads as a broken control. With no
+                // fitted managers there is nothing to choose between, so
+                // show the seeded name as plain text instead.
+                <span className="order-name">{entry.manager}</span>
+              ) : (
+                <select
+                  value={entry.manager}
+                  onChange={(e) => {
+                    const next = [...order]
+                    next[i] = { ...entry, manager: e.target.value }
+                    setOrder(next)
+                  }}
+                >
+                  {names.map((n) => (
+                    <option key={n} value={n}>{n}</option>
+                  ))}
+                </select>
+              )}
               <label className="is-me">
                 <input
                   type="radio"
@@ -176,7 +233,7 @@ export default function DraftRail({ onSimComplete, onStatus, draftedCount }: Dra
               onChange={(e) => setRollouts(Number(e.target.value))}
             />
           </label>
-          <button onClick={handleRun} disabled={running || mySlot === null}>
+          <button onClick={handleRun} disabled={running || mySlot === null || unfitted}>
             {running ? `Simulating… ${elapsed}s` : 'Run simulation'}
           </button>
         </div>
@@ -185,7 +242,12 @@ export default function DraftRail({ onSimComplete, onStatus, draftedCount }: Dra
 
       <section className="rail-section">
         <h2>Managers</h2>
-        {order.length === 0 && <p className="rail-empty">Nothing to show yet.</p>}
+        {unfitted && (
+          <p className="rail-empty">
+            No manager models fitted yet — run <code>make fit-managers</code>.
+          </p>
+        )}
+        {!unfitted && order.length === 0 && <p className="rail-empty">Nothing to show yet.</p>}
         {order.map((entry) => {
           const m = byName.get(entry.manager)
           if (!m) return null

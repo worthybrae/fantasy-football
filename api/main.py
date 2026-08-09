@@ -1,3 +1,4 @@
+import math
 import threading
 import uuid
 
@@ -9,6 +10,19 @@ from scoring.board import build_board
 from scoring.config import DEFAULT_WEIGHTS
 from scoring.draft_sim import DEFAULT_ROLLOUTS, run_sim
 from scoring.profile import build_profile
+
+def _int_or_none(value):
+    return None if value is None or pd.isna(value) else int(value)
+
+
+def _float_or_none(value):
+    """JSON has no infinity, and `logloss` is genuinely inf when there is
+    nothing to score -- FastAPI's encoder rejects it outright."""
+    if value is None or pd.isna(value):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
 
 def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
     app = FastAPI(title="Draft Board API")
@@ -226,6 +240,60 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
 
         threading.Thread(target=worker, daemon=True).start()
         return {"run_id": run_id, "status": "running"}
+
+    # Declared BEFORE /api/sim/{run_id}: FastAPI matches routes in
+    # registration order, so the path parameter would otherwise swallow
+    # "latest" and 404 it as an unknown run_id.
+    @app.get("/api/sim/latest")
+    def sim_latest():
+        """Provenance for the sim currently merged into the board.
+
+        sim_results/sim_survival are replaced wholesale by each run and
+        merged into every board unconditionally, so a reloaded page is
+        showing some run -- this says which slot, which pick, and when.
+        """
+        cur = conn.cursor()
+        try:
+            res = read_table(cur, "sim_results")
+            if res.empty or "created_at" not in res.columns:
+                return {"run": None}
+            head = res.iloc[0]
+            return {"run": {"run_id": str(head["run_id"]),
+                            "my_slot": _int_or_none(head.get("my_slot")),
+                            "pick_no": _int_or_none(head.get("pick_no")),
+                            "created_at": str(head["created_at"])}}
+        finally:
+            cur.close()
+
+    @app.get("/api/model")
+    def model_status():
+        """Whether opponent models exist at all, and whether they beat ADP.
+
+        Both are guards the spec asked for and neither reached the board:
+        with no fitted models every opponent picks uniformly at random, and
+        the backtest was printed to stdout by `make fit-managers` and then
+        dropped.
+        """
+        cur = conn.cursor()
+        try:
+            profiles = read_table(cur, "manager_profiles")
+            has_managers = not profiles.empty and "manager" in profiles.columns
+            n_managers = int(profiles["manager"].nunique()) if has_managers else 0
+            bt = read_table(cur, "model_backtest")
+            report = None
+            if not bt.empty:
+                row = bt.iloc[0]
+                report = {"holdout_season": _int_or_none(row.get("holdout_season")),
+                          "top1": _float_or_none(row.get("top1")),
+                          "top5": _float_or_none(row.get("top5")),
+                          "logloss": _float_or_none(row.get("logloss")),
+                          "adp_top1": _float_or_none(row.get("adp_top1")),
+                          "adp_logloss": _float_or_none(row.get("adp_logloss")),
+                          "beats_adp": bool(row.get("beats_adp"))}
+            return {"fitted": n_managers > 0, "n_managers": n_managers,
+                    "backtest": report}
+        finally:
+            cur.close()
 
     @app.get("/api/sim/{run_id}")
     def sim_status(run_id: str):

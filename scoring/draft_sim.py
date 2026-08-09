@@ -19,6 +19,7 @@ construction; reading it as a rate would model the median player at every
 position as missing half the season.
 """
 import warnings
+from datetime import datetime, timezone
 from itertools import zip_longest
 from typing import NamedTuple
 
@@ -798,6 +799,18 @@ def run_sim(conn, my_slot: int, slot_managers: dict,
     pool = build_pool(conn, board, settings)
 
     fits = fit_all(conn, settings)
+    if not [m for m in fits if m != "__pooled__"]:
+        # With no fitted opponent, every beta is zeros and every opponent
+        # draws uniformly over roughly 500 available players. Measured on a
+        # 500-player pool: the consensus number one comes back 100% likely to
+        # still be there at slot 8, and the top ten average 98.75%. That is
+        # not a degraded answer, it is a confident wrong one, and the board
+        # merges it with no way to tell.
+        raise ValueError(
+            "no manager models could be fitted from the imported draft "
+            "history -- run `make espn-import` and then `make fit-managers` "
+            "first. Without them every opponent would pick uniformly at "
+            "random and the simulation's numbers would be meaningless.")
     profiles = read_table(conn, "manager_profiles")
     pooled = fits.get("__pooled__", np.zeros(len(FEATURE_NAMES)))
     betas = {}
@@ -839,7 +852,15 @@ def run_sim(conn, my_slot: int, slot_managers: dict,
     run_id = f"{my_slot}-{n_rollouts}-{seed}-{len(taken_order)}"
     results.insert(0, "run_id", run_id)
     avail.insert(0, "run_id", run_id)
+    # Provenance (spec Part 4). scoring/board.py merges these tables into
+    # every board unconditionally, and write_table replaces them wholesale,
+    # so without a timestamp and the slot/pick they were computed for, a
+    # reloaded page shows Avail% and ΔEV from an arbitrarily old run -- maybe
+    # for a different slot -- with nothing on screen saying so. /api/sim/latest
+    # serves these three and the rail renders them on load.
     results["my_slot"] = my_slot
+    results["pick_no"] = _next_pick_for(settings, my_slot, len(taken_order))
+    results["created_at"] = datetime.now(timezone.utc).isoformat()
     write_table(conn, "sim_results", results)
     write_table(conn, "sim_survival", avail)
     return run_id

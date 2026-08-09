@@ -1118,4 +1118,17 @@ td:first-child {
 .coef-fill.neg { background: var(--fail); }
 .manager-card footer { font-size: 0.7rem; color: var(--text-3); margin-top: 4px; }
 .rail-empty { font-size: 0.8rem; color: var(--text-3); }
+/* Model-health warnings: no fitted opponent models, or a model that loses to
+   the ADP baseline out of sample. Both mean the sim columns cannot be read
+   as predictions, so they get the accent treatment rather than muted text. */
+.rail-warning {
+  font-size: 0.8rem;
+  color: var(--accent);
+  background: var(--accent-bg);
+  border-radius: 6px;
+  padding: 6px 8px;
+  margin: 6px 0;
+}
+.rail-warning code { font-size: 0.75rem; }
+.order-name { flex: 1; font-size: 0.85rem; color: var(--text-2); }
 .sim-status { font-size: 0.8rem; color: var(--text-2); white-space: nowrap; }

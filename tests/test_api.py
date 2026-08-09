@@ -29,9 +29,41 @@ def _seed(path):
         columns=["gsis_id", "espn_id", "sleeper_name", "position", "team"]))
     conn.close()
 
-def _client(tmp_path):
+def _seed_draft_history(path):
+    """Minimal imported league: one season, two managers, matched ADP.
+
+    run_sim refuses to run with no fitted opponent models -- with none, every
+    opponent draws uniformly over the whole pool and the output is
+    confidently wrong rather than merely rough. Any test that runs a real sim
+    therefore needs enough history for fit_all to produce a per-manager fit.
+    """
+    conn = get_conn(path)
+    write_table(conn, "draft_picks", pd.DataFrame([
+        {"season": 2025, "overall_pick": 1, "round": 1, "round_pick": 1,
+         "team_id": 1, "espn_player_id": 11, "player_name": "A Star",
+         "position": "WR", "nfl_team": "DET", "keeper": False},
+        {"season": 2025, "overall_pick": 2, "round": 1, "round_pick": 2,
+         "team_id": 2, "espn_player_id": 12, "player_name": "B Steady",
+         "position": "WR", "nfl_team": "GB", "keeper": False},
+    ]))
+    write_table(conn, "draft_teams", pd.DataFrame([
+        {"season": 2025, "team_id": 1, "manager": "m1", "slot": 1},
+        {"season": 2025, "team_id": 2, "manager": "m2", "slot": 2},
+    ]))
+    write_table(conn, "historic_adp", pd.DataFrame([
+        {"season": 2025, "adp_name": "A Star", "position": "WR",
+         "team": "DET", "adp_rank": 1},
+        {"season": 2025, "adp_name": "B Steady", "position": "WR",
+         "team": "GB", "adp_rank": 2},
+    ]))
+    conn.close()
+
+
+def _client(tmp_path, draft_history=False):
     path = str(tmp_path / "t.duckdb")
     _seed(path)
+    if draft_history:
+        _seed_draft_history(path)
     return TestClient(create_app(path))
 
 def _weekly_rows(pid, name, team, opp, weeks_by_season, receptions, yards, targets):
@@ -340,7 +372,7 @@ def test_draft_order_accepts_string_my_slot(tmp_path):
 
 def test_sim_endpoint_starts_and_completes(tmp_path):
     import time
-    client = _client(tmp_path)
+    client = _client(tmp_path, draft_history=True)
     client.put("/api/draft-order", json={
         "order": [{"slot": s, "manager": f"m{s}"} for s in range(1, 9)],
         "my_slot": 1})
@@ -356,6 +388,97 @@ def test_sim_endpoint_starts_and_completes(tmp_path):
 
 def test_sim_status_for_unknown_run_is_404(tmp_path):
     assert _client(tmp_path).get("/api/sim/nope").status_code == 404
+
+def test_sim_refuses_to_run_without_fitted_manager_models(tmp_path):
+    """With no imported draft history, fit_all returns nothing and every
+    opponent's beta is zeros -- a uniform draw over the whole pool. Measured
+    on a 500-player pool, the consensus number one comes back 100% likely to
+    still be available at slot 8 and the top ten average 98.75%. The run has
+    to fail loudly rather than write those numbers onto the board."""
+    import time
+    client = _client(tmp_path)                 # deliberately no draft history
+    client.put("/api/draft-order", json={
+        "order": [{"slot": s, "manager": f"m{s}"} for s in range(1, 9)],
+        "my_slot": 1})
+    run_id = client.post("/api/sim", json={"my_slot": 1, "rollouts": 3}).json()["run_id"]
+    for _ in range(200):
+        status = client.get(f"/api/sim/{run_id}").json()
+        if status["status"] != "running":
+            break
+        time.sleep(0.05)
+    assert status["status"] == "error"
+    assert "fit-managers" in status["detail"]
+    # Nothing written, so the board keeps showing blank sim columns rather
+    # than a confident set of fabricated ones.
+    row = client.get("/api/players").json()["players"][0]
+    assert row["avail_pct"] is None and row["ev"] is None
+
+def test_sim_latest_is_null_before_any_run_and_carries_provenance_after(tmp_path):
+    """The board merges sim_results into every request unconditionally, so a
+    reloaded page shows whatever the last run produced. /api/sim/latest is
+    how the header can say which slot, which pick, and how old."""
+    import time
+    client = _client(tmp_path, draft_history=True)
+    assert client.get("/api/sim/latest").json() == {"run": None}
+
+    client.put("/api/draft-order", json={
+        "order": [{"slot": s, "manager": f"m{s}"} for s in range(1, 9)],
+        "my_slot": 3})
+    run_id = client.post("/api/sim", json={"my_slot": 3, "rollouts": 3}).json()["run_id"]
+    for _ in range(200):
+        if client.get(f"/api/sim/{run_id}").json()["status"] != "running":
+            break
+        time.sleep(0.05)
+
+    run = client.get("/api/sim/latest").json()["run"]
+    assert run is not None
+    assert run["my_slot"] == 3
+    assert run["pick_no"] == 3          # slot 3, nothing drafted -> overall 3
+    assert run["created_at"]
+
+def test_model_endpoint_reports_unfitted_before_anything_is_imported(tmp_path):
+    body = _client(tmp_path).get("/api/model").json()
+    assert body == {"fitted": False, "n_managers": 0, "backtest": None}
+
+def test_model_endpoint_surfaces_the_persisted_backtest(tmp_path):
+    """Spec Part 3: if the model does not beat ADP-only, the board must not
+    present simulator output as authoritative. The backtest was printed to
+    stdout by `make fit-managers` and then dropped, so nothing downstream
+    could ever know."""
+    path = str(tmp_path / "t.duckdb")
+    _seed(path)
+    conn = get_conn(path)
+    write_table(conn, "manager_profiles", pd.DataFrame([
+        {"manager": "worthy", "feature": "reach", "value": 1.0,
+         "pooled_value": 0.0, "n_picks": 40, "heldout_gain": 0.1,
+         "uses_personal": True, "summary": "reaches"}]))
+    write_table(conn, "model_backtest", pd.DataFrame([
+        {"holdout_season": 2025, "top1": 0.1, "top5": 0.3, "logloss": 4.0,
+         "adp_top1": 0.2, "adp_logloss": 3.0, "beats_adp": False}]))
+    conn.close()
+
+    body = TestClient(create_app(path)).get("/api/model").json()
+    assert body["fitted"] is True
+    assert body["n_managers"] == 1
+    assert body["backtest"]["beats_adp"] is False
+    assert body["backtest"]["holdout_season"] == 2025
+
+def test_model_endpoint_serializes_an_infinite_logloss_as_null(tmp_path):
+    """backtest() genuinely returns inf when there is nothing to score, and
+    JSON has no infinity -- FastAPI's encoder rejects it outright."""
+    path = str(tmp_path / "t.duckdb")
+    _seed(path)
+    conn = get_conn(path)
+    write_table(conn, "model_backtest", pd.DataFrame([
+        {"holdout_season": None, "top1": 0.0, "top5": 0.0,
+         "logloss": float("inf"), "adp_top1": 0.0,
+         "adp_logloss": float("inf"), "beats_adp": False}]))
+    conn.close()
+
+    r = TestClient(create_app(path)).get("/api/model")
+    assert r.status_code == 200
+    assert r.json()["backtest"]["logloss"] is None
+    assert r.json()["backtest"]["holdout_season"] is None
 
 def test_players_expose_sim_columns_as_null_without_a_sim(tmp_path):
     row = _client(tmp_path).get("/api/players").json()["players"][0]
@@ -388,7 +511,7 @@ def test_concurrent_players_requests_during_running_sim(tmp_path):
     /api/players reads immediately after kicking off a sim and confirm none
     of them surface a thread-safety exception (mirrors the existing
     test_concurrent_requests pattern, but overlapping a real sim run)."""
-    client = _client(tmp_path)
+    client = _client(tmp_path, draft_history=True)
     client.put("/api/draft-order", json={
         "order": [{"slot": s, "manager": f"m{s}"} for s in range(1, 9)],
         "my_slot": 1})

@@ -199,3 +199,44 @@ export async function pollSim(runId: string): Promise<{ status: string; detail: 
   if (!res.ok) throw new Error('Failed to read simulation status')
   return res.json()
 }
+
+// Provenance for whatever sim the board's Avail%/ΔEV columns currently come
+// from. Those columns are merged into every /api/players response and each
+// run replaces the tables wholesale, so on a fresh page load they are some
+// run -- possibly for a different slot, possibly hours old.
+export interface SimRun {
+  run_id: string
+  my_slot: number | null
+  /** Overall pick number the run was computed for. */
+  pick_no: number | null
+  created_at: string
+}
+
+export async function fetchSimLatest(): Promise<SimRun | null> {
+  const res = await fetch('/api/sim/latest')
+  if (!res.ok) throw new Error('Failed to read the last simulation')
+  return (await res.json()).run
+}
+
+export interface Backtest {
+  holdout_season: number | null
+  top1: number | null
+  top5: number | null
+  logloss: number | null
+  adp_top1: number | null
+  adp_logloss: number | null
+  beats_adp: boolean
+}
+
+export interface ModelStatus {
+  /** Whether any manager models have been fitted at all. */
+  fitted: boolean
+  n_managers: number
+  backtest: Backtest | null
+}
+
+export async function fetchModel(): Promise<ModelStatus> {
+  const res = await fetch('/api/model')
+  if (!res.ok) throw new Error('Failed to load model status')
+  return res.json()
+}

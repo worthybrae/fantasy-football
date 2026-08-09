@@ -442,3 +442,17 @@ def backtest(conn, settings=None) -> dict:
               "adp_logloss": -adp_ll / n}
     report["beats_adp"] = bool(report["logloss"] < report["adp_logloss"])
     return report
+
+
+def write_backtest(conn, settings=None) -> dict:
+    """Run the backtest and persist it as a one-row `model_backtest` table.
+
+    Spec Part 3: "If the model does not beat ADP-only, that is the finding,
+    and the board should not present simulator output as authoritative."
+    Printing it to stdout from `make fit-managers` cannot reach the board, so
+    nothing stopped the board presenting the simulator as authoritative
+    regardless. `/api/model` serves this row and the rail warns on it.
+    """
+    report = backtest(conn, settings)
+    write_table(conn, "model_backtest", pd.DataFrame([report]))
+    return report

@@ -219,7 +219,9 @@ holds out the most recent season and reports top-1 and top-5 pick accuracy
 and log-loss against a pure-ADP baseline. If the fitted model doesn't beat
 that baseline out of sample, the command prints a warning, and it means
 what it says: treat the simulator's output as indicative only, not as a
-real prediction, until more seasons are imported.
+real prediction, until more seasons are imported. The result is also saved
+and served from `/api/model`, so the same warning appears in the draft rail
+rather than only in the terminal you happened to run `make fit-managers` in.
 
 Not every manager gets a personal model. A manager needs enough picks, and
 needs their own fit to actually beat the pooled fit on held-out seasons —
@@ -252,8 +254,22 @@ picks past the first several rounds still matter instead of scoring as
 noise). `ROLLOUTS` trades runtime for resolution — more rollouts, tighter
 standard error on each candidate's score.
 
+`make fit-managers` has to have been run first. Without fitted opponent
+models every opponent would pick uniformly at random over the whole pool,
+which makes the consensus number one look about 100% likely to still be
+available at any slot — a confidently wrong answer rather than a rough one —
+so the run fails with that message instead, and the rail says so before you
+click.
+
+If you've marked players drafted, the simulator reads `drafted.pick_no` to
+work out which team took each of them and resumes with real rosters. Rows
+marked before that column existed have no pick number and can't be
+attributed to anyone, so a run refuses rather than guess; un-mark and re-mark
+them in draft order to fix it.
+
 The board picks up two new columns once a sim has run, and the header strip
-above it shows your slot, your next pick, and how old the last run is:
+above it shows your slot, your next pick, and how old the last run is (on
+page load too, since those columns come from whatever run last finished):
 
 - **Avail%** — the probability the player is still on the board at your
   next pick.
@@ -261,7 +277,9 @@ above it shows your slot, your next pick, and how old the last run is:
   best available candidate at your current pick. Populated only for the
   players the simulator actually evaluated; blank means that player wasn't
   in contention, and both columns blank together just means no sim has run
-  yet.
+  yet. A player who almost certainly won't last until your pick isn't
+  evaluated: forcing him mostly wouldn't happen, so his "expected value"
+  would really be the value of whatever you'd have taken instead.
 
 ### A known open question
 
