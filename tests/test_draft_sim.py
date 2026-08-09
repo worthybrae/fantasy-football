@@ -733,7 +733,8 @@ def test_run_sim_seeds_rosters_from_the_recorded_pick_order(tmp_path, monkeypatc
     assert run_id.endswith("-3")               # three picks already made
 
 
-from scoring.draft_sim import _candidate_indices, search_pick, survival
+from scoring.draft_sim import (SEARCH_COLUMNS, _candidate_indices,
+                               search_pick, survival)
 
 
 def test_search_pick_ranks_the_best_candidate_first():
@@ -1014,6 +1015,38 @@ def test_run_sim_writes_sim_results_and_sim_survival_and_returns_the_run_id(
     assert results["created_at"].notna().all()
     assert not avail.empty
     assert (avail["run_id"] == run_id).all()
+
+
+def test_run_sim_warns_when_a_fitted_reach_coefficient_is_positive(
+        tmp_path, monkeypatch):
+    """`reach` is max(0, adp_rank - pick) / teams, so a positive coefficient
+    says "the further past his market rank a player is, the more I want him".
+    exp(reach * beta) on a rank-500 player then dominates every other term
+    and that manager is simulated drafting the deepest player in the pool.
+
+    It is most likely a symptom of build_pool's dense 1..k rank not lining up
+    with the population historic_adp's per-season rank was fitted over -- the
+    branch's own logged open question -- and there is nowhere else it
+    surfaces.
+    """
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    reaching = np.zeros(len(FEATURE_NAMES))
+    reaching[FEATURE_NAMES.index("reach")] = 0.4
+    monkeypatch.setattr(draft_model_mod, "fit_all",
+                        lambda conn, settings=None: {"__pooled__": reaching,
+                                                     "gunslinger": reaching})
+    monkeypatch.setattr(board_mod, "build_board",
+                        lambda conn, weights=None, settings=None: pd.DataFrame())
+    monkeypatch.setattr(draft_sim_mod, "build_pool",
+                        lambda conn, board, settings: _pool(12))
+    monkeypatch.setattr(draft_sim_mod, "search_pick",
+                        lambda *a, **k: pd.DataFrame(columns=SEARCH_COLUMNS))
+    monkeypatch.setattr(draft_sim_mod, "survival",
+                        lambda *a, **k: pd.DataFrame(columns=["player_id", "avail_pct"]))
+
+    with pytest.warns(RuntimeWarning, match="reach coefficient is positive"):
+        run_sim(conn, my_slot=1, slot_managers={1: "gunslinger"},
+                n_rollouts=2, seed=0)
 
 
 def test_run_sim_refuses_to_run_with_no_fitted_manager_models(tmp_path, monkeypatch):

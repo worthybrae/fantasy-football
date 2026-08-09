@@ -16,7 +16,12 @@ def compute_composite(df: pd.DataFrame, weights: dict) -> pd.Series:
     return score
 
 def apply_vor(df: pd.DataFrame, replacement_ranks: dict | None = None) -> pd.DataFrame:
-    ranks = replacement_ranks or REPLACEMENT_RANK
+    # `replacement_ranks or REPLACEMENT_RANK` would be wrong: an empty dict is
+    # falsy, so a league that genuinely derives no replacement ranks would
+    # silently revert to this repo's hardcoded 8-team ones. None means "not
+    # specified"; {} means "no per-position ranks", which falls through to the
+    # per-position default below.
+    ranks = REPLACEMENT_RANK if replacement_ranks is None else replacement_ranks
     out = df.copy()
     out["vor"] = 0.0
     for pos, grp in out.groupby("position"):

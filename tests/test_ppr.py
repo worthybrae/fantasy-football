@@ -31,3 +31,16 @@ def test_custom_rules_override_defaults():
     assert compute_ppr_points(df).iloc[0] == 15.0            # 5*1.0 + 100*0.1
     half = compute_ppr_points(df, {"receptions": 0.5, "receiving_yards": 0.1})
     assert half.iloc[0] == 12.5                              # 5*0.5 + 100*0.1
+
+def test_an_empty_rules_dict_scores_nothing_rather_than_reverting_to_ppr():
+    """`rules or DEFAULT_RULES` treats {} as "unspecified".
+
+    league.from_espn genuinely produces `scoring == {}` when none of a
+    league's ESPN scoring items map to an nflverse column, and quietly
+    scoring that league on standard PPR is worse than scoring it at zero:
+    zero is visibly wrong, a plausible-looking standard-PPR board is not.
+    """
+    df = pd.DataFrame([{"receptions": 8, "receiving_yards": 100,
+                        "receiving_tds": 1}])
+    assert compute_ppr_points(df, {}).iloc[0] == 0.0
+    assert compute_ppr_points(df, None).iloc[0] == 24.0

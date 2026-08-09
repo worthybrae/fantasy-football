@@ -15,7 +15,13 @@ def _col(df: pd.DataFrame, name: str) -> pd.Series:
     return pd.Series(0.0, index=df.index)
 
 def compute_ppr_points(df: pd.DataFrame, rules: dict | None = None) -> pd.Series:
+    # `rules or DEFAULT_RULES` would be wrong: an empty dict is falsy, and an
+    # empty dict is exactly what league.from_espn produces when none of a
+    # league's scoring items map to an nflverse column. Silently scoring that
+    # league on standard PPR is worse than scoring it at zero, which at least
+    # shows up. None means "not specified"; {} means "nothing scores".
+    rules = DEFAULT_RULES if rules is None else rules
     total = pd.Series(0.0, index=df.index)
-    for col, pts in (rules or DEFAULT_RULES).items():
+    for col, pts in rules.items():
         total = total + _col(df, col) * pts
     return total

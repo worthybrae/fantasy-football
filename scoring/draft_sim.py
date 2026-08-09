@@ -837,6 +837,22 @@ def run_sim(conn, my_slot: int, slot_managers: dict,
             personal = bool(rows["uses_personal"].iloc[0]) if not rows.empty else False
         betas[manager] = beta if personal else pooled
 
+    # `reach` is max(0, adp_rank - pick) / teams, so a positive coefficient
+    # says "the further past his market rank a player is, the more I want
+    # him" -- exp(reach * beta) on a rank-500 player then dominates every
+    # other term and the manager drafts the deepest player in the pool. It is
+    # a symptom, most likely of build_pool's dense 1..k rank not lining up
+    # with the population historic_adp's per-season rank was fitted over, and
+    # it makes that manager's simulated behaviour meaningless rather than
+    # merely noisy. Cheap to check, and there is nowhere else it surfaces.
+    reaching = sorted(m for m, beta in betas.items() if beta[_REACH] > 0)
+    if reaching:
+        warnings.warn(
+            f"draft_sim: fitted reach coefficient is positive for {reaching}; "
+            "those managers will be simulated drafting the deepest available "
+            "players. Check the adp_rank scale against historic_adp.",
+            RuntimeWarning)
+
     taken, taken_order = _drafted_state(conn, pool)
 
     # Survival first: search_pick needs it to keep candidates it has no real

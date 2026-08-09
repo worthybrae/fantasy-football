@@ -335,18 +335,24 @@ def build_board(conn, weights: dict | None = None,
     # write, and even then only carry the most recent run (write_table fully
     # replaces the table each time) -- so a left-merge here is always at most
     # one row per player_id, and every column is null until a sim has run.
+    # `drop_duplicates` is not defensive about run_sim, which does write one
+    # row per player per run. It is about this frame: `_add_adp_only_players`
+    # synthesizes `player_id = "adp_" + norm` with no position in the key, so
+    # one normalized name at two positions in the ADP feed (neither matching
+    # the weekly universe) produces two board rows carrying the same id. A
+    # many-to-many merge would then turn 2 rows into 4.
     sim_avail = read_table(conn, "sim_survival")
     sim_ev = read_table(conn, "sim_results")
     if sim_avail.empty:
         uni["avail_pct"] = pd.NA
     else:
-        uni = uni.merge(sim_avail[["player_id", "avail_pct"]],
-                        on="player_id", how="left")
+        avail = sim_avail[["player_id", "avail_pct"]].drop_duplicates("player_id")
+        uni = uni.merge(avail, on="player_id", how="left")
     if sim_ev.empty:
         uni["ev"] = pd.NA
         uni["ev_se"] = pd.NA
     else:
         ev = sim_ev[["player_id", "ev", "se"]].rename(columns={"se": "ev_se"})
-        uni = uni.merge(ev, on="player_id", how="left")
+        uni = uni.merge(ev.drop_duplicates("player_id"), on="player_id", how="left")
 
     return uni[_BOARD_COLUMNS]

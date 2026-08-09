@@ -103,3 +103,19 @@ def test_apply_vor_accepts_custom_replacement_ranks():
     out = apply_vor(df, {"RB": 2})
     assert out.sort_values("composite", ascending=False)["vor"].tolist() == [
         10.0, 0.0, -10.0, -20.0, -30.0]
+
+def test_an_empty_replacement_ranks_dict_does_not_revert_to_the_hardcoded_ranks():
+    """`replacement_ranks or REPLACEMENT_RANK` treats {} as "unspecified", so
+    a league that derives no per-position ranks would silently be scored
+    against this repo's hardcoded 8-team ones. {} must fall through to
+    apply_vor's own per-position default (9) instead."""
+    df = _df(25)
+    df["composite"] = df["production"]
+    ordered = lambda out: out.sort_values("composite", ascending=False)
+
+    default = ordered(apply_vor(df))
+    empty = ordered(apply_vor(df, {}))
+
+    assert default.iloc[23]["vor"] == 0.0        # REPLACEMENT_RANK["WR"] == 24
+    assert empty.iloc[8]["vor"] == 0.0           # apply_vor's own default, 9
+    assert empty.iloc[23]["vor"] != 0.0

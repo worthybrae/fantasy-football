@@ -481,3 +481,29 @@ def test_board_sim_columns_null_for_player_outside_sim_population(tmp_path):
     assert pd.isna(row["avail_pct"])
     assert pd.isna(row["ev"])
     assert pd.isna(row["ev_se"])
+
+def test_board_sim_merge_does_not_multiply_rows_on_a_duplicate_player_id(tmp_path):
+    """The merge has to be safe structurally, not just because run_sim
+    happens to write one row per player.
+
+    `_add_adp_only_players` synthesizes `player_id = "adp_" + norm` with no
+    position in the key, so one normalized name at two positions in the ADP
+    feed (neither matching the weekly universe) already yields two board rows
+    with the same id. A many-to-many merge against a sim table would then
+    turn 2 rows into 4, silently duplicating players on the board.
+    """
+    from pipeline.db import write_table
+    conn = _seed(tmp_path)
+    before = len(build_board(conn))
+    write_table(conn, "sim_survival", pd.DataFrame([
+        {"run_id": "r1", "player_id": "p1", "avail_pct": 0.42},
+        {"run_id": "r1", "player_id": "p1", "avail_pct": 0.11}]))
+    write_table(conn, "sim_results", pd.DataFrame([
+        {"run_id": "r1", "player_id": "p1", "ev": 1580.5, "se": 4.2,
+         "rank": 1, "my_slot": 4},
+        {"run_id": "r1", "player_id": "p1", "ev": 1.0, "se": 0.1,
+         "rank": 2, "my_slot": 4}]))
+
+    board = build_board(conn)
+    assert len(board) == before
+    assert board["player_id"].tolist().count("p1") == 1
