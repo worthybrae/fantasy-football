@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from pipeline.db import get_conn, write_table
+from pipeline.import_league import _HISTORIC_ADP_COLUMNS, normalize_historic_adp
 from scoring.draft_model import (FEATURE_NAMES, PickObservation,
                                   build_observations, feature_matrix)
 from scoring import league
@@ -34,6 +35,75 @@ def _seed(tmp_path):
         {"season": 2025, "adp_name": "Player D", "position": "TE", "adp_rank": 4},
     ]))
     return conn
+
+def _seed_kdst(tmp_path):
+    """One season with a WR, a K and a DST pick, and a historic_adp written
+    the way `pipeline.import_league` writes it after normalization.
+
+    draft_picks come from ESPN: positions K/DST, `player_name` from ESPN's
+    `fullName` ("Ravens D/ST"), `nfl_team` from ESPN_PRO_TEAMS. The ADP feed
+    calls the same two players a "PK" and "Ravens".
+    """
+    conn = get_conn(str(tmp_path / "kdst.duckdb"))
+    write_table(conn, "draft_picks", pd.DataFrame([
+        {"season": 2025, "overall_pick": 1, "round": 1, "round_pick": 1,
+         "team_id": 1, "espn_player_id": 11, "player_name": "Real Receiver",
+         "position": "WR", "nfl_team": "DET", "keeper": False},
+        {"season": 2025, "overall_pick": 2, "round": 1, "round_pick": 2,
+         "team_id": 2, "espn_player_id": 12, "player_name": "Boot Leg",
+         "position": "K", "nfl_team": "GB", "keeper": False},
+        {"season": 2025, "overall_pick": 3, "round": 2, "round_pick": 1,
+         "team_id": 2, "espn_player_id": 13, "player_name": "Ravens D/ST",
+         "position": "DST", "nfl_team": "BAL", "keeper": False},
+    ]))
+    write_table(conn, "draft_teams", pd.DataFrame([
+        {"season": 2025, "team_id": 1, "manager": "worthy", "slot": 1},
+        {"season": 2025, "team_id": 2, "manager": "dan", "slot": 2},
+    ]))
+    raw = pd.DataFrame([
+        {"adp_name": "Real Receiver", "position": "WR", "team": "DET", "adp": 1.0},
+        {"adp_name": "Boot Leg", "position": "PK", "team": "GB", "adp": 2.0},
+        {"adp_name": "Ravens", "position": "DEF", "team": "BAL", "adp": 3.0},
+    ])
+    # parse_adp already maps DEF -> DST; PK and the team spellings are what
+    # normalize_historic_adp is for.
+    raw["position"] = raw["position"].replace({"DEF": "DST"})
+    adp = normalize_historic_adp(raw).sort_values("adp").reset_index(drop=True)
+    adp["adp_rank"] = adp.index + 1
+    adp["season"] = 2025
+    write_table(conn, "historic_adp", adp[_HISTORIC_ADP_COLUMNS])
+    return conn
+
+
+def test_kicker_and_defense_picks_produce_observations(tmp_path):
+    """K and DST picks have to reach the fitting set.
+
+    The ADP feed labels kickers "PK" and gives a defense its nickname
+    ("Ravens") while ESPN says "K" and "Ravens D/ST", and historic_adp was
+    written straight through with neither normalized and no team column. Of
+    these three picks only the WR survived, and in a 15-round draft K plus
+    DST is 2/15 of every season -- about 13% of all picks, guaranteed
+    unmatched, enough on its own to drag a healthy import under the import
+    report's 80% threshold. It also left pos_K and pos_DST all-zero,
+    unidentified columns in the feature matrix.
+    """
+    obs = build_observations(_seed_kdst(tmp_path))
+
+    assert len(obs) == 3
+    chosen = {o.overall_pick: o.pool.iloc[o.chosen]["position"] for o in obs}
+    assert chosen == {1: "WR", 2: "K", 3: "DST"}
+
+
+def test_kicker_and_defense_reach_the_feature_matrix_position_dummies(tmp_path):
+    """The point of matching them: pos_K and pos_DST stop being all-zero."""
+    obs = build_observations(_seed_kdst(tmp_path))
+    settings = league.default_settings()
+    columns = {name: i for i, name in enumerate(FEATURE_NAMES)}
+
+    first = feature_matrix(obs[0], settings)          # full three-player pool
+    assert first[:, columns["pos_K"]].sum() == 1.0
+    assert first[:, columns["pos_DST"]].sum() == 1.0
+
 
 def test_pool_shrinks_as_players_come_off_the_board(tmp_path):
     obs = build_observations(_seed(tmp_path))

@@ -71,7 +71,7 @@ def test_parse_settings_extracts_pick_order_and_draft_type():
     assert out["lineup_slots"]["23"] == 2
 
 import pytest
-from pipeline.db import get_conn, read_table
+from pipeline.db import get_conn, read_table, write_table
 from pipeline.espn_league import (
     parse_league_id, season_url, import_seasons, validate_import,
 )
@@ -159,6 +159,45 @@ def test_validate_import_reports_pick_count_and_adp_match_rate(tmp_path):
     lines = "\n".join(validate_import(conn))
     assert "2025" in lines
     assert "ADP match" in lines
+
+def test_validate_import_matches_kickers_and_defenses(tmp_path):
+    """The report is the spec's honesty mechanism, so it has to score the
+    same join the fitting does.
+
+    A K pick and a DST pick can never match by (normalized name, position):
+    the ADP feed says "PK" and "Ravens" where ESPN says "K" and
+    "Ravens D/ST". Before the fix this printed "ADP match 33%" plus the
+    low-match warning for three perfectly good picks, blaming the data for a
+    code bug.
+    """
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    write_table(conn, "draft_picks", pd.DataFrame([
+        {"season": 2025, "overall_pick": 1, "round": 1, "round_pick": 1,
+         "team_id": 1, "espn_player_id": 11, "player_name": "Real Receiver",
+         "position": "WR", "nfl_team": "DET", "keeper": False},
+        {"season": 2025, "overall_pick": 2, "round": 1, "round_pick": 2,
+         "team_id": 2, "espn_player_id": 12, "player_name": "Boot Leg",
+         "position": "K", "nfl_team": "GB", "keeper": False},
+        {"season": 2025, "overall_pick": 3, "round": 2, "round_pick": 1,
+         "team_id": 2, "espn_player_id": 13, "player_name": "Ravens D/ST",
+         "position": "DST", "nfl_team": "BAL", "keeper": False},
+    ]))
+    write_table(conn, "draft_teams", pd.DataFrame([
+        {"season": 2025, "team_id": 1, "manager": "worthy", "slot": 1},
+        {"season": 2025, "team_id": 2, "manager": "dan", "slot": 2},
+    ]))
+    write_table(conn, "historic_adp", pd.DataFrame([
+        {"season": 2025, "adp_name": "Real Receiver", "position": "WR",
+         "team": "DET", "adp_rank": 1},
+        {"season": 2025, "adp_name": "Boot Leg", "position": "K",
+         "team": "GB", "adp_rank": 2},
+        {"season": 2025, "adp_name": "Ravens", "position": "DST",
+         "team": "BAL", "adp_rank": 3},
+    ]))
+    lines = "\n".join(validate_import(conn))
+    assert "ADP match 100%" in lines
+    assert "low ADP match" not in lines
+
 
 def _small_payload(season, n_teams, n_picks):
     """League with a 1-round roster (QB only) so `expected = teams * rounds`

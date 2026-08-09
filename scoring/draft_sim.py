@@ -27,7 +27,7 @@ import pandas as pd
 
 from pipeline.db import read_table, write_table
 from scoring import factors
-from scoring.board import FANTASY_POSITIONS, _norm_name
+from scoring.board import FANTASY_POSITIONS, _norm_name, adp_match_key
 from scoring.config import RECENCY_WEIGHTS
 from scoring.draft_model import EARLY_ROUNDS, FEATURE_NAMES, RUN_WINDOW
 
@@ -56,13 +56,20 @@ def projections(conn, board: pd.DataFrame) -> pd.Series:
     if not espn.empty and "espn_proj" in espn.columns:
         valid = espn.dropna(subset=["espn_proj"])
         valid = valid[valid["espn_proj"] > 0]
-        for _, row in valid.iterrows():
-            lookup[(_norm_name(row["espn_name"]), row["position"])] = float(row["espn_proj"])
+        teams = (valid["team"] if "team" in valid.columns
+                 else pd.Series([None] * len(valid), index=valid.index))
+        # DSTs key on team, not name: ESPN says "Ravens D/ST" and the board
+        # says whatever the ADP feed's nickname is, so a name join never hit
+        # and every defense fell through to POSITION_FLOOR.
+        for (_, row), team in zip(valid.iterrows(), teams):
+            key = adp_match_key(row["espn_name"], row["position"], team)
+            if key is not None:
+                lookup[key] = float(row["espn_proj"])
 
     values = []
     for _, row in board.iterrows():
-        key = (_norm_name(row["name"]), row["position"])
-        proj = lookup.get(key)
+        key = adp_match_key(row["name"], row["position"], row.get("team"))
+        proj = lookup.get(key) if key is not None else None
         if proj is None:
             stats = row.get("stats")
             ppg = stats.get("ppg") if isinstance(stats, dict) else None

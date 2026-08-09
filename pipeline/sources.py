@@ -70,6 +70,11 @@ def _espn_season_projection(p: dict, year: int):
     return None
 
 def parse_espn(payload: dict, year: int | None = None) -> pd.DataFrame:
+    # `team` is carried for the DST rows' sake: ESPN names a defense
+    # "Ravens D/ST" while the board names it from the ADP feed's nickname, so
+    # the two never match by name and every DST silently fell through to a
+    # position floor. A team has exactly one defense, so team is the join.
+    from pipeline.espn_league import ESPN_PRO_TEAMS
     rows = []
     for entry in payload.get("players", []):
         p = entry.get("player") or {}
@@ -78,11 +83,12 @@ def parse_espn(payload: dict, year: int | None = None) -> pd.DataFrame:
             continue
         rows.append({
             "espn_id": p.get("id"), "espn_name": p.get("fullName"), "position": pos,
+            "team": ESPN_PRO_TEAMS.get(p.get("proTeamId")),
             "espn_adp": (p.get("ownership") or {}).get("averageDraftPosition"),
             "espn_ppr_rank": ((p.get("draftRanksByRankType") or {}).get("PPR") or {}).get("rank"),
             "espn_proj": _espn_season_projection(p, year) if year else None,
         })
-    return pd.DataFrame(rows, columns=["espn_id", "espn_name", "position",
+    return pd.DataFrame(rows, columns=["espn_id", "espn_name", "position", "team",
                                        "espn_adp", "espn_ppr_rank", "espn_proj"])
 
 def fetch_espn_adp(year: int, limit: int = 500) -> pd.DataFrame:

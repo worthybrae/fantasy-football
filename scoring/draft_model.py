@@ -19,9 +19,23 @@ from scipy.optimize import minimize
 
 from pipeline.db import read_table, write_table
 from scoring import league as league_mod
-from scoring.board import _norm_name
+from scoring.board import _ADP_POSITION_ALIASES, _norm_name, adp_match_key
 
 RUN_WINDOW = 5
+
+
+def _match_keys(frame: pd.DataFrame, name_col: str, team_col: str = "team") -> list:
+    """`board.adp_match_key` for every row.
+
+    `team_col` differs by table: `historic_adp` carries `team`, `draft_picks`
+    carries `nfl_team`. A missing column (a historic_adp written before it
+    carried one) yields no team, which makes DSTs unmatchable rather than
+    wrongly matched.
+    """
+    teams = (frame[team_col] if team_col in frame.columns
+             else pd.Series([None] * len(frame), index=frame.index))
+    return [adp_match_key(name, position, team) for name, position, team
+            in zip(frame[name_col], frame["position"], teams)]
 
 
 class PickObservation(NamedTuple):
@@ -44,12 +58,23 @@ def build_observations(conn) -> list:
     picks = picks.merge(teams[["season", "team_id", "manager"]],
                         on=["season", "team_id"], how="left")
     picks = picks.assign(norm=picks["player_name"].map(_norm_name))
-    adp = adp.assign(norm=adp["adp_name"].map(_norm_name))
+    # Defensive: a historic_adp written before import_league normalized it
+    # still says "PK" for kickers, which would leave pos_K an all-zero,
+    # unidentified column in the feature matrix even once the join is keyed
+    # correctly. Same alias table the board applies to the live ADP feed.
+    adp = adp.assign(norm=adp["adp_name"].map(_norm_name),
+                     position=adp["position"].replace(_ADP_POSITION_ALIASES))
+    adp = adp.assign(key=_match_keys(adp, "adp_name"))
+    picks = picks.assign(key=_match_keys(picks, "player_name", "nfl_team"))
 
     out = []
     for season, season_picks in picks.groupby("season"):
-        pool = adp[adp["season"] == season][["norm", "position", "adp_rank"]]
-        # historic_adp has no uniqueness guarantee on (norm, position) --
+        pool = adp[adp["season"] == season][["norm", "position", "adp_rank", "key"]]
+        # A DST with no team has no join key at all (see adp_match_key); it
+        # is unmatchable, and leaving it in would let two of them match each
+        # other.
+        pool = pool[pool["key"].map(lambda k: k is not None)]
+        # historic_adp has no uniqueness guarantee on the join key --
         # parse_adp builds it straight from the external payload, and
         # import_league writes it without deduping. Collapse to the
         # best-known (lowest) adp_rank per player before anything else, so
@@ -57,16 +82,16 @@ def build_observations(conn) -> list:
         # than by accident of the fixture. Same precedent as
         # scoring.board._dedupe_adp.
         pool = pool.sort_values("adp_rank").drop_duplicates(
-            ["norm", "position"], keep="first").reset_index(drop=True)
+            "key", keep="first").reset_index(drop=True)
         available = pool.copy()
         rosters, recent = {}, []
         for _, pick in season_picks.sort_values("overall_pick").iterrows():
-            match = available.index[(available["norm"] == pick["norm"])
-                                    & (available["position"] == pick["position"])]
+            key = pick["key"]
+            match = (available.index[available["key"] == key]
+                     if key is not None else available.index[[]])
             if len(match):
                 reset = available.reset_index(drop=True)
-                chosen = int(reset.index[(reset["norm"] == pick["norm"])
-                                         & (reset["position"] == pick["position"])][0])
+                chosen = int(reset.index[reset["key"] == key][0])
                 out.append(PickObservation(
                     season=int(season), overall_pick=int(pick["overall_pick"]),
                     manager=pick["manager"], chosen=chosen, pool=reset,

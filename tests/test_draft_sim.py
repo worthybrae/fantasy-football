@@ -279,6 +279,28 @@ def test_projections_prefer_espn_then_fall_back_to_weighted_ppg(tmp_path):
     assert not proj.isna().any()
 
 
+def test_projections_join_defenses_by_team_not_by_name(tmp_path):
+    """Every DST used to fall through to POSITION_FLOOR.
+
+    ESPN calls a defense "Ravens D/ST"; the board names it from the ADP
+    feed's nickname ("Ravens"), so the (normalized name, position) join could
+    never hit and the whole position was scored at a constant floor. A team
+    has exactly one defense, so team is the join -- the same rule
+    `board._merge_adp` already uses for DST ADP.
+    """
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    write_table(conn, "espn_adp", pd.DataFrame([
+        {"espn_id": 16018, "espn_name": "Ravens D/ST", "position": "DST",
+         "team": "BAL", "espn_adp": 140.0, "espn_ppr_rank": 150,
+         "espn_proj": 132.0}]))
+    board = pd.DataFrame([
+        {"player_id": "adp_ravens", "name": "Ravens", "position": "DST",
+         "team": "BAL", "stats": None}])
+    proj = projections(conn, board)
+    assert proj["adp_ravens"] == 132.0
+    assert proj["adp_ravens"] != POSITION_FLOOR["DST"]
+
+
 def test_projections_ignores_non_positive_espn_projection(tmp_path):
     conn = get_conn(str(tmp_path / "t.duckdb"))
     write_table(conn, "espn_adp", pd.DataFrame([

@@ -76,6 +76,27 @@ def _norm_name(name: str) -> str:
     return " ".join(parts)
 
 
+def adp_match_key(name, position, team=None):
+    """Join key between an ADP row and a draft pick, as one string.
+
+    Players join on (position, normalized name). DSTs join on team alone,
+    exactly the way `_merge_adp` already joins them on the live board: the
+    ADP feed labels a defense with its nickname ("Ravens") while ESPN calls
+    it "Ravens D/ST", so no name match is possible, and a team has exactly
+    one defense. Team abbreviations go through `_ADP_TEAM_ALIASES` on both
+    sides so LAR/WSH/JAC-style spellings meet nflverse's.
+
+    Returns None for a DST with no team, which is unmatchable rather than
+    matchable-against-anything.
+    """
+    if position == "DST":
+        if team is None or (not isinstance(team, str) and pd.isna(team)):
+            return None
+        abbrev = str(team).upper()
+        return f"DST|{_ADP_TEAM_ALIASES.get(abbrev, abbrev)}"
+    return f"{position}|{_norm_name(name)}"
+
+
 def _adapt_depth_charts(depth: pd.DataFrame) -> pd.DataFrame:
     """Map the live nflverse depth-chart schema onto what role_factor expects."""
     if depth.empty:

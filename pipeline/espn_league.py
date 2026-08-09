@@ -197,7 +197,7 @@ def import_seasons(conn, league_id: str, current_season: int, fetch,
 
 
 def validate_import(conn) -> list[str]:
-    from scoring.board import _norm_name
+    from scoring.draft_model import _match_keys
     picks = read_table(conn, "draft_picks")
     teams = read_table(conn, "draft_teams")
     adp = read_table(conn, "historic_adp")
@@ -217,13 +217,16 @@ def validate_import(conn) -> list[str]:
         if adp.empty:
             rate = 0.0
         else:
+            # Same join key build_observations fits on, so this number
+            # reports the real match rate rather than a second, subtly
+            # different one -- the report is the spec's honesty mechanism and
+            # has to agree with what actually gets fitted.
             season_adp = adp[adp["season"] == season]
-            known = set(zip(season_adp["adp_name"].map(_norm_name),
-                            season_adp["position"]))
-            hit = grp.apply(
-                lambda r: (_norm_name(r["player_name"]), r["position"]) in known,
-                axis=1)
-            rate = float(hit.mean()) if len(grp) else 0.0
+            known = {key for key in _match_keys(season_adp, "adp_name")
+                     if key is not None}
+            hit = [key is not None and key in known
+                   for key in _match_keys(grp, "player_name", "nfl_team")]
+            rate = float(sum(hit)) / len(grp) if len(grp) else 0.0
         flag = "" if len(grp) == expected else f"  <-- expected {expected}"
         lines.append(f"  {season}: {len(grp)} picks, {managers} managers, "
                      f"ADP match {rate:.0%}{flag}")
