@@ -10,6 +10,7 @@ model's core feature is a player's position relative to market rank, which is
 undefined without one -- and the import step reports how many picks this
 removes per season so a bad join surfaces as a number, not a silent shrug.
 """
+import warnings
 from typing import NamedTuple
 
 import numpy as np
@@ -128,9 +129,16 @@ def feature_matrix(obs: PickObservation, settings) -> np.ndarray:
     return np.column_stack(columns) if n else np.zeros((0, len(FEATURE_NAMES)))
 
 
+def _shifted_exp(scores: np.ndarray) -> np.ndarray:
+    """exp(scores - scores.max()), the max-subtracted exponentiation shared by
+    softmax normalization and the log-sum-exp term. Both need it; computing it
+    once and reusing it (rather than each recomputing it from scores) halves
+    the exp() calls per observation on the hot path fit() iterates over."""
+    return np.exp(scores - scores.max())
+
+
 def _softmax(scores: np.ndarray) -> np.ndarray:
-    shifted = scores - scores.max()
-    exp = np.exp(shifted)
+    exp = _shifted_exp(scores)
     return exp / exp.sum()
 
 
@@ -138,7 +146,9 @@ def log_likelihood(beta, X_list, chosen_list) -> float:
     total = 0.0
     for X, k in zip(X_list, chosen_list):
         scores = X @ beta
-        total += scores[k] - (scores.max() + np.log(np.exp(scores - scores.max()).sum()))
+        exp = _shifted_exp(scores)
+        log_sum_exp = scores.max() + np.log(exp.sum())
+        total += scores[k] - log_sum_exp
     return float(total)
 
 
@@ -152,9 +162,11 @@ def neg_log_likelihood(beta, X_list, chosen_list, prior=None, lam=0.0):
     grad = np.zeros_like(beta, dtype=float)
     for X, k in zip(X_list, chosen_list):
         scores = X @ beta
-        probs = _softmax(scores)
-        value -= scores[k] - (scores.max()
-                              + np.log(np.exp(scores - scores.max()).sum()))
+        exp = _shifted_exp(scores)
+        exp_sum = exp.sum()
+        probs = exp / exp_sum
+        log_sum_exp = scores.max() + np.log(exp_sum)
+        value -= scores[k] - log_sum_exp
         grad += probs @ X - X[k]
     if prior is not None and lam:
         diff = beta - prior
@@ -171,6 +183,12 @@ def fit(X_list, chosen_list, prior=None, lam: float = 0.0) -> np.ndarray:
     result = minimize(neg_log_likelihood, start,
                       args=(X_list, chosen_list, prior, lam),
                       jac=True, method="L-BFGS-B")
+    if not result.success:
+        warnings.warn(
+            f"draft_model.fit: L-BFGS-B did not converge ({result.message}); "
+            f"returning its result anyway from {len(X_list)} choice sets",
+            RuntimeWarning,
+        )
     return result.x
 
 

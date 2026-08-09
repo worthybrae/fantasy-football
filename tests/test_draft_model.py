@@ -287,3 +287,50 @@ def test_log_likelihood_of_uniform_beta_is_pool_entropy():
     X_list, chosen = _synthetic(np.array([1.0, 0.0, 0.0]), n_choices=4, pool=10, seed=4)
     zero = np.zeros(3)
     assert abs(log_likelihood(zero, X_list, chosen) - 4 * np.log(1 / 10)) < 1e-9
+
+def test_gradient_matches_finite_differences_with_a_prior_penalty():
+    # test_gradient_matches_finite_differences above only ever calls
+    # neg_log_likelihood with prior=None, lam=0.0, so it never exercises the
+    # penalty term's contribution to the value or the gradient. Repeat the
+    # same check with both supplied so a value/gradient mismatch in the
+    # penalty (the exact bug class the module warns about) would be caught.
+    beta = np.array([0.3, -0.7, 0.1])
+    X_list, chosen = _synthetic(beta, n_choices=5, pool=6, seed=1)
+    prior = np.array([0.2, 0.1, -0.4])
+    lam = 2.5
+    point = np.array([0.1, 0.2, -0.3])
+    _, grad = neg_log_likelihood(point, X_list, chosen, prior=prior, lam=lam)
+    eps = 1e-6
+    for i in range(len(point)):
+        bumped = point.copy()
+        bumped[i] += eps
+        numeric = (neg_log_likelihood(bumped, X_list, chosen, prior=prior, lam=lam)[0]
+                   - neg_log_likelihood(point, X_list, chosen, prior=prior, lam=lam)[0]) / eps
+        assert abs(numeric - grad[i]) < 1e-4
+
+def test_fit_on_an_empty_choice_set_returns_without_calling_the_optimizer(monkeypatch):
+    def _boom(*args, **kwargs):
+        raise AssertionError("minimize should not be called for an empty X_list")
+    monkeypatch.setattr("scoring.draft_model.minimize", _boom)
+    assert np.array_equal(fit([], []), np.zeros(len(FEATURE_NAMES)))
+    prior = np.array([1.0, 2.0, 3.0])
+    assert np.array_equal(fit([], [], prior=prior, lam=1.0), prior)
+
+def test_fit_warns_and_still_returns_x_when_the_optimizer_fails_to_converge(monkeypatch):
+    # Thin per-manager samples (Task 8's regime -- ~105 picks against 12
+    # parameters inside a lambda sweep) are exactly where L-BFGS-B can hit
+    # ABNORMAL_TERMINATION_IN_LNSRCH. A silent non-convergence would return a
+    # plausible-looking but wrong beta with no signal, which is the failure
+    # mode this test guards against. Faked via monkeypatch since a real
+    # reliably-unconvergeable L-BFGS-B call isn't practical to construct.
+    class _FakeResult:
+        success = False
+        message = "ABNORMAL_TERMINATION_IN_LNSRCH"
+        x = np.array([9.0, 9.0, 9.0])
+
+    monkeypatch.setattr("scoring.draft_model.minimize", lambda *a, **k: _FakeResult())
+    X_list, chosen = _synthetic(np.array([1.0, 0.0, 0.0]), n_choices=3, pool=5, seed=5)
+    with pytest.warns(RuntimeWarning, match="did not converge") as record:
+        beta_hat = fit(X_list, chosen)
+    assert str(len(X_list)) in str(record[0].message)
+    assert np.array_equal(beta_hat, _FakeResult.x)
