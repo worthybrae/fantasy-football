@@ -145,7 +145,9 @@ export interface DraftOrderEntry {
 export interface DraftOrder {
   order: DraftOrderEntry[]
   my_slot: number | null
-  source: 'espn' | 'manual' | 'none'
+  // 'unpublished' means ESPN has the league's managers but has not set a
+  // draft order yet, so the slots below are a placeholder to rearrange.
+  source: 'espn' | 'manual' | 'none' | 'unpublished'
 }
 
 // Just the fields DraftRail needs (teams/rounds, for turning a pick count

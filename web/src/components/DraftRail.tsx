@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import {
   fetchDraftOrder, fetchLeague, fetchManagers, fetchModel, fetchSimLatest, pollSim,
   saveDraftOrder, startSim,
-  type DraftOrderEntry, type LeagueInfo, type Manager, type ModelStatus,
+  type DraftOrder, type DraftOrderEntry, type LeagueInfo, type Manager, type ModelStatus,
 } from '../api'
 
 // Coefficients worth showing on a card. The rest are position dummies that
@@ -70,6 +70,7 @@ export default function DraftRail({ onSimComplete, onStatus, draftedCount }: Dra
   const [managers, setManagers] = useState<Manager[]>([])
   const [order, setOrder] = useState<DraftOrderEntry[]>([])
   const [mySlot, setMySlot] = useState<number | null>(null)
+  const [orderSource, setOrderSource] = useState<DraftOrder['source']>('none')
   const [league, setLeague] = useState<LeagueInfo | null>(null)
   const [model, setModel] = useState<ModelStatus | null>(null)
   const [rollouts, setRollouts] = useState(300)
@@ -91,6 +92,7 @@ export default function DraftRail({ onSimComplete, onStatus, draftedCount }: Dra
         setManagers(m)
         setOrder(o.order)
         setMySlot(o.my_slot)
+        setOrderSource(o.source)
         setLeague(l)
         setModel(mod)
         // The board's Avail%/ΔEV columns are merged from whatever run last
@@ -173,6 +175,12 @@ export default function DraftRail({ onSimComplete, onStatus, draftedCount }: Dra
       <section className="rail-section">
         <h2>Draft order</h2>
         {order.length === 0 && <p className="rail-empty">Run `make espn-import` to load your league.</p>}
+        {orderSource === 'unpublished' && (
+          <p className="rail-empty">
+            ESPN hasn't published this year's draft order. These slots are a
+            placeholder — set them to the real order before simulating.
+          </p>
+        )}
         {unfitted && (
           <p className="rail-warning">
             No manager models fitted — run <code>make fit-managers</code>.

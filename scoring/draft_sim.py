@@ -845,6 +845,28 @@ def run_sim(conn, my_slot: int, slot_managers: dict,
     # with the population historic_adp's per-season rank was fitted over, and
     # it makes that manager's simulated behaviour meaningless rather than
     # merely noisy. Cheap to check, and there is nowhere else it surfaces.
+    # A slot with no manager, or a manager with no fit, silently fell through
+    # to a zeros beta -- the same uniform-random opponent the guard above
+    # refuses to run with, arriving one layer later. It is reachable without
+    # any user error: ESPN leaves `draftDayPickOrder` null until it publishes
+    # a draft order, so every team in the upcoming season carries a null
+    # slot, and a caller building {slot: manager} from those rows collapses
+    # all eight teams into one entry keyed None.
+    expected = set(range(1, settings.teams + 1))
+    missing = sorted(expected - set(slot_managers))
+    if missing:
+        raise ValueError(
+            f"draft order covers slots {sorted(slot_managers)} but this "
+            f"league has {settings.teams} -- slots {missing} have no "
+            "manager. ESPN leaves the draft order unset until it publishes "
+            "one, so assign it in the rail (or PUT /api/draft-order) before "
+            "simulating.")
+    # An unrecognized name is a legitimate case -- a manager who joined this
+    # year has no history to fit -- so they draft like the league average
+    # rather than at random.
+    for slot, manager in slot_managers.items():
+        betas.setdefault(manager, pooled)
+
     reaching = sorted(m for m, beta in betas.items() if beta[_REACH] > 0)
     if reaching:
         warnings.warn(

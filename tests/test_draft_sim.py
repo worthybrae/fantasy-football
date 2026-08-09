@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 from pipeline.db import get_conn, read_table, write_table
 from scoring import league
-from scoring.draft_sim import (DEFAULT_AVAILABILITY, FLEX_POSITIONS, POSITION_FLOOR,
+from scoring.draft_sim import (run_sim, DEFAULT_AVAILABILITY, FLEX_POSITIONS, POSITION_FLOOR,
                                best_lineup_points, build_pool, projections,
                                roster_value)
 
@@ -693,7 +693,7 @@ def test_run_sim_refuses_to_run_when_a_drafted_row_has_no_pick_no(
                         lambda conn, board, settings: _pool(12))
 
     with pytest.raises(ValueError, match="pick_no"):
-        run_sim(conn, my_slot=1, slot_managers={1: "m1"}, n_rollouts=2, seed=0)
+        run_sim(conn, my_slot=1, slot_managers={i: "m1" for i in range(1, 9)}, n_rollouts=2, seed=0)
 
 
 def test_run_sim_seeds_rosters_from_the_recorded_pick_order(tmp_path, monkeypatch):
@@ -725,7 +725,7 @@ def test_run_sim_seeds_rosters_from_the_recorded_pick_order(tmp_path, monkeypatc
     monkeypatch.setattr(draft_sim_mod, "survival",
                         lambda *a, **k: pd.DataFrame(columns=["player_id", "avail_pct"]))
 
-    run_id = run_sim(conn, my_slot=1, slot_managers={1: "m1"}, n_rollouts=2, seed=0)
+    run_id = run_sim(conn, my_slot=1, slot_managers={i: "m1" for i in range(1, 9)}, n_rollouts=2, seed=0)
 
     # _pool(n) numbers players p0..p(n-1) in pool order, so the pool index of
     # "pK" is K -- pick order p5, p1, p9 must arrive as [5, 1, 9].
@@ -733,7 +733,7 @@ def test_run_sim_seeds_rosters_from_the_recorded_pick_order(tmp_path, monkeypatc
     assert run_id.endswith("-3")               # three picks already made
 
 
-from scoring.draft_sim import (SEARCH_COLUMNS, _candidate_indices,
+from scoring.draft_sim import (run_sim, SEARCH_COLUMNS, _candidate_indices,
                                search_pick, survival)
 
 
@@ -965,7 +965,7 @@ def test_run_sim_gates_personal_coefficients_on_the_manager_profiles_flag(
     monkeypatch.setattr(draft_sim_mod, "search_pick", fake_search_pick)
     monkeypatch.setattr(draft_sim_mod, "survival", fake_survival)
 
-    run_sim(conn, my_slot=1, slot_managers={1: "reacher", 2: "average"},
+    run_sim(conn, my_slot=1, slot_managers={**{i: "average" for i in range(1, 9)}, 1: "reacher"},
            n_rollouts=5, seed=0)
 
     betas = captured["betas"]
@@ -1045,7 +1045,7 @@ def test_run_sim_warns_when_a_fitted_reach_coefficient_is_positive(
                         lambda *a, **k: pd.DataFrame(columns=["player_id", "avail_pct"]))
 
     with pytest.warns(RuntimeWarning, match="reach coefficient is positive"):
-        run_sim(conn, my_slot=1, slot_managers={1: "gunslinger"},
+        run_sim(conn, my_slot=1, slot_managers={i: "gunslinger" for i in range(1, 9)},
                 n_rollouts=2, seed=0)
 
 
@@ -1064,7 +1064,7 @@ def test_run_sim_refuses_to_run_with_no_fitted_manager_models(tmp_path, monkeypa
                         lambda conn, board, settings: _pool(12))
 
     with pytest.raises(ValueError, match="fit-managers"):
-        run_sim(conn, my_slot=1, slot_managers={1: "m1"}, n_rollouts=2, seed=0)
+        run_sim(conn, my_slot=1, slot_managers={i: "m1" for i in range(1, 9)}, n_rollouts=2, seed=0)
     assert read_table(conn, "sim_results").empty
 
 
@@ -1115,10 +1115,28 @@ def test_run_sim_falls_back_to_pooled_when_manager_profiles_has_not_been_written
     monkeypatch.setattr(draft_sim_mod, "survival",
                         lambda *a, **k: pd.DataFrame(columns=["player_id", "avail_pct"]))
 
-    run_sim(conn, my_slot=1, slot_managers={1: "some_manager"}, n_rollouts=5, seed=0)
+    run_sim(conn, my_slot=1, slot_managers={i: "some_manager" for i in range(1, 9)}, n_rollouts=5, seed=0)
 
     # No manager_profiles row exists to say "yes, use the personal fit" --
     # must fall back to pooled (all zeros), not crash, and not silently use
     # the personal fit either.
     np.testing.assert_allclose(captured["betas"]["some_manager"],
                                np.zeros(len(FEATURE_NAMES)))
+
+
+def test_run_sim_refuses_a_draft_order_that_does_not_cover_every_slot(tmp_path, monkeypatch):
+    """ESPN leaves draftDayPickOrder null until it publishes an order, so a
+    caller building {slot: manager} from those rows collapses every team into
+    one entry keyed None. That used to fall through to a zeros beta -- every
+    opponent picking uniformly at random -- and report confident numbers."""
+    import pandas as pd
+    from pipeline.db import get_conn, write_table
+    from scoring import draft_model, league
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    write_table(conn, "league", pd.DataFrame(
+        [{"season": 2026, "settings_json": league.to_json(league.default_settings())}]))
+    monkeypatch.setattr(draft_model, "fit_all", lambda *a, **k: {
+        "__pooled__": np.zeros(len(FEATURE_NAMES)),
+        "solo": np.zeros(len(FEATURE_NAMES))})
+    with pytest.raises(ValueError, match="have no manager"):
+        run_sim(conn, my_slot=1, slot_managers={None: "solo"}, n_rollouts=2)

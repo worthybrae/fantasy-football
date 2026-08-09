@@ -180,10 +180,22 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
             if teams.empty:
                 return {"order": [], "my_slot": None, "source": "none"}
             newest = teams[teams["season"] == teams["season"].max()]
-            newest = newest.dropna(subset=["slot"]).sort_values("slot")
-            return {"order": [{"slot": int(r["slot"]), "manager": r["manager"]}
-                              for _, r in newest.iterrows()],
-                    "my_slot": None, "source": "espn"}
+            ordered = newest.dropna(subset=["slot"]).sort_values("slot")
+            if not ordered.empty:
+                return {"order": [{"slot": int(r["slot"]), "manager": r["manager"]}
+                                  for _, r in ordered.iterrows()],
+                        "my_slot": None, "source": "espn"}
+            # ESPN leaves `draftDayPickOrder` null until it publishes an
+            # order, which is the normal state for the season you are
+            # preparing for. Returning an empty list here left the rail with
+            # no rows to edit, so there was no way to enter an order at all --
+            # and entering one is the whole pre-draft workflow. Seed the
+            # managers into slots so they can be rearranged, and say the
+            # order is a placeholder rather than ESPN's.
+            seeded = newest.sort_values("team_id")
+            return {"order": [{"slot": i, "manager": r["manager"]}
+                              for i, (_, r) in enumerate(seeded.iterrows(), start=1)],
+                    "my_slot": None, "source": "unpublished"}
         finally:
             cur.close()
 

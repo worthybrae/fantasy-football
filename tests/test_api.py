@@ -536,3 +536,21 @@ def test_concurrent_players_requests_during_running_sim(tmp_path):
         import time
         time.sleep(0.05)
     assert status["status"] == "done", status.get("detail")
+
+
+def test_draft_order_seeds_slots_when_espn_has_not_published_an_order(tmp_path):
+    # ESPN leaves draftDayPickOrder null until it publishes a draft order,
+    # which is the normal state for the season you are preparing for. An
+    # empty order left the rail with no rows to edit and no way to enter one.
+    path = str(tmp_path / "t.duckdb")
+    _seed(path)
+    conn = get_conn(path)
+    write_table(conn, "draft_teams", pd.DataFrame([
+        {"season": 2026, "team_id": 7, "manager": "dan", "slot": None},
+        {"season": 2026, "team_id": 3, "manager": "worthy", "slot": None},
+    ]))
+    conn.close()
+    body = TestClient(create_app(path)).get("/api/draft-order").json()
+    assert body["source"] == "unpublished"
+    assert body["order"] == [{"slot": 1, "manager": "worthy"},
+                             {"slot": 2, "manager": "dan"}]
