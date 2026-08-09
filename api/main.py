@@ -162,7 +162,8 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
         if len(slots) != len(set(slots)):
             raise HTTPException(status_code=422, detail="order contains duplicate slots")
         my_slot = payload.get("my_slot")
-        if my_slot is not None and int(my_slot) not in slots:
+        my_slot = int(my_slot) if my_slot is not None else None
+        if my_slot is not None and my_slot not in slots:
             raise HTTPException(status_code=422,
                                  detail="my_slot must be one of the submitted slots")
         rows = pd.DataFrame([{"slot": int(e["slot"]), "manager": e["manager"],

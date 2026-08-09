@@ -319,3 +319,16 @@ def test_draft_order_rejects_my_slot_not_in_order(tmp_path):
                          {"slot": 2, "manager": "dan"}], "my_slot": 99}
     r = client.put("/api/draft-order", json=payload)
     assert r.status_code == 422
+
+def test_draft_order_accepts_string_my_slot(tmp_path):
+    """A frontend <select> (Task 14) can plausibly submit my_slot as a JSON
+    string ("2") rather than a number. The membership check already casts
+    with int(my_slot), but the row-build comparison must use the same
+    normalized value -- otherwise is_me is False for every row, the PUT
+    still returns 200, and the next GET silently reports my_slot: null."""
+    client = _client(tmp_path)
+    payload = {"order": [{"slot": 1, "manager": "worthy"},
+                         {"slot": 2, "manager": "dan"}], "my_slot": "2"}
+    assert client.put("/api/draft-order", json=payload).status_code == 200
+    body = client.get("/api/draft-order").json()
+    assert body["my_slot"] == 2
