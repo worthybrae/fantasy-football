@@ -17,7 +17,8 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 
-from pipeline.db import read_table
+from pipeline.db import read_table, write_table
+from scoring import league as league_mod
 from scoring.board import _norm_name
 
 RUN_WINDOW = 5
@@ -198,3 +199,221 @@ def prepare(observations, settings):
     managers = [o.manager for o in observations]
     seasons = [o.season for o in observations]
     return X_list, chosen, managers, seasons
+
+
+LAMBDA_GRID = [0.01, 0.1, 1.0, 10.0, 100.0]
+MIN_PICKS_FOR_PERSONAL = 20
+
+# Decay rate for the ADP baseline in backtest(): the pool passed to
+# feature_matrix is always sorted ascending by adp_rank (build_observations
+# never reorders it), so pool position IS market rank order and a softmax
+# over -TEMPERATURE * position gives a real probability distribution over
+# "who does the market think goes next" -- unlike a uniform distribution,
+# which assigns the market's #1 player and its #200th the same probability
+# and so would be beaten by nearly anything. TEMPERATURE=1.0 means each step
+# down the ADP board is ~e times less likely than the one before it: sharp
+# enough to be a meaningful baseline (most snake-draft picks land within a
+# few spots of the top of the board), not so sharp that it degenerates into
+# "always predict index 0" and stops being a distribution worth comparing
+# log-loss against.
+ADP_BASELINE_TEMPERATURE = 1.0
+
+# Plain-language templates for the coefficients worth surfacing. Keyed by
+# feature name; each maps (deviation from pooled) -> a phrase.
+_PHRASES = {
+    "reach": ("reaches for players the market ranks later",
+              "avoids reaches, drafts in market order"),
+    "fall": ("chases players who slide", "ignores players who slide"),
+    "pos_RB": ("leans RB", "fades RB"),
+    "pos_WR": ("leans WR", "fades WR"),
+    "pos_TE": ("leans TE", "fades TE"),
+    "pos_K": ("takes kickers early", "leaves kickers late"),
+    "pos_DST": ("takes defenses early", "leaves defenses late"),
+    "qb_early": ("early-QB guy", "waits on QB"),
+    "te_early": ("early-TE guy", "waits on TE"),
+    "need": ("fills starting slots first", "ignores roster needs"),
+    "run": ("chases positional runs", "fades positional runs"),
+}
+
+
+def select_lambda(X_list, chosen_list, seasons, prior, grid=None) -> float:
+    """Leave-one-season-out cross-validation over the ridge strength.
+
+    Seasons, not random folds: picks inside one draft are not independent of
+    each other, so a random split would leak the same draft across train and
+    test and pick a lambda that is too loose.
+    """
+    grid = grid or LAMBDA_GRID
+    unique = sorted(set(seasons))
+    if len(unique) < 2:
+        return grid[-1]                      # one season: shrink hard
+    best, best_ll = grid[-1], -np.inf
+    for lam in grid:
+        total = 0.0
+        for holdout in unique:
+            train = [i for i, s in enumerate(seasons) if s != holdout]
+            test = [i for i, s in enumerate(seasons) if s == holdout]
+            if not train or not test:
+                continue
+            beta = fit([X_list[i] for i in train], [chosen_list[i] for i in train],
+                       prior=prior, lam=lam)
+            total += log_likelihood(beta, [X_list[i] for i in test],
+                                    [chosen_list[i] for i in test])
+        if total > best_ll:
+            best, best_ll = lam, total
+    return best
+
+
+def fit_all(conn, settings=None) -> dict:
+    settings = settings or league_mod.load(conn)
+    observations = build_observations(conn)
+    if not observations:
+        return {}
+    X_list, chosen, managers, seasons = prepare(observations, settings)
+    pooled = fit(X_list, chosen)
+    fits = {"__pooled__": pooled}
+    for manager in sorted(set(managers)):
+        idx = [i for i, m in enumerate(managers) if m == manager]
+        Xm = [X_list[i] for i in idx]
+        cm = [chosen[i] for i in idx]
+        sm = [seasons[i] for i in idx]
+        lam = select_lambda(Xm, cm, sm, prior=pooled)
+        fits[manager] = fit(Xm, cm, prior=pooled, lam=lam)
+    return fits
+
+
+def _heldout_gain(X_list, chosen, seasons, pooled) -> float:
+    """Per-pick log-likelihood advantage of a personal fit over pooled.
+
+    Positive means the manager's own coefficients predict held-out picks
+    better than the league-wide ones. Negative means they do not, and the
+    simulator should use pooled for that manager.
+    """
+    unique = sorted(set(seasons))
+    if len(unique) < 2:
+        return -np.inf
+    personal_ll = pooled_ll = 0.0
+    n = 0
+    for holdout in unique:
+        train = [i for i, s in enumerate(seasons) if s != holdout]
+        test = [i for i, s in enumerate(seasons) if s == holdout]
+        if not train or not test:
+            continue
+        lam = select_lambda([X_list[i] for i in train], [chosen[i] for i in train],
+                            [seasons[i] for i in train], prior=pooled)
+        beta = fit([X_list[i] for i in train], [chosen[i] for i in train],
+                   prior=pooled, lam=lam)
+        Xt = [X_list[i] for i in test]
+        ct = [chosen[i] for i in test]
+        personal_ll += log_likelihood(beta, Xt, ct)
+        pooled_ll += log_likelihood(pooled, Xt, ct)
+        n += len(test)
+    return (personal_ll - pooled_ll) / n if n else -np.inf
+
+
+def describe(beta, pooled, top: int = 3) -> str:
+    diff = np.asarray(beta) - np.asarray(pooled)
+    order = np.argsort(-np.abs(diff))
+    phrases = []
+    for i in order[:top]:
+        name = FEATURE_NAMES[i]
+        if name not in _PHRASES or abs(diff[i]) < 0.05:
+            continue
+        high, low = _PHRASES[name]
+        phrases.append(high if diff[i] > 0 else low)
+    return ", ".join(phrases) if phrases else "drafts close to league average"
+
+
+def write_profiles(conn, settings=None) -> pd.DataFrame:
+    settings = settings or league_mod.load(conn)
+    observations = build_observations(conn)
+    if not observations:
+        empty = pd.DataFrame(columns=[
+            "manager", "feature", "value", "pooled_value", "n_picks",
+            "heldout_gain", "uses_personal", "summary"])
+        write_table(conn, "manager_profiles", empty)
+        return empty
+
+    X_list, chosen, managers, seasons = prepare(observations, settings)
+    pooled = fit(X_list, chosen)
+    rows = []
+    for manager in sorted(set(managers)):
+        idx = [i for i, m in enumerate(managers) if m == manager]
+        Xm, cm = [X_list[i] for i in idx], [chosen[i] for i in idx]
+        sm = [seasons[i] for i in idx]
+        lam = select_lambda(Xm, cm, sm, prior=pooled)
+        beta = fit(Xm, cm, prior=pooled, lam=lam)
+        gain = _heldout_gain(Xm, cm, sm, pooled)
+        uses_personal = bool(len(idx) >= MIN_PICKS_FOR_PERSONAL and gain > 0)
+        effective = beta if uses_personal else pooled
+        summary = describe(effective, pooled) if uses_personal else \
+            "league average, not enough signal"
+        for i, name in enumerate(FEATURE_NAMES):
+            rows.append({"manager": manager, "feature": name,
+                         "value": float(beta[i]), "pooled_value": float(pooled[i]),
+                         "n_picks": len(idx),
+                         "heldout_gain": float(gain) if np.isfinite(gain) else None,
+                         "uses_personal": uses_personal, "summary": summary})
+    profiles = pd.DataFrame(rows)
+    write_table(conn, "manager_profiles", profiles)
+    return profiles
+
+
+def backtest(conn, settings=None) -> dict:
+    """Hold out the newest season and score against an ADP-only baseline.
+
+    If the fitted model does not beat "the market's next-best player is next
+    off the board", that is the finding, and the board must not present
+    simulator output as authoritative.
+    """
+    settings = settings or league_mod.load(conn)
+    observations = build_observations(conn)
+    if not observations:
+        return {"holdout_season": None, "top1": 0.0, "top5": 0.0,
+                "logloss": float("inf"), "adp_top1": 0.0,
+                "adp_logloss": float("inf"), "beats_adp": False}
+    X_list, chosen, managers, seasons = prepare(observations, settings)
+    holdout = max(seasons)
+    train = [i for i, s in enumerate(seasons) if s != holdout]
+    test = [i for i, s in enumerate(seasons) if s == holdout]
+    pooled = fit([X_list[i] for i in train], [chosen[i] for i in train]) \
+        if train else np.zeros(len(FEATURE_NAMES))
+
+    fits = {}
+    for manager in set(managers):
+        idx = [i for i in train if managers[i] == manager]
+        if len(idx) < MIN_PICKS_FOR_PERSONAL:
+            fits[manager] = pooled
+            continue
+        lam = select_lambda([X_list[i] for i in idx], [chosen[i] for i in idx],
+                            [seasons[i] for i in idx], prior=pooled)
+        fits[manager] = fit([X_list[i] for i in idx], [chosen[i] for i in idx],
+                            prior=pooled, lam=lam)
+
+    hits1 = hits5 = 0
+    ll = adp_ll = 0.0
+    adp_hits1 = 0
+    for i in test:
+        X, k = X_list[i], chosen[i]
+        probs = _softmax(X @ fits.get(managers[i], pooled))
+        order = np.argsort(-probs)
+        hits1 += int(order[0] == k)
+        hits5 += int(k in order[:5])
+        ll += np.log(max(probs[k], 1e-12))
+        # ADP baseline: the pool is sorted ascending by adp_rank (see
+        # build_observations), so pool position IS market rank order and
+        # index 0 is the market's next player. A uniform distribution over
+        # the pool is not a real baseline -- it would assign the market's #1
+        # player and its #200th the same probability, so "beats the market"
+        # would be true almost by construction. Score the market's own
+        # ranking with a softmax over pool position instead: a real
+        # probability distribution to compare the fitted model against.
+        adp_hits1 += int(k == 0)
+        adp_probs = _softmax(-ADP_BASELINE_TEMPERATURE * np.arange(len(X)))
+        adp_ll += np.log(max(adp_probs[k], 1e-12))
+    n = max(len(test), 1)
+    report = {"holdout_season": int(holdout), "top1": hits1 / n, "top5": hits5 / n,
+              "logloss": -ll / n, "adp_top1": adp_hits1 / n,
+              "adp_logloss": -adp_ll / n}
+    report["beats_adp"] = bool(report["logloss"] < report["adp_logloss"])
+    return report

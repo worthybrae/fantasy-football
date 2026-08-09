@@ -334,3 +334,97 @@ def test_fit_warns_and_still_returns_x_when_the_optimizer_fails_to_converge(monk
         beta_hat = fit(X_list, chosen)
     assert str(len(X_list)) in str(record[0].message)
     assert np.array_equal(beta_hat, _FakeResult.x)
+
+from scoring.draft_model import (backtest, describe, fit_all, select_lambda,
+                                 write_profiles)
+
+def _seed_many(tmp_path, seasons=(2023, 2024, 2025)):
+    """Two managers with opposite tastes, repeated across seasons.
+
+    `early` always takes the best RB available; `late` always takes the best
+    WR. A fitted model should separate them on the position dummies.
+    """
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    names = [f"Player {i}" for i in range(1, 21)]
+    positions = ["RB" if i % 2 else "WR" for i in range(1, 21)]
+    picks, adp = [], []
+    for season in seasons:
+        for i, (name, pos) in enumerate(zip(names, positions), start=1):
+            adp.append({"season": season, "adp_name": name,
+                        "position": pos, "adp_rank": i})
+        taken = set()
+        for pick_no in range(1, 9):
+            manager_pos = "RB" if pick_no % 2 else "WR"
+            team_id = 1 if pick_no % 2 else 2
+            choice = next(n for n, p in zip(names, positions)
+                          if p == manager_pos and n not in taken)
+            taken.add(choice)
+            picks.append({"season": season, "overall_pick": pick_no,
+                          "round": (pick_no - 1) // 2 + 1,
+                          "round_pick": (pick_no - 1) % 2 + 1,
+                          "team_id": team_id, "espn_player_id": pick_no,
+                          "player_name": choice,
+                          "position": manager_pos, "nfl_team": "DET",
+                          "keeper": False})
+    write_table(conn, "draft_picks", pd.DataFrame(picks))
+    write_table(conn, "draft_teams", pd.DataFrame(
+        [{"season": s, "team_id": t, "manager": m, "slot": t}
+         for s in seasons for t, m in ((1, "rbguy"), (2, "wrguy"))]))
+    write_table(conn, "historic_adp", pd.DataFrame(adp))
+    return conn
+
+def test_select_lambda_returns_a_value_from_the_grid():
+    beta_true = np.array([1.0, -0.5, 0.2])
+    X_list, chosen = _synthetic(beta_true, n_choices=60, pool=10, seed=5)
+    seasons = [2023] * 20 + [2024] * 20 + [2025] * 20
+    lam = select_lambda(X_list, chosen, seasons, prior=np.zeros(3),
+                        grid=[0.01, 1.0, 100.0])
+    assert lam in (0.01, 1.0, 100.0)
+
+def test_fit_all_separates_managers_with_opposite_tastes(tmp_path):
+    fits = fit_all(_seed_many(tmp_path))
+    assert set(fits) >= {"rbguy", "wrguy", "__pooled__"}
+    rb_idx = FEATURE_NAMES.index("pos_RB")
+    wr_idx = FEATURE_NAMES.index("pos_WR")
+    assert fits["rbguy"][rb_idx] - fits["rbguy"][wr_idx] > \
+           fits["wrguy"][rb_idx] - fits["wrguy"][wr_idx]
+
+def test_backtest_reports_accuracy_against_an_adp_baseline(tmp_path):
+    report = backtest(_seed_many(tmp_path))
+    assert report["holdout_season"] == 2025
+    assert 0.0 <= report["top1"] <= 1.0
+    assert 0.0 <= report["top5"] <= 1.0
+    assert isinstance(report["beats_adp"], bool)
+
+def test_beats_adp_is_false_for_a_model_no_better_than_the_market(tmp_path, monkeypatch):
+    # _seed_many's draft is chalk: every pick is the market's next player by
+    # ADP rank (see the fixture docstring -- pick order and ADP rank order
+    # are constructed to coincide). A real ADP baseline should therefore
+    # score that holdout season well. A model forced to predict *uniformly*
+    # over the pool (beta == 0 makes every softmax uniform, regardless of X)
+    # carries no market information and must lose to that baseline -- this
+    # is the check the brief's original uniform-distribution "baseline"
+    # could never fail, since a uniform baseline is beaten by almost
+    # anything. It guards the fix in backtest() that replaced the uniform
+    # ADP distribution with a real one.
+    monkeypatch.setattr("scoring.draft_model.fit",
+                        lambda *a, **k: np.zeros(len(FEATURE_NAMES)))
+    report = backtest(_seed_many(tmp_path))
+    assert report["beats_adp"] is False
+
+def test_write_profiles_marks_thin_managers_as_pooled(tmp_path):
+    conn = _seed_many(tmp_path, seasons=(2025,))     # 4 picks each: very thin
+    profiles = write_profiles(conn)
+    assert set(profiles.columns) == {
+        "manager", "feature", "value", "pooled_value", "n_picks",
+        "heldout_gain", "uses_personal", "summary"}
+    assert (profiles["n_picks"] == 4).all()
+    from pipeline.db import read_table
+    assert not read_table(conn, "manager_profiles").empty
+
+def test_describe_names_the_strongest_deviations():
+    pooled = np.zeros(len(FEATURE_NAMES))
+    beta = pooled.copy()
+    beta[FEATURE_NAMES.index("reach")] = -2.0
+    text = describe(beta, pooled)
+    assert "reach" in text.lower()
