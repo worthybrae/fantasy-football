@@ -414,7 +414,7 @@ def test_rollout_respects_already_taken_players():
     taken = np.zeros(len(pool.player_id), dtype=bool)
     taken[:40] = True                    # only 20 players left, 8 teams x 15 rounds
     value = rollout(pool, S, slots, 1, taken, _flat_betas(slots.values()),
-                    rng=np.random.default_rng(3))
+                    rng=np.random.default_rng(3), taken_order=list(range(40)))
     assert value > 0                     # runs out of players without crashing
 
 
@@ -426,17 +426,19 @@ def test_rollout_handles_taken_covering_the_whole_draft_without_crashing():
     exceeds the total number of picks in the draft (teams x rounds), there
     is nothing left to simulate, and _run_draft returns explicitly rather
     than falling through a `slots[already:]` slice that happens to be empty.
-    _run_draft has no per-team ownership record for players marked `taken`
-    before it was called -- only a pool-wide "off the board" mask -- so 0.0
-    is the correct, documented answer here, not a numeric regression: this
-    test does not change under the Finding 1/2 fixes, it guards against a
-    future refactor silently breaking the degenerate case.
+    With no `taken_order`, _run_draft has no per-team ownership record for
+    players marked `taken` before it was called -- only a pool-wide "off the
+    board" mask -- so 0.0 is the correct, documented answer here, not a
+    numeric regression. That unattributed call is now also the case
+    _run_draft warns about, which this asserts alongside the value: the
+    degenerate path stays safe, and it stays loud.
     """
     pool = _pool(150)                     # more players than teams x rounds (120)
     slots = {i: f"m{i}" for i in range(1, 9)}
     taken = np.ones(len(pool.player_id), dtype=bool)   # already >= len(slots)
-    value = rollout(pool, S, slots, 1, taken, _flat_betas(slots.values()),
-                    rng=np.random.default_rng(2))
+    with pytest.warns(RuntimeWarning, match="taken_order"):
+        value = rollout(pool, S, slots, 1, taken, _flat_betas(slots.values()),
+                        rng=np.random.default_rng(2))
     assert value == 0.0
 
 
@@ -567,6 +569,144 @@ def test_rollout_never_drafts_past_a_roster_cap_even_when_the_shortlist_is_all_o
             for pos, count in roster["counts"].items():
                 assert count <= caps.get(pos, 99), \
                     f"seed {seed}: slot {slot} rostered {count} {pos} (cap {caps.get(pos)})"
+
+
+# --- Mid-draft pick attribution. `drafted.pick_no` records what order the
+# board was marked up in; combined with the snake order that says which slot
+# was on the clock for each of those picks. Without it every roster resumed
+# empty: my own earlier picks vanished from the roster the search values,
+# every opponent's `need` read 1.0 at every position, and `_roster_cap`
+# re-armed from zero (a manager holding three QBs could take three more).
+
+
+def test_run_draft_attributes_already_taken_players_to_the_slot_that_took_them():
+    """16 picks made in an 8-team, 15-round league = two full rounds.
+
+    snake_slots puts slot 4 on the clock at offsets 3 and 12, so those two
+    picks are mine and must already be on my roster when the resume starts --
+    leaving me with a full 15, not the 13 the unattributed version produced.
+    """
+    pool = _pool(300)
+    slots = {i: f"m{i}" for i in range(1, 9)}
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    taken[:16] = True
+    order = list(range(16))
+
+    rosters = _run_draft(pool, S, slots, 4, taken, _flat_betas(slots.values()),
+                         rng=np.random.default_rng(0), taken_order=order)
+
+    snake = snake_slots(S.teams, S.rounds)
+    for slot in range(1, S.teams + 1):
+        seeded = [i for i in range(16) if snake[i] == slot]
+        assert rosters[slot]["indices"][:len(seeded)] == seeded
+        assert len(rosters[slot]["indices"]) == S.rounds
+        assert sum(rosters[slot]["counts"].values()) == S.rounds
+    assert rosters[4]["indices"][:2] == [3, 12]
+
+
+def test_run_draft_counts_already_taken_players_against_the_roster_cap():
+    """A manager who already holds three QBs must not be able to take more.
+
+    Slot 1 is on the clock at offsets 0, 15 and 16; this hands it a QB at
+    each of them, so it starts the resume at the QB cap. Unattributed, its
+    count restarted at zero and it drafted up to three more.
+    """
+    pool = _pool(300)
+    qbs = [i for i in range(300) if pool.position[i] == "QB"]
+    others = [i for i in range(300) if pool.position[i] != "QB"]
+    slot_one_offsets = {0, 15, 16}
+    order = [qbs.pop(0) if offset in slot_one_offsets else others.pop(0)
+             for offset in range(24)]
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    taken[order] = True
+    slots = {i: f"m{i}" for i in range(1, 9)}
+
+    rosters = _run_draft(pool, S, slots, 4, taken, _flat_betas(slots.values()),
+                         rng=np.random.default_rng(0), taken_order=order)
+
+    assert rosters[1]["counts"]["QB"] == _roster_cap(S)["QB"] == 3
+
+
+def test_run_draft_keeps_the_snake_aligned_when_a_taken_player_left_the_board():
+    """A pick whose player is no longer in the pool still consumed its turn.
+
+    `taken_order` carries None for it rather than dropping the entry, so
+    every later pick still lands on the slot that actually made it.
+    """
+    pool = _pool(300)
+    slots = {i: f"m{i}" for i in range(1, 9)}
+    order = [None] + list(range(1, 16))       # pick 1's player is off the board
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    taken[1:16] = True
+
+    rosters = _run_draft(pool, S, slots, 4, taken, _flat_betas(slots.values()),
+                         rng=np.random.default_rng(0), taken_order=order)
+
+    snake = snake_slots(S.teams, S.rounds)
+    assert rosters[1]["indices"][0] != 0      # slot 1's pick 1 is not rostered
+    for slot in range(1, S.teams + 1):
+        seeded = [i for i in range(1, 16) if snake[i] == slot]
+        assert rosters[slot]["indices"][:len(seeded)] == seeded
+
+
+def test_run_sim_refuses_to_run_when_a_drafted_row_has_no_pick_no(
+        tmp_path, monkeypatch):
+    """Rows drafted before the pick_no migration cannot be attributed.
+
+    Ordering them first (or in any other invented order) hands real players
+    to the wrong teams and corrupts every roster, need and cap downstream
+    with no warning, so run_sim refuses and says how to fix it.
+    """
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    conn.execute("INSERT INTO drafted VALUES ('p3', NULL)")
+    personal = np.zeros(len(FEATURE_NAMES))
+    monkeypatch.setattr(draft_model_mod, "fit_all",
+                        lambda conn, settings=None: {"__pooled__": personal,
+                                                     "m1": personal})
+    monkeypatch.setattr(board_mod, "build_board",
+                        lambda conn, weights=None, settings=None: pd.DataFrame())
+    monkeypatch.setattr(draft_sim_mod, "build_pool",
+                        lambda conn, board, settings: _pool(12))
+
+    with pytest.raises(ValueError, match="pick_no"):
+        run_sim(conn, my_slot=1, slot_managers={1: "m1"}, n_rollouts=2, seed=0)
+
+
+def test_run_sim_seeds_rosters_from_the_recorded_pick_order(tmp_path, monkeypatch):
+    """End-to-end: `drafted.pick_no` reaches the simulator as attribution.
+
+    Three picks recorded through the same INSERT the API uses; run_sim must
+    hand search_pick/survival a taken_order matching that pick order, not
+    just a pool-wide mask.
+    """
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    for pick_no, pid in enumerate(["p5", "p1", "p9"], start=1):
+        conn.execute("INSERT INTO drafted VALUES (?, ?)", [pid, pick_no])
+    zeros = np.zeros(len(FEATURE_NAMES))
+    monkeypatch.setattr(draft_model_mod, "fit_all",
+                        lambda conn, settings=None: {"__pooled__": zeros, "m1": zeros})
+    monkeypatch.setattr(board_mod, "build_board",
+                        lambda conn, weights=None, settings=None: pd.DataFrame())
+    monkeypatch.setattr(draft_sim_mod, "build_pool",
+                        lambda conn, board, settings: _pool(12))
+
+    captured = {}
+
+    def fake_search_pick(pool, settings, slot_managers, my_slot, taken, betas,
+                         **kwargs):
+        captured["taken_order"] = kwargs.get("taken_order")
+        return pd.DataFrame(columns=["player_id", "ev", "se", "rank"])
+
+    monkeypatch.setattr(draft_sim_mod, "search_pick", fake_search_pick)
+    monkeypatch.setattr(draft_sim_mod, "survival",
+                        lambda *a, **k: pd.DataFrame(columns=["player_id", "avail_pct"]))
+
+    run_id = run_sim(conn, my_slot=1, slot_managers={1: "m1"}, n_rollouts=2, seed=0)
+
+    # _pool(n) numbers players p0..p(n-1) in pool order, so the pool index of
+    # "pK" is K -- pick order p5, p1, p9 must arrive as [5, 1, 9].
+    assert captured["taken_order"] == [5, 1, 9]
+    assert run_id.endswith("-3")               # three picks already made
 
 
 from scoring.draft_sim import search_pick, survival

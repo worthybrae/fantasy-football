@@ -18,6 +18,7 @@ scoring.factors.normalize_within_position), which averages 50 by
 construction; reading it as a rate would model the median player at every
 position as missing half the season.
 """
+import warnings
 from typing import NamedTuple
 
 import numpy as np
@@ -406,20 +407,60 @@ def _greedy_choice(pool, available, roster, settings, caps):
     return best_idx if best_idx is not None else legal[0]
 
 
+def _seed_rosters(pool, settings, taken_order):
+    """Replay the picks already made and hand each one to the slot that was
+    on the clock for it.
+
+    `taken_order` is one entry per pick already made, in pick order: a pool
+    index, or None for a pick whose player is not in the pool (drafted, then
+    dropped off the board by a later refresh) -- a None still consumed its
+    turn, so it still advances the snake.
+
+    Returns `(rosters, recent)` in exactly the shape `_run_draft` resumes
+    from, so a mid-draft run starts with every team holding what it actually
+    took: `need` and the roster caps see real counts, and my own earlier
+    picks are part of the roster the search is valuing.
+    """
+    slots = snake_slots(settings.teams, settings.rounds)
+    rosters = {slot: {"counts": {}, "indices": []}
+               for slot in range(1, settings.teams + 1)}
+    recent = []
+    for offset, idx in enumerate(taken_order or []):
+        if offset >= len(slots):
+            break                       # more picks than the draft has turns
+        if idx is None:
+            recent.insert(0, None)
+            continue
+        slot = slots[offset]
+        pos = pool.position[idx]
+        rosters[slot]["counts"][pos] = rosters[slot]["counts"].get(pos, 0) + 1
+        rosters[slot]["indices"].append(int(idx))
+        recent.insert(0, pos)
+    return rosters, recent[:RUN_WINDOW]
+
+
 def _run_draft(pool, settings, slot_managers, my_slot, taken, betas, rng,
-               forced=None) -> dict:
+               forced=None, taken_order=None) -> dict:
     """Simulate the remainder of one snake draft and return every slot's
     roster, as `{slot: {"counts": {position: n, ...}, "indices": [pool
     index, ...]}}`.
 
     Resume contract: `taken` marks exactly the players drafted so far in
-    THIS draft, in pick order -- its count of True values (`already`, below)
-    IS the number of picks already made, and is used as an index into the
+    THIS draft -- the number of picks already made, used as an index into the
     snake pick order to resume from. If `taken` is ever built any other way
     (a player unavailable for a reason other than "already picked", or a
     count that does not match the real number of picks made), every
     remaining slot assignment misaligns silently: nothing here can detect
     that from `taken` alone.
+
+    `taken_order` is the same information WITH attribution: the pool index of
+    each already-made pick, in pick order (see `_seed_rosters`). It is what
+    lets a mid-draft run know who holds what. Without it every roster resumes
+    empty, so every opponent's `need` reads 1.0 at every position and the
+    roster caps re-arm from zero -- a manager already holding three QBs is
+    free to take three more. Callers that know the pick order must pass it;
+    `run_sim` always does. Omitting it while players are already off the
+    board warns rather than failing silently.
 
     `rollout` wraps this and returns only my `roster_value` as a scalar --
     Task 11's search depends on that scalar return type -- so this returns
@@ -430,20 +471,21 @@ def _run_draft(pool, settings, slot_managers, my_slot, taken, betas, rng,
     caps = _roster_cap(settings)
     rounds = settings.rounds
     slots = snake_slots(settings.teams, rounds)
-    rosters = {slot: {"counts": {}, "indices": []}
-               for slot in range(1, settings.teams + 1)}
-    already = int(gone.sum())
+    if taken_order is None and gone.any():
+        warnings.warn(
+            "draft_sim: players are marked taken but no taken_order was given; "
+            "their picks cannot be attributed to a team, so every roster "
+            "resumes empty (needs, roster caps and my own roster are wrong)",
+            RuntimeWarning, stacklevel=2)
+    rosters, recent = _seed_rosters(pool, settings, taken_order)
+    already = len(taken_order) if taken_order is not None else int(gone.sum())
     if already >= len(slots):
         # The draft is already over by the contract above -- there is
-        # nothing left to simulate. This function has no per-team ownership
-        # record for players marked `taken` before it was called (`taken` is
-        # a pool-wide mask, not a per-team assignment), so the only rosters
-        # it can honestly report are the empty ones just built: an explicit,
-        # documented answer rather than an accident of `slots[already:]`
-        # happening to be an empty slice.
+        # nothing left to simulate, so report the reconstructed rosters as
+        # they stand: an explicit, documented answer rather than an accident
+        # of `slots[already:]` happening to be an empty slice.
         return rosters
 
-    recent = []
     for offset, slot in enumerate(slots[already:], start=already):
         available = np.flatnonzero(~gone)
         if len(available) == 0:
@@ -481,16 +523,21 @@ def _run_draft(pool, settings, slot_managers, my_slot, taken, betas, rng,
     return rosters
 
 
-def rollout(pool, settings, slot_managers, my_slot, taken, betas, rng,
-            forced=None) -> float:
-    """Simulate the remainder of one snake draft and return my end-of-draft
-    roster_value. See `_run_draft` for the full `taken` resume contract."""
-    rosters = _run_draft(pool, settings, slot_managers, my_slot, taken, betas,
-                         rng, forced)
+def _my_value(pool, rosters, my_slot, settings) -> float:
     mine = rosters[my_slot]["indices"]
     return roster_value(
         [(pool.position[i], pool.points[i], pool.availability[i]) for i in mine],
         settings)
+
+
+def rollout(pool, settings, slot_managers, my_slot, taken, betas, rng,
+            forced=None, taken_order=None) -> float:
+    """Simulate the remainder of one snake draft and return my end-of-draft
+    roster_value. See `_run_draft` for the full resume contract, including
+    what `taken_order` is for."""
+    rosters = _run_draft(pool, settings, slot_managers, my_slot, taken, betas,
+                         rng, forced, taken_order=taken_order)
+    return _my_value(pool, rosters, my_slot, settings)
 
 
 DEFAULT_ROLLOUTS = 300
@@ -507,7 +554,8 @@ def _next_pick_for(settings, my_slot, already) -> int:
 
 def search_pick(pool, settings, slot_managers, my_slot, taken, betas,
                 n_rollouts: int = DEFAULT_ROLLOUTS,
-                n_candidates: int = DEFAULT_CANDIDATES, seed: int = 0):
+                n_candidates: int = DEFAULT_CANDIDATES, seed: int = 0,
+                taken_order=None):
     """Expected end-of-draft roster value for each candidate at my next pick.
 
     Candidates are the best available by market rank and by projection, since
@@ -516,6 +564,9 @@ def search_pick(pool, settings, slot_managers, my_slot, taken, betas,
     Rollout i uses seed (seed, i) for every candidate -- common random numbers,
     so all candidates face identical opponent behavior and the comparison
     between them is far less noisy than independent sampling at the same cost.
+
+    `taken_order` is passed straight through to every rollout; see
+    `_run_draft` for what it is and why a mid-draft run needs it.
     """
     available = np.flatnonzero(~taken)
     if len(available) == 0:
@@ -528,7 +579,8 @@ def search_pick(pool, settings, slot_managers, my_slot, taken, betas,
     for idx in candidates:
         values = np.array([
             rollout(pool, settings, slot_managers, my_slot, taken, betas,
-                    rng=np.random.default_rng([seed, i]), forced=int(idx))
+                    rng=np.random.default_rng([seed, i]), forced=int(idx),
+                    taken_order=taken_order)
             for i in range(n_rollouts)])
         rows.append({"player_id": pool.player_id[idx],
                      "ev": float(values.mean()),
@@ -540,14 +592,25 @@ def search_pick(pool, settings, slot_managers, my_slot, taken, betas,
 
 
 def survival(pool, settings, slot_managers, my_slot, taken, betas,
-             n_rollouts: int = DEFAULT_ROLLOUTS, seed: int = 0):
+             n_rollouts: int = DEFAULT_ROLLOUTS, seed: int = 0,
+             taken_order=None):
     """Probability each player is still available when my next turn arrives.
 
     Counted from the same rollout machinery, but stopping at my next pick
     rather than running the draft out -- this is the "who can I wait on"
     number, and it only depends on what happens before my turn.
+
+    `taken_order` carries the same pick attribution `_run_draft` needs, and
+    for the same reason: without it every opponent between now and my turn
+    resumes with an empty roster, so `need` reads 1.0 everywhere and the
+    caps re-arm from zero.
     """
-    already = int(taken.sum())
+    if taken_order is None and taken.any():
+        warnings.warn(
+            "draft_sim.survival: players are marked taken but no taken_order "
+            "was given; opponents resume with empty rosters, so their needs "
+            "and roster caps are wrong", RuntimeWarning, stacklevel=2)
+    already = len(taken_order) if taken_order is not None else int(taken.sum())
     target = _next_pick_for(settings, my_slot, already)
     slots = snake_slots(settings.teams, settings.rounds)
     caps = _roster_cap(settings)
@@ -556,8 +619,9 @@ def survival(pool, settings, slot_managers, my_slot, taken, betas,
     for i in range(n_rollouts):
         rng = np.random.default_rng([seed, i])
         gone = taken.copy()
-        rosters = {slot: {} for slot in range(1, settings.teams + 1)}
-        recent = []
+        seeded, seeded_recent = _seed_rosters(pool, settings, taken_order)
+        rosters = {slot: state["counts"] for slot, state in seeded.items()}
+        recent = list(seeded_recent)
         for offset in range(already, min(target - 1, len(slots))):
             slot = slots[offset]
             available = np.flatnonzero(~gone)
@@ -590,6 +654,46 @@ def survival(pool, settings, slot_managers, my_slot, taken, betas,
 
     return pd.DataFrame({"player_id": pool.player_id,
                          "avail_pct": counts / max(n_rollouts, 1)})
+
+
+def _drafted_state(conn, pool):
+    """`(taken, taken_order)` for the players already off the board.
+
+    `drafted.pick_no` is written by `POST /api/drafted` and is the only
+    record of what order the board was marked up in, which is what makes
+    attribution possible at all: pick k in the snake order belongs to the
+    slot that was on the clock for pick k.
+
+    Rows whose `pick_no` is null predate the column (`pipeline/db.py` adds it
+    to existing databases with a plain ALTER, so anything drafted before that
+    migration has no value). Those picks are genuinely unattributable -- any
+    order we invented for them, including "nulls first", would hand real
+    players to the wrong teams and silently corrupt every roster, need and
+    cap downstream. So this refuses to guess and asks the user to re-mark
+    them, which is cheap: un-toggle and re-toggle in draft order.
+    """
+    drafted = read_table(conn, "drafted")
+    if drafted.empty:
+        return np.zeros(len(pool.player_id), dtype=bool), []
+    if "pick_no" not in drafted.columns or drafted["pick_no"].isna().any():
+        missing = int(drafted["pick_no"].isna().sum()) \
+            if "pick_no" in drafted.columns else len(drafted)
+        raise ValueError(
+            f"{missing} drafted player(s) have no pick_no, so they cannot be "
+            "attributed to a team and the simulation would run against wrong "
+            "rosters. Un-mark and re-mark them in draft order (or clear the "
+            "drafted table) and run again.")
+    ordered = drafted.sort_values("pick_no")
+    position_of = {pid: i for i, pid in enumerate(pool.player_id)}
+    # A drafted player who is no longer on the board (a refresh dropped him)
+    # still consumed his turn, so he stays in the order as a None rather than
+    # shifting every later pick onto the wrong slot.
+    taken_order = [position_of.get(pid) for pid in ordered["player_id"]]
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    for idx in taken_order:
+        if idx is not None:
+            taken[idx] = True
+    return taken, taken_order
 
 
 def run_sim(conn, my_slot: int, slot_managers: dict,
@@ -629,16 +733,15 @@ def run_sim(conn, my_slot: int, slot_managers: dict,
             personal = bool(rows["uses_personal"].iloc[0]) if not rows.empty else False
         betas[manager] = beta if personal else pooled
 
-    drafted = read_table(conn, "drafted")
-    drafted_ids = set(drafted["player_id"]) if not drafted.empty else set()
-    taken = np.isin(pool.player_id, list(drafted_ids))
+    taken, taken_order = _drafted_state(conn, pool)
 
     results = search_pick(pool, settings, slot_managers, my_slot, taken, betas,
-                          n_rollouts=n_rollouts, seed=seed)
+                          n_rollouts=n_rollouts, seed=seed,
+                          taken_order=taken_order)
     avail = survival(pool, settings, slot_managers, my_slot, taken, betas,
-                     n_rollouts=n_rollouts, seed=seed)
+                     n_rollouts=n_rollouts, seed=seed, taken_order=taken_order)
 
-    run_id = f"{my_slot}-{n_rollouts}-{seed}-{int(taken.sum())}"
+    run_id = f"{my_slot}-{n_rollouts}-{seed}-{len(taken_order)}"
     results.insert(0, "run_id", run_id)
     avail.insert(0, "run_id", run_id)
     results["my_slot"] = my_slot
