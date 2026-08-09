@@ -368,7 +368,8 @@ def _pool(n=60):
         position=positions,
         adp_rank=np.arange(1, n + 1, dtype=float),
         points=np.linspace(300.0, 60.0, n),
-        availability=np.full(n, 90.0))
+        availability=np.full(n, 90.0),
+        vor=np.linspace(300.0, 60.0, n))
 
 
 def _flat_betas(managers):
@@ -473,7 +474,8 @@ def _parity_fixture():
         player_id=np.array([f"p{i}" for i in range(len(positions))]),
         norm=norms, position=positions, adp_rank=adp_rank,
         points=np.linspace(300.0, 60.0, len(positions)),
-        availability=np.full(len(positions), 90.0))
+        availability=np.full(len(positions), 90.0),
+        vor=np.linspace(300.0, 60.0, len(positions)))
 
     roster = {"RB": 2, "WR": 1, "QB": 1}       # RB need false, others true
     recent = ["WR", "RB", "RB", "QB", "TE"]    # fills RUN_WINDOW exactly
@@ -557,7 +559,7 @@ def test_rollout_never_drafts_past_a_roster_cap_even_when_the_shortlist_is_all_o
         player_id=np.array([f"p{i}" for i in range(n)]),
         norm=np.array([f"player {i}" for i in range(n)]),
         position=positions, adp_rank=np.arange(1, n + 1, dtype=float),
-        points=points, availability=np.full(n, 90.0))
+        points=points, availability=np.full(n, 90.0), vor=points)
     slots = {i: f"m{i}" for i in range(1, 9)}
     taken = np.zeros(n, dtype=bool)
     betas = _flat_betas(slots.values())
@@ -709,7 +711,7 @@ def test_run_sim_seeds_rosters_from_the_recorded_pick_order(tmp_path, monkeypatc
     assert run_id.endswith("-3")               # three picks already made
 
 
-from scoring.draft_sim import search_pick, survival
+from scoring.draft_sim import _candidate_indices, search_pick, survival
 
 
 def test_search_pick_ranks_the_best_candidate_first():
@@ -718,10 +720,14 @@ def test_search_pick_ranks_the_best_candidate_first():
     taken = np.zeros(len(pool.player_id), dtype=bool)
     out = search_pick(pool, S, slots, 1, taken, _flat_betas(slots.values()),
                       n_rollouts=25, n_candidates=6, seed=11)
-    assert list(out.columns) == ["player_id", "ev", "se", "rank"]
+    # `applied_pct` joined the schema with the fix for dead candidates: how
+    # often forcing this candidate actually happened rather than falling
+    # through to the greedy baseline.
+    assert list(out.columns) == ["player_id", "ev", "se", "applied_pct", "rank"]
     assert out["rank"].tolist() == [1, 2, 3, 4, 5, 6]
     assert out["ev"].is_monotonic_decreasing
     assert (out["se"] >= 0).all()
+    assert (out["applied_pct"] == 1.0).all()      # my_slot 1 picks first
 
 def test_search_pick_uses_common_random_numbers():
     # Same seed, same candidates -> byte-identical EVs across calls.
@@ -734,6 +740,80 @@ def test_search_pick_uses_common_random_numbers():
     b = search_pick(pool, S, slots, 1, taken, betas, n_rollouts=15,
                     n_candidates=4, seed=5)
     assert a["ev"].tolist() == b["ev"].tolist()
+
+def _anti_correlated_pool(n=60):
+    """Market rank and VOR deliberately disagree: pool index 0 is the market's
+    number one and the worst by VOR, index n-1 the reverse."""
+    positions = np.array(["RB", "WR", "QB", "TE", "K", "DST"] * (n // 6))
+    return SimPool(
+        player_id=np.array([f"p{i}" for i in range(n)]),
+        norm=np.array([f"player {i}" for i in range(n)]),
+        position=positions,
+        adp_rank=np.arange(1, n + 1, dtype=float),
+        points=np.linspace(60.0, 300.0, n),
+        availability=np.full(n, 90.0),
+        vor=np.linspace(60.0, 300.0, n))
+
+
+def test_candidate_set_draws_from_both_market_rank_and_vor():
+    """The second candidate source has to actually operate.
+
+    `dict.fromkeys(by_market + by_vor)[:n_candidates]` returned `by_market`
+    verbatim -- both slices held n_candidates already-unique entries, so the
+    truncation threw the whole second source away. With market rank and VOR
+    anti-correlated the candidates came back p0..p11 and the top twelve by
+    VOR (p59..p48) contributed nothing at all.
+    """
+    pool = _anti_correlated_pool()
+    available = np.arange(len(pool.player_id))
+    everyone_survives = np.ones(len(pool.player_id))
+
+    picked = _candidate_indices(pool, available, everyone_survives, 12)
+
+    assert len(picked) == 12
+    assert len(set(picked)) == 12
+    top_market = set(range(6))                       # p0..p5
+    top_vor = set(range(len(pool.player_id) - 6, len(pool.player_id)))   # p54..p59
+    assert len(top_market & set(picked)) >= 5
+    assert len(top_vor & set(picked)) >= 5
+
+
+def test_candidate_set_skips_players_who_will_not_survive_to_my_pick():
+    """A candidate an opponent has already taken by my turn falls through to
+    the greedy policy, so under common random numbers every such candidate
+    produces the identical draft and reads as a precisely-measured near-tie.
+    Candidates below MIN_CANDIDATE_AVAIL are not evaluated at all.
+    """
+    pool = _pool()
+    available = np.arange(len(pool.player_id))
+    avail_pct = np.ones(len(pool.player_id))
+    avail_pct[:8] = 0.05                             # the top of the board turns over
+
+    picked = _candidate_indices(pool, available, avail_pct, 6)
+
+    assert all(idx >= 8 for idx in picked)
+
+
+def test_search_pick_drops_candidates_it_almost_never_actually_gets():
+    """The end-to-end version of the same thing, in the reviewer's scenario.
+
+    Slot 8 against ADP-disciplined opponents with nothing drafted: the top of
+    the board is gone seven picks in. Before the fix, p0/p1/p2/p3 came back
+    byte-identical (ev=1332.449153, se=7.406298) and were ranked 3rd through
+    6th. Now no candidate is reported unless forcing him actually happened,
+    and no two rows can be exactly equal by construction.
+    """
+    pool = _pool()
+    slots = {i: f"m{i}" for i in range(1, 9)}
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+
+    out = search_pick(pool, S, slots, 8, taken, _adp_betas(slots.values()),
+                      n_rollouts=60, n_candidates=12, seed=0)
+
+    assert not out.empty
+    assert (out["applied_pct"] >= 0.25).all()
+    assert not out.duplicated(["ev", "se"]).any()
+
 
 def _adp_betas(managers):
     """Opponents who follow market order: a negative `reach` coefficient

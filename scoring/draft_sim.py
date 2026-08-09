@@ -19,6 +19,7 @@ construction; reading it as a rate would model the median player at every
 position as missing half the season.
 """
 import warnings
+from itertools import zip_longest
 from typing import NamedTuple
 
 import numpy as np
@@ -208,6 +209,10 @@ class SimPool(NamedTuple):
     # within-position percentile). Named for what it is, so the two can never
     # be swapped by accident again.
     availability: np.ndarray
+    # The board's own value over replacement, the second candidate source the
+    # spec asks for ("the union of the top available by VOR and the top by
+    # market rank").
+    vor: np.ndarray
 
 
 def snake_slots(teams: int, rounds: int) -> list:
@@ -273,13 +278,19 @@ def build_pool(conn, board: pd.DataFrame, settings) -> SimPool:
     unknown = ranked[~has_rank]
     ranked = pd.concat([known, unknown], ignore_index=True)
     availability = ranked["player_id"].map(_availability(conn))
+    # `vor` is the board's headline ranking and the spec's second candidate
+    # source. A board built without it (a bare fixture) falls back to the
+    # projection, which keeps the second source meaningful rather than
+    # collapsing it onto market order.
+    vor_col = ranked["vor"] if "vor" in ranked.columns else ranked["proj"]
     return SimPool(
         player_id=ranked["player_id"].to_numpy(),
         norm=ranked["name"].map(_norm_name).to_numpy(),
         position=ranked["position"].to_numpy(),
         adp_rank=np.arange(1, len(ranked) + 1, dtype=float),
         points=ranked["proj"].to_numpy(dtype=float),
-        availability=availability.fillna(DEFAULT_AVAILABILITY).to_numpy(dtype=float))
+        availability=availability.fillna(DEFAULT_AVAILABILITY).to_numpy(dtype=float),
+        vor=pd.to_numeric(vor_col, errors="coerce").fillna(-np.inf).to_numpy(dtype=float))
 
 
 def _live_features(pool, available, overall_pick, roster, recent, settings):
@@ -552,43 +563,116 @@ def _next_pick_for(settings, my_slot, already) -> int:
     return len(slots) + 1
 
 
+SEARCH_COLUMNS = ["player_id", "ev", "se", "applied_pct", "rank"]
+
+# A candidate has to have a real chance of still being there at my next pick
+# for the number attached to him to mean anything. Below this, forcing him
+# mostly does not happen and the "expected value of taking him" is really the
+# expected value of the greedy baseline.
+MIN_CANDIDATE_AVAIL = 0.25
+
+
+def _candidate_indices(pool, available, avail_pct, n_candidates) -> list:
+    """Which players to actually evaluate at my next pick.
+
+    Two sources, interleaved: best by market rank, and best by VOR -- the
+    board's own headline ranking, and what the spec asks for. Slicing
+    `n_candidates` off each source, concatenating, and truncating back to
+    `n_candidates` returned the market list verbatim: its entries are already
+    unique and already fill the slice, so the second source never operated at
+    all. (With points and market rank deliberately anti-correlated, the
+    candidates came back p0..p11 and the top twelve by points, p59..p48,
+    contributed nothing.) Interleaving takes roughly half from each and tops
+    up from whichever list still has entries when the two overlap.
+
+    Both sources are drawn only from players who might actually still be
+    there when my turn comes. Forcing a candidate an opponent already took
+    falls through to the greedy policy, and under common random numbers every
+    such candidate then produces the identical draft: at slot 8 against
+    ADP-disciplined opponents, four of twelve candidates came back
+    byte-identical (ev=1332.449153, se=7.406298) and ranked 3rd through 6th,
+    for players with a 7-22% chance of being available. If nobody clears the
+    bar -- only possible in a pool small enough that everything turns over --
+    fall back to the whole available set rather than returning nothing.
+    """
+    live = available[avail_pct[available] >= MIN_CANDIDATE_AVAIL]
+    if len(live) == 0:
+        live = available
+    by_market = live[np.argsort(pool.adp_rank[live], kind="stable")]
+    by_vor = live[np.argsort(-pool.vor[live], kind="stable")]
+    picked, seen = [], set()
+    for from_market, from_vor in zip_longest(by_market, by_vor):
+        for idx in (from_market, from_vor):
+            if idx is None or int(idx) in seen:
+                continue
+            seen.add(int(idx))
+            picked.append(int(idx))
+            if len(picked) == n_candidates:
+                return picked
+    return picked
+
+
 def search_pick(pool, settings, slot_managers, my_slot, taken, betas,
                 n_rollouts: int = DEFAULT_ROLLOUTS,
                 n_candidates: int = DEFAULT_CANDIDATES, seed: int = 0,
-                taken_order=None):
+                taken_order=None, avail_pct=None):
     """Expected end-of-draft roster value for each candidate at my next pick.
 
-    Candidates are the best available by market rank and by projection, since
-    those two disagree exactly where the interesting decisions are.
+    Candidates come from `_candidate_indices`: market rank and VOR, among the
+    players likely to survive to that pick.
 
     Rollout i uses seed (seed, i) for every candidate -- common random numbers,
     so all candidates face identical opponent behavior and the comparison
     between them is far less noisy than independent sampling at the same cost.
+
+    `applied_pct` reports the share of rollouts in which the candidate was
+    actually still on the board at my turn, i.e. in which forcing him meant
+    anything at all; the rest fell through to the greedy policy. Candidates
+    below `MIN_CANDIDATE_AVAIL` are dropped rather than ranked, so the board
+    never shows a confident ΔEV for a player who will not be there. (`forced`
+    ending up on my roster is exactly equivalent to it having applied: if he
+    was gone at my turn he can never come back, and if it applied he is
+    rostered.)
+
+    `avail_pct`, pool-aligned, is that survival estimate. `run_sim` computes
+    it once and shares it with the `sim_survival` table; left out, it is
+    computed here.
 
     `taken_order` is passed straight through to every rollout; see
     `_run_draft` for what it is and why a mid-draft run needs it.
     """
     available = np.flatnonzero(~taken)
     if len(available) == 0:
-        return pd.DataFrame(columns=["player_id", "ev", "se", "rank"])
-    by_market = available[np.argsort(pool.adp_rank[available])][:n_candidates]
-    by_points = available[np.argsort(-pool.points[available])][:n_candidates]
-    candidates = list(dict.fromkeys(list(by_market) + list(by_points)))[:n_candidates]
+        return pd.DataFrame(columns=SEARCH_COLUMNS)
+    if avail_pct is None:
+        avail_pct = survival(pool, settings, slot_managers, my_slot, taken,
+                             betas, n_rollouts=n_rollouts, seed=seed,
+                             taken_order=taken_order)["avail_pct"].to_numpy()
+    candidates = _candidate_indices(pool, available, np.asarray(avail_pct),
+                                    n_candidates)
 
     rows = []
     for idx in candidates:
-        values = np.array([
-            rollout(pool, settings, slot_managers, my_slot, taken, betas,
-                    rng=np.random.default_rng([seed, i]), forced=int(idx),
-                    taken_order=taken_order)
-            for i in range(n_rollouts)])
+        values, applied = [], 0
+        for i in range(n_rollouts):
+            rosters = _run_draft(pool, settings, slot_managers, my_slot, taken,
+                                 betas, rng=np.random.default_rng([seed, i]),
+                                 forced=idx, taken_order=taken_order)
+            values.append(_my_value(pool, rosters, my_slot, settings))
+            applied += int(idx in rosters[my_slot]["indices"])
+        values = np.array(values)
         rows.append({"player_id": pool.player_id[idx],
                      "ev": float(values.mean()),
                      "se": float(values.std(ddof=1) / np.sqrt(len(values)))
-                     if len(values) > 1 else 0.0})
-    out = pd.DataFrame(rows).sort_values("ev", ascending=False).reset_index(drop=True)
+                     if len(values) > 1 else 0.0,
+                     "applied_pct": applied / max(n_rollouts, 1)})
+    frame = pd.DataFrame(rows)
+    kept = frame[frame["applied_pct"] >= MIN_CANDIDATE_AVAIL]
+    if not kept.empty:
+        frame = kept
+    out = frame.sort_values("ev", ascending=False).reset_index(drop=True)
     out["rank"] = out.index + 1
-    return out[["player_id", "ev", "se", "rank"]]
+    return out[SEARCH_COLUMNS]
 
 
 def survival(pool, settings, slot_managers, my_slot, taken, betas,
@@ -735,11 +819,15 @@ def run_sim(conn, my_slot: int, slot_managers: dict,
 
     taken, taken_order = _drafted_state(conn, pool)
 
-    results = search_pick(pool, settings, slot_managers, my_slot, taken, betas,
-                          n_rollouts=n_rollouts, seed=seed,
-                          taken_order=taken_order)
+    # Survival first: search_pick needs it to keep candidates it has no real
+    # chance of getting out of the ranking, and computing it once means that
+    # costs nothing beyond the sim_survival table we were writing anyway.
     avail = survival(pool, settings, slot_managers, my_slot, taken, betas,
                      n_rollouts=n_rollouts, seed=seed, taken_order=taken_order)
+    results = search_pick(pool, settings, slot_managers, my_slot, taken, betas,
+                          n_rollouts=n_rollouts, seed=seed,
+                          taken_order=taken_order,
+                          avail_pct=avail["avail_pct"].to_numpy())
 
     run_id = f"{my_slot}-{n_rollouts}-{seed}-{len(taken_order)}"
     results.insert(0, "run_id", run_id)
