@@ -60,7 +60,7 @@ const fmtSource = (n: number | null) => (n === null ? '—' : Number.isInteger(n
 const rankColumnId = (source: RankSourceId) => `rank_${source}`
 
 const NUMERIC_COLUMNS = new Set([
-  'bye', 'espn_ppr_rank',
+  'bye', 'espn_ppr_rank', 'avail_pct', 'ev',
   ...RANK_SOURCES.map((s) => rankColumnId(s.id)),
   ...['QB', 'RB', 'WR'].flatMap((p) => boardColumnsFor(p).map((c) => c.id)),
 ])
@@ -69,6 +69,7 @@ const NUMERIC_COLUMNS = new Set([
 // after switching tabs.
 const STATIC_COLUMN_IDS = [
   'drafted-toggle', 'espn_ppr_rank', 'name', 'position', 'team', 'bye',
+  'avail_pct', 'ev',
   ...RANK_SOURCES.map((s) => rankColumnId(s.id)),
 ]
 
@@ -91,6 +92,15 @@ export default function PlayerTable({
     setSorting([{ id: rankColumnId(rankSource), desc: false }])
   }, [rankSource])
   const tableRef = useRef<HTMLTableElement>(null)
+
+  // ΔEV (below) is rendered relative to the best EV on the board -- the top
+  // sim candidate reads as a dash and everything else reads as what it
+  // costs you to take instead. Computed from `players` (not the sorted
+  // table rows), so it doesn't shift as the sort/filter changes.
+  const bestEv = useMemo(() => {
+    const values = players.map((p) => p.ev).filter((v): v is number => v !== null)
+    return values.length ? Math.max(...values) : null
+  }, [players])
 
   const columns = useMemo<ColumnDef<Player>[]>(
     () => [
@@ -192,6 +202,41 @@ export default function PlayerTable({
           )
         },
       },
+      {
+        id: 'avail_pct',
+        header: () => (
+          <span title="Probability this player is still available at your next pick">Avail%</span>
+        ),
+        // null -> undefined so sortUndefined 'last' applies, same as the
+        // other nullable numeric columns above.
+        accessorFn: (row) => row.avail_pct ?? undefined,
+        sortUndefined: 'last',
+        sortDescFirst: true,
+        cell: ({ row }) => {
+          const v = row.original.avail_pct
+          // Blank (not "0%") when a sim hasn't run yet; an actual 0% still
+          // renders, since "definitely gone" is a real, distinct answer.
+          return v === null ? '' : `${Math.round(v * 100)}%`
+        },
+      },
+      {
+        id: 'ev',
+        header: () => (
+          <span title="Expected starting-lineup points versus the best available option">ΔEV</span>
+        ),
+        accessorFn: (row) => row.ev ?? undefined,
+        sortUndefined: 'last',
+        sortDescFirst: true,
+        // Rendered relative to the best EV on the board, so the top
+        // candidate reads as a dash and everything else reads as what it
+        // costs you.
+        cell: ({ row }) => {
+          const p = row.original
+          if (p.ev === null || bestEv === null) return ''
+          const delta = p.ev - bestEv
+          return delta === 0 ? '—' : delta.toFixed(1)
+        },
+      },
       ...boardColumnsFor(positionFilter).map((c): ColumnDef<Player> => ({
         id: c.id,
         // null stats (rookies/K/DST) -> undefined so sortUndefined applies
@@ -202,7 +247,7 @@ export default function PlayerTable({
         cell: ({ row }) => (row.original.stats ? c.cell(row.original.stats) : '—'),
       })),
     ],
-    [onToggleDrafted, positionFilter, rankSource]
+    [onToggleDrafted, positionFilter, rankSource, bestEv]
   )
 
   // TanStack drops an active sort when its column disappears from the

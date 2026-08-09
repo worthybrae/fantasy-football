@@ -7,6 +7,7 @@ import { BoardSkeleton } from './components/PageSkeleton'
 import PositionTabs from './components/PositionTabs'
 import FreshnessBadge from './components/FreshnessBadge'
 import TopBar from './components/TopBar'
+import DraftRail from './components/DraftRail'
 import './App.css'
 
 const FLEX_POSITIONS = new Set(['RB', 'WR', 'TE'])
@@ -35,6 +36,11 @@ function Board() {
   // PlayerTable every time it changes (filter, sort, or data reload).
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null)
   const [visibleIds, setVisibleIds] = useState<string[]>([])
+  // Sim status shown in the top bar ("Slot 4 · next pick 2.13 · sim just
+  // now"). Stays null -- header unchanged -- until DraftRail reports a run
+  // has actually started; a brand-new board with no import and no sim has
+  // nothing to say here.
+  const [simStatus, setSimStatus] = useState<string | null>(null)
 
   async function loadPlayers() {
     setLoading(true)
@@ -225,7 +231,12 @@ function Board() {
       <TopBar
         search={search}
         onSearch={setSearch}
-        meta={<FreshnessBadge />}
+        meta={
+          <>
+            <FreshnessBadge />
+            {simStatus && <span className="sim-status">{simStatus}</span>}
+          </>
+        }
         searchShortcutDisabled={false}
       />
       <div className="app-body">
@@ -295,6 +306,11 @@ function Board() {
             </>
           )}
         </main>
+        <DraftRail
+          onSimComplete={loadPlayers}
+          onStatus={setSimStatus}
+          draftedCount={players.filter((p) => p.drafted).length}
+        />
       </div>
     </div>
   )

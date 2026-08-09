@@ -124,13 +124,14 @@
   display: flex;
   align-items: center;
   justify-content: flex-end;
+  gap: var(--space-3);
 }
 
 /* -- layout -- */
 
 .app-body {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   flex: 1;
   min-height: 0;
 }
@@ -1079,3 +1080,42 @@ td:first-child {
 .pts-hot-2 { background: color-mix(in srgb, var(--ok) 28%, transparent); }
 .pts-cold-1 { background: color-mix(in srgb, var(--fail) 10%, transparent); }
 .pts-cold-2 { background: color-mix(in srgb, var(--fail) 24%, transparent); }
+
+/* -- draft rail -- */
+
+.draft-rail {
+  width: 280px;
+  flex: 0 0 280px;
+  overflow-y: auto;
+  background: var(--bg-1);
+  border-left: 1px solid var(--border);
+  padding: 12px;
+}
+
+.rail-section + .rail-section { margin-top: 20px; }
+.rail-section h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; }
+.order-list { list-style: none; margin: 0; padding: 0; }
+.order-list li { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.slot-no { width: 18px; text-align: right; opacity: 0.6; font-variant-numeric: tabular-nums; }
+.rail-run { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.rail-run input { width: 70px; }
+.manager-card { border: 1px solid var(--border); border-radius: 6px; padding: 8px; margin-bottom: 8px; }
+.manager-card header { display: flex; align-items: center; gap: 6px; }
+.manager-summary { font-size: 0.85rem; opacity: 0.85; margin: 6px 0; }
+/* Namespaced .rail-chip (not .chip) -- .chip is already taken by
+   SimilarPlayers' rank/market chips (App.css, "similar players" section)
+   with different sizing; reusing that name here would have silently
+   changed those chips' font-size/padding via source-order cascade. */
+.rail-chip { font-size: 0.7rem; padding: 1px 6px; border-radius: 10px; }
+.rail-chip-personal { background: var(--accent-bg); color: var(--accent); }
+.rail-chip-pooled { background: var(--bg-2); color: var(--text-3); }
+.coef-bars { list-style: none; margin: 0; padding: 0; }
+.coef-bars li { display: flex; align-items: center; gap: 6px; font-size: 0.75rem; }
+.coef-name { width: 70px; color: var(--text-3); }
+.coef-track { flex: 1; height: 6px; background: var(--bg-2); border-radius: 3px; }
+.coef-fill { display: block; height: 100%; border-radius: 3px; }
+.coef-fill.pos { background: var(--ok); }
+.coef-fill.neg { background: var(--fail); }
+.manager-card footer { font-size: 0.7rem; color: var(--text-3); margin-top: 4px; }
+.rail-empty { font-size: 0.8rem; color: var(--text-3); }
+.sim-status { font-size: 0.8rem; color: var(--text-2); white-space: nowrap; }

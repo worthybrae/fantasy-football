@@ -15,6 +15,7 @@ export interface Player {
   espn_ppr_rank: number | null;
   stats: BoardStats | null;
   rookie: boolean; drafted: boolean;
+  avail_pct: number | null; ev: number | null; ev_se: number | null;
 }
 
 // URL slug for a player page: accent-folded kebab-case name
@@ -118,5 +119,83 @@ export interface PlayerProfileData {
 export async function fetchProfile(playerId: string): Promise<PlayerProfileData> {
   const res = await fetch(`/api/players/${playerId}/profile`)
   if (!res.ok) throw new Error(`profile ${res.status}: ${await detailText(res)}`)
+  return res.json()
+}
+
+export interface ManagerCoefficient {
+  feature: string
+  value: number
+  pooled_value: number
+}
+
+export interface Manager {
+  manager: string
+  summary: string
+  n_picks: number
+  uses_personal: boolean
+  heldout_gain: number | null
+  coefficients: ManagerCoefficient[]
+}
+
+export interface DraftOrderEntry {
+  slot: number
+  manager: string
+}
+
+export interface DraftOrder {
+  order: DraftOrderEntry[]
+  my_slot: number | null
+  source: 'espn' | 'manual' | 'none'
+}
+
+// Just the fields DraftRail needs (teams/rounds, for turning a pick count
+// into round.pick notation) -- /api/league returns more (season, starters,
+// flex_slots, bench, derived, unmapped_scoring) that nothing on this board
+// consumes yet.
+export interface LeagueInfo {
+  teams: number
+  rounds: number
+}
+
+export async function fetchManagers(): Promise<Manager[]> {
+  const res = await fetch('/api/managers')
+  if (!res.ok) throw new Error('Failed to load managers')
+  return (await res.json()).managers
+}
+
+export async function fetchDraftOrder(): Promise<DraftOrder> {
+  const res = await fetch('/api/draft-order')
+  if (!res.ok) throw new Error('Failed to load draft order')
+  return res.json()
+}
+
+export async function fetchLeague(): Promise<LeagueInfo> {
+  const res = await fetch('/api/league')
+  if (!res.ok) throw new Error('Failed to load league settings')
+  return res.json()
+}
+
+export async function saveDraftOrder(order: DraftOrderEntry[], mySlot: number) {
+  const res = await fetch('/api/draft-order', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ order, my_slot: mySlot }),
+  })
+  if (!res.ok) throw new Error('Failed to save draft order')
+}
+
+export async function startSim(mySlot: number, rollouts: number): Promise<string> {
+  const res = await fetch('/api/sim', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ my_slot: mySlot, rollouts }),
+  })
+  if (!res.ok) throw new Error('Failed to start simulation')
+  return (await res.json()).run_id
+}
+
+export async function pollSim(runId: string): Promise<{ status: string; detail: string | null }> {
+  const res = await fetch(`/api/sim/${runId}`)
+  if (!res.ok) throw new Error('Failed to read simulation status')
   return res.json()
 }
