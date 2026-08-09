@@ -45,30 +45,38 @@ def build_observations(conn) -> list:
     out = []
     for season, season_picks in picks.groupby("season"):
         pool = adp[adp["season"] == season][["norm", "position", "adp_rank"]]
-        pool = pool.sort_values("adp_rank").reset_index(drop=True)
+        # historic_adp has no uniqueness guarantee on (norm, position) --
+        # parse_adp builds it straight from the external payload, and
+        # import_league writes it without deduping. Collapse to the
+        # best-known (lowest) adp_rank per player before anything else, so
+        # "one pick removes exactly one pool row" holds structurally rather
+        # than by accident of the fixture. Same precedent as
+        # scoring.board._dedupe_adp.
+        pool = pool.sort_values("adp_rank").drop_duplicates(
+            ["norm", "position"], keep="first").reset_index(drop=True)
         available = pool.copy()
         rosters, recent = {}, []
         for _, pick in season_picks.sort_values("overall_pick").iterrows():
             match = available.index[(available["norm"] == pick["norm"])
                                     & (available["position"] == pick["position"])]
-            if len(match) == 0:
-                # No ADP row for this player that season -- unusable as an
-                # observation, but the pick still consumed a roster spot and
-                # still counts toward positional runs.
-                rosters.setdefault(pick["manager"], {})
-                rosters[pick["manager"]][pick["position"]] = (
-                    rosters[pick["manager"]].get(pick["position"], 0) + 1)
-                recent.insert(0, pick["position"])
-                continue
-            reset = available.reset_index(drop=True)
-            chosen = int(reset.index[(reset["norm"] == pick["norm"])
-                                     & (reset["position"] == pick["position"])][0])
-            out.append(PickObservation(
-                season=int(season), overall_pick=int(pick["overall_pick"]),
-                manager=pick["manager"], chosen=chosen, pool=reset,
-                roster=dict(rosters.get(pick["manager"], {})),
-                recent=list(recent[:RUN_WINDOW])))
-            available = available.drop(index=match)
+            if len(match):
+                reset = available.reset_index(drop=True)
+                chosen = int(reset.index[(reset["norm"] == pick["norm"])
+                                         & (reset["position"] == pick["position"])][0])
+                out.append(PickObservation(
+                    season=int(season), overall_pick=int(pick["overall_pick"]),
+                    manager=pick["manager"], chosen=chosen, pool=reset,
+                    roster=dict(rosters.get(pick["manager"], {})),
+                    recent=list(recent[:RUN_WINDOW])))
+                # Belt and braces: the pool is deduped above so `match`
+                # should never carry more than one label, but drop only the
+                # first to guarantee the pool never shrinks by more than one
+                # row for a single pick even if that invariant is ever
+                # violated upstream.
+                available = available.drop(index=match[:1])
+            # Bookkeeping runs unconditionally, matched or not: a pick with
+            # no ADP row that season produces no observation, but it still
+            # consumed a roster spot and still counts toward positional runs.
             rosters.setdefault(pick["manager"], {})
             rosters[pick["manager"]][pick["position"]] = (
                 rosters[pick["manager"]].get(pick["position"], 0) + 1)
