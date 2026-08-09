@@ -234,3 +234,148 @@ def test_projections_zero_ppg_falls_back_to_position_floor(tmp_path):
     ])
     proj = projections(conn, board)
     assert proj["p1"] == POSITION_FLOOR["RB"]
+
+
+from scoring.draft_model import FEATURE_NAMES
+from scoring.draft_sim import SimPool, rollout, snake_slots
+
+
+def test_snake_slots_reverses_every_other_round():
+    assert snake_slots(4, 3) == [1, 2, 3, 4, 4, 3, 2, 1, 1, 2, 3, 4]
+
+
+def _pool(n=60):
+    positions = np.array(["RB", "WR", "QB", "TE", "K", "DST"] * (n // 6))
+    return SimPool(
+        player_id=np.array([f"p{i}" for i in range(n)]),
+        norm=np.array([f"player {i}" for i in range(n)]),
+        position=positions,
+        adp_rank=np.arange(1, n + 1, dtype=float),
+        points=np.linspace(300.0, 60.0, n),
+        durability=np.full(n, 90.0))
+
+
+def _flat_betas(managers):
+    return {m: np.zeros(len(FEATURE_NAMES)) for m in managers}
+
+
+def test_rollout_is_deterministic_under_a_fixed_seed():
+    pool = _pool()
+    slots = {i: f"m{i}" for i in range(1, 9)}
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    args = (pool, S, slots, 4, taken, _flat_betas(slots.values()))
+    a = rollout(*args, rng=np.random.default_rng(7))
+    b = rollout(*args, rng=np.random.default_rng(7))
+    assert a == b
+
+
+def test_rollout_returns_a_positive_roster_value():
+    pool = _pool()
+    slots = {i: f"m{i}" for i in range(1, 9)}
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    value = rollout(pool, S, slots, 4, taken, _flat_betas(slots.values()),
+                    rng=np.random.default_rng(1))
+    assert value > 0
+
+
+def test_forcing_the_top_player_beats_forcing_the_worst():
+    pool = _pool()
+    slots = {i: f"m{i}" for i in range(1, 9)}
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    betas = _flat_betas(slots.values())
+    best = np.mean([rollout(pool, S, slots, 1, taken, betas,
+                            rng=np.random.default_rng(i), forced=0)
+                    for i in range(20)])
+    worst = np.mean([rollout(pool, S, slots, 1, taken, betas,
+                             rng=np.random.default_rng(i), forced=len(pool.points) - 1)
+                     for i in range(20)])
+    assert best > worst
+
+
+def test_rollout_respects_already_taken_players():
+    pool = _pool()
+    slots = {i: f"m{i}" for i in range(1, 9)}
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    taken[:40] = True                    # only 20 players left, 8 teams x 15 rounds
+    value = rollout(pool, S, slots, 1, taken, _flat_betas(slots.values()),
+                    rng=np.random.default_rng(3))
+    assert value > 0                     # runs out of players without crashing
+
+
+# --- Feature parity: _live_features (numpy, rollout-fast) must produce the
+# same vectors as draft_model.feature_matrix (pandas, fitted-on). The fitted
+# coefficients only mean anything against the same feature definitions they
+# were fitted on -- a silent mismatch here would invalidate every simulation
+# result while everything still runs and looks plausible. Not covered by the
+# brief's own tests, so it is added here.
+
+from scoring.draft_model import PickObservation, feature_matrix
+from scoring.draft_sim import _live_features
+
+
+def _parity_fixture():
+    """Twelve players across all six positions, two already off the board
+    (both WR, so `available` is a genuine subset of the pool, not the whole
+    thing), a roster with mixed true/false needs (RB satisfied, WR/QB/TE/K/
+    DST not), and a recent-run window that exactly fills RUN_WINDOW -- so
+    `need` and `run` come out with a mix of zeros and non-zeros on both
+    sides, rather than being trivially zero everywhere.
+    """
+    positions = np.array(["QB", "RB", "WR", "TE", "K", "DST",
+                          "RB", "WR", "QB", "TE", "RB", "WR"])
+    norms = np.array([f"player {i}" for i in range(len(positions))])
+    adp_rank = np.arange(1, len(positions) + 1, dtype=float)
+    taken = np.zeros(len(positions), dtype=bool)
+    taken[[2, 7]] = True                      # both taken players are WR
+    available = np.flatnonzero(~taken)
+
+    pool = SimPool(
+        player_id=np.array([f"p{i}" for i in range(len(positions))]),
+        norm=norms, position=positions, adp_rank=adp_rank,
+        points=np.linspace(300.0, 60.0, len(positions)),
+        durability=np.full(len(positions), 90.0))
+
+    roster = {"RB": 2, "WR": 1, "QB": 1}       # RB need false, others true
+    recent = ["WR", "RB", "RB", "QB", "TE"]    # fills RUN_WINDOW exactly
+
+    obs_pool = pd.DataFrame({
+        "norm": norms[available], "position": positions[available],
+        "adp_rank": adp_rank[available]})
+
+    return pool, available, roster, recent, obs_pool
+
+
+def test_live_features_matches_feature_matrix_on_an_early_round_pick():
+    pool, available, roster, recent, obs_pool = _parity_fixture()
+    overall_pick = 5                            # round 1 of 8 teams: early
+    obs = PickObservation(season=2024, overall_pick=overall_pick, manager="m",
+                          chosen=0, pool=obs_pool, roster=roster, recent=recent)
+    expected = feature_matrix(obs, S)
+    actual = _live_features(pool, available, overall_pick, roster, recent, S)
+    np.testing.assert_allclose(actual, expected)
+
+
+def test_live_features_matches_feature_matrix_on_a_late_round_pick():
+    pool, available, roster, recent, obs_pool = _parity_fixture()
+    overall_pick = 50                           # round 7 of 8 teams: late
+    obs = PickObservation(season=2024, overall_pick=overall_pick, manager="m",
+                          chosen=0, pool=obs_pool, roster=roster, recent=recent)
+    expected = feature_matrix(obs, S)
+    actual = _live_features(pool, available, overall_pick, roster, recent, S)
+    np.testing.assert_allclose(actual, expected)
+
+
+# --- Roster caps (property 4): K and DST capped at 1, QB at most 3, imposed
+# as a mask rather than learned. rollout()'s public interface only returns a
+# float -- it does not expose per-manager roster composition -- so a direct
+# unit test of the cap table itself is the reliable way to pin this down,
+# rather than trying to infer it indirectly from a scalar.
+
+from scoring.draft_sim import _roster_cap
+
+
+def test_roster_cap_limits_kicker_defense_and_qb_regardless_of_starters():
+    caps = _roster_cap(S)
+    assert caps["K"] == 1
+    assert caps["DST"] == 1
+    assert caps["QB"] <= 3
