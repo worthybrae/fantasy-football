@@ -2,10 +2,12 @@ from itertools import combinations
 
 import numpy as np
 import pandas as pd
+import pytest
 from pipeline.db import get_conn, read_table, write_table
 from scoring import league
-from scoring.draft_sim import (FLEX_POSITIONS, POSITION_FLOOR, best_lineup_points,
-                               build_pool, projections, roster_value)
+from scoring.draft_sim import (DEFAULT_AVAILABILITY, FLEX_POSITIONS, POSITION_FLOOR,
+                               best_lineup_points, build_pool, projections,
+                               roster_value)
 
 S = league.default_settings()   # QB/2RB/2WR/TE/2FLEX/K/DST, 5 bench
 
@@ -187,6 +189,76 @@ def test_roster_value_position_insurance_never_exceeds_the_backups_own_points():
         assert 0.0 <= insurance <= backup_points + 1e-9
 
 
+_ZERO_BENCH_ROSTER = [
+    ("QB", 300.0, 50.0),
+    ("RB", 250.0, 50.0), ("RB", 200.0, 50.0), ("RB", 100.0, 50.0),
+    ("WR", 240.0, 50.0), ("WR", 220.0, 50.0), ("WR", 90.0, 50.0),
+    ("TE", 150.0, 50.0), ("K", 120.0, 50.0), ("DST", 110.0, 50.0),
+]
+
+
+def test_roster_value_does_not_credit_a_flex_starter_as_bench_insurance():
+    """A roster that exactly fills every starting slot has no bench at all,
+    so it can have no insurance: roster_value must equal best_lineup_points.
+
+    Ten players, ten slots (QB / 2 RB / 2 WR / TE / K / DST / 2 FLEX). RB3
+    (100) and WR3 (90) are the two FLEX starters -- best_lineup_points has
+    already counted both. The insurance loop used to index `values[count]`,
+    i.e. the player just past the *dedicated* count, which at RB and WR is
+    exactly that FLEX starter, so each of them got paid twice: 1780 became
+    1970. The backup has to be the best player the lineup did NOT assign.
+    """
+    starters_only = [(pos, points) for pos, points, _ in _ZERO_BENCH_ROSTER]
+    # QB 300 + RB 250+200 + WR 240+220 + TE 150 + K 120 + DST 110 = 1590,
+    # plus FLEX taking the two leftovers RB 100 and WR 90 = 1780.
+    assert best_lineup_points(starters_only, S) == 1780.0
+    assert roster_value(_ZERO_BENCH_ROSTER, S) == 1780.0
+
+
+def test_roster_value_insurance_uses_the_first_unassigned_player_at_the_position():
+    """The other half of the same rule: a real bench player still pays.
+
+    Same zero-bench roster plus a genuine RB4 (60) who no slot assigns. RB's
+    two dedicated starters are at 50% availability, so missed_total clamps to
+    1.0 and the credit is his own full 60 -- applied to him, not to RB3, who
+    is starting at FLEX.
+    """
+    with_bench = _ZERO_BENCH_ROSTER + [("RB", 60.0, 100.0)]
+    assert roster_value(with_bench, S) == 1840.0
+
+
+def test_build_pool_availability_is_a_games_played_rate_not_a_percentile(tmp_path):
+    """SimPool's availability must be `games / possible`, not the board's
+    within-position `durability` percentile.
+
+    board["durability"] comes out of factors.normalize_within_position, i.e.
+    rank(pct=True) * 100. Feeding that into roster_value's
+    `missed = 1 - availability / 100` models the median player at every
+    position as missing half the season, and makes any two starters at a
+    multi-slot position sum past the min(1.0, ...) clamp. The rate the
+    insurance term actually wants is durability_factor's `durability_raw`,
+    which the board drops before _BOARD_COLUMNS.
+    """
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    write_table(conn, "weekly", pd.DataFrame([
+        {"player_id": "p1", "player_display_name": "Fifteen Games",
+         "position": "WR", "recent_team": "DET", "season": 2025, "week": w,
+         "receptions": 5, "receiving_yards": 60, "targets": 7, "carries": 0}
+        for w in range(1, 16)]))
+    board = pd.DataFrame([
+        # durability 99.0 is a percentile; his real rate is 15/17 = 88.2%.
+        {"player_id": "p1", "name": "Fifteen Games", "position": "WR",
+         "team": "DET", "market_rank": 1.0, "durability": 99.0, "stats": None},
+        # No weekly history at all (a K, a DST, or a rookie).
+        {"player_id": "p2", "name": "No History", "position": "K",
+         "team": "SF", "market_rank": 2.0, "durability": 50.0, "stats": None},
+    ])
+    pool = build_pool(conn, board, S)
+    by_id = dict(zip(pool.player_id, pool.availability))
+    assert by_id["p1"] == pytest.approx(15 / 17 * 100.0)
+    assert by_id["p2"] == DEFAULT_AVAILABILITY
+
+
 def test_projections_prefer_espn_then_fall_back_to_weighted_ppg(tmp_path):
     conn = get_conn(str(tmp_path / "t.duckdb"))
     write_table(conn, "espn_adp", pd.DataFrame([
@@ -296,7 +368,7 @@ def _pool(n=60):
         position=positions,
         adp_rank=np.arange(1, n + 1, dtype=float),
         points=np.linspace(300.0, 60.0, n),
-        durability=np.full(n, 90.0))
+        availability=np.full(n, 90.0))
 
 
 def _flat_betas(managers):
@@ -399,7 +471,7 @@ def _parity_fixture():
         player_id=np.array([f"p{i}" for i in range(len(positions))]),
         norm=norms, position=positions, adp_rank=adp_rank,
         points=np.linspace(300.0, 60.0, len(positions)),
-        durability=np.full(len(positions), 90.0))
+        availability=np.full(len(positions), 90.0))
 
     roster = {"RB": 2, "WR": 1, "QB": 1}       # RB need false, others true
     recent = ["WR", "RB", "RB", "QB", "TE"]    # fills RUN_WINDOW exactly
@@ -483,7 +555,7 @@ def test_rollout_never_drafts_past_a_roster_cap_even_when_the_shortlist_is_all_o
         player_id=np.array([f"p{i}" for i in range(n)]),
         norm=np.array([f"player {i}" for i in range(n)]),
         position=positions, adp_rank=np.arange(1, n + 1, dtype=float),
-        points=points, durability=np.full(n, 90.0))
+        points=points, availability=np.full(n, 90.0))
     slots = {i: f"m{i}" for i in range(1, 9)}
     taken = np.zeros(n, dtype=bool)
     betas = _flat_betas(slots.values())

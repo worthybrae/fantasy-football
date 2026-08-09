@@ -7,7 +7,16 @@ noise; with it, a backup behind a starter who is expected to miss games is
 worth his own rate for the games he covers. That credit is earned once per
 roster spot at the position -- not once per starter he backs up -- since one
 bench player can't literally be in two places at once; see roster_value's
-docstring for why.
+docstring for why. It is also earned only by a player the starting lineup did
+NOT assign: at a multi-slot position the player just past the dedicated count
+is usually filling a FLEX slot, and best_lineup_points has already paid him.
+
+The rate that term multiplies is an *availability* rate (games played over
+games possible, 0-100), not the board's `durability` column. The board's
+column is a within-position percentile (see
+scoring.factors.normalize_within_position), which averages 50 by
+construction; reading it as a rate would model the median player at every
+position as missing half the season.
 """
 from typing import NamedTuple
 
@@ -15,7 +24,9 @@ import numpy as np
 import pandas as pd
 
 from pipeline.db import read_table, write_table
+from scoring import factors
 from scoring.board import FANTASY_POSITIONS, _norm_name
+from scoring.config import RECENCY_WEIGHTS
 from scoring.draft_model import EARLY_ROUNDS, FEATURE_NAMES, RUN_WINDOW
 
 FLEX_POSITIONS = ("RB", "WR", "TE")
@@ -24,6 +35,12 @@ GAMES = 17
 # a K or a rookie DST never lands as NaN inside the lineup optimizer.
 POSITION_FLOOR = {"QB": 180.0, "RB": 80.0, "WR": 80.0, "TE": 60.0,
                   "K": 110.0, "DST": 100.0}
+# Availability (0-100) for a player with no weekly history to compute one
+# from: rookies, kickers, and every DST. A realistic full-season availability
+# rate, not the neutral 50 the board uses for a missing *percentile* -- 50
+# here would mean "expected to miss half the season", which is a claim about
+# the player, not an admission of ignorance.
+DEFAULT_AVAILABILITY = 90.0
 
 
 def projections(conn, board: pd.DataFrame) -> pd.Series:
@@ -54,34 +71,64 @@ def projections(conn, board: pd.DataFrame) -> pd.Series:
     return pd.Series(values, index=board["player_id"].to_numpy(), dtype=float)
 
 
-def best_lineup_points(roster, settings) -> float:
-    """Points of the best legal starting lineup.
+def _lineup_assignment(by_position: dict, settings):
+    """Fill the starting lineup greedily and report what it consumed.
+
+    `by_position` maps position -> that position's points, sorted descending.
+    Returns `(points, assigned)`, where `assigned[pos]` is how many of that
+    position's players the starting lineup actually used: its dedicated slots
+    plus any FLEX slot its leftovers claimed.
 
     Greedy is optimal here: FLEX accepts a superset of no dedicated slot's
     eligibility and every other slot is single-position, so filling dedicated
     slots best-first and handing FLEX the leftovers can never be beaten.
+
+    `assigned` is the half `best_lineup_points` throws away and `roster_value`
+    cannot do without: the first genuinely benched player at a position is
+    `values[assigned[pos]]`, not `values[starters[pos]]`. At RB and WR those
+    two differ exactly when a FLEX slot is filled from that position, which
+    is the normal case.
+    """
+    total = 0.0
+    assigned = {}
+    leftovers = []
+    for pos, count in settings.starters.items():
+        values = by_position.get(pos, [])
+        total += sum(values[:count])
+        assigned[pos] = min(count, len(values))
+        if pos in FLEX_POSITIONS:
+            leftovers.extend((points, pos) for points in values[count:])
+    leftovers.sort(key=lambda item: item[0], reverse=True)
+    for points, pos in leftovers[:settings.flex_slots]:
+        total += points
+        assigned[pos] += 1
+    return total, assigned
+
+
+def best_lineup_points(roster, settings) -> float:
+    """Points of the best legal starting lineup.
+
+    `roster` is a list of `(position, points)`. Unchanged public behaviour:
+    the assignment detail its callers don't need stays inside
+    `_lineup_assignment`.
     """
     by_position = {}
     for pos, points in roster:
         by_position.setdefault(pos, []).append(points)
     for values in by_position.values():
         values.sort(reverse=True)
-
-    total = 0.0
-    leftovers = []
-    for pos, count in settings.starters.items():
-        values = by_position.get(pos, [])
-        total += sum(values[:count])
-        if pos in FLEX_POSITIONS:
-            leftovers.extend(values[count:])
-    leftovers.sort(reverse=True)
-    return total + sum(leftovers[:settings.flex_slots])
+    return _lineup_assignment(by_position, settings)[0]
 
 
 def roster_value(roster, settings) -> float:
     """Starting-lineup points plus bench insurance.
 
-    Each starter is expected to miss `(1 - durability/100) * 17` games. A
+    `roster` is a list of `(position, points, availability)`, where
+    availability is a games-played rate on a 0-100 scale (see
+    `DEFAULT_AVAILABILITY` and `_availability`) -- NOT the board's
+    `durability` percentile.
+
+    Each starter is expected to miss `(1 - availability/100) * 17` games. A
     single bench player is one body: he can cover for however many of his
     position's starters happen to be out, but he cannot be in two places at
     once, so the credit for him is earned once per roster, not once per
@@ -94,35 +141,45 @@ def roster_value(roster, settings) -> float:
     once, which both overstates the position's value and, because Task 11's
     candidate search maximizes this exact quantity, would steer it toward
     overrating the third player at a thin, fragile position.
-    """
-    starters_only = [(pos, points) for pos, points, _ in roster]
-    total = best_lineup_points(starters_only, settings)
 
+    The backup is the best player the starting lineup did not assign, which
+    is `values[assigned[pos]]` and not `values[count]`: at RB and WR the
+    player just past the dedicated count is normally filling a FLEX slot, and
+    `_lineup_assignment` has already paid him. Reading him as the backup
+    scored a roster with no bench at all above its own starting lineup.
+    """
     by_position = {}
-    for pos, points, durability in roster:
-        by_position.setdefault(pos, []).append((points, durability))
+    for pos, points, availability in roster:
+        by_position.setdefault(pos, []).append((points, availability))
     for values in by_position.values():
         values.sort(reverse=True)
 
+    total, assigned = _lineup_assignment(
+        {pos: [points for points, _ in values]
+         for pos, values in by_position.items()}, settings)
+
     for pos, count in settings.starters.items():
         values = by_position.get(pos, [])
-        if len(values) <= count:
+        used = assigned.get(pos, 0)
+        if len(values) <= used:
             continue
-        # `values` is sorted descending and `backup_points` is the entry
-        # right after the top `count` starters, so by construction it can
-        # never exceed any of their points -- no per-starter min(...) cap is
-        # needed to keep this backup from being credited for more than his
-        # own rate.
-        backup_points = values[count][0]
+        # `values` is sorted descending and `backup_points` is the first
+        # entry the starting lineup left unassigned, so by construction it
+        # can never exceed any starter's points -- no per-starter min(...)
+        # cap is needed to keep this backup from being credited for more
+        # than his own rate.
+        backup_points = values[used][0]
         missed_total = 0.0
-        for _, durability in values[:count]:
-            # `durability or 50.0` would be wrong here: 0.0 is a real,
-            # legitimate value on this 0-100 scale (a player who played none
-            # of his possible games) and Python's `or` treats it as falsy,
-            # silently substituting the "unknown" default and understating
-            # exactly the fragile-starter case this term exists to cover.
-            safe_durability = 50.0 if durability is None or pd.isna(durability) else durability
-            missed_total += max(0.0, 1.0 - safe_durability / 100.0)
+        for _, availability in values[:count]:
+            # `availability or DEFAULT_AVAILABILITY` would be wrong here:
+            # 0.0 is a real, legitimate value on this 0-100 scale (a player
+            # who played none of his possible games) and Python's `or`
+            # treats it as falsy, silently substituting the "unknown"
+            # default and understating exactly the fragile-starter case this
+            # term exists to cover.
+            safe = (DEFAULT_AVAILABILITY if availability is None or pd.isna(availability)
+                    else availability)
+            missed_total += max(0.0, 1.0 - safe / 100.0)
         missed_total = min(1.0, missed_total)
         total += missed_total * backup_points
     return total
@@ -146,7 +203,10 @@ class SimPool(NamedTuple):
     position: np.ndarray
     adp_rank: np.ndarray
     points: np.ndarray
-    durability: np.ndarray
+    # Games-played rate on a 0-100 scale, NOT board["durability"] (a
+    # within-position percentile). Named for what it is, so the two can never
+    # be swapped by accident again.
+    availability: np.ndarray
 
 
 def snake_slots(teams: int, rounds: int) -> list:
@@ -155,6 +215,35 @@ def snake_slots(teams: int, rounds: int) -> list:
         forward = list(range(1, teams + 1))
         order.extend(forward if r % 2 == 0 else forward[::-1])
     return order
+
+
+def _availability(conn) -> dict:
+    """Games-played rate per player_id, on a 0-100 scale.
+
+    `board["durability"]` cannot be used for this. It is produced by
+    `factors.normalize_within_position`, i.e. `rank(pct=True) * 100`, so it
+    is a within-position percentile: it averages 50 by construction, which
+    read as a rate means "the median player at every position misses half the
+    season", and makes any two starters at a multi-slot position sum past
+    `roster_value`'s `min(1.0, ...)` clamp so the backup always collects his
+    full projected season. The actual rate is `durability_factor`'s
+    `durability_raw` (games / possible), which the board drops before
+    `_BOARD_COLUMNS`.
+
+    Same `RECENCY_WEIGHTS` window `build_board` scores on, and for the same
+    reason: `durability_raw` counts possible games from a player's first
+    season in the data, so deep history would punish veterans for decade-old
+    injuries.
+    """
+    weekly = read_table(conn, "weekly")
+    if weekly.empty or "season" not in weekly.columns:
+        return {}
+    weekly = weekly[weekly["season"].isin(RECENCY_WEIGHTS)]
+    if weekly.empty:
+        return {}
+    raw = factors.durability_factor(weekly)
+    rate = raw["durability_raw"].clip(lower=0.0, upper=1.0) * 100.0
+    return dict(zip(raw["player_id"], rate))
 
 
 def build_pool(conn, board: pd.DataFrame, settings) -> SimPool:
@@ -182,13 +271,14 @@ def build_pool(conn, board: pd.DataFrame, settings) -> SimPool:
     known = ranked[has_rank].sort_values("market_rank", kind="stable")
     unknown = ranked[~has_rank]
     ranked = pd.concat([known, unknown], ignore_index=True)
+    availability = ranked["player_id"].map(_availability(conn))
     return SimPool(
         player_id=ranked["player_id"].to_numpy(),
         norm=ranked["name"].map(_norm_name).to_numpy(),
         position=ranked["position"].to_numpy(),
         adp_rank=np.arange(1, len(ranked) + 1, dtype=float),
         points=ranked["proj"].to_numpy(dtype=float),
-        durability=ranked["durability"].fillna(50.0).to_numpy(dtype=float))
+        availability=availability.fillna(DEFAULT_AVAILABILITY).to_numpy(dtype=float))
 
 
 def _live_features(pool, available, overall_pick, roster, recent, settings):
@@ -297,7 +387,7 @@ def _greedy_choice(pool, available, roster, settings, caps):
     ignoring caps entirely -- silently drafting a 4th QB. Filtering first
     means the shortlist is never spent on players I cannot legally take.
     """
-    current = [(pool.position[i], pool.points[i], pool.durability[i])
+    current = [(pool.position[i], pool.points[i], pool.availability[i])
                for i in roster["indices"]]
     base = roster_value(current, settings)
     legal = available[_legal_mask(pool, available, roster["counts"], caps)]
@@ -309,7 +399,7 @@ def _greedy_choice(pool, available, roster, settings, caps):
     best_idx, best_gain = None, -np.inf
     for i in shortlist:
         pos = pool.position[i]
-        gain = roster_value(current + [(pos, pool.points[i], pool.durability[i])],
+        gain = roster_value(current + [(pos, pool.points[i], pool.availability[i])],
                             settings) - base
         if gain > best_gain:
             best_idx, best_gain = i, gain
@@ -399,7 +489,7 @@ def rollout(pool, settings, slot_managers, my_slot, taken, betas, rng,
                          rng, forced)
     mine = rosters[my_slot]["indices"]
     return roster_value(
-        [(pool.position[i], pool.points[i], pool.durability[i]) for i in mine],
+        [(pool.position[i], pool.points[i], pool.availability[i]) for i in mine],
         settings)
 
 
