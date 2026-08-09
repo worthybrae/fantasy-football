@@ -15,12 +15,13 @@ def compute_composite(df: pd.DataFrame, weights: dict) -> pd.Series:
         score = score + df[name] * (w / total)
     return score
 
-def apply_vor(df: pd.DataFrame) -> pd.DataFrame:
+def apply_vor(df: pd.DataFrame, replacement_ranks: dict | None = None) -> pd.DataFrame:
+    ranks = replacement_ranks or REPLACEMENT_RANK
     out = df.copy()
     out["vor"] = 0.0
     for pos, grp in out.groupby("position"):
         ranked = grp.sort_values("composite", ascending=False)
-        idx = min(REPLACEMENT_RANK.get(pos, 9), len(ranked)) - 1
+        idx = min(ranks.get(pos, 9), len(ranked)) - 1
         replacement = ranked.iloc[idx]["composite"]
         out.loc[grp.index, "vor"] = grp["composite"] - replacement
     return out

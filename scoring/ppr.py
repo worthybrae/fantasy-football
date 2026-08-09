@@ -14,8 +14,8 @@ def _col(df: pd.DataFrame, name: str) -> pd.Series:
         return pd.to_numeric(df[name], errors="coerce").fillna(0)
     return pd.Series(0.0, index=df.index)
 
-def compute_ppr_points(df: pd.DataFrame) -> pd.Series:
+def compute_ppr_points(df: pd.DataFrame, rules: dict | None = None) -> pd.Series:
     total = pd.Series(0.0, index=df.index)
-    for col, pts in _RULES.items():
+    for col, pts in (rules or DEFAULT_RULES).items():
         total = total + _col(df, col) * pts
     return total

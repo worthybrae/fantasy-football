@@ -93,3 +93,13 @@ def test_vor_and_tiers_mixed_positions():
     # Sanity check: both should be positive
     assert top_wr_vor_mixed > 0, "Top WR should have positive vor"
     assert rb_data.iloc[0]["vor"] > 0, "Top RB should have positive vor"
+
+def test_apply_vor_accepts_custom_replacement_ranks():
+    import pandas as pd
+    from scoring.composite import apply_vor
+    df = pd.DataFrame({"position": ["RB"] * 5,
+                       "composite": [90.0, 80.0, 70.0, 60.0, 50.0]})
+    # Replacement at RB2 (index 1) -> the 80.0 player is the baseline.
+    out = apply_vor(df, {"RB": 2})
+    assert out.sort_values("composite", ascending=False)["vor"].tolist() == [
+        10.0, 0.0, -10.0, -20.0, -30.0]

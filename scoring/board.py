@@ -46,7 +46,7 @@ import re
 import unicodedata
 import pandas as pd
 from pipeline.db import read_table
-from scoring import factors
+from scoring import factors, league
 from scoring.composite import compute_composite, apply_vor, assign_tiers
 from scoring.config import DEFAULT_WEIGHTS, RECENCY_WEIGHTS
 from scoring.market import add_market
@@ -212,12 +212,15 @@ def _latest_season_stats(weekly: pd.DataFrame) -> pd.DataFrame:
     return latest[["player_id", "stats"]]
 
 
-def build_board(conn, weights: dict | None = None) -> pd.DataFrame:
+def build_board(conn, weights: dict | None = None,
+                settings: "league.LeagueSettings | None" = None) -> pd.DataFrame:
     # The weekly table reaches back to 2016 for profiles/stat twins, but the
     # board scores on the RECENCY_WEIGHTS window only: production would zero
     # out older seasons anyway, and durability counts "possible games" from a
     # player's first season in the data, so deep history would punish
     # veterans for decade-old injuries.
+    settings = settings or league.load(conn)
+    rules = settings.scoring
     weekly = read_table(conn, "weekly")
     if not weekly.empty:
         weekly = weekly[weekly["season"].isin(RECENCY_WEIGHTS)]
@@ -258,8 +261,8 @@ def build_board(conn, weights: dict | None = None) -> pd.DataFrame:
         dura = pd.DataFrame(columns=["player_id", "durability_raw"])
         role = pd.DataFrame(columns=["player_id", "role_raw"])
     else:
-        prod = factors.production_factor(weekly)
-        dura = factors.durability_factor(weekly)
+        prod = factors.production_factor(weekly, rules)
+        dura = factors.durability_factor(weekly, rules)
         role = factors.role_factor(depth, weekly)
     for raw in (prod, dura, role):
         uni = uni.merge(raw, on="player_id", how="left")
@@ -268,7 +271,7 @@ def build_board(conn, weights: dict | None = None) -> pd.DataFrame:
     uni = uni.merge(env, on="team", how="left")
 
     prior = weekly[weekly["season"] == weekly["season"].max()] if not weekly.empty else weekly
-    sos = factors.schedule_factor(prior, sched) if not (sched.empty or weekly.empty) \
+    sos = factors.schedule_factor(prior, sched, rules) if not (sched.empty or weekly.empty) \
         else pd.DataFrame(columns=["team", "position", "sos_raw"])
     uni = uni.merge(sos, on=["team", "position"], how="left")
 
@@ -297,7 +300,7 @@ def build_board(conn, weights: dict | None = None) -> pd.DataFrame:
 
     # -- score --
     uni["composite"] = compute_composite(uni, weights or DEFAULT_WEIGHTS)
-    uni = apply_vor(uni)
+    uni = apply_vor(uni, settings.replacement_ranks)
     uni = assign_tiers(uni)
     uni = uni.sort_values("vor", ascending=False).reset_index(drop=True)
     uni["rank"] = uni.index + 1

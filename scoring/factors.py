@@ -2,9 +2,9 @@ import pandas as pd
 from scoring.ppr import compute_ppr_points
 from scoring.config import RECENCY_WEIGHTS
 
-def player_seasons(weekly: pd.DataFrame) -> pd.DataFrame:
+def player_seasons(weekly: pd.DataFrame, rules: dict | None = None) -> pd.DataFrame:
     wk = weekly.copy()
-    wk["ppr_points"] = compute_ppr_points(wk)
+    wk["ppr_points"] = compute_ppr_points(wk, rules)
     grp = wk.groupby(["player_id", "season"]).agg(
         points=("ppr_points", "sum"), games=("week", "nunique"),
         player_name=("player_display_name", "last"),
@@ -12,16 +12,16 @@ def player_seasons(weekly: pd.DataFrame) -> pd.DataFrame:
     grp["ppg"] = grp["points"] / grp["games"]
     return grp
 
-def production_factor(weekly: pd.DataFrame) -> pd.DataFrame:
-    ps = player_seasons(weekly)
+def production_factor(weekly: pd.DataFrame, rules: dict | None = None) -> pd.DataFrame:
+    ps = player_seasons(weekly, rules)
     ps["w"] = ps["season"].map(RECENCY_WEIGHTS).fillna(0.0)
     ps["wppg"] = ps["ppg"] * ps["w"]
     agg = ps.groupby("player_id").agg(wsum=("wppg", "sum"), wtot=("w", "sum")).reset_index()
     agg["production_raw"] = agg["wsum"] / agg["wtot"].replace(0, float("nan"))
     return agg[["player_id", "production_raw"]]
 
-def durability_factor(weekly: pd.DataFrame) -> pd.DataFrame:
-    ps = player_seasons(weekly)
+def durability_factor(weekly: pd.DataFrame, rules: dict | None = None) -> pd.DataFrame:
+    ps = player_seasons(weekly, rules)
     first = ps.groupby("player_id")["season"].min()
     games = ps.groupby("player_id")["games"].sum()
     latest = ps["season"].max()
@@ -71,9 +71,10 @@ def environment_factor(schedules: pd.DataFrame) -> pd.DataFrame:
     return both.groupby("team", as_index=False)["implied"].mean().rename(
         columns={"implied": "env_raw"})
 
-def schedule_factor(weekly_prior: pd.DataFrame, schedules: pd.DataFrame) -> pd.DataFrame:
+def schedule_factor(weekly_prior: pd.DataFrame, schedules: pd.DataFrame,
+                    rules: dict | None = None) -> pd.DataFrame:
     wk = weekly_prior.copy()
-    wk["ppr_points"] = compute_ppr_points(wk)
+    wk["ppr_points"] = compute_ppr_points(wk, rules)
     weeks = wk.groupby("opponent_team")["week"].nunique().rename("def_games")
     allowed = wk.groupby(["opponent_team", "position"])["ppr_points"].sum().reset_index()
     allowed = allowed.merge(weeks, on="opponent_team")

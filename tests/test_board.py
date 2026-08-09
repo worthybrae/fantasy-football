@@ -391,3 +391,50 @@ def test_board_stats_summary_passing_cols(tmp_path):
     assert qb["pass_yards"] == 250 * weeks
     assert qb["pass_tds"] == 2 * weeks
     assert qb["interceptions"] == 1 * weeks
+
+def test_board_uses_league_settings_when_present(tmp_path):
+    from pipeline.db import read_table, write_table
+    from scoring import league
+    conn = _seed(tmp_path)
+    # The brief's own fixture (_seed) has exactly one real weekly WR, so
+    # every alternative rank/points setting collapses to the same result
+    # (normalize_within_position's percentile rank flattens a lone real
+    # value to 100 regardless of the scoring rules, and the WR replacement
+    # index clamps to the same "last of 2" player whether the configured
+    # rank is 16 or 24). A second real WR, engineered so its production
+    # ranks *below* the seed's star under full PPR but *above* it under the
+    # league's half-PPR scoring below, makes the derived-settings path
+    # actually observable instead of merely "doesn't crash":
+    #   Full PPR (rec=1.0, yds=0.1): p1 = 8+9.0=17.0/gm; p2 = 2+14.0=16.0/gm -> p1 ahead.
+    #   Half PPR (rec=0.5, yds=0.1): p1 = 4+9.0=13.0/gm; p2 = 1+14.0=15.0/gm -> p2 ahead.
+    extra = pd.DataFrame(
+        [{"player_id": "p2", "player_display_name": "Other WR", "position": "WR",
+          "recent_team": "GB", "opponent_team": "DET", "season": 2025, "week": w,
+          "receptions": 2, "receiving_yards": 140, "targets": 6, "carries": 0}
+         for w in range(1, 18)])
+    write_table(conn, "weekly", pd.concat([read_table(conn, "weekly"), extra], ignore_index=True))
+    settings = league.LeagueSettings(
+        season=2026, teams=8,
+        starters={"QB": 1, "RB": 2, "WR": 2, "TE": 1, "K": 1, "DST": 1},
+        flex_slots=0, bench=5,
+        scoring={"receptions": 0.5, "receiving_yards": 0.1},
+        draft_type="SNAKE")
+    write_table(conn, "league", pd.DataFrame(
+        [{"season": 2026, "settings_json": league.to_json(settings)}]))
+    board = build_board(conn)
+    star = board[board["player_id"] == "p1"].iloc[0]
+    other = board[board["player_id"] == "p2"].iloc[0]
+    # Under the league's half-PPR scoring, "Other WR" (fewer catches, more
+    # yards) out-produces "Star WR" -- the reverse of the full-PPR default
+    # (proven by test_board_without_league_table_is_unchanged below, where
+    # the star's market_rank reflects being the top player). This flip can
+    # only happen if settings.scoring, not the hardcoded DEFAULT_RULES, drove
+    # production_factor -- and it propagates through composite into vor.
+    assert other["production"] > star["production"]
+    assert other["vor"] > star["vor"]
+
+def test_board_without_league_table_is_unchanged(tmp_path):
+    # Same fixture, no `league` table -> the pre-existing expectations hold.
+    board = build_board(_seed(tmp_path))
+    star = board[board["player_id"] == "p1"].iloc[0]
+    assert star["market_rank"] == 1.5

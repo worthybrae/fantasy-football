@@ -23,3 +23,11 @@ def test_fumbles_and_2pt():
 def test_missing_columns_are_zero():
     df = pd.DataFrame([{"receptions": 5}])
     assert compute_ppr_points(df).iloc[0] == 5.0
+
+def test_custom_rules_override_defaults():
+    from scoring.ppr import compute_ppr_points
+    import pandas as pd
+    df = pd.DataFrame([{"receptions": 5, "receiving_yards": 100}])
+    assert compute_ppr_points(df).iloc[0] == 15.0            # 5*1.0 + 100*0.1
+    half = compute_ppr_points(df, {"receptions": 0.5, "receiving_yards": 0.1})
+    assert half.iloc[0] == 12.5                              # 5*0.5 + 100*0.1
