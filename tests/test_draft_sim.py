@@ -2,7 +2,7 @@ from itertools import combinations
 
 import numpy as np
 import pandas as pd
-from pipeline.db import get_conn, write_table
+from pipeline.db import get_conn, read_table, write_table
 from scoring import league
 from scoring.draft_sim import (FLEX_POSITIONS, POSITION_FLOOR, best_lineup_points,
                                build_pool, projections, roster_value)
@@ -495,3 +495,255 @@ def test_rollout_never_drafts_past_a_roster_cap_even_when_the_shortlist_is_all_o
             for pos, count in roster["counts"].items():
                 assert count <= caps.get(pos, 99), \
                     f"seed {seed}: slot {slot} rostered {count} {pos} (cap {caps.get(pos)})"
+
+
+from scoring.draft_sim import search_pick, survival
+
+
+def test_search_pick_ranks_the_best_candidate_first():
+    pool = _pool()
+    slots = {i: f"m{i}" for i in range(1, 9)}
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    out = search_pick(pool, S, slots, 1, taken, _flat_betas(slots.values()),
+                      n_rollouts=25, n_candidates=6, seed=11)
+    assert list(out.columns) == ["player_id", "ev", "se", "rank"]
+    assert out["rank"].tolist() == [1, 2, 3, 4, 5, 6]
+    assert out["ev"].is_monotonic_decreasing
+    assert (out["se"] >= 0).all()
+
+def test_search_pick_uses_common_random_numbers():
+    # Same seed, same candidates -> byte-identical EVs across calls.
+    pool = _pool()
+    slots = {i: f"m{i}" for i in range(1, 9)}
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    betas = _flat_betas(slots.values())
+    a = search_pick(pool, S, slots, 1, taken, betas, n_rollouts=15,
+                    n_candidates=4, seed=5)
+    b = search_pick(pool, S, slots, 1, taken, betas, n_rollouts=15,
+                    n_candidates=4, seed=5)
+    assert a["ev"].tolist() == b["ev"].tolist()
+
+def _adp_betas(managers):
+    """Opponents who follow market order: a negative `reach` coefficient
+    penalizes players whose ADP rank sits later than the current pick."""
+    beta = np.zeros(len(FEATURE_NAMES))
+    beta[FEATURE_NAMES.index("reach")] = -3.0
+    return {m: beta for m in managers}
+
+def test_survival_probabilities_are_between_zero_and_one_and_favor_late_adp():
+    pool = _pool()
+    slots = {i: f"m{i}" for i in range(1, 9)}
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    out = survival(pool, S, slots, 8, taken, _adp_betas(slots.values()),
+                   n_rollouts=40, seed=2)
+    assert ((out["avail_pct"] >= 0) & (out["avail_pct"] <= 1)).all()
+    first = out[out["player_id"] == "p0"]["avail_pct"].iloc[0]
+    last = out[out["player_id"] == "p59"]["avail_pct"].iloc[0]
+    assert last > first
+
+
+# --- Supplementary tests for task-11 properties the brief's own tests only
+# exercise indirectly: _next_pick_for's pick arithmetic in isolation,
+# survival's "stop BEFORE my own pick" boundary at its tightest (my turn is
+# immediately next), and run_sim's uses_personal gating -- the entire point
+# of Task 8's held-out personal-vs-pooled comparison is wasted if the
+# simulator ignores the flag it produced.
+
+from scoring.draft_sim import _next_pick_for
+
+
+def test_next_pick_for_returns_the_overall_pick_number_of_my_next_turn():
+    """8 teams, 15 rounds (S = default_settings()) -> snake_slots has 120
+    entries. Slot 5's turns land at overall picks 5 (round 1, forward),
+    12 (round 2, reversed: 8,7,6,5,...), 21 (round 3, forward), ... .
+    `already` counts picks made so far, not rounds, so this pins down both
+    "my very first turn" and "resuming mid-draft after my own last pick"."""
+    assert _next_pick_for(S, my_slot=5, already=0) == 5
+    assert _next_pick_for(S, my_slot=5, already=5) == 12    # right after my pick 5
+    assert _next_pick_for(S, my_slot=5, already=11) == 12   # right before my pick 12
+    # already >= the whole draft's pick count (120): no turn remains: the
+    # documented off-the-end fallback (len(slots) + 1), not an IndexError or
+    # a wraparound back to an earlier pick.
+    assert _next_pick_for(S, my_slot=5, already=120) == 121
+
+
+def test_survival_does_not_simulate_when_my_turn_is_immediately_next():
+    """Correctness point 2: survival stops BEFORE my next pick rather than
+    running the draft out. Isolate the tightest case -- my_slot picks first
+    overall (slot 1, nobody drafted yet) -- so `_next_pick_for` returns 1
+    and the simulation loop's range is empty: zero picks get simulated, and
+    "who can I wait on" for right now is answered as "everyone", not
+    whatever the board would look like several picks later.
+    """
+    pool = _pool()
+    slots = {i: f"m{i}" for i in range(1, 9)}
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    out = survival(pool, S, slots, 1, taken, _flat_betas(slots.values()),
+                   n_rollouts=10, seed=0)
+    assert (out["avail_pct"] == 1.0).all()
+
+
+import scoring.board as board_mod
+import scoring.draft_model as draft_model_mod
+import scoring.draft_sim as draft_sim_mod
+from scoring.draft_sim import run_sim
+
+
+def test_run_sim_gates_personal_coefficients_on_the_manager_profiles_flag(
+        tmp_path, monkeypatch):
+    """run_sim must use a manager's personal fit only when
+    manager_profiles.uses_personal is True for that manager, and the pooled
+    fit otherwise (correctness point 4) -- that gate is the entire reason
+    Task 8 computed a held-out personal-vs-pooled comparison in the first
+    place; skipping it would mean every manager silently gets one fit type
+    regardless of whether it actually predicts them better.
+
+    fit_all only produces a personal fit that differs from pooled given
+    real, multi-season draft history clearing MIN_PICKS_FOR_PERSONAL --
+    building that fixture here would exercise fit_all's own convergence,
+    not run_sim's gating decision. Instead `fit_all`, `build_board`, and
+    `build_pool` are monkeypatched to return small, fully controlled
+    values (fit_all returns the SAME distinctive, non-zero "personal" beta
+    for both managers, and a distinct all-zero "pooled" beta), and
+    `search_pick`/`survival` are monkeypatched to capture the `betas` dict
+    run_sim actually builds and hands them, rather than running real
+    rollouts. manager_profiles then flags one manager uses_personal=True and
+    the other False. If the gate is honored, "reacher" ends up with the
+    personal beta and "average" ends up with pooled -- even though fit_all
+    handed both of them the identical personal fit, so the only thing that
+    can explain "average" getting pooled is run_sim's own gating logic.
+    """
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    write_table(conn, "manager_profiles", pd.DataFrame([
+        {"manager": "reacher", "feature": "reach", "value": 9.0,
+         "pooled_value": 0.0, "n_picks": 40, "heldout_gain": 0.2,
+         "uses_personal": True, "summary": "reaches"},
+        {"manager": "average", "feature": "reach", "value": 9.0,
+         "pooled_value": 0.0, "n_picks": 5, "heldout_gain": -0.3,
+         "uses_personal": False, "summary": "pooled, not enough signal"},
+    ]))
+
+    personal_beta = np.zeros(len(FEATURE_NAMES))
+    personal_beta[FEATURE_NAMES.index("reach")] = 9.0
+    pooled_beta = np.zeros(len(FEATURE_NAMES))
+    fits = {"__pooled__": pooled_beta, "reacher": personal_beta,
+            "average": personal_beta}
+
+    monkeypatch.setattr(draft_model_mod, "fit_all",
+                        lambda conn, settings=None: fits)
+    monkeypatch.setattr(board_mod, "build_board",
+                        lambda conn, weights=None, settings=None: pd.DataFrame())
+    monkeypatch.setattr(draft_sim_mod, "build_pool",
+                        lambda conn, board, settings: _pool())
+
+    captured = {}
+
+    def fake_search_pick(pool, settings, slot_managers, my_slot, taken, betas,
+                         **kwargs):
+        captured["betas"] = betas
+        return pd.DataFrame(columns=["player_id", "ev", "se", "rank"])
+
+    def fake_survival(pool, settings, slot_managers, my_slot, taken, betas,
+                      **kwargs):
+        return pd.DataFrame(columns=["player_id", "avail_pct"])
+
+    monkeypatch.setattr(draft_sim_mod, "search_pick", fake_search_pick)
+    monkeypatch.setattr(draft_sim_mod, "survival", fake_survival)
+
+    run_sim(conn, my_slot=1, slot_managers={1: "reacher", 2: "average"},
+           n_rollouts=5, seed=0)
+
+    betas = captured["betas"]
+    np.testing.assert_allclose(betas["reacher"], personal_beta)
+    np.testing.assert_allclose(betas["average"], pooled_beta)
+
+
+def test_run_sim_writes_sim_results_and_sim_survival_and_returns_the_run_id(
+        tmp_path, monkeypatch):
+    """End-to-end smoke test with real (not monkeypatched) search_pick/
+    survival, on a tiny synthetic pool -- run_sim's own DB plumbing
+    (`write_table` for both tables, the run_id format, the `my_slot` column
+    on results) rather than the gating logic the test above isolates.
+
+    `conn` has no `league` table, so the real `league.load` already falls
+    back to `default_settings()` (matching `S`) with no mocking needed;
+    only `build_board`/`build_pool` (real board construction needs stat and
+    ADP tables this fixture does not seed) and `fit_all` (no draft history
+    to fit) are replaced.
+    """
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    monkeypatch.setattr(draft_model_mod, "fit_all",
+                        lambda conn, settings=None: {"__pooled__": np.zeros(len(FEATURE_NAMES))})
+    monkeypatch.setattr(board_mod, "build_board",
+                        lambda conn, weights=None, settings=None: pd.DataFrame())
+    monkeypatch.setattr(draft_sim_mod, "build_pool",
+                        lambda conn, board, settings: _pool(12))
+
+    run_id = run_sim(conn, my_slot=1,
+                     slot_managers={i: f"m{i}" for i in range(1, 9)},
+                     n_rollouts=5, seed=0)
+
+    assert run_id == "1-5-0-0"
+    results = read_table(conn, "sim_results")
+    avail = read_table(conn, "sim_survival")
+    assert not results.empty
+    assert (results["run_id"] == run_id).all()
+    assert (results["my_slot"] == 1).all()
+    assert not avail.empty
+    assert (avail["run_id"] == run_id).all()
+
+
+def test_run_sim_falls_back_to_pooled_when_manager_profiles_has_not_been_written(
+        tmp_path, monkeypatch):
+    """Regression test for a real bug found while timing run_sim (not one of
+    the brief's own scenarios, which never happen to exercise this path --
+    see below).
+
+    `run_sim` reads `manager_profiles` with `pipeline.db.read_table`, which
+    returns a columnless `pd.DataFrame()` when the table does not exist yet
+    -- the ordinary state of a fresh DB before `make fit-managers` (or this
+    task's own `write_profiles`) has ever run, e.g. right after
+    `make espn-import`. The brief's original gating line,
+    `rows = profiles[profiles["manager"] == manager]`, indexes that
+    columnless frame by "manager" unconditionally once `fits` contains any
+    real (non-"__pooled__") manager, which raises `KeyError: 'manager'`
+    instead of falling back to pooled.
+
+    The brief's own tests never hit this: this file's other run_sim tests
+    mock `fit_all` to return only `{"__pooled__": ...}`, so the per-manager
+    loop body -- where the crash lives -- never executes. Building an actual
+    multi-manager, multi-season draft-history fixture during the timing
+    measurement for correctness point 5 (see task-11-report.md) is what
+    surfaced it. Fixed in scoring/draft_sim.py: `profiles.empty or
+    "manager" not in profiles.columns` now short-circuits to
+    personal=False (pooled) before the indexing that used to crash.
+    """
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    # manager_profiles deliberately never written.
+    personal_beta = np.zeros(len(FEATURE_NAMES))
+    personal_beta[FEATURE_NAMES.index("reach")] = 5.0
+    fits = {"__pooled__": np.zeros(len(FEATURE_NAMES)), "some_manager": personal_beta}
+    monkeypatch.setattr(draft_model_mod, "fit_all", lambda conn, settings=None: fits)
+    monkeypatch.setattr(board_mod, "build_board",
+                        lambda conn, weights=None, settings=None: pd.DataFrame())
+    monkeypatch.setattr(draft_sim_mod, "build_pool",
+                        lambda conn, board, settings: _pool(12))
+
+    captured = {}
+
+    def fake_search_pick(pool, settings, slot_managers, my_slot, taken, betas,
+                         **kwargs):
+        captured["betas"] = betas
+        return pd.DataFrame(columns=["player_id", "ev", "se", "rank"])
+
+    monkeypatch.setattr(draft_sim_mod, "search_pick", fake_search_pick)
+    monkeypatch.setattr(draft_sim_mod, "survival",
+                        lambda *a, **k: pd.DataFrame(columns=["player_id", "avail_pct"]))
+
+    run_sim(conn, my_slot=1, slot_managers={1: "some_manager"}, n_rollouts=5, seed=0)
+
+    # No manager_profiles row exists to say "yes, use the personal fit" --
+    # must fall back to pooled (all zeros), not crash, and not silently use
+    # the personal fit either.
+    np.testing.assert_allclose(captured["betas"]["some_manager"],
+                               np.zeros(len(FEATURE_NAMES)))

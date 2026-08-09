@@ -14,8 +14,8 @@ from typing import NamedTuple
 import numpy as np
 import pandas as pd
 
-from pipeline.db import read_table
-from scoring.board import _norm_name
+from pipeline.db import read_table, write_table
+from scoring.board import FANTASY_POSITIONS, _norm_name
 from scoring.draft_model import EARLY_ROUNDS, FEATURE_NAMES, RUN_WINDOW
 
 FLEX_POSITIONS = ("RB", "WR", "TE")
@@ -212,11 +212,22 @@ def _live_features(pool, available, overall_pick, roster, recent, settings):
     X[:, _QB_EARLY] = (positions == "QB") * early
     X[:, _TE_EARLY] = (positions == "TE") * early
 
+    # `need` and `run` are grouped by position (the fixed six-value
+    # vocabulary, not `np.unique(positions)` -- see _legal_mask's docstring:
+    # np.unique's sort showed up as its own measurable cost once the
+    # per-element comprehension it was replacing was gone) rather than
+    # computed with a Python-level comprehension over every element. `X`
+    # starts zeroed, so a position whose need/run value is 0.0 needs no
+    # write.
     starters = settings.starters
-    X[:, _NEED] = [1.0 if roster.get(p, 0) < starters.get(p, 0) else 0.0
-                   for p in positions]
     window = recent[:RUN_WINDOW]
-    X[:, _RUN] = [window.count(p) / RUN_WINDOW for p in positions]
+    for pos in FANTASY_POSITIONS:
+        mask = positions == pos
+        if roster.get(pos, 0) < starters.get(pos, 0):
+            X[mask, _NEED] = 1.0
+        run_share = window.count(pos) / RUN_WINDOW
+        if run_share:
+            X[mask, _RUN] = run_share
     return X
 
 
@@ -241,9 +252,34 @@ GREEDY_CANDIDATES = 40
 
 def _legal_mask(pool, indices, counts, caps) -> np.ndarray:
     """Which of `indices` sit at a position `counts` (a roster's position ->
-    count-so-far dict) has not yet hit its cap."""
-    return np.array([counts.get(pool.position[i], 0) < caps.get(pool.position[i], 99)
-                     for i in indices])
+    count-so-far dict) has not yet hit its cap.
+
+    Vectorized over the fixed, six-value position vocabulary (QB, RB, WR,
+    TE, K, DST -- `scoring.board.FANTASY_POSITIONS`) rather than a per-player
+    Python loop, and iterating that fixed set directly rather than computing
+    `np.unique(indices' positions)` to discover it. Task 10's review flagged
+    the original
+    `[counts.get(pool.position[i], 0) < caps.get(pool.position[i], 99) for i in indices]`
+    as a per-pick O(available) Python comprehension, multiplied by candidates
+    x rollouts x picks-per-rollout in Task 11's search_pick. Profiling a
+    realistic call (12 candidates x 300 rollouts, a 400-player pool, a full
+    15-round 8-team draft -- this task's own numbers) confirmed it: roughly
+    40% of total wall time, from re-indexing `pool.position` and calling two
+    dict.get()s per element, up to ~500 times, on every single pick of every
+    rollout. Grouping by position turns that into a handful of vectorized
+    numpy comparisons instead -- same inputs, same output, just not one
+    Python-level iteration per player. Swapping `np.unique` for the fixed
+    vocabulary avoids `unique`'s own sort, which showed up as a measurable
+    cost in its own right once the per-element comprehension it replaced was
+    gone. (`_live_features`'s `need`/`run` columns had the identical shape of
+    cost and got the same two fixes.)
+    """
+    positions = pool.position[indices]
+    mask = np.ones(len(indices), dtype=bool)
+    for pos in FANTASY_POSITIONS:
+        if counts.get(pos, 0) >= caps.get(pos, 99):
+            mask[positions == pos] = False
+    return mask
 
 
 def _greedy_choice(pool, available, roster, settings, caps):
@@ -365,3 +401,157 @@ def rollout(pool, settings, slot_managers, my_slot, taken, betas, rng,
     return roster_value(
         [(pool.position[i], pool.points[i], pool.durability[i]) for i in mine],
         settings)
+
+
+DEFAULT_ROLLOUTS = 300
+DEFAULT_CANDIDATES = 12
+
+
+def _next_pick_for(settings, my_slot, already) -> int:
+    slots = snake_slots(settings.teams, settings.rounds)
+    for offset in range(already, len(slots)):
+        if slots[offset] == my_slot:
+            return offset + 1
+    return len(slots) + 1
+
+
+def search_pick(pool, settings, slot_managers, my_slot, taken, betas,
+                n_rollouts: int = DEFAULT_ROLLOUTS,
+                n_candidates: int = DEFAULT_CANDIDATES, seed: int = 0):
+    """Expected end-of-draft roster value for each candidate at my next pick.
+
+    Candidates are the best available by market rank and by projection, since
+    those two disagree exactly where the interesting decisions are.
+
+    Rollout i uses seed (seed, i) for every candidate -- common random numbers,
+    so all candidates face identical opponent behavior and the comparison
+    between them is far less noisy than independent sampling at the same cost.
+    """
+    available = np.flatnonzero(~taken)
+    if len(available) == 0:
+        return pd.DataFrame(columns=["player_id", "ev", "se", "rank"])
+    by_market = available[np.argsort(pool.adp_rank[available])][:n_candidates]
+    by_points = available[np.argsort(-pool.points[available])][:n_candidates]
+    candidates = list(dict.fromkeys(list(by_market) + list(by_points)))[:n_candidates]
+
+    rows = []
+    for idx in candidates:
+        values = np.array([
+            rollout(pool, settings, slot_managers, my_slot, taken, betas,
+                    rng=np.random.default_rng([seed, i]), forced=int(idx))
+            for i in range(n_rollouts)])
+        rows.append({"player_id": pool.player_id[idx],
+                     "ev": float(values.mean()),
+                     "se": float(values.std(ddof=1) / np.sqrt(len(values)))
+                     if len(values) > 1 else 0.0})
+    out = pd.DataFrame(rows).sort_values("ev", ascending=False).reset_index(drop=True)
+    out["rank"] = out.index + 1
+    return out[["player_id", "ev", "se", "rank"]]
+
+
+def survival(pool, settings, slot_managers, my_slot, taken, betas,
+             n_rollouts: int = DEFAULT_ROLLOUTS, seed: int = 0):
+    """Probability each player is still available when my next turn arrives.
+
+    Counted from the same rollout machinery, but stopping at my next pick
+    rather than running the draft out -- this is the "who can I wait on"
+    number, and it only depends on what happens before my turn.
+    """
+    already = int(taken.sum())
+    target = _next_pick_for(settings, my_slot, already)
+    slots = snake_slots(settings.teams, settings.rounds)
+    caps = _roster_cap(settings)
+    counts = np.zeros(len(pool.player_id))
+
+    for i in range(n_rollouts):
+        rng = np.random.default_rng([seed, i])
+        gone = taken.copy()
+        rosters = {slot: {} for slot in range(1, settings.teams + 1)}
+        recent = []
+        for offset in range(already, min(target - 1, len(slots))):
+            slot = slots[offset]
+            available = np.flatnonzero(~gone)
+            if len(available) == 0:
+                break
+            beta = betas.get(slot_managers.get(slot))
+            if beta is None:
+                beta = np.zeros(len(FEATURE_NAMES))
+            X = _live_features(pool, available, offset + 1, rosters[slot],
+                               recent, settings)
+            scores = X @ beta
+            for j, idx in enumerate(available):
+                pos = pool.position[idx]
+                if rosters[slot].get(pos, 0) >= caps.get(pos, 99):
+                    scores[j] = -np.inf
+            finite = np.isfinite(scores)
+            if not finite.any():
+                choice = int(available[0])
+            else:
+                shifted = scores - scores[finite].max()
+                weights = np.where(finite, np.exp(shifted), 0.0)
+                total = weights.sum()
+                choice = int(available[0]) if total <= 0 else \
+                    int(rng.choice(available, p=weights / total))
+            gone[choice] = True
+            pos = pool.position[choice]
+            rosters[slot][pos] = rosters[slot].get(pos, 0) + 1
+            recent.insert(0, pos)
+        counts += ~gone
+
+    return pd.DataFrame({"player_id": pool.player_id,
+                         "avail_pct": counts / max(n_rollouts, 1)})
+
+
+def run_sim(conn, my_slot: int, slot_managers: dict,
+            n_rollouts: int = DEFAULT_ROLLOUTS, seed: int = 0) -> str:
+    from scoring import league as league_mod
+    from scoring.board import build_board
+    from scoring.draft_model import fit_all
+
+    settings = league_mod.load(conn)
+    board = build_board(conn, settings=settings)
+    pool = build_pool(conn, board, settings)
+
+    fits = fit_all(conn, settings)
+    profiles = read_table(conn, "manager_profiles")
+    pooled = fits.get("__pooled__", np.zeros(len(FEATURE_NAMES)))
+    betas = {}
+    for manager, beta in fits.items():
+        if manager == "__pooled__":
+            continue
+        # `profiles.empty` alone is not a safe guard here: read_table
+        # returns a columnless pd.DataFrame() when `manager_profiles`
+        # doesn't exist yet (e.g. `make sim` run before `make
+        # fit-managers`), and indexing a columnless frame by "manager" below
+        # raises KeyError rather than yielding an empty (safely-filterable)
+        # result -- a real crash the brief's original
+        # `rows = profiles[profiles["manager"] == manager]` did not guard
+        # against, only reachable once fit_all has real per-manager fits to
+        # iterate (an empty conn's fit_all returns just "__pooled__", which
+        # never enters this loop body -- exactly why the brief's own tests
+        # never hit it). No personal profile on record defaults to pooled,
+        # same as write_profiles' own default when there isn't enough
+        # signal.
+        if profiles.empty or "manager" not in profiles.columns:
+            personal = False
+        else:
+            rows = profiles[profiles["manager"] == manager]
+            personal = bool(rows["uses_personal"].iloc[0]) if not rows.empty else False
+        betas[manager] = beta if personal else pooled
+
+    drafted = read_table(conn, "drafted")
+    drafted_ids = set(drafted["player_id"]) if not drafted.empty else set()
+    taken = np.isin(pool.player_id, list(drafted_ids))
+
+    results = search_pick(pool, settings, slot_managers, my_slot, taken, betas,
+                          n_rollouts=n_rollouts, seed=seed)
+    avail = survival(pool, settings, slot_managers, my_slot, taken, betas,
+                     n_rollouts=n_rollouts, seed=seed)
+
+    run_id = f"{my_slot}-{n_rollouts}-{seed}-{int(taken.sum())}"
+    results.insert(0, "run_id", run_id)
+    avail.insert(0, "run_id", run_id)
+    results["my_slot"] = my_slot
+    write_table(conn, "sim_results", results)
+    write_table(conn, "sim_survival", avail)
+    return run_id

@@ -2,7 +2,7 @@
 # One-time setup: make setup && make refresh
 # Draft night:    make up   (then open http://localhost:5173)
 
-.PHONY: setup refresh api web up test build espn-import fit-managers
+.PHONY: setup refresh api web up test build espn-import fit-managers sim
 
 setup: ## create venv, install python + web deps
 	python3 -m venv .venv
@@ -17,6 +17,9 @@ espn-import: ## import ESPN draft history: make espn-import LEAGUE=<url-or-id>
 
 fit-managers: ## fit per-manager pick models from imported draft history
 	.venv/bin/python -m pipeline.fit_managers
+
+sim: ## run the draft simulator: make sim SLOT=4 [ROLLOUTS=300]
+	.venv/bin/python -m pipeline.run_sim "$(SLOT)" $(ROLLOUTS)
 
 api: ## run the FastAPI backend on :8000
 	.venv/bin/uvicorn api.main:app --port 8000 --reload
