@@ -4,9 +4,10 @@ Roster value is the projected points of the best legal starting lineup, plus
 an insurance term for the bench. Without that term every pick past the last
 starting slot is worth exactly zero and the simulator's late rounds become
 noise; with it, a backup behind a starter who is expected to miss games is
-worth his own rate for the games he covers -- capped at what the starter he's
-covering for was worth, so a bench player never nets more credit than "what
-he actually provides."
+worth his own rate for the games he covers. That credit is earned once per
+roster spot at the position -- not once per starter he backs up -- since one
+bench player can't literally be in two places at once; see roster_value's
+docstring for why.
 """
 import numpy as np
 import pandas as pd
@@ -77,14 +78,19 @@ def best_lineup_points(roster, settings) -> float:
 def roster_value(roster, settings) -> float:
     """Starting-lineup points plus bench insurance.
 
-    Each starter is expected to miss `(1 - durability/100) * 17` games; the
-    best bench player at that position covers those games at his own rate.
-    Because the bench players considered here are always ranked below every
-    starter at the position (best_lineup_points already claimed the top
-    players as starters), the backup's own rate is never higher than the
-    starter's -- the `min(...)` below is a belt-and-suspenders cap, not a
-    difference/"drop-off" calculation, so a durable backup is never credited
-    for more than he actually provides.
+    Each starter is expected to miss `(1 - durability/100) * 17` games. A
+    single bench player is one body: he can cover for however many of his
+    position's starters happen to be out, but he cannot be in two places at
+    once, so the credit for him is earned once per roster, not once per
+    starter he sits behind. Missed-game shares are summed across the
+    starters at the position and clamped to 1.0 (a full season is the most
+    coverage one backup can supply) before being multiplied by his own rate
+    a single time. Crediting him separately behind every starter at a
+    multi-slot position (e.g. twice at RB) would let one player's real
+    season -- worth `backup_points` -- get counted as insurance more than
+    once, which both overstates the position's value and, because Task 11's
+    candidate search maximizes this exact quantity, would steer it toward
+    overrating the third player at a thin, fragile position.
     """
     starters_only = [(pos, points) for pos, points, _ in roster]
     total = best_lineup_points(starters_only, settings)
@@ -99,14 +105,21 @@ def roster_value(roster, settings) -> float:
         values = by_position.get(pos, [])
         if len(values) <= count:
             continue
+        # `values` is sorted descending and `backup_points` is the entry
+        # right after the top `count` starters, so by construction it can
+        # never exceed any of their points -- no per-starter min(...) cap is
+        # needed to keep this backup from being credited for more than his
+        # own rate.
         backup_points = values[count][0]
-        for starter_points, durability in values[:count]:
+        missed_total = 0.0
+        for _, durability in values[:count]:
             # `durability or 50.0` would be wrong here: 0.0 is a real,
             # legitimate value on this 0-100 scale (a player who played none
             # of his possible games) and Python's `or` treats it as falsy,
             # silently substituting the "unknown" default and understating
             # exactly the fragile-starter case this term exists to cover.
             safe_durability = 50.0 if durability is None or pd.isna(durability) else durability
-            missed = max(0.0, 1.0 - safe_durability / 100.0)
-            total += missed * min(backup_points, starter_points)
+            missed_total += max(0.0, 1.0 - safe_durability / 100.0)
+        missed_total = min(1.0, missed_total)
+        total += missed_total * backup_points
     return total

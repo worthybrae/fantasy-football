@@ -4,7 +4,8 @@ import numpy as np
 import pandas as pd
 from pipeline.db import get_conn, write_table
 from scoring import league
-from scoring.draft_sim import FLEX_POSITIONS, best_lineup_points, projections, roster_value
+from scoring.draft_sim import (FLEX_POSITIONS, POSITION_FLOOR, best_lineup_points,
+                               projections, roster_value)
 
 S = league.default_settings()   # QB/2RB/2WR/TE/2FLEX/K/DST, 5 bench
 
@@ -26,6 +27,13 @@ def test_best_lineup_ignores_surplus_beyond_flex():
 
 def test_best_lineup_handles_an_unfilled_slot():
     assert best_lineup_points([("QB", 300.0)], S) == 300.0
+
+
+def test_best_lineup_and_roster_value_handle_an_empty_roster():
+    # A valuation primitive later tasks build on -- an empty roster (before
+    # any picks) must not raise or return NaN, it must return 0.0.
+    assert best_lineup_points([], S) == 0.0
+    assert roster_value([], S) == 0.0
 
 
 def test_best_lineup_matches_brute_force_on_an_adversarial_roster():
@@ -136,6 +144,49 @@ def test_roster_value_ignores_bench_depth_beyond_the_first_backup():
     assert roster_value(three_deep, S) == roster_value(two_deep, S)
 
 
+def test_roster_value_credits_a_shared_backup_once_not_per_starter():
+    """A multi-slot position's single backup must be credited once per
+    roster, not once per starter he sits behind.
+
+    RB has 2 starting slots under default_settings. WR filler is included
+    and deliberately outranks the RB backup (240/230 > 150) so it -- not the
+    RB backup -- claims both FLEX slots; this isolates the RB insurance term
+    from best_lineup_points's own FLEX logic, so the only thing left to
+    explain the total is the insurance loop itself.
+
+    Without the fix, a backup worth 150 for the season gets counted twice
+    (once behind each zero-durability starter) for 300 of "insurance" --
+    twice what one human being can actually provide. With the fix, his
+    missed-share credit is summed across the two starters (1.0 + 1.0,
+    clamped to 1.0) and applied to his 150 points once.
+    """
+    roster = [
+        ("RB", 300.0, 0.0), ("RB", 280.0, 0.0), ("RB", 150.0, 100.0),
+        ("WR", 260.0, 100.0), ("WR", 250.0, 100.0),
+        ("WR", 240.0, 100.0), ("WR", 230.0, 100.0),
+    ]
+    # starters_only: RB 300+280=580, WR 260+250=510, FLEX takes WR 240+230=470
+    #   (the RB backup, 150, loses the FLEX competition to the WR leftovers)
+    #   => 1560
+    # RB insurance: missed_total = min(1.0, 1.0 + 1.0) = 1.0; credit = 1.0 * 150 = 150
+    # WR insurance: durability 100 everywhere => missed_total = 0; credit = 0
+    assert roster_value(roster, S) == 1710.0
+
+
+def test_roster_value_position_insurance_never_exceeds_the_backups_own_points():
+    backup_points = 150.0
+    wr_filler = [("WR", 260.0, 100.0), ("WR", 250.0, 100.0),
+                 ("WR", 240.0, 100.0), ("WR", 230.0, 100.0)]
+    for d1, d2 in [(0.0, 0.0), (0.0, 100.0), (50.0, 50.0), (100.0, 100.0), (30.0, 70.0)]:
+        without_backup = [("RB", 300.0, d1), ("RB", 280.0, d2)] + wr_filler
+        with_backup = without_backup + [("RB", backup_points, 100.0)]
+        # WR filler is identical and its own insurance term is 0 either way
+        # (all WR durability=100), so this difference isolates exactly the
+        # RB position's insurance credit.
+        insurance = roster_value(with_backup, S) - roster_value(without_backup, S)
+        assert 0.0 <= insurance <= backup_points + 1e-9
+
+
 def test_projections_prefer_espn_then_fall_back_to_weighted_ppg(tmp_path):
     conn = get_conn(str(tmp_path / "t.duckdb"))
     write_table(conn, "espn_adp", pd.DataFrame([
@@ -167,3 +218,19 @@ def test_projections_ignores_non_positive_espn_projection(tmp_path):
     ])
     proj = projections(conn, board)
     assert proj["p1"] == 136.0                 # espn_proj <= 0 is not used; falls to ppg x 17
+
+
+def test_projections_zero_ppg_falls_back_to_position_floor(tmp_path):
+    # `ppg` of exactly 0.0 is falsy in `float(ppg) * GAMES if ppg else None`,
+    # so it is treated the same as "no stat history" and sent to the
+    # position floor rather than projected as a literal 0.0. Pinning this so
+    # it reads as a deliberate choice (a real player already has a game or
+    # two of non-zero history well before his season ppg could be exactly
+    # 0.0) rather than an accident discovered later.
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    board = pd.DataFrame([
+        {"player_id": "p1", "name": "Zero Ppg", "position": "RB",
+         "team": "DAL", "stats": {"ppg": 0.0}},
+    ])
+    proj = projections(conn, board)
+    assert proj["p1"] == POSITION_FLOOR["RB"]
