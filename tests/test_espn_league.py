@@ -73,7 +73,8 @@ def test_parse_settings_extracts_pick_order_and_draft_type():
 import pytest
 from pipeline.db import get_conn, read_table, write_table
 from pipeline.espn_league import (
-    parse_league_id, season_url, import_seasons, validate_import,
+    parse_league_id, season_url, history_url, fetch_season, import_seasons,
+    validate_import,
 )
 from tests.test_league import ESPN_SETTINGS
 
@@ -81,10 +82,66 @@ def test_parse_league_id_from_url_and_bare_id():
     assert parse_league_id("https://fantasy.espn.com/football/league?leagueId=123456") == "123456"
     assert parse_league_id("123456") == "123456"
 
-def test_season_url_uses_league_history_for_prior_seasons():
-    assert "leagueHistory/99" in season_url("99", 2024, current_season=2026)
-    assert "seasonId=2024" in season_url("99", 2024, current_season=2026)
+def test_season_url_uses_the_dated_path_for_every_season():
+    # Was leagueHistory for prior seasons. Real leagues that keep the same id
+    # 404 on leagueHistory and answer on the dated path, so that is now the
+    # primary for every year and leagueHistory is the fallback.
+    assert "seasons/2024/segments/0/leagues/99" in season_url("99", 2024, current_season=2026)
     assert "seasons/2026/segments/0/leagues/99" in season_url("99", 2026, current_season=2026)
+
+def test_history_url_is_the_documented_fallback_form():
+    assert "leagueHistory/99" in history_url("99", 2024)
+    assert "seasonId=2024" in history_url("99", 2024)
+
+def test_fetch_season_falls_back_to_league_history_when_the_dated_path_404s():
+    seen = []
+    def fetch(url):
+        seen.append(url)
+        if "leagueHistory" not in url:
+            raise FileNotFoundError(url)
+        return {"draftDetail": {"drafted": True}}
+    assert fetch_season(fetch, "99", 2024, 2026) == {"draftDetail": {"drafted": True}}
+    assert len(seen) == 2 and "leagueHistory" in seen[1]
+
+def test_fetch_season_raises_only_when_both_forms_are_missing():
+    def fetch(url):
+        raise FileNotFoundError(url)
+    with pytest.raises(FileNotFoundError):
+        fetch_season(fetch, "99", 2024, 2026)
+
+def test_parse_draft_picks_drops_espns_placeholder_picks():
+    # ESPN pads an undrafted board with playerId -1 in every slot, and even a
+    # completed draft carries a few for rounds nobody filled.
+    payload = {"draftDetail": {"drafted": True, "picks": [
+        {"overallPickNumber": 1, "roundId": 1, "roundPickNumber": 1,
+         "teamId": 3, "playerId": 4046537, "keeper": False},
+        {"overallPickNumber": 2, "roundId": 1, "roundPickNumber": 2,
+         "teamId": 7, "playerId": -1, "keeper": False},
+        {"overallPickNumber": 3, "roundId": 1, "roundPickNumber": 3,
+         "teamId": 1, "playerId": None, "keeper": False},
+    ]}}
+    df = parse_draft_picks(payload, 2025)
+    assert df["espn_player_id"].tolist() == [4046537]
+
+def test_import_seasons_skips_a_season_whose_draft_has_not_happened(tmp_path):
+    # The upcoming season returns a full board with every playerId -1 and
+    # drafted=False. Importing it would teach the model picks nobody made.
+    upcoming = {"draftDetail": {"drafted": False, "picks": [
+        {"overallPickNumber": i, "roundId": 1, "roundPickNumber": i,
+         "teamId": 3, "playerId": -1, "keeper": False} for i in range(1, 9)]}}
+    def fetch(url):
+        if "2026" in url:
+            return {**upcoming, **TEAM_PAYLOAD, **ESPN_SETTINGS}
+        if "2025" not in url:
+            raise FileNotFoundError(url)
+        if "/players?" in url:
+            return [{"id": 4046537, "fullName": "Justin Jefferson",
+                     "defaultPositionId": 3, "proTeamId": 16}]
+        return {**DRAFT_PAYLOAD, **TEAM_PAYLOAD, **ESPN_SETTINGS}
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    summary = import_seasons(conn, "99", current_season=2026, fetch=fetch)
+    assert summary["seasons"] == [2025]
+    assert set(read_table(conn, "draft_picks")["season"]) == {2025}
 
 def _fake_fetch(seasons):
     """Serve league + player-directory payloads for `seasons`, 404 otherwise."""

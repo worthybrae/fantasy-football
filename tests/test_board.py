@@ -507,3 +507,13 @@ def test_board_sim_merge_does_not_multiply_rows_on_a_duplicate_player_id(tmp_pat
     board = build_board(conn)
     assert len(board) == before
     assert board["player_id"].tolist().count("p1") == 1
+
+
+def test_adp_match_key_returns_none_for_a_missing_position():
+    # A draft pick whose ESPN player id is absent from that season's directory
+    # arrives with position/name/team all NA. `NA == "DST"` is NA, whose truth
+    # value raises -- validate_import crashed on a real import because of it.
+    from scoring.board import adp_match_key
+    assert adp_match_key(pd.NA, pd.NA, pd.NA) is None
+    assert adp_match_key(None, None) is None
+    assert adp_match_key("Justin Jefferson", "WR") is not None

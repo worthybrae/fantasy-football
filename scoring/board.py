@@ -87,8 +87,13 @@ def adp_match_key(name, position, team=None):
     sides so LAR/WSH/JAC-style spellings meet nflverse's.
 
     Returns None for a DST with no team, which is unmatchable rather than
-    matchable-against-anything.
+    matchable-against-anything. Also returns None for a pick with no
+    position at all: a draft pick whose ESPN player id is missing from that
+    season's directory arrives here with position/name/team all NA, and
+    `NA == "DST"` is NA, whose truth value raises.
     """
+    if position is None or (not isinstance(position, str) and pd.isna(position)):
+        return None
     if position == "DST":
         if team is None or (not isinstance(team, str) and pd.isna(team)):
             return None

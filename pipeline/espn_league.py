@@ -4,6 +4,7 @@ Parsers are pure functions over the JSON ESPN's read API returns, so they are
 testable against literal fixtures with no network or browser. The Playwright
 client and the season walk live further down.
 """
+import json
 import re
 from pathlib import Path
 
@@ -37,8 +38,20 @@ _PICK_COLUMNS = ["season", "overall_pick", "round", "round_pick",
                  "team_id", "espn_player_id", "keeper"]
 
 
+def _is_real_pick(pick: dict) -> bool:
+    """ESPN pads a draft board with placeholder picks whose playerId is -1.
+
+    Every scheduled-but-undrafted slot looks like a real pick otherwise --
+    it carries a team, a round, and an overall number. Even completed
+    drafts carry a few (a round nobody filled). They are not picks anyone
+    made, so they must never reach the model.
+    """
+    return (pick.get("playerId") or -1) > 0
+
+
 def parse_draft_picks(payload: dict, season: int) -> pd.DataFrame:
-    picks = ((payload.get("draftDetail") or {}).get("picks")) or []
+    picks = [p for p in (((payload.get("draftDetail") or {}).get("picks")) or [])
+             if _is_real_pick(p)]
     rows = [{"season": season,
              "overall_pick": p.get("overallPickNumber"),
              "round": p.get("roundId"),
@@ -113,17 +126,48 @@ def parse_league_id(url_or_id: str) -> str:
     return m.group(1)
 
 
-def season_url(league_id: str, season: int, current_season: int) -> str:
-    # ESPN serves the live season under /seasons/{year}/... and every earlier
-    # season under /leagueHistory/{id}?seasonId=. Hitting the wrong one for a
-    # given year returns 404, not a redirect.
-    if season >= current_season:
-        return f"{BASE}/seasons/{season}/segments/0/leagues/{league_id}?{VIEWS}"
+def season_url(league_id: str, season: int, current_season: int | None = None) -> str:
+    """Primary URL for a season, live or historical.
+
+    ESPN documents /leagueHistory/{id}?seasonId= as the way to read a prior
+    season, but it 404s for leagues whose prior seasons are still served
+    under the dated path -- which, in practice, is how a league that has
+    kept the same id reads back. So the dated path is tried first for every
+    year and `history_url` is the fallback; `current_season` is accepted
+    only so existing callers keep working.
+    """
+    return f"{BASE}/seasons/{season}/segments/0/leagues/{league_id}?{VIEWS}"
+
+
+def history_url(league_id: str, season: int) -> str:
+    """Fallback for leagues whose prior seasons only answer here."""
     return f"{BASE}/leagueHistory/{league_id}?seasonId={season}&{VIEWS}"
+
+
+def fetch_season(fetch, league_id: str, season: int, current_season: int):
+    """Fetch a season payload, trying the dated path then leagueHistory.
+
+    Raises FileNotFoundError only when BOTH forms 404, so a genuinely
+    absent season still reads as a miss to the walk.
+    """
+    try:
+        return _unwrap(fetch(season_url(league_id, season, current_season)))
+    except FileNotFoundError:
+        return _unwrap(fetch(history_url(league_id, season)))
 
 
 def players_url(season: int) -> str:
     return f"{BASE}/seasons/{season}/players?view=players_wl"
+
+
+# The player directory is capped at 50 rows unless the request carries a
+# filter raising the limit -- and it answers 200 either way, so an
+# unfiltered pull looks like a healthy fetch that silently resolves almost
+# no names. `sources.fetch_espn_adp` already needs the same header for the
+# same reason. 3000 comfortably covers a season's full directory (2020,
+# the deepest here, returns ~7.9k raw rows of which ~3k are fantasy
+# positions).
+PLAYERS_FILTER = json.dumps({"players": {"limit": 3000}})
 
 
 def _unwrap(payload):
@@ -152,8 +196,15 @@ def import_seasons(conn, league_id: str, current_season: int, fetch,
         # into 15 wasted iterations and a misleading "no drafted seasons
         # found" at the end.
         try:
-            payload = _unwrap(fetch(season_url(league_id, season, current_season)))
-            has_picks = bool((payload.get("draftDetail") or {}).get("picks"))
+            payload = fetch_season(fetch, league_id, season, current_season)
+            # A season whose draft has not happened yet still returns a full
+            # board -- every slot present, every playerId -1. Importing that
+            # as history would teach the model 120 picks nobody made, so a
+            # season counts only once ESPN says the draft is done AND at
+            # least one pick names a real player.
+            detail = payload.get("draftDetail") or {}
+            has_picks = bool(detail.get("drafted")) and any(
+                _is_real_pick(p) for p in (detail.get("picks") or []))
             # Fetched on the same iteration, under the same handling, as
             # the season payload: a season that exists should have both.
             players_payload = fetch(players_url(season)) if has_picks else None
@@ -227,7 +278,21 @@ def validate_import(conn) -> list[str]:
             hit = [key is not None and key in known
                    for key in _match_keys(grp, "player_name", "nfl_team")]
             rate = float(sum(hit)) / len(grp) if len(grp) else 0.0
-        flag = "" if len(grp) == expected else f"  <-- expected {expected}"
+        # A league that ends its draft early leaves whole rounds unfilled --
+        # ESPN pads the board to roster size regardless, and those padding
+        # slots are dropped as placeholder picks. That is a league habit, not
+        # a data problem, so name it as short rounds rather than flagging the
+        # count as suspicious. Anything that is not a whole number of rounds
+        # short really is unexpected.
+        short = expected - len(grp)
+        if short == 0:
+            flag = ""
+        elif short > 0 and short % settings.teams == 0:
+            rounds_short = short // settings.teams
+            flag = (f"  ({rounds_short} of {settings.rounds} rounds not drafted"
+                    " -- draft ended early)")
+        else:
+            flag = f"  <-- expected {expected}"
         lines.append(f"  {season}: {len(grp)} picks, {managers} managers, "
                      f"ADP match {rate:.0%}{flag}")
         if rate and rate < 0.8:
@@ -291,10 +356,15 @@ class EspnClient:
         self._open_context()
 
     def get_json(self, url: str):
-        response = self._context.request.get(url)
+        # The player-directory endpoint needs a filter header to return more
+        # than 50 rows. Applying it by URL rather than by parameter keeps
+        # `fetch` a plain one-argument callable, which is what lets
+        # `import_seasons` be driven by a fixture in the tests.
+        headers = {"X-Fantasy-Filter": PLAYERS_FILTER} if "/players?" in url else None
+        response = self._context.request.get(url, headers=headers)
         if response.status in (401, 403):
             self.login()
-            response = self._context.request.get(url)
+            response = self._context.request.get(url, headers=headers)
         if response.status == 404:
             raise FileNotFoundError(url)
         if not response.ok:
