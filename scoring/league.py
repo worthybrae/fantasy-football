@@ -7,7 +7,7 @@ exactly -- so a database with no `league` table produces the board it always
 produced.
 """
 import json
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 
 from pipeline.db import read_table
 from scoring.config import FLEX_SHARES, LEAGUE_TEAMS, REPLACEMENT_RANK

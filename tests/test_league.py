@@ -62,9 +62,11 @@ def test_load_returns_defaults_when_no_league_table(tmp_path):
     assert league.load(conn) == league.default_settings()
 
 def test_load_reads_newest_season_from_league_table(tmp_path):
+    from pipeline.espn_league import parse_settings
     conn = get_conn(str(tmp_path / "t.duckdb"))
+    older = league.from_espn(parse_settings(ESPN_SETTINGS, 2025))
     rows = pd.DataFrame([
-        {"season": 2025, "settings_json": league.to_json(_settings())},
+        {"season": 2025, "settings_json": league.to_json(older)},
         {"season": 2026, "settings_json": league.to_json(_settings())},
     ])
     write_table(conn, "league", rows)
