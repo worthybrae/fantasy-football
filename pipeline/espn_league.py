@@ -145,14 +145,24 @@ def import_seasons(conn, league_id: str, current_season: int, fetch,
     picks, teams, leagues, directories = [], [], [], []
     seasons, misses = [], 0
     for season in range(current_season, current_season - max_back, -1):
+        # Only a missing season (404 -> FileNotFoundError) counts as a
+        # "miss" the walk can tolerate. Anything else -- a persistent
+        # auth failure, a 5xx, a JSON decode error -- is a real problem
+        # with a real cause and must propagate, not be silently absorbed
+        # into 15 wasted iterations and a misleading "no drafted seasons
+        # found" at the end.
         try:
             payload = _unwrap(fetch(season_url(league_id, season, current_season)))
-        except Exception:
+            has_picks = bool((payload.get("draftDetail") or {}).get("picks"))
+            # Fetched on the same iteration, under the same handling, as
+            # the season payload: a season that exists should have both.
+            players_payload = fetch(players_url(season)) if has_picks else None
+        except FileNotFoundError:
             misses += 1
             if misses >= 2 and seasons:
                 break
             continue
-        if not ((payload.get("draftDetail") or {}).get("picks")):
+        if not has_picks:
             misses += 1
             if misses >= 2 and seasons:
                 break
@@ -168,7 +178,7 @@ def import_seasons(conn, league_id: str, current_season: int, fetch,
         teams.append(parse_draft_teams(payload, season))
         leagues.append({"season": season,
                         "settings_json": league_mod.to_json(settings)})
-        directory = parse_player_directory(fetch(players_url(season)))
+        directory = parse_player_directory(players_payload)
         directory["season"] = season
         directories.append(directory)
 
@@ -191,9 +201,17 @@ def validate_import(conn) -> list[str]:
     picks = read_table(conn, "draft_picks")
     teams = read_table(conn, "draft_teams")
     adp = read_table(conn, "historic_adp")
-    settings = league_mod.load(conn)
+    # Each season keeps its own settings row (team count and roster shape can
+    # change year over year) -- `league_mod.load(conn)` only returns the
+    # newest one, so it is wrong to apply league-wide here. Build the
+    # per-season map once, and fall back to the newest/default settings only
+    # for a season with no row of its own (shouldn't happen in practice).
+    league_table = read_table(conn, "league")
+    settings_by_season = {int(row["season"]): league_mod.from_json(row["settings_json"])
+                          for _, row in league_table.iterrows()}
     lines = []
     for season, grp in picks.groupby("season"):
+        settings = settings_by_season.get(int(season), league_mod.load(conn))
         expected = settings.teams * settings.rounds
         managers = teams[teams["season"] == season]["manager"].nunique()
         if adp.empty:

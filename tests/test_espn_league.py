@@ -113,6 +113,11 @@ def test_import_seasons_walks_back_and_writes_tables(tmp_path):
     # a name (parse_draft_picks intentionally keeps unmatched picks, per
     # Task 1's own test).
     assert set(picks["player_name"].dropna()) == {"Justin Jefferson", "Saquon Barkley"}
+    # The keeper pick (playerId 2977187) has no directory entry, once per
+    # imported season -- assert the null path explicitly rather than only
+    # excluding it, since those null rows flow downstream into
+    # build_observations and validate_import.
+    assert picks["player_name"].isna().sum() == 2
     assert not read_table(conn, "league").empty
     assert not read_table(conn, "draft_teams").empty
 
@@ -137,9 +142,58 @@ def test_import_rejects_non_snake_draft(tmp_path):
     with pytest.raises(ValueError, match="AUCTION"):
         import_seasons(conn, "99", current_season=2026, fetch=fetch)
 
+def test_import_seasons_propagates_non_missing_errors(tmp_path):
+    # A persistent auth failure (RuntimeError from EspnClient.get_json on a
+    # non-401/403-recoverable, non-404 status) is not "this season doesn't
+    # exist" -- it must propagate with its real cause, not be swallowed as a
+    # miss and reported as the generic "no drafted seasons found".
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    def fetch(url):
+        raise RuntimeError("401 for " + url)
+    with pytest.raises(RuntimeError, match="401"):
+        import_seasons(conn, "99", current_season=2026, fetch=fetch)
+
 def test_validate_import_reports_pick_count_and_adp_match_rate(tmp_path):
     conn = get_conn(str(tmp_path / "t.duckdb"))
     import_seasons(conn, "99", current_season=2026, fetch=_fake_fetch([2025]))
     lines = "\n".join(validate_import(conn))
     assert "2025" in lines
     assert "ADP match" in lines
+
+def _small_payload(season, n_teams, n_picks):
+    """League with a 1-round roster (QB only) so `expected = teams * rounds`
+    can be made to exactly equal a controlled pick count per season."""
+    picks = [{"overallPickNumber": i + 1, "roundId": 1, "roundPickNumber": i + 1,
+              "teamId": (i % n_teams) + 1, "playerId": 9000 + i, "keeper": False}
+             for i in range(n_picks)]
+    settings = {"settings": {
+        "size": n_teams,
+        "rosterSettings": {"lineupSlotCounts": {"0": 1}},
+        "scoringSettings": {"scoringItems": []},
+        "draftSettings": {"type": "SNAKE", "pickOrder": list(range(1, n_teams + 1))},
+    }}
+    teams_payload = {
+        "teams": [{"id": i + 1, "name": f"Team {i + 1}", "owners": [f"{{U{i}}}"],
+                   "draftDayPickOrder": i + 1} for i in range(n_teams)],
+        "members": [{"id": f"{{U{i}}}", "displayName": f"user{i}"} for i in range(n_teams)],
+    }
+    return {"draftDetail": {"drafted": True, "picks": picks}, **teams_payload, **settings}
+
+def test_validate_import_uses_each_seasons_own_settings_for_expected_count(tmp_path):
+    # 2025 is an 8->2-team league with 2 picks (expected = 2 teams * 1 round);
+    # 2024 was a 3-team league with 3 picks (expected = 3 teams * 1 round).
+    # Both seasons' actual pick counts exactly match THEIR OWN settings, so
+    # neither should get a "<-- expected N" mismatch flag. The newest
+    # season's settings (2025, 2 teams) must not leak into 2024's check.
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    payloads = {2025: _small_payload(2025, 2, 2), 2024: _small_payload(2024, 3, 3)}
+    def fetch(url):
+        year = next((s for s in payloads if str(s) in url), None)
+        if year is None:
+            raise FileNotFoundError(url)
+        if "/players?" in url:
+            return []
+        return payloads[year]
+    import_seasons(conn, "99", current_season=2026, fetch=fetch)
+    lines = "\n".join(validate_import(conn))
+    assert "expected" not in lines
