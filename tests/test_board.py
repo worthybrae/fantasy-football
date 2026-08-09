@@ -462,3 +462,22 @@ def test_board_merges_sim_results_when_present(tmp_path):
     assert row["avail_pct"] == 0.42
     assert row["ev"] == 1580.5
     assert row["ev_se"] == 4.2
+
+def test_board_sim_columns_null_for_player_outside_sim_population(tmp_path):
+    """A sim only ever covers the pool it was run against (e.g. candidates
+    considered at one pick) -- a player absent from sim_survival/sim_results
+    entirely (here "Rookie Guy", the seed's ADP-only player) must land as a
+    left-merge miss (NaN/null), not error or silently inherit another row's
+    value, once a sim has run for someone else."""
+    from pipeline.db import write_table
+    conn = _seed(tmp_path)
+    write_table(conn, "sim_survival", pd.DataFrame(
+        [{"run_id": "r1", "player_id": "p1", "avail_pct": 0.42}]))
+    write_table(conn, "sim_results", pd.DataFrame(
+        [{"run_id": "r1", "player_id": "p1", "ev": 1580.5, "se": 4.2,
+          "rank": 1, "my_slot": 4}]))
+    board = build_board(conn)
+    row = board[board["name"] == "Rookie Guy"].iloc[0]
+    assert pd.isna(row["avail_pct"])
+    assert pd.isna(row["ev"])
+    assert pd.isna(row["ev_se"])

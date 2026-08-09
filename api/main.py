@@ -52,7 +52,14 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
                 "SELECT coalesce(max(pick_no), 0) + 1 FROM drafted").fetchone()[0]
             cur.execute("INSERT OR IGNORE INTO drafted VALUES (?, ?)",
                         [player_id, next_pick])
-            return {"drafted": True, "pick_no": next_pick}
+            # INSERT OR IGNORE silently no-ops for an already-drafted
+            # player, leaving its original pick_no in place -- report that
+            # stored value, not the freshly-computed next_pick, so a re-POST
+            # can never claim a pick_no that disagrees with the actual row.
+            stored = cur.execute(
+                "SELECT pick_no FROM drafted WHERE player_id = ?", [player_id]
+            ).fetchone()[0]
+            return {"drafted": True, "pick_no": stored}
         finally:
             cur.close()
 

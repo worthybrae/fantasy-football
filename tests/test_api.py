@@ -122,14 +122,13 @@ def test_players_negative_weight_returns_422(tmp_path):
 
 def test_drafted_roundtrip(tmp_path):
     # Task 13 adds pick_no to the POST response (see test_drafted_records_
-    # pick_order), so the old bare {"drafted": True} equality no longer
-    # holds -- checked field-by-field instead of dropped, to keep covering
-    # the drafted-flag roundtrip this test originally existed for.
+    # pick_order). The first draft in a fresh database is deterministically
+    # pick_no 1, so full-dict equality -- which also catches any unexpected
+    # extra key -- still holds and is restored rather than weakened to
+    # field-level checks.
     c = _client(tmp_path)
     pid = c.get("/api/players").json()["players"][0]["player_id"]
-    posted = c.post(f"/api/drafted/{pid}").json()
-    assert posted["drafted"] is True
-    assert posted["pick_no"] == 1
+    assert c.post(f"/api/drafted/{pid}").json() == {"drafted": True, "pick_no": 1}
     assert any(p["drafted"] for p in c.get("/api/players").json()["players"])
     assert c.delete(f"/api/drafted/{pid}").json() == {"drafted": False}
 
@@ -368,6 +367,18 @@ def test_drafted_records_pick_order(tmp_path):
     client = _client(tmp_path)
     assert client.post("/api/drafted/p1").json()["pick_no"] == 1
     assert client.post("/api/drafted/p2").json()["pick_no"] == 2
+
+def test_redrafting_an_already_drafted_player_reports_its_original_pick_no(tmp_path):
+    """INSERT OR IGNORE silently no-ops for an already-drafted player, so the
+    stored pick_no doesn't change on a re-POST -- the response must not lie
+    about that by returning the freshly-computed next_pick anyway. Task 14's
+    rail reads pick order to derive whose turn it is, so a response that
+    disagrees with the stored row is a real bug, not a cosmetic one."""
+    client = _client(tmp_path)
+    assert client.post("/api/drafted/p1").json()["pick_no"] == 1
+    assert client.post("/api/drafted/p2").json()["pick_no"] == 2
+    # Re-drafting p1 must still report 1, not 3 (the next free pick_no).
+    assert client.post("/api/drafted/p1").json() == {"drafted": True, "pick_no": 1}
 
 def test_concurrent_players_requests_during_running_sim(tmp_path):
     """Task 13 correctness point 4: the sim worker thread does long-running
