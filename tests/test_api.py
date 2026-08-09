@@ -121,9 +121,15 @@ def test_players_negative_weight_returns_422(tmp_path):
     assert r.status_code == 422
 
 def test_drafted_roundtrip(tmp_path):
+    # Task 13 adds pick_no to the POST response (see test_drafted_records_
+    # pick_order), so the old bare {"drafted": True} equality no longer
+    # holds -- checked field-by-field instead of dropped, to keep covering
+    # the drafted-flag roundtrip this test originally existed for.
     c = _client(tmp_path)
     pid = c.get("/api/players").json()["players"][0]["player_id"]
-    assert c.post(f"/api/drafted/{pid}").json() == {"drafted": True}
+    posted = c.post(f"/api/drafted/{pid}").json()
+    assert posted["drafted"] is True
+    assert posted["pick_no"] == 1
     assert any(p["drafted"] for p in c.get("/api/players").json()["players"])
     assert c.delete(f"/api/drafted/{pid}").json() == {"drafted": False}
 
@@ -332,3 +338,67 @@ def test_draft_order_accepts_string_my_slot(tmp_path):
     assert client.put("/api/draft-order", json=payload).status_code == 200
     body = client.get("/api/draft-order").json()
     assert body["my_slot"] == 2
+
+def test_sim_endpoint_starts_and_completes(tmp_path):
+    import time
+    client = _client(tmp_path)
+    client.put("/api/draft-order", json={
+        "order": [{"slot": s, "manager": f"m{s}"} for s in range(1, 9)],
+        "my_slot": 1})
+    started = client.post("/api/sim", json={"my_slot": 1, "rollouts": 3})
+    assert started.status_code == 200
+    run_id = started.json()["run_id"]
+    for _ in range(200):
+        status = client.get(f"/api/sim/{run_id}").json()
+        if status["status"] != "running":
+            break
+        time.sleep(0.05)
+    assert status["status"] == "done", status.get("detail")
+
+def test_sim_status_for_unknown_run_is_404(tmp_path):
+    assert _client(tmp_path).get("/api/sim/nope").status_code == 404
+
+def test_players_expose_sim_columns_as_null_without_a_sim(tmp_path):
+    row = _client(tmp_path).get("/api/players").json()["players"][0]
+    assert row["avail_pct"] is None
+    assert row["ev"] is None
+    assert row["ev_se"] is None
+
+def test_drafted_records_pick_order(tmp_path):
+    client = _client(tmp_path)
+    assert client.post("/api/drafted/p1").json()["pick_no"] == 1
+    assert client.post("/api/drafted/p2").json()["pick_no"] == 2
+
+def test_concurrent_players_requests_during_running_sim(tmp_path):
+    """Task 13 correctness point 4: the sim worker thread does long-running
+    writes (sim_results, sim_survival, manager_profiles -- all via its own
+    conn.cursor()) while request handlers keep reading/writing through their
+    own cursors on the same shared DuckDB connection. Fire a burst of
+    /api/players reads immediately after kicking off a sim and confirm none
+    of them surface a thread-safety exception (mirrors the existing
+    test_concurrent_requests pattern, but overlapping a real sim run)."""
+    client = _client(tmp_path)
+    client.put("/api/draft-order", json={
+        "order": [{"slot": s, "manager": f"m{s}"} for s in range(1, 9)],
+        "my_slot": 1})
+    started = client.post("/api/sim", json={"my_slot": 1, "rollouts": 15})
+    assert started.status_code == 200
+    run_id = started.json()["run_id"]
+
+    def get_players():
+        r = client.get("/api/players")
+        assert r.status_code == 200
+        return r
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(get_players) for _ in range(16)]
+        for future in as_completed(futures):
+            future.result()
+
+    for _ in range(200):
+        status = client.get(f"/api/sim/{run_id}").json()
+        if status["status"] != "running":
+            break
+        import time
+        time.sleep(0.05)
+    assert status["status"] == "done", status.get("detail")

@@ -62,7 +62,7 @@ _BOARD_COLUMNS = [
     "player_id", "name", "position", "team", "bye", "production", "durability",
     "role", "environment", "schedule", "composite", "vor", "tier", "market_rank",
     "market_spread", "market_sources", "espn_ppr_rank", "edge", "rookie", "drafted", "rank",
-    "stats",
+    "stats", "avail_pct", "ev", "ev_se",
 ]
 
 
@@ -309,5 +309,23 @@ def build_board(conn, weights: dict | None = None,
 
     drafted_ids = set(drafted["player_id"]) if not drafted.empty else set()
     uni["drafted"] = uni["player_id"].isin(drafted_ids)
+
+    # Sim output (Task 13): both tables are absent until run_sim's first
+    # write, and even then only carry the most recent run (write_table fully
+    # replaces the table each time) -- so a left-merge here is always at most
+    # one row per player_id, and every column is null until a sim has run.
+    sim_avail = read_table(conn, "sim_survival")
+    sim_ev = read_table(conn, "sim_results")
+    if sim_avail.empty:
+        uni["avail_pct"] = pd.NA
+    else:
+        uni = uni.merge(sim_avail[["player_id", "avail_pct"]],
+                        on="player_id", how="left")
+    if sim_ev.empty:
+        uni["ev"] = pd.NA
+        uni["ev_se"] = pd.NA
+    else:
+        ev = sim_ev[["player_id", "ev", "se"]].rename(columns={"se": "ev_se"})
+        uni = uni.merge(ev, on="player_id", how="left")
 
     return uni[_BOARD_COLUMNS]

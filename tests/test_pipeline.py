@@ -14,6 +14,24 @@ def test_read_missing_table_returns_empty(tmp_path):
     conn = get_conn(str(tmp_path / "t.duckdb"))
     assert read_table(conn, "nope").empty
 
+def test_get_conn_migrates_old_drafted_table_without_dropping_rows(tmp_path):
+    """Task 13 adds a pick_no column to `drafted` so POST /api/drafted can
+    report pick order. A real data/nfl.duckdb from before this change only
+    has the single-column (player_id) drafted table -- get_conn's ALTER
+    TABLE migration must add pick_no in place, not drop and recreate the
+    table (which would silently wipe a real user's drafted list)."""
+    import duckdb
+    path = str(tmp_path / "old.duckdb")
+    old = duckdb.connect(path)
+    old.execute("CREATE TABLE drafted (player_id VARCHAR PRIMARY KEY)")
+    old.execute("INSERT INTO drafted VALUES ('p1')")
+    old.close()
+
+    conn = get_conn(path)
+    columns = {r[1] for r in conn.execute("PRAGMA table_info('drafted')").fetchall()}
+    assert "pick_no" in columns
+    assert conn.execute("SELECT player_id, pick_no FROM drafted").fetchall() == [("p1", None)]
+
 def test_freshness_upsert(tmp_path):
     conn = get_conn(str(tmp_path / "t.duckdb"))
     record_freshness(conn, "weekly", True, 100)

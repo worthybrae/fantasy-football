@@ -1,14 +1,24 @@
+import threading
+import uuid
+
 import pandas as pd
 from fastapi import Body, FastAPI, HTTPException, Query
 from pipeline.db import get_conn, read_table, write_table, DEFAULT_PATH
 from scoring import league
 from scoring.board import build_board
 from scoring.config import DEFAULT_WEIGHTS
+from scoring.draft_sim import DEFAULT_ROLLOUTS, run_sim
 from scoring.profile import build_profile
 
 def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
     app = FastAPI(title="Draft Board API")
     conn = get_conn(db_path)
+    # In-process only: run status lives here, not in the database, so a
+    # status poll survives only as long as this app instance does (the same
+    # lifetime as `conn` and every other piece of in-memory server state).
+    # A poll for a run_id from a previous process lifetime finds nothing here
+    # and 404s -- see sim_status -- rather than crashing.
+    _sim_runs: dict[str, dict] = {}
 
     @app.get("/api/players")
     def players(w_production: float = Query(DEFAULT_WEIGHTS["production"], ge=0),
@@ -38,8 +48,11 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
     def draft(player_id: str):
         cur = conn.cursor()
         try:
-            cur.execute("INSERT OR IGNORE INTO drafted VALUES (?)", [player_id])
-            return {"drafted": True}
+            next_pick = cur.execute(
+                "SELECT coalesce(max(pick_no), 0) + 1 FROM drafted").fetchone()[0]
+            cur.execute("INSERT OR IGNORE INTO drafted VALUES (?, ?)",
+                        [player_id, next_pick])
+            return {"drafted": True, "pick_no": next_pick}
         finally:
             cur.close()
 
@@ -175,6 +188,44 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
             return {"saved": len(rows)}
         finally:
             cur.close()
+
+    @app.post("/api/sim")
+    def start_sim(payload: dict = Body(...)):
+        my_slot = int(payload.get("my_slot") or 0)
+        if my_slot < 1:
+            raise HTTPException(status_code=422, detail="my_slot is required")
+        rollouts = int(payload.get("rollouts") or DEFAULT_ROLLOUTS)
+        order = draft_order()
+        slot_managers = {e["slot"]: e["manager"] for e in order["order"]}
+        run_id = uuid.uuid4().hex[:12]
+        _sim_runs[run_id] = {"status": "running", "detail": None}
+
+        def worker():
+            # A dedicated cursor, not the shared `conn`, so this background
+            # thread's long-running writes (sim_results, sim_survival, and
+            # fit_all's manager_profiles) don't share a live statement/result
+            # state with whatever cursor a concurrent request handler is
+            # using at the same moment -- see api/main.py's other handlers,
+            # every one of which already opens conn.cursor() per call for
+            # the same reason (see test_concurrent_requests).
+            cur = conn.cursor()
+            try:
+                run_sim(cur, my_slot, slot_managers, n_rollouts=rollouts)
+                _sim_runs[run_id] = {"status": "done", "detail": None}
+            except Exception as e:
+                _sim_runs[run_id] = {"status": "error", "detail": str(e)}
+            finally:
+                cur.close()
+
+        threading.Thread(target=worker, daemon=True).start()
+        return {"run_id": run_id, "status": "running"}
+
+    @app.get("/api/sim/{run_id}")
+    def sim_status(run_id: str):
+        state = _sim_runs.get(run_id)
+        if state is None:
+            raise HTTPException(status_code=404, detail="unknown run_id")
+        return state
 
     return app
 

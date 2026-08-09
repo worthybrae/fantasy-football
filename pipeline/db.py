@@ -9,7 +9,13 @@ def get_conn(path: str = DEFAULT_PATH) -> duckdb.DuckDBPyConnection:
     conn = duckdb.connect(path)
     conn.execute("""CREATE TABLE IF NOT EXISTS meta (
         source VARCHAR PRIMARY KEY, ok BOOLEAN, rows BIGINT, refreshed_at TIMESTAMP)""")
-    conn.execute("CREATE TABLE IF NOT EXISTS drafted (player_id VARCHAR PRIMARY KEY)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS drafted (
+        player_id VARCHAR PRIMARY KEY, pick_no INTEGER)""")
+    # Databases created before pick_no existed are missing the column; adding
+    # it here keeps an existing data/nfl.duckdb usable without a manual drop.
+    columns = {r[1] for r in conn.execute("PRAGMA table_info('drafted')").fetchall()}
+    if "pick_no" not in columns:
+        conn.execute("ALTER TABLE drafted ADD COLUMN pick_no INTEGER")
     # PUT /api/draft-order persists via write_table, which does
     # CREATE OR REPLACE TABLE ... AS SELECT and so replaces this table's
     # inferred schema (no PRIMARY KEY) on every save. This initial DDL only

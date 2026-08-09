@@ -71,11 +71,15 @@ def test_board_shape_and_join(tmp_path):
     assert "adp" not in board.columns
 
 def test_board_column_contract(tmp_path):
+    # Task 13 deliberately extends the contract with exactly avail_pct, ev,
+    # ev_se (sim output) -- see test_board_sim_columns_are_null_without_a_sim
+    # for the null-by-default guarantee this list alone doesn't cover.
     board = build_board(_seed(tmp_path))
     expected = ["player_id", "name", "position", "team", "bye", "production",
                 "durability", "role", "environment", "schedule", "composite",
                 "vor", "tier", "market_rank", "market_spread", "market_sources",
-                "espn_ppr_rank", "edge", "rookie", "drafted", "rank", "stats"]
+                "espn_ppr_rank", "edge", "rookie", "drafted", "rank", "stats",
+                "avail_pct", "ev", "ev_se"]
     assert list(board.columns) == expected
     assert board["rank"].tolist() == list(range(1, len(board) + 1))
 
@@ -438,3 +442,23 @@ def test_board_without_league_table_is_unchanged(tmp_path):
     board = build_board(_seed(tmp_path))
     star = board[board["player_id"] == "p1"].iloc[0]
     assert star["market_rank"] == 1.5
+
+def test_board_sim_columns_are_null_without_a_sim(tmp_path):
+    board = build_board(_seed(tmp_path))
+    for col in ("avail_pct", "ev", "ev_se"):
+        assert col in board.columns
+        assert board[col].isna().all()
+
+def test_board_merges_sim_results_when_present(tmp_path):
+    from pipeline.db import write_table
+    conn = _seed(tmp_path)
+    write_table(conn, "sim_survival", pd.DataFrame(
+        [{"run_id": "r1", "player_id": "p1", "avail_pct": 0.42}]))
+    write_table(conn, "sim_results", pd.DataFrame(
+        [{"run_id": "r1", "player_id": "p1", "ev": 1580.5, "se": 4.2,
+          "rank": 1, "my_slot": 4}]))
+    board = build_board(conn)
+    row = board[board["player_id"] == "p1"].iloc[0]
+    assert row["avail_pct"] == 0.42
+    assert row["ev"] == 1580.5
+    assert row["ev_se"] == 4.2
