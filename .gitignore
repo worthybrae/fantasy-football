@@ -165,6 +165,7 @@ cython_debug/
 #.idea/
 
 data/
+data/espn_state.json
 .venv/
 __pycache__/
 web/node_modules/

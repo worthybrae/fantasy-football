@@ -69,3 +69,77 @@ def test_parse_settings_extracts_pick_order_and_draft_type():
     assert out["draft_type"] == "SNAKE"
     assert out["pick_order"] == [3, 7, 1, 2, 4, 5, 6, 8]
     assert out["lineup_slots"]["23"] == 2
+
+import pytest
+from pipeline.db import get_conn, read_table
+from pipeline.espn_league import (
+    parse_league_id, season_url, import_seasons, validate_import,
+)
+from tests.test_league import ESPN_SETTINGS
+
+def test_parse_league_id_from_url_and_bare_id():
+    assert parse_league_id("https://fantasy.espn.com/football/league?leagueId=123456") == "123456"
+    assert parse_league_id("123456") == "123456"
+
+def test_season_url_uses_league_history_for_prior_seasons():
+    assert "leagueHistory/99" in season_url("99", 2024, current_season=2026)
+    assert "seasonId=2024" in season_url("99", 2024, current_season=2026)
+    assert "seasons/2026/segments/0/leagues/99" in season_url("99", 2026, current_season=2026)
+
+def _fake_fetch(seasons):
+    """Serve league + player-directory payloads for `seasons`, 404 otherwise."""
+    def fetch(url):
+        year = next((s for s in seasons if str(s) in url), None)
+        if year is None:
+            raise FileNotFoundError(url)
+        if "/players?" in url:
+            return [{"id": 4046537, "fullName": "Justin Jefferson",
+                     "defaultPositionId": 3, "proTeamId": 16},
+                    {"id": 3117251, "fullName": "Saquon Barkley",
+                     "defaultPositionId": 2, "proTeamId": 21}]
+        return {**DRAFT_PAYLOAD, **TEAM_PAYLOAD, **ESPN_SETTINGS}
+    return fetch
+
+def test_import_seasons_walks_back_and_writes_tables(tmp_path):
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    summary = import_seasons(conn, "99", current_season=2026,
+                             fetch=_fake_fetch([2025, 2024]))
+    assert summary["seasons"] == [2025, 2024]
+    picks = read_table(conn, "draft_picks")
+    assert len(picks) == 6                     # 3 picks x 2 seasons
+    # One of the 3 picks per season (a keeper) has no matching entry in the
+    # fake player directory below, so its player_name is NaN by design --
+    # dropna before comparing rather than asserting every raw pick resolves
+    # a name (parse_draft_picks intentionally keeps unmatched picks, per
+    # Task 1's own test).
+    assert set(picks["player_name"].dropna()) == {"Justin Jefferson", "Saquon Barkley"}
+    assert not read_table(conn, "league").empty
+    assert not read_table(conn, "draft_teams").empty
+
+def test_import_seasons_stops_after_two_consecutive_missing_seasons(tmp_path):
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    # 2025 present, 2024 and 2023 missing -> walk halts, 2022 never requested.
+    summary = import_seasons(conn, "99", current_season=2026,
+                             fetch=_fake_fetch([2025, 2022]))
+    assert summary["seasons"] == [2025]
+
+def test_import_rejects_non_snake_draft(tmp_path):
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    auction = {**ESPN_SETTINGS}
+    auction["settings"] = {**ESPN_SETTINGS["settings"],
+                           "draftSettings": {"type": "AUCTION", "pickOrder": []}}
+    def fetch(url):
+        if "2025" not in url:
+            raise FileNotFoundError(url)
+        if "/players?" in url:
+            return []
+        return {**DRAFT_PAYLOAD, **TEAM_PAYLOAD, **auction}
+    with pytest.raises(ValueError, match="AUCTION"):
+        import_seasons(conn, "99", current_season=2026, fetch=fetch)
+
+def test_validate_import_reports_pick_count_and_adp_match_rate(tmp_path):
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    import_seasons(conn, "99", current_season=2026, fetch=_fake_fetch([2025]))
+    lines = "\n".join(validate_import(conn))
+    assert "2025" in lines
+    assert "ADP match" in lines

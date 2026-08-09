@@ -4,7 +4,13 @@ Parsers are pure functions over the JSON ESPN's read API returns, so they are
 testable against literal fixtures with no network or browser. The Playwright
 client and the season walk live further down.
 """
+import re
+from pathlib import Path
+
 import pandas as pd
+
+from pipeline.db import write_table, read_table
+from scoring import league as league_mod
 
 # ESPN lineup slot ids -> our position vocabulary. Slots we do not model
 # (individual defensive positions, punter, head coach) are absent by design.
@@ -89,3 +95,187 @@ def parse_settings(payload: dict, season: int) -> dict:
         "draft_type": (s.get("draftSettings") or {}).get("type"),
         "pick_order": (s.get("draftSettings") or {}).get("pickOrder") or [],
     }
+
+
+BASE = "https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl"
+VIEWS = "view=mDraftDetail&view=mTeam&view=mSettings"
+LOGIN_URL = "https://www.espn.com/login"
+STATE_PATH = "data/espn_state.json"
+
+
+def parse_league_id(url_or_id: str) -> str:
+    m = re.search(r"leagueId=(\d+)", url_or_id)
+    if m:
+        return m.group(1)
+    m = re.search(r"\b(\d{3,})\b", url_or_id)
+    if not m:
+        raise ValueError(f"no league id in {url_or_id!r}")
+    return m.group(1)
+
+
+def season_url(league_id: str, season: int, current_season: int) -> str:
+    # ESPN serves the live season under /seasons/{year}/... and every earlier
+    # season under /leagueHistory/{id}?seasonId=. Hitting the wrong one for a
+    # given year returns 404, not a redirect.
+    if season >= current_season:
+        return f"{BASE}/seasons/{season}/segments/0/leagues/{league_id}?{VIEWS}"
+    return f"{BASE}/leagueHistory/{league_id}?seasonId={season}&{VIEWS}"
+
+
+def players_url(season: int) -> str:
+    return f"{BASE}/seasons/{season}/players?view=players_wl"
+
+
+def _unwrap(payload):
+    # leagueHistory returns a single-element list; the seasons endpoint returns
+    # the object directly.
+    if isinstance(payload, list) and payload:
+        return payload[0]
+    return payload
+
+
+def import_seasons(conn, league_id: str, current_season: int, fetch,
+                   max_back: int = 15) -> dict:
+    """Walk seasons backward from current_season, newest first.
+
+    `fetch(url) -> parsed JSON` is injected so tests can serve fixtures. It
+    must raise on a missing season; two consecutive misses end the walk, which
+    tolerates one gap year without running to `max_back` on every import.
+    """
+    picks, teams, leagues, directories = [], [], [], []
+    seasons, misses = [], 0
+    for season in range(current_season, current_season - max_back, -1):
+        try:
+            payload = _unwrap(fetch(season_url(league_id, season, current_season)))
+        except Exception:
+            misses += 1
+            if misses >= 2 and seasons:
+                break
+            continue
+        if not ((payload.get("draftDetail") or {}).get("picks")):
+            misses += 1
+            if misses >= 2 and seasons:
+                break
+            continue
+        misses = 0
+        settings = league_mod.from_espn(parse_settings(payload, season))
+        if settings.draft_type != "SNAKE":
+            raise ValueError(
+                f"season {season} draft type is {settings.draft_type}; "
+                "only SNAKE is supported")
+        seasons.append(season)
+        picks.append(parse_draft_picks(payload, season))
+        teams.append(parse_draft_teams(payload, season))
+        leagues.append({"season": season,
+                        "settings_json": league_mod.to_json(settings)})
+        directory = parse_player_directory(fetch(players_url(season)))
+        directory["season"] = season
+        directories.append(directory)
+
+    if not seasons:
+        raise ValueError("no drafted seasons found -- check the league id and login")
+
+    all_picks = pd.concat(picks, ignore_index=True)
+    directory = pd.concat(directories, ignore_index=True)
+    all_picks = all_picks.merge(
+        directory, on=["season", "espn_player_id"], how="left")
+
+    write_table(conn, "draft_picks", all_picks)
+    write_table(conn, "draft_teams", pd.concat(teams, ignore_index=True))
+    write_table(conn, "league", pd.DataFrame(leagues))
+    return {"seasons": seasons, "picks": len(all_picks)}
+
+
+def validate_import(conn) -> list[str]:
+    from scoring.board import _norm_name
+    picks = read_table(conn, "draft_picks")
+    teams = read_table(conn, "draft_teams")
+    adp = read_table(conn, "historic_adp")
+    settings = league_mod.load(conn)
+    lines = []
+    for season, grp in picks.groupby("season"):
+        expected = settings.teams * settings.rounds
+        managers = teams[teams["season"] == season]["manager"].nunique()
+        if adp.empty:
+            rate = 0.0
+        else:
+            season_adp = adp[adp["season"] == season]
+            known = set(zip(season_adp["adp_name"].map(_norm_name),
+                            season_adp["position"]))
+            hit = grp.apply(
+                lambda r: (_norm_name(r["player_name"]), r["position"]) in known,
+                axis=1)
+            rate = float(hit.mean()) if len(grp) else 0.0
+        flag = "" if len(grp) == expected else f"  <-- expected {expected}"
+        lines.append(f"  {season}: {len(grp)} picks, {managers} managers, "
+                     f"ADP match {rate:.0%}{flag}")
+        if rate and rate < 0.8:
+            lines.append(f"         low ADP match for {season} -- "
+                         "picks below the threshold are excluded from fitting")
+    return lines
+
+
+class EspnClient:
+    """Playwright-backed fetcher that reuses a saved ESPN login.
+
+    First run with no saved state (or a state ESPN has expired) opens a real
+    browser window at the ESPN login page and waits for the human. Disney SSO
+    handles 2FA and bot checks there, which is the only place they can be
+    answered. Everything after that is headless.
+    """
+
+    def __init__(self, state_path: str = STATE_PATH):
+        self.state_path = Path(state_path)
+        self._pw = None
+        self._browser = None
+        self._context = None
+
+    def __enter__(self):
+        from playwright.sync_api import sync_playwright
+        self._pw = sync_playwright().start()
+        self._open_context()
+        return self
+
+    def __exit__(self, *exc):
+        for closer in (self._context, self._browser):
+            if closer is not None:
+                closer.close()
+        if self._pw is not None:
+            self._pw.stop()
+
+    def _open_context(self):
+        self._browser = self._pw.chromium.launch(headless=True)
+        kwargs = {"storage_state": str(self.state_path)} if self.state_path.exists() else {}
+        self._context = self._browser.new_context(**kwargs)
+
+    def login(self):
+        """Open a visible window and block until the user has signed in."""
+        print("ESPN login required -- a browser window is opening.")
+        print("Sign in, then return here; the import continues automatically.")
+        browser = self._pw.chromium.launch(headless=False)
+        context = browser.new_context()
+        page = context.new_page()
+        page.goto(LOGIN_URL)
+        # espn_s2 is only set once the SSO flow completes.
+        page.wait_for_function(
+            "() => document.cookie.includes('espn_s2') || "
+            "document.cookie.includes('SWID')", timeout=300_000)
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        context.storage_state(path=str(self.state_path))
+        context.close()
+        browser.close()
+        # Rebuild the headless context so it picks up the new cookies.
+        self._context.close()
+        self._browser.close()
+        self._open_context()
+
+    def get_json(self, url: str):
+        response = self._context.request.get(url)
+        if response.status in (401, 403):
+            self.login()
+            response = self._context.request.get(url)
+        if response.status == 404:
+            raise FileNotFoundError(url)
+        if not response.ok:
+            raise RuntimeError(f"{response.status} for {url}")
+        return response.json()

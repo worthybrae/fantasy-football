@@ -2,7 +2,7 @@
 # One-time setup: make setup && make refresh
 # Draft night:    make up   (then open http://localhost:5173)
 
-.PHONY: setup refresh api web up test build
+.PHONY: setup refresh api web up test build espn-import
 
 setup: ## create venv, install python + web deps
 	python3 -m venv .venv
@@ -11,6 +11,9 @@ setup: ## create venv, install python + web deps
 
 refresh: ## pull latest stats, depth charts, schedules/odds, ADP into DuckDB
 	.venv/bin/python -m pipeline.refresh
+
+espn-import: ## import ESPN draft history: make espn-import LEAGUE=<url-or-id>
+	.venv/bin/python -m pipeline.import_league "$(LEAGUE)"
 
 api: ## run the FastAPI backend on :8000
 	.venv/bin/uvicorn api.main:app --port 8000 --reload
