@@ -12,6 +12,7 @@ removes per season so a bad join surfaces as a number, not a silent shrug.
 """
 from typing import NamedTuple
 
+import numpy as np
 import pandas as pd
 
 from pipeline.db import read_table
@@ -82,3 +83,45 @@ def build_observations(conn) -> list:
                 rosters[pick["manager"]].get(pick["position"], 0) + 1)
             recent.insert(0, pick["position"])
     return out
+
+
+# QB is the dropped baseline: with a full set of position dummies plus an
+# intercept-free softmax the columns would be collinear.
+_POSITION_DUMMIES = ["RB", "WR", "TE", "K", "DST"]
+FEATURE_NAMES = (["reach", "fall"]
+                 + [f"pos_{p}" for p in _POSITION_DUMMIES]
+                 + ["qb_early", "te_early", "need", "run"])
+EARLY_ROUNDS = 3
+
+
+def feature_matrix(obs: PickObservation, settings) -> np.ndarray:
+    pool = obs.pool
+    n = len(pool)
+    ranks = pool["adp_rank"].to_numpy(dtype=float)
+    positions = pool["position"].to_numpy()
+    teams = max(settings.teams, 1)
+
+    delta = ranks - obs.overall_pick
+    reach = np.maximum(0.0, delta) / teams
+    fall = np.maximum(0.0, -delta) / teams
+
+    columns = [reach, fall]
+    for pos in _POSITION_DUMMIES:
+        columns.append((positions == pos).astype(float))
+
+    # `overall_pick` is 1-indexed, so pick 8 in an 8-team league is round 1.
+    round_no = (obs.overall_pick - 1) // teams + 1
+    early = 1.0 if round_no <= EARLY_ROUNDS else 0.0
+    columns.append((positions == "QB").astype(float) * early)
+    columns.append((positions == "TE").astype(float) * early)
+
+    starters = settings.starters
+    need = np.array([1.0 if obs.roster.get(p, 0) < starters.get(p, 0) else 0.0
+                     for p in positions])
+    columns.append(need)
+
+    recent = obs.recent[:RUN_WINDOW]
+    run = np.array([recent.count(p) / RUN_WINDOW for p in positions])
+    columns.append(run)
+
+    return np.column_stack(columns) if n else np.zeros((0, len(FEATURE_NAMES)))

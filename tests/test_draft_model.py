@@ -1,6 +1,8 @@
+import numpy as np
 import pandas as pd
 from pipeline.db import get_conn, write_table
-from scoring.draft_model import build_observations
+from scoring.draft_model import FEATURE_NAMES, build_observations, feature_matrix
+from scoring import league
 
 def _seed(tmp_path):
     conn = get_conn(str(tmp_path / "t.duckdb"))
@@ -137,3 +139,46 @@ def test_season_boundary_resets_pool_roster_and_recent(tmp_path):
     assert len(first_2025.pool) == 2   # fresh 2025 pool, no 2024 leftovers
     assert first_2025.roster == {}     # worthy's 2024 RB pick doesn't carry over
     assert first_2025.recent == []     # nothing carries across the season boundary
+
+def _settings():
+    return league.default_settings()
+
+def test_feature_matrix_shape_and_column_order(tmp_path):
+    obs = build_observations(_seed(tmp_path))[0]
+    X = feature_matrix(obs, _settings())
+    assert X.shape == (len(obs.pool), len(FEATURE_NAMES))
+    assert FEATURE_NAMES[0] == "reach" and FEATURE_NAMES[1] == "fall"
+
+def test_reach_and_fall_are_nonnegative_and_mutually_exclusive(tmp_path):
+    obs = build_observations(_seed(tmp_path))[2]     # overall pick 3
+    X = feature_matrix(obs, _settings())
+    reach, fall = X[:, 0], X[:, 1]
+    assert (reach >= 0).all() and (fall >= 0).all()
+    assert ((reach == 0) | (fall == 0)).all()
+
+def test_reach_measures_rounds_of_reach_required(tmp_path):
+    obs = build_observations(_seed(tmp_path))[0]      # overall pick 1, 8 teams
+    X = feature_matrix(obs, _settings())
+    ranks = obs.pool["adp_rank"].to_numpy()
+    expected = np.maximum(0, ranks - obs.overall_pick) / 8
+    assert np.allclose(X[:, 0], expected)
+
+def test_need_is_one_while_short_of_a_starter(tmp_path):
+    obs = build_observations(_seed(tmp_path))[2]      # dan has 1 WR, 0 RB, 0 TE
+    X = feature_matrix(obs, _settings())
+    need = X[:, FEATURE_NAMES.index("need")]
+    positions = obs.pool["position"].tolist()
+    # obs[2]'s pool is Player B (RB, rank 2) and Player D (TE, rank 4) -- the
+    # two players still on the board for dan's second pick. Dan has 0 RB and
+    # 0 TE so far, and the default league starts 2 RB / 1 TE, so both are
+    # short of a starter and should read as needs.
+    assert positions == ["RB", "TE"]
+    assert need[positions.index("RB")] == 1.0
+    assert need[positions.index("TE")] == 1.0
+
+def test_run_counts_same_position_picks_in_the_recent_window(tmp_path):
+    obs = build_observations(_seed(tmp_path))[2]      # recent == ["WR", "RB"]
+    X = feature_matrix(obs, _settings())
+    run = X[:, FEATURE_NAMES.index("run")]
+    positions = obs.pool["position"].tolist()
+    assert run[positions.index("RB")] == 1.0 / 5
