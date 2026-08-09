@@ -5,7 +5,7 @@ import pandas as pd
 from pipeline.db import get_conn, write_table
 from scoring import league
 from scoring.draft_sim import (FLEX_POSITIONS, POSITION_FLOOR, best_lineup_points,
-                               projections, roster_value)
+                               build_pool, projections, roster_value)
 
 S = league.default_settings()   # QB/2RB/2WR/TE/2FLEX/K/DST, 5 bench
 
@@ -236,6 +236,50 @@ def test_projections_zero_ppg_falls_back_to_position_floor(tmp_path):
     assert proj["p1"] == POSITION_FLOOR["RB"]
 
 
+def test_build_pool_ranks_market_known_players_before_unranked_ones(tmp_path):
+    """adp_rank must land on the scale draft_model's reach/fall coefficients
+    were fitted on: historic_adp.adp_rank is a dense rank over the players
+    ONE season's ADP source actually ranked, not over `board`'s broader union
+    of every player with a stat line plus ADP-only rookies and K/DST.
+
+    build_pool used to fold a `market_rank.fillna(len(board) + 1)` sentinel
+    into the same `sort_values` as the real market_rank values. That is not
+    safe: fp_rank/mfl_rank/cbs_rank are raw external ranks, not re-ranked
+    within `board`, so a real market_rank can exceed len(board) once board is
+    a filtered subset of what those sources rank -- and a sentinel of
+    len(board) + 1 can then be SMALLER than that real value, sorting a
+    genuinely-ranked player behind the unranked ones. This pins the required
+    fix: rank densely among only the players carrying a real market_rank
+    (1..k, in market order), then continue the sequence for the rest (k+1..)
+    rather than interleaving them.
+    """
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    board = pd.DataFrame([
+        {"player_id": "p1", "name": "Second By Market", "position": "WR",
+         "team": "DET", "market_rank": 20.0, "durability": 90.0, "stats": None},
+        {"player_id": "p2", "name": "First By Market", "position": "RB",
+         "team": "DAL", "market_rank": 5.0, "durability": 90.0, "stats": None},
+        # A real market_rank that is numerically larger than len(board) --
+        # exactly the case a fillna(len(board) + 1) sentinel gets wrong.
+        {"player_id": "p3", "name": "Large Real Rank", "position": "WR",
+         "team": "GB", "market_rank": 500.0, "durability": 90.0, "stats": None},
+        {"player_id": "p4", "name": "Unranked One", "position": "TE",
+         "team": "GB", "market_rank": None, "durability": 90.0, "stats": None},
+        {"player_id": "p5", "name": "Unranked Two", "position": "K",
+         "team": "SF", "market_rank": None, "durability": 90.0, "stats": None},
+    ])
+    pool = build_pool(conn, board, S)
+    by_id = dict(zip(pool.player_id, pool.adp_rank))
+    # Known market_rank players occupy dense ranks 1..3, in market order --
+    # unaffected by p3's real rank value (500.0) exceeding len(board) (5).
+    assert by_id["p2"] == 1.0     # market_rank 5.0
+    assert by_id["p1"] == 2.0     # market_rank 20.0
+    assert by_id["p3"] == 3.0     # market_rank 500.0 -- still ranked 3rd
+    # Unranked players continue the sequence after the known ones, not
+    # interleaved with them.
+    assert sorted([by_id["p4"], by_id["p5"]]) == [4.0, 5.0]
+
+
 from scoring.draft_model import FEATURE_NAMES
 from scoring.draft_sim import SimPool, rollout, snake_slots
 
@@ -300,6 +344,28 @@ def test_rollout_respects_already_taken_players():
     value = rollout(pool, S, slots, 1, taken, _flat_betas(slots.values()),
                     rng=np.random.default_rng(3))
     assert value > 0                     # runs out of players without crashing
+
+
+def test_rollout_handles_taken_covering_the_whole_draft_without_crashing():
+    """Locks in rollout's resume contract for the fully-drafted edge case.
+
+    `taken`'s count of True values IS the number of picks already made
+    (rollout's / _run_draft's docstring). If that count already meets or
+    exceeds the total number of picks in the draft (teams x rounds), there
+    is nothing left to simulate, and _run_draft returns explicitly rather
+    than falling through a `slots[already:]` slice that happens to be empty.
+    _run_draft has no per-team ownership record for players marked `taken`
+    before it was called -- only a pool-wide "off the board" mask -- so 0.0
+    is the correct, documented answer here, not a numeric regression: this
+    test does not change under the Finding 1/2 fixes, it guards against a
+    future refactor silently breaking the degenerate case.
+    """
+    pool = _pool(150)                     # more players than teams x rounds (120)
+    slots = {i: f"m{i}" for i in range(1, 9)}
+    taken = np.ones(len(pool.player_id), dtype=bool)   # already >= len(slots)
+    value = rollout(pool, S, slots, 1, taken, _flat_betas(slots.values()),
+                    rng=np.random.default_rng(2))
+    assert value == 0.0
 
 
 # --- Feature parity: _live_features (numpy, rollout-fast) must produce the
@@ -368,10 +434,12 @@ def test_live_features_matches_feature_matrix_on_a_late_round_pick():
 # --- Roster caps (property 4): K and DST capped at 1, QB at most 3, imposed
 # as a mask rather than learned. rollout()'s public interface only returns a
 # float -- it does not expose per-manager roster composition -- so a direct
-# unit test of the cap table itself is the reliable way to pin this down,
-# rather than trying to infer it indirectly from a scalar.
+# unit test of the cap table itself pins down the table in isolation, and
+# `_run_draft` (which returns the full per-slot roster state rollout() is
+# built on, without changing rollout()'s own scalar return type) lets a
+# second test check that a full simulated draft actually honours it.
 
-from scoring.draft_sim import _roster_cap
+from scoring.draft_sim import _roster_cap, _run_draft
 
 
 def test_roster_cap_limits_kicker_defense_and_qb_regardless_of_starters():
@@ -379,3 +447,51 @@ def test_roster_cap_limits_kicker_defense_and_qb_regardless_of_starters():
     assert caps["K"] == 1
     assert caps["DST"] == 1
     assert caps["QB"] <= 3
+
+
+def test_rollout_never_drafts_past_a_roster_cap_even_when_the_shortlist_is_all_one_position():
+    """Regression test for a roster-cap escape hatch.
+
+    _greedy_choice's shortlist used to be the top GREEDY_CANDIDATES players
+    by raw points pool-wide, computed BEFORE any legality filter. With QB
+    points set far above every other position's, the top-40 shortlist is
+    entirely QB; once my slot's QB count reaches its cap (3), the old code
+    found every shortlisted candidate illegal, left best_idx unset, and fell
+    through to the cap-blind "best remaining player" fallback -- taking a
+    4th QB anyway. This builds exactly that scenario end-to-end through
+    _run_draft and checks the actual resulting rosters, not just the cap
+    table in isolation.
+
+    Non-QB supply here is deliberately generous (40 apiece, 200 total,
+    against a max aggregate demand across all 8 teams of 4 RB + 4 WR + 3 TE
+    + 1 K + 1 DST = 13/team = 104) so that legal alternatives always exist
+    SOMEWHERE in the pool once a manager is QB-capped -- an earlier, thinner
+    version of this fixture (8 non-QB players apiece) let the whole market
+    run out of non-QB supply, which manufactures a genuinely unavoidable
+    "nothing legal left" case rather than exercising the shortlist bug this
+    test targets. With this fixture, the pre-fix `_greedy_choice` (its
+    shortlist built from the top GREEDY_CANDIDATES by points BEFORE any
+    legality filter) rosters my slot 15 QB -- every single pick -- because
+    the shortlist is 100% QB every turn and the old cap-blind fallback
+    always wins; the fix should never exceed the cap of 3.
+    """
+    n = 400
+    positions = np.array(["QB"] * 200 + (["RB", "WR", "TE", "K", "DST"] * 40))
+    points = np.concatenate([np.linspace(1000.0, 300.0, 200),
+                             np.linspace(50.0, 5.0, 200)])
+    pool = SimPool(
+        player_id=np.array([f"p{i}" for i in range(n)]),
+        norm=np.array([f"player {i}" for i in range(n)]),
+        position=positions, adp_rank=np.arange(1, n + 1, dtype=float),
+        points=points, durability=np.full(n, 90.0))
+    slots = {i: f"m{i}" for i in range(1, 9)}
+    taken = np.zeros(n, dtype=bool)
+    betas = _flat_betas(slots.values())
+    caps = _roster_cap(S)
+    for seed in range(10):
+        rosters = _run_draft(pool, S, slots, 1, taken, betas,
+                             rng=np.random.default_rng(seed))
+        for slot, roster in rosters.items():
+            for pos, count in roster["counts"].items():
+                assert count <= caps.get(pos, 99), \
+                    f"seed {seed}: slot {slot} rostered {count} {pos} (cap {caps.get(pos)})"

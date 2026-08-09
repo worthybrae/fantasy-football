@@ -161,11 +161,27 @@ def build_pool(conn, board: pd.DataFrame, settings) -> SimPool:
     points = projections(conn, board)
     ranked = board.copy()
     ranked["proj"] = ranked["player_id"].map(points)
-    # Market rank is the model's notion of "where the board thinks he goes";
-    # players the market never ranked sit at the back rather than dropping out,
-    # since an opponent can still take them.
-    ranked["market_rank"] = ranked["market_rank"].fillna(len(ranked) + 1)
-    ranked = ranked.sort_values("market_rank").reset_index(drop=True)
+
+    # `adp_rank` must land on the scale draft_model's reach/fall coefficients
+    # were fitted on: historic_adp.adp_rank is a dense rank over the players
+    # ONE season's ADP source actually ranked, not over `board`'s broader
+    # union of every player with a stat line plus ADP-only rookies and K/DST.
+    # Folding a fillna sentinel into the same sort_values as the real
+    # market_rank values is not safe here: fp_rank/mfl_rank/cbs_rank (which
+    # feed into market_rank, see scoring/market.py) are raw external ranks,
+    # not re-ranked within `board`, so a real market_rank can exceed
+    # len(board) once board is a filtered subset of what those sources rank
+    # -- and a sentinel of len(board) + 1 would then be SMALLER than that
+    # real value, scrambling a genuinely-ranked player behind the unranked
+    # ones. Ranking densely among only the players who carry a real
+    # market_rank keeps "rank k" meaning roughly the same thing whether it
+    # came from board or a historic ADP feed. Unranked players are appended
+    # after the last real rank, not interleaved, so they stay takeable but
+    # sit far down the board (an opponent can still draft them).
+    has_rank = ranked["market_rank"].notna()
+    known = ranked[has_rank].sort_values("market_rank", kind="stable")
+    unknown = ranked[~has_rank]
+    ranked = pd.concat([known, unknown], ignore_index=True)
     return SimPool(
         player_id=ranked["player_id"].to_numpy(),
         norm=ranked["name"].map(_norm_name).to_numpy(),
@@ -214,46 +230,94 @@ def _roster_cap(settings) -> dict:
     return caps
 
 
-# Greedy only weighs the best available players by projection. Scanning the
-# whole pool would make every rollout O(pool) roster valuations, which at
-# ~500 players x 15 picks x thousands of rollouts is the difference between
-# seconds and hours -- and a player outside the top 40 by projection can
-# never be the greedy pick anyway.
+# Heuristic cutoff chosen for speed, not a proven bound -- marginal
+# roster-value gain and raw points don't have to rank identically. Scanning
+# every legal remaining player would make every rollout O(pool) roster
+# valuations, which at ~500 players x 15 picks x thousands of rollouts is
+# the difference between seconds and hours, so only the top GREEDY_CANDIDATES
+# by points are evaluated.
 GREEDY_CANDIDATES = 40
 
 
+def _legal_mask(pool, indices, counts, caps) -> np.ndarray:
+    """Which of `indices` sit at a position `counts` (a roster's position ->
+    count-so-far dict) has not yet hit its cap."""
+    return np.array([counts.get(pool.position[i], 0) < caps.get(pool.position[i], 99)
+                     for i in indices])
+
+
 def _greedy_choice(pool, available, roster, settings, caps):
-    """My in-rollout policy: the available player who most increases roster
-    value. One-ply greedy, which is what makes a rollout cheap enough to run
-    thousands of times; the search in Task 11 is what looks further ahead."""
+    """My in-rollout policy: the available, cap-legal player who most
+    increases roster value. One-ply greedy, which is what makes a rollout
+    cheap enough to run thousands of times; the search in Task 11 is what
+    looks further ahead.
+
+    Legality is filtered before the shortlist is built, not inside the loop
+    over it. The shortlist is only the top GREEDY_CANDIDATES by raw points,
+    and late in a draft those top point-scorers can all sit at a position
+    I'm already capped on (e.g. QB once I have 3). Filtering inside the loop
+    (skip-and-continue) left `best_idx` unset in exactly that case and fell
+    through to a fallback that picked the single best remaining player
+    ignoring caps entirely -- silently drafting a 4th QB. Filtering first
+    means the shortlist is never spent on players I cannot legally take.
+    """
     current = [(pool.position[i], pool.points[i], pool.durability[i])
                for i in roster["indices"]]
     base = roster_value(current, settings)
-    shortlist = available[np.argsort(-pool.points[available])][:GREEDY_CANDIDATES]
+    legal = available[_legal_mask(pool, available, roster["counts"], caps)]
+    if len(legal) == 0:
+        # No cap-legal player remains anywhere in the pool -- genuinely
+        # unavoidable, not a shortlist artifact -- so caps no longer apply.
+        return available[0] if len(available) else None
+    shortlist = legal[np.argsort(-pool.points[legal])][:GREEDY_CANDIDATES]
     best_idx, best_gain = None, -np.inf
     for i in shortlist:
         pos = pool.position[i]
-        if roster["counts"].get(pos, 0) >= caps.get(pos, 99):
-            continue
         gain = roster_value(current + [(pos, pool.points[i], pool.durability[i])],
                             settings) - base
         if gain > best_gain:
             best_idx, best_gain = i, gain
-    return best_idx if best_idx is not None else (available[0] if len(available) else None)
+    return best_idx if best_idx is not None else legal[0]
 
 
-def rollout(pool, settings, slot_managers, my_slot, taken, betas, rng,
-            forced=None) -> float:
-    n = len(pool.player_id)
+def _run_draft(pool, settings, slot_managers, my_slot, taken, betas, rng,
+               forced=None) -> dict:
+    """Simulate the remainder of one snake draft and return every slot's
+    roster, as `{slot: {"counts": {position: n, ...}, "indices": [pool
+    index, ...]}}`.
+
+    Resume contract: `taken` marks exactly the players drafted so far in
+    THIS draft, in pick order -- its count of True values (`already`, below)
+    IS the number of picks already made, and is used as an index into the
+    snake pick order to resume from. If `taken` is ever built any other way
+    (a player unavailable for a reason other than "already picked", or a
+    count that does not match the real number of picks made), every
+    remaining slot assignment misaligns silently: nothing here can detect
+    that from `taken` alone.
+
+    `rollout` wraps this and returns only my `roster_value` as a scalar --
+    Task 11's search depends on that scalar return type -- so this returns
+    the full per-slot state instead, for anything (including tests) that
+    needs to inspect roster composition beyond my own final number.
+    """
     gone = taken.copy()
     caps = _roster_cap(settings)
     rounds = settings.rounds
     slots = snake_slots(settings.teams, rounds)
     rosters = {slot: {"counts": {}, "indices": []}
                for slot in range(1, settings.teams + 1)}
-    recent = []
     already = int(gone.sum())
+    if already >= len(slots):
+        # The draft is already over by the contract above -- there is
+        # nothing left to simulate. This function has no per-team ownership
+        # record for players marked `taken` before it was called (`taken` is
+        # a pool-wide mask, not a per-team assignment), so the only rosters
+        # it can honestly report are the empty ones just built: an explicit,
+        # documented answer rather than an accident of `slots[already:]`
+        # happening to be an empty slice.
+        return rosters
 
+    recent = []
     for offset, slot in enumerate(slots[already:], start=already):
         available = np.flatnonzero(~gone)
         if len(available) == 0:
@@ -270,29 +334,33 @@ def rollout(pool, settings, slot_managers, my_slot, taken, betas, rng,
             beta = betas.get(slot_managers.get(slot))
             if beta is None:
                 beta = np.zeros(len(FEATURE_NAMES))
-            X = _live_features(pool, available, overall_pick, roster["counts"],
-                               recent, settings)
-            scores = X @ beta
-            for j, i in enumerate(available):
-                pos = pool.position[i]
-                if roster["counts"].get(pos, 0) >= caps.get(pos, 99):
-                    scores[j] = -np.inf
-            if not np.isfinite(scores).any():
-                choice = int(available[0])
+            legal = available[_legal_mask(pool, available, roster["counts"], caps)]
+            if len(legal) == 0:
+                choice = int(available[0])      # no legal player exists at all
             else:
-                shifted = scores - np.nanmax(scores[np.isfinite(scores)])
-                weights = np.where(np.isfinite(shifted), np.exp(shifted), 0.0)
-                total = weights.sum()
-                choice = int(available[0]) if total <= 0 else \
-                    int(rng.choice(available, p=weights / total))
-        if choice is None:
-            break
+                X = _live_features(pool, legal, overall_pick, roster["counts"],
+                                   recent, settings)
+                scores = X @ beta
+                # `scores.max()` is one of `scores` itself, so it always
+                # contributes exp(0) == 1 -- weights.sum() is always >= 1,
+                # never zero, so no zero-division guard is needed here.
+                weights = np.exp(scores - scores.max())
+                choice = int(rng.choice(legal, p=weights / weights.sum()))
         gone[choice] = True
         pos = pool.position[choice]
         rosters[slot]["counts"][pos] = rosters[slot]["counts"].get(pos, 0) + 1
         rosters[slot]["indices"].append(choice)
         recent.insert(0, pos)
 
+    return rosters
+
+
+def rollout(pool, settings, slot_managers, my_slot, taken, betas, rng,
+            forced=None) -> float:
+    """Simulate the remainder of one snake draft and return my end-of-draft
+    roster_value. See `_run_draft` for the full `taken` resume contract."""
+    rosters = _run_draft(pool, settings, slot_managers, my_slot, taken, betas,
+                         rng, forced)
     mine = rosters[my_slot]["indices"]
     return roster_value(
         [(pool.position[i], pool.points[i], pool.durability[i]) for i in mine],
