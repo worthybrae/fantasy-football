@@ -426,10 +426,10 @@ def test_board_uses_league_settings_when_present(tmp_path):
     other = board[board["player_id"] == "p2"].iloc[0]
     # Under the league's half-PPR scoring, "Other WR" (fewer catches, more
     # yards) out-produces "Star WR" -- the reverse of the full-PPR default
-    # (proven by test_board_without_league_table_is_unchanged below, where
-    # the star's market_rank reflects being the top player). This flip can
-    # only happen if settings.scoring, not the hardcoded DEFAULT_RULES, drove
-    # production_factor -- and it propagates through composite into vor.
+    # computed in the comment above (under DEFAULT_RULES, p1 leads 17.0 to
+    # 16.0/gm). This flip can only happen if settings.scoring, not the
+    # hardcoded DEFAULT_RULES, drove production_factor -- and it propagates
+    # through composite into vor.
     assert other["production"] > star["production"]
     assert other["vor"] > star["vor"]
 
