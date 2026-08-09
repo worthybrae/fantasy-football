@@ -1,5 +1,7 @@
-from fastapi import FastAPI, HTTPException, Query
-from pipeline.db import get_conn, read_table, DEFAULT_PATH
+import pandas as pd
+from fastapi import Body, FastAPI, HTTPException, Query
+from pipeline.db import get_conn, read_table, write_table, DEFAULT_PATH
+from scoring import league
 from scoring.board import build_board
 from scoring.config import DEFAULT_WEIGHTS
 from scoring.profile import build_profile
@@ -86,6 +88,90 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
             if payload is None:
                 raise HTTPException(status_code=404, detail="unknown player_id")
             return payload
+        finally:
+            cur.close()
+
+    @app.get("/api/league")
+    def league_info():
+        cur = conn.cursor()
+        try:
+            derived = not read_table(cur, "league").empty
+            s = league.load(cur)
+            return {"season": s.season, "teams": s.teams,
+                    "starters": s.starters, "flex_slots": s.flex_slots,
+                    "bench": s.bench, "rounds": s.rounds, "derived": derived,
+                    "unmapped_scoring": list(s.unmapped_scoring)}
+        finally:
+            cur.close()
+
+    @app.get("/api/managers")
+    def managers():
+        cur = conn.cursor()
+        try:
+            profiles = read_table(cur, "manager_profiles")
+            if profiles.empty:
+                return {"managers": []}
+            out = []
+            for manager, grp in profiles.groupby("manager"):
+                head = grp.iloc[0]
+                gain = head["heldout_gain"]
+                out.append({
+                    "manager": manager,
+                    "summary": head["summary"],
+                    "n_picks": int(head["n_picks"]),
+                    "uses_personal": bool(head["uses_personal"]),
+                    "heldout_gain": None if pd.isna(gain) else float(gain),
+                    "coefficients": [
+                        {"feature": r["feature"], "value": float(r["value"]),
+                         "pooled_value": float(r["pooled_value"])}
+                        for _, r in grp.iterrows()],
+                })
+            return {"managers": out}
+        finally:
+            cur.close()
+
+    @app.get("/api/draft-order")
+    def draft_order():
+        cur = conn.cursor()
+        try:
+            saved = read_table(cur, "draft_order")
+            if not saved.empty:
+                saved = saved.sort_values("slot")
+                me = saved[saved["is_me"]]
+                return {"order": [{"slot": int(r["slot"]), "manager": r["manager"]}
+                                  for _, r in saved.iterrows()],
+                        "my_slot": int(me.iloc[0]["slot"]) if not me.empty else None,
+                        "source": "manual"}
+            teams = read_table(cur, "draft_teams")
+            if teams.empty:
+                return {"order": [], "my_slot": None, "source": "none"}
+            newest = teams[teams["season"] == teams["season"].max()]
+            newest = newest.dropna(subset=["slot"]).sort_values("slot")
+            return {"order": [{"slot": int(r["slot"]), "manager": r["manager"]}
+                              for _, r in newest.iterrows()],
+                    "my_slot": None, "source": "espn"}
+        finally:
+            cur.close()
+
+    @app.put("/api/draft-order")
+    def set_draft_order(payload: dict = Body(...)):
+        entries = payload.get("order") or []
+        if not entries:
+            raise HTTPException(status_code=422, detail="order must not be empty")
+        slots = [int(e["slot"]) for e in entries]
+        if len(slots) != len(set(slots)):
+            raise HTTPException(status_code=422, detail="order contains duplicate slots")
+        my_slot = payload.get("my_slot")
+        if my_slot is not None and int(my_slot) not in slots:
+            raise HTTPException(status_code=422,
+                                 detail="my_slot must be one of the submitted slots")
+        rows = pd.DataFrame([{"slot": int(e["slot"]), "manager": e["manager"],
+                              "is_me": int(e["slot"]) == my_slot}
+                             for e in entries])
+        cur = conn.cursor()
+        try:
+            write_table(cur, "draft_order", rows)
+            return {"saved": len(rows)}
         finally:
             cur.close()
 

@@ -10,6 +10,8 @@ def get_conn(path: str = DEFAULT_PATH) -> duckdb.DuckDBPyConnection:
     conn.execute("""CREATE TABLE IF NOT EXISTS meta (
         source VARCHAR PRIMARY KEY, ok BOOLEAN, rows BIGINT, refreshed_at TIMESTAMP)""")
     conn.execute("CREATE TABLE IF NOT EXISTS drafted (player_id VARCHAR PRIMARY KEY)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS draft_order (
+        slot INTEGER PRIMARY KEY, manager VARCHAR, is_me BOOLEAN)""")
     return conn
 
 def write_table(conn, name: str, df: pd.DataFrame) -> None:

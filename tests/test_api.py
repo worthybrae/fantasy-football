@@ -194,3 +194,128 @@ def test_profile_all_zero_weights_returns_422(tmp_path):
         "w_schedule": 0.0, "w_durability": 0.0})
     assert r.status_code == 422
     assert "detail" in r.json()
+
+def test_league_endpoint_reports_fallback_when_not_imported(tmp_path):
+    client = _client(tmp_path)
+    body = client.get("/api/league").json()
+    assert body["derived"] is False
+    assert body["teams"] == 8
+    assert body["rounds"] == 15
+
+def test_league_endpoint_reports_derived_settings(tmp_path):
+    from scoring import league
+    path = str(tmp_path / "t.duckdb")
+    _seed(path)
+    conn = get_conn(path)
+    settings = league.LeagueSettings(
+        season=2026, teams=10,
+        starters={"QB": 1, "RB": 2, "WR": 3, "TE": 1, "K": 1, "DST": 1},
+        flex_slots=1, bench=6, scoring={"receptions": 0.5},
+        draft_type="SNAKE", unmapped_scoring=("101",))
+    write_table(conn, "league", pd.DataFrame(
+        [{"season": 2026, "settings_json": league.to_json(settings)}]))
+    conn.close()
+    body = TestClient(create_app(path)).get("/api/league").json()
+    assert body["derived"] is True
+    assert body["teams"] == 10
+    assert body["unmapped_scoring"] == ["101"]
+
+def test_managers_endpoint_groups_coefficients(tmp_path):
+    path = str(tmp_path / "t.duckdb")
+    _seed(path)
+    conn = get_conn(path)
+    write_table(conn, "manager_profiles", pd.DataFrame([
+        {"manager": "worthy", "feature": "reach", "value": -1.2,
+         "pooled_value": -0.4, "n_picks": 105, "heldout_gain": 0.08,
+         "uses_personal": True, "summary": "sticks to market order"},
+        {"manager": "worthy", "feature": "run", "value": 0.6,
+         "pooled_value": 0.1, "n_picks": 105, "heldout_gain": 0.08,
+         "uses_personal": True, "summary": "sticks to market order"},
+    ]))
+    conn.close()
+    body = TestClient(create_app(path)).get("/api/managers").json()
+    assert len(body["managers"]) == 1
+    entry = body["managers"][0]
+    assert entry["manager"] == "worthy"
+    assert entry["n_picks"] == 105
+    assert entry["uses_personal"] is True
+    assert {c["feature"] for c in entry["coefficients"]} == {"reach", "run"}
+
+def test_managers_endpoint_null_heldout_gain_serializes_as_json_null(tmp_path):
+    """heldout_gain is written as None (-> NaN on the DuckDB/pandas round trip)
+    whenever a manager has too few picks or too few seasons for a holdout
+    split (see draft_model._heldout_gain / write_profiles). FastAPI's JSON
+    encoder raises on a bare NaN, so this must come back as JSON null, not
+    crash the endpoint."""
+    path = str(tmp_path / "t.duckdb")
+    _seed(path)
+    conn = get_conn(path)
+    write_table(conn, "manager_profiles", pd.DataFrame([
+        {"manager": "rookie", "feature": "reach", "value": 0.0,
+         "pooled_value": 0.0, "n_picks": 3, "heldout_gain": None,
+         "uses_personal": False, "summary": "league average, not enough signal"},
+    ]))
+    conn.close()
+    r = TestClient(create_app(path)).get("/api/managers")
+    assert r.status_code == 200
+    entry = r.json()["managers"][0]
+    assert entry["heldout_gain"] is None
+
+def test_draft_order_round_trip(tmp_path):
+    client = _client(tmp_path)
+    assert client.get("/api/draft-order").json()["source"] == "none"
+    payload = {"order": [{"slot": 1, "manager": "worthy"},
+                         {"slot": 2, "manager": "dan"}], "my_slot": 2}
+    assert client.put("/api/draft-order", json=payload).status_code == 200
+    body = client.get("/api/draft-order").json()
+    assert body["source"] == "manual"
+    assert body["my_slot"] == 2
+    assert body["order"] == [{"slot": 1, "manager": "worthy"},
+                             {"slot": 2, "manager": "dan"}]
+
+def test_draft_order_seeds_from_imported_teams(tmp_path):
+    path = str(tmp_path / "t.duckdb")
+    _seed(path)
+    conn = get_conn(path)
+    write_table(conn, "draft_teams", pd.DataFrame([
+        {"season": 2025, "team_id": 1, "manager": "old", "slot": 1},
+        {"season": 2026, "team_id": 1, "manager": "worthy", "slot": 1},
+        {"season": 2026, "team_id": 2, "manager": "dan", "slot": 2},
+    ]))
+    conn.close()
+    body = TestClient(create_app(path)).get("/api/draft-order").json()
+    assert body["source"] == "espn"
+    assert [e["manager"] for e in body["order"]] == ["worthy", "dan"]
+
+def test_draft_order_espn_path_skips_null_slot(tmp_path):
+    """draftDayPickOrder can be missing on the ESPN side (parse_draft_teams
+    writes slot=None for it). The endpoint must drop those rows instead of
+    crashing on int(None)."""
+    path = str(tmp_path / "t.duckdb")
+    _seed(path)
+    conn = get_conn(path)
+    write_table(conn, "draft_teams", pd.DataFrame([
+        {"season": 2026, "team_id": 1, "manager": "worthy", "slot": 1},
+        {"season": 2026, "team_id": 2, "manager": "ghost", "slot": None},
+        {"season": 2026, "team_id": 3, "manager": "dan", "slot": 2},
+    ]))
+    conn.close()
+    r = TestClient(create_app(path)).get("/api/draft-order")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["source"] == "espn"
+    assert [e["manager"] for e in body["order"]] == ["worthy", "dan"]
+
+def test_draft_order_rejects_duplicate_slots(tmp_path):
+    client = _client(tmp_path)
+    payload = {"order": [{"slot": 1, "manager": "worthy"},
+                         {"slot": 1, "manager": "dan"}], "my_slot": 1}
+    r = client.put("/api/draft-order", json=payload)
+    assert r.status_code == 422
+
+def test_draft_order_rejects_my_slot_not_in_order(tmp_path):
+    client = _client(tmp_path)
+    payload = {"order": [{"slot": 1, "manager": "worthy"},
+                         {"slot": 2, "manager": "dan"}], "my_slot": 99}
+    r = client.put("/api/draft-order", json=payload)
+    assert r.status_code == 422
