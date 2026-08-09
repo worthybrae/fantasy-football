@@ -1,7 +1,9 @@
 import numpy as np
 import pandas as pd
+import pytest
 from pipeline.db import get_conn, write_table
-from scoring.draft_model import FEATURE_NAMES, build_observations, feature_matrix
+from scoring.draft_model import (FEATURE_NAMES, PickObservation,
+                                  build_observations, feature_matrix)
 from scoring import league
 
 def _seed(tmp_path):
@@ -182,3 +184,60 @@ def test_run_counts_same_position_picks_in_the_recent_window(tmp_path):
     run = X[:, FEATURE_NAMES.index("run")]
     positions = obs.pool["position"].tolist()
     assert run[positions.index("RB")] == 1.0 / 5
+
+def _pool(rows):
+    return pd.DataFrame(rows, columns=["norm", "position", "adp_rank"])
+
+@pytest.mark.parametrize("pick,early", [(8, True), (24, True), (25, False)])
+def test_qb_and_te_early_flags_the_round_boundary(pick, early):
+    # 8-team league, EARLY_ROUNDS=3: pick 8 is round 1, pick 24 is round 3
+    # (both early); pick 25 is round 4, the first NOT-early pick.
+    pool = _pool([("qb1", "QB", 1), ("rb1", "RB", 2), ("te1", "TE", 3)])
+    obs = PickObservation(season=2025, overall_pick=pick, manager="x",
+                           chosen=0, pool=pool, roster={}, recent=[])
+    X = feature_matrix(obs, _settings())
+    qb_early = X[:, FEATURE_NAMES.index("qb_early")]
+    te_early = X[:, FEATURE_NAMES.index("te_early")]
+    positions = pool["position"].tolist()
+    expected = 1.0 if early else 0.0
+    assert qb_early[positions.index("QB")] == expected
+    assert te_early[positions.index("TE")] == expected
+    # The interaction only ever fires on QB/RB rows respectively -- a non-QB
+    # row must never carry qb_early, and vice versa for te_early.
+    assert qb_early[positions.index("RB")] == 0.0
+    assert te_early[positions.index("RB")] == 0.0
+    assert qb_early[positions.index("TE")] == 0.0
+    assert te_early[positions.index("QB")] == 0.0
+
+def test_need_is_zero_once_a_starter_slot_is_already_full(tmp_path):
+    pool = _pool([("rb1", "RB", 1)])
+    settings = _settings()  # default league starts 2 RB
+    full = PickObservation(season=2025, overall_pick=1, manager="x", chosen=0,
+                            pool=pool, roster={"RB": 2}, recent=[])
+    short = PickObservation(season=2025, overall_pick=1, manager="x", chosen=0,
+                             pool=pool, roster={"RB": 1}, recent=[])
+    need_full = feature_matrix(full, settings)[:, FEATURE_NAMES.index("need")]
+    need_short = feature_matrix(short, settings)[:, FEATURE_NAMES.index("need")]
+    assert need_full[0] == 0.0
+    assert need_short[0] == 1.0
+
+def test_need_is_zero_for_a_position_absent_from_starters():
+    # A league that doesn't start K at all -- e.g. a superflex-style config
+    # from `from_espn` with no kicker slot mapped.
+    settings = league.LeagueSettings(
+        season=0, teams=8,
+        starters={"QB": 1, "RB": 2, "WR": 2, "TE": 1, "DST": 1},
+        flex_slots=2, bench=5, scoring={}, draft_type="SNAKE",
+    )
+    pool = _pool([("k1", "K", 1)])
+    obs = PickObservation(season=2025, overall_pick=1, manager="x", chosen=0,
+                           pool=pool, roster={}, recent=[])
+    need = feature_matrix(obs, settings)[:, FEATURE_NAMES.index("need")]
+    assert need[0] == 0.0
+
+def test_feature_matrix_of_an_empty_pool_has_the_right_shape():
+    empty_pool = _pool([])
+    obs = PickObservation(season=2025, overall_pick=1, manager="x", chosen=0,
+                           pool=empty_pool, roster={}, recent=[])
+    X = feature_matrix(obs, _settings())
+    assert X.shape == (0, len(FEATURE_NAMES))
