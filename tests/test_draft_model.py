@@ -241,3 +241,49 @@ def test_feature_matrix_of_an_empty_pool_has_the_right_shape():
                            pool=empty_pool, roster={}, recent=[])
     X = feature_matrix(obs, _settings())
     assert X.shape == (0, len(FEATURE_NAMES))
+
+from scoring.draft_model import fit, log_likelihood, neg_log_likelihood
+
+def _synthetic(beta_true, n_choices=40, pool=20, seed=0):
+    """Generate choices from a known beta so the fit can be checked for recovery."""
+    rng = np.random.default_rng(seed)
+    X_list, chosen = [], []
+    for _ in range(n_choices):
+        X = rng.normal(size=(pool, len(beta_true)))
+        p = np.exp(X @ beta_true)
+        p = p / p.sum()
+        X_list.append(X)
+        chosen.append(int(rng.choice(pool, p=p)))
+    return X_list, chosen
+
+def test_gradient_matches_finite_differences():
+    beta = np.array([0.3, -0.7, 0.1])
+    X_list, chosen = _synthetic(beta, n_choices=5, pool=6, seed=1)
+    point = np.array([0.1, 0.2, -0.3])
+    _, grad = neg_log_likelihood(point, X_list, chosen)
+    eps = 1e-6
+    for i in range(len(point)):
+        bumped = point.copy()
+        bumped[i] += eps
+        numeric = (neg_log_likelihood(bumped, X_list, chosen)[0]
+                   - neg_log_likelihood(point, X_list, chosen)[0]) / eps
+        assert abs(numeric - grad[i]) < 1e-4
+
+def test_fit_recovers_known_beta():
+    beta_true = np.array([1.5, -1.0, 0.5])
+    X_list, chosen = _synthetic(beta_true, n_choices=3000, pool=15, seed=2)
+    beta_hat = fit(X_list, chosen)
+    assert np.allclose(beta_hat, beta_true, atol=0.2)
+
+def test_shrinkage_pulls_a_thin_fit_toward_the_prior():
+    beta_true = np.array([1.5, -1.0, 0.5])
+    prior = np.array([0.0, 0.0, 0.0])
+    X_list, chosen = _synthetic(beta_true, n_choices=6, pool=15, seed=3)
+    loose = fit(X_list, chosen, prior=prior, lam=0.01)
+    tight = fit(X_list, chosen, prior=prior, lam=100.0)
+    assert np.linalg.norm(tight - prior) < np.linalg.norm(loose - prior)
+
+def test_log_likelihood_of_uniform_beta_is_pool_entropy():
+    X_list, chosen = _synthetic(np.array([1.0, 0.0, 0.0]), n_choices=4, pool=10, seed=4)
+    zero = np.zeros(3)
+    assert abs(log_likelihood(zero, X_list, chosen) - 4 * np.log(1 / 10)) < 1e-9

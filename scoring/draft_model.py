@@ -14,6 +14,7 @@ from typing import NamedTuple
 
 import numpy as np
 import pandas as pd
+from scipy.optimize import minimize
 
 from pipeline.db import read_table
 from scoring.board import _norm_name
@@ -125,3 +126,57 @@ def feature_matrix(obs: PickObservation, settings) -> np.ndarray:
     columns.append(run)
 
     return np.column_stack(columns) if n else np.zeros((0, len(FEATURE_NAMES)))
+
+
+def _softmax(scores: np.ndarray) -> np.ndarray:
+    shifted = scores - scores.max()
+    exp = np.exp(shifted)
+    return exp / exp.sum()
+
+
+def log_likelihood(beta, X_list, chosen_list) -> float:
+    total = 0.0
+    for X, k in zip(X_list, chosen_list):
+        scores = X @ beta
+        total += scores[k] - (scores.max() + np.log(np.exp(scores - scores.max()).sum()))
+    return float(total)
+
+
+def neg_log_likelihood(beta, X_list, chosen_list, prior=None, lam=0.0):
+    """Value and gradient of the ridge-penalized negative log-likelihood.
+
+    Convex in beta, which is why L-BFGS-B finds the global optimum rather than
+    a local one -- the reason this uses scipy instead of a hand-rolled loop.
+    """
+    value = 0.0
+    grad = np.zeros_like(beta, dtype=float)
+    for X, k in zip(X_list, chosen_list):
+        scores = X @ beta
+        probs = _softmax(scores)
+        value -= scores[k] - (scores.max()
+                              + np.log(np.exp(scores - scores.max()).sum()))
+        grad += probs @ X - X[k]
+    if prior is not None and lam:
+        diff = beta - prior
+        value += lam * float(diff @ diff)
+        grad += 2.0 * lam * diff
+    return value, grad
+
+
+def fit(X_list, chosen_list, prior=None, lam: float = 0.0) -> np.ndarray:
+    n_features = X_list[0].shape[1] if X_list else len(FEATURE_NAMES)
+    start = np.zeros(n_features) if prior is None else np.asarray(prior, dtype=float).copy()
+    if not X_list:
+        return start
+    result = minimize(neg_log_likelihood, start,
+                      args=(X_list, chosen_list, prior, lam),
+                      jac=True, method="L-BFGS-B")
+    return result.x
+
+
+def prepare(observations, settings):
+    X_list = [feature_matrix(o, settings) for o in observations]
+    chosen = [o.chosen for o in observations]
+    managers = [o.manager for o in observations]
+    seasons = [o.season for o in observations]
+    return X_list, chosen, managers, seasons
