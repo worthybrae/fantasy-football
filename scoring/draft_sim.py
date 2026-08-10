@@ -481,11 +481,39 @@ def _legal_mask(pool, indices, counts, caps) -> np.ndarray:
     return mask
 
 
+def _replacement_points(pool, settings) -> dict:
+    """Projected points of the last starter-caliber player at each position.
+
+    `LeagueSettings.replacement_ranks` already derives those ranks from the
+    league's roster shape, and the board's VOR column already uses them --
+    the simulator simply was not. Without this a one-ply greedy compares a
+    380-point quarterback against a 300-point running back and takes the
+    quarterback, ignoring that the next quarterback available is worth 300
+    while the next running back is worth 150.
+    """
+    ranks = settings.replacement_ranks
+    out = {}
+    for pos, rank in ranks.items():
+        points = np.sort(pool.points[pool.position == pos])[::-1]
+        if len(points) == 0:
+            out[pos] = 0.0
+        else:
+            out[pos] = float(points[min(rank, len(points)) - 1])
+    return out
+
+
 def _greedy_choice(pool, available, roster, settings, caps):
     """My in-rollout policy: the available, cap-legal player who most
-    increases roster value. One-ply greedy, which is what makes a rollout
-    cheap enough to run thousands of times; the search in Task 11 is what
-    looks further ahead.
+    increases roster value, valued above their position's replacement level
+    (`_replacement_points`) rather than on raw points. Raw points would take
+    a quarterback over a running back every time -- a QB outscores every RB
+    in the pool, but replacement-level QBs also score far more than
+    replacement-level RBs, so the QB's real marginal value is smaller.
+    One-ply greedy is what makes a rollout cheap enough to run thousands of
+    times; the search in Task 11 is what looks further ahead. This ranks
+    candidates only -- the roster it builds, and the value `roster_value`
+    later reports for it, are always priced in real (unadjusted) points; see
+    the loop body for where the two are kept apart.
 
     Legality is filtered before the shortlist is built, not inside the loop
     over it. The shortlist is only the top GREEDY_CANDIDATES by raw points,
@@ -505,12 +533,25 @@ def _greedy_choice(pool, available, roster, settings, caps):
         # unavoidable, not a shortlist artifact -- so caps no longer apply.
         return available[0] if len(available) else None
     shortlist = legal[np.argsort(-pool.points[legal])][:GREEDY_CANDIDATES]
+    replacement = _replacement_points(pool, settings)
     best_idx, best_gain = None, -np.inf
     for i in shortlist:
         pos = pool.position[i]
-        gain = roster_value(current + [(pos, pool.points[i], pool.availability[i])],
+        adjusted = pool.points[i] - replacement.get(pos, 0.0)
+        gain = roster_value(current + [(pos, adjusted, pool.availability[i])],
                             settings) - base
-        if gain > best_gain:
+        # `>=`, not `>`: the shortlist is iterated in descending RAW-points
+        # order (a speed heuristic, see the docstring above), so a strict `>`
+        # silently resolves any tie in *replacement-adjusted* gain by falling
+        # back to whichever candidate has the higher raw points -- exactly
+        # the bias this function exists to remove. A thin position (its
+        # replacement rank deeper than the pool's actual depth at that
+        # position, so `_replacement_points` clamps to the last player
+        # present) can tie a deep one exactly on adjusted value despite a
+        # large gap in raw points; `>=` lets the later, lower-raw-points
+        # candidate win that tie instead of the earlier, higher-raw-points
+        # one.
+        if gain >= best_gain:
             best_idx, best_gain = i, gain
     return best_idx if best_idx is not None else legal[0]
 

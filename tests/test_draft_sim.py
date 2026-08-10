@@ -609,6 +609,26 @@ def test_roster_cap_limits_kicker_defense_and_qb_regardless_of_starters():
     assert caps["QB"] <= 3
 
 
+def test_greedy_takes_the_running_back_over_the_higher_scoring_quarterback():
+    """The defect this fixes, from a real run: the simulated user opened
+    with Josh Allen, market rank 24, at pick 4. A QB outscores every RB in
+    raw points, so a one-ply greedy on raw points always takes one early --
+    the error value over replacement exists to prevent."""
+    import numpy as np
+    from scoring.draft_sim import SimPool, _greedy_choice, _roster_cap
+    pool = SimPool(
+        player_id=np.array(["qb", "rb"]), norm=np.array(["qb", "rb"]),
+        position=np.array(["QB", "RB"]), adp_rank=np.array([1.0, 2.0]),
+        points=np.array([380.0, 300.0]), availability=np.full(2, 95.0),
+        vor=np.array([0.0, 0.0]), market_rank=np.array([1.0, 2.0]),
+        age=np.array([28.0, 24.0]), ppg_std=np.zeros(2),
+        missed_rate=np.zeros(2), no_track_record=np.array([False, False]),
+        hype=np.zeros(2), trend=np.zeros(2))
+    roster = {"counts": {}, "indices": []}
+    choice = _greedy_choice(pool, np.arange(2), roster, S, _roster_cap(S))
+    assert pool.position[choice] == "RB"
+
+
 def test_rollout_never_drafts_past_a_roster_cap_even_when_the_shortlist_is_all_one_position():
     """Regression test for a roster-cap escape hatch.
 
