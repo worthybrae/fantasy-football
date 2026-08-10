@@ -1351,3 +1351,54 @@ def test_assign_primaries_is_deterministic():
     a = _assign_primaries(counts, n_rollouts=10)
     b = _assign_primaries(counts, n_rollouts=10)
     assert a == b
+
+
+def _seed_board_tables(conn):
+    """Minimal weekly/schedules/adp/espn tables so build_board returns rows."""
+    import pandas as pd
+    from pipeline.db import write_table
+    write_table(conn, "weekly", pd.DataFrame([
+        {"player_id": f"p{n}", "player_display_name": f"Player {n}",
+         "position": ["QB", "RB", "WR", "TE"][n % 4], "recent_team": "DET",
+         "opponent_team": "GB", "season": 2025, "week": w,
+         "receptions": 5, "receiving_yards": 60, "targets": 7, "carries": 3}
+        for n in range(1, 30) for w in range(1, 18)]))
+    write_table(conn, "schedules", pd.DataFrame([
+        {"home_team": "DET", "away_team": "GB", "week": 1,
+         "total_line": 48.0, "spread_line": 2.0}]))
+    write_table(conn, "adp", pd.DataFrame(
+        columns=["adp_name", "position", "team", "adp"]))
+    write_table(conn, "depth_charts", pd.DataFrame(
+        columns=["gsis_id", "depth_team", "formation", "week", "position"]))
+    write_table(conn, "espn_adp", pd.DataFrame(
+        columns=["espn_id", "espn_name", "position", "espn_adp",
+                 "espn_ppr_rank", "espn_proj"]))
+    write_table(conn, "fp_ecr", pd.DataFrame(
+        columns=["fp_name", "team", "position", "rank_ecr", "rank_ave",
+                 "rank_std", "fp_tier"]))
+    write_table(conn, "sleeper_ids", pd.DataFrame(
+        columns=["gsis_id", "espn_id", "sleeper_name", "position", "team"]))
+
+
+def test_run_sim_writes_sim_board(tmp_path, monkeypatch):
+    import pandas as pd
+    from pipeline.db import get_conn, write_table, read_table
+    from scoring import draft_model, league
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    write_table(conn, "league", pd.DataFrame(
+        [{"season": 2026, "settings_json": league.to_json(league.default_settings())}]))
+    _seed_board_tables(conn)
+    monkeypatch.setattr(draft_model, "fit_all", lambda *a, **k: {
+        "__pooled__": np.zeros(len(FEATURE_NAMES)),
+        **{f"m{i}": np.zeros(len(FEATURE_NAMES)) for i in range(1, 9)}})
+    run_id = run_sim(conn, my_slot=1,
+                     slot_managers={i: f"m{i}" for i in range(1, 9)},
+                     n_rollouts=3, seed=0)
+    board = read_table(conn, "sim_board")
+    assert list(board.columns) == ["run_id", "overall_pick", "round",
+                                   "round_pick", "slot", "alt_rank",
+                                   "player_id", "prob", "certain"]
+    assert not board.empty
+    assert set(board["run_id"]) == {run_id}
+    primaries = board[board["alt_rank"] == 0]["player_id"]
+    assert len(set(primaries)) == len(primaries)

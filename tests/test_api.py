@@ -538,6 +538,44 @@ def test_concurrent_players_requests_during_running_sim(tmp_path):
     assert status["status"] == "done", status.get("detail")
 
 
+def test_sim_board_is_empty_without_a_run(tmp_path):
+    body = _client(tmp_path).get("/api/sim/board").json()
+    assert body["run"] is None
+    assert body["cells"] == []
+    assert body["teams"] == 8
+    assert body["rounds"] == 15
+
+
+def test_sim_board_serves_cells_with_player_details(tmp_path):
+    path = str(tmp_path / "t.duckdb")
+    _seed(path)
+    conn = get_conn(path)
+    write_table(conn, "sim_results", pd.DataFrame(
+        [{"run_id": "r1", "player_id": "p1", "ev": 1.0, "se": 0.1, "rank": 1,
+          "applied_pct": 1.0, "my_slot": 4, "pick_no": 0,
+          "created_at": "2026-08-09 12:00:00"}]))
+    write_table(conn, "sim_board", pd.DataFrame([
+        {"run_id": "r1", "overall_pick": 1, "round": 1, "round_pick": 1,
+         "slot": 1, "alt_rank": 0, "player_id": "p1", "prob": 0.42,
+         "certain": False},
+        {"run_id": "r1", "overall_pick": 1, "round": 1, "round_pick": 1,
+         "slot": 1, "alt_rank": 1, "player_id": "nope", "prob": 0.2,
+         "certain": False},
+    ]))
+    conn.close()
+    body = TestClient(create_app(path)).get("/api/sim/board").json()
+    assert body["run"]["my_slot"] == 4
+    primary = [c for c in body["cells"] if c["alt_rank"] == 0][0]
+    assert primary["name"] == "A Star"
+    assert primary["position"] == "WR"
+    assert primary["prob"] == 0.42
+    # A cell naming a player the board no longer carries still renders,
+    # with the id standing in for the name rather than vanishing.
+    alt = [c for c in body["cells"] if c["alt_rank"] == 1][0]
+    assert alt["name"] == "nope"
+    assert alt["position"] is None
+
+
 def test_draft_order_seeds_slots_when_espn_has_not_published_an_order(tmp_path):
     # ESPN leaves draftDayPickOrder null until it publishes a draft order,
     # which is the normal state for the season you are preparing for. An

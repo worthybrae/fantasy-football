@@ -895,10 +895,14 @@ def run_sim(conn, my_slot: int, slot_managers: dict,
                           n_rollouts=n_rollouts, seed=seed,
                           taken_order=taken_order,
                           avail_pct=avail["avail_pct"].to_numpy())
+    cells = predict_board(pool, settings, slot_managers, my_slot, taken, betas,
+                          n_rollouts=n_rollouts, seed=seed,
+                          taken_order=taken_order)
 
     run_id = f"{my_slot}-{n_rollouts}-{seed}-{len(taken_order)}"
     results.insert(0, "run_id", run_id)
     avail.insert(0, "run_id", run_id)
+    cells.insert(0, "run_id", run_id)
     # Provenance (spec Part 4). scoring/board.py merges these tables into
     # every board unconditionally, and write_table replaces them wholesale,
     # so without a timestamp and the slot/pick they were computed for, a
@@ -910,6 +914,7 @@ def run_sim(conn, my_slot: int, slot_managers: dict,
     results["created_at"] = datetime.now(timezone.utc).isoformat()
     write_table(conn, "sim_results", results)
     write_table(conn, "sim_survival", avail)
+    write_table(conn, "sim_board", cells)
     return run_id
 
 

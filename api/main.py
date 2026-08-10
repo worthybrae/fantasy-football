@@ -277,6 +277,50 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
         finally:
             cur.close()
 
+    @app.get("/api/sim/board")
+    def sim_board():
+        cur = conn.cursor()
+        try:
+            settings = league.load(cur)
+            order = draft_order()["order"]
+            cells = read_table(cur, "sim_board")
+            latest = read_table(cur, "sim_results")
+            run = None
+            if not latest.empty:
+                head = latest.iloc[0]
+                run = {"run_id": head["run_id"],
+                       "my_slot": int(head["my_slot"]),
+                       "created_at": str(head["created_at"])}
+            if cells.empty:
+                return {"run": run, "teams": settings.teams,
+                        "rounds": settings.rounds, "order": order, "cells": []}
+            board = build_board(cur, settings=settings)
+            names = board.set_index("player_id")[["name", "position", "team"]]
+            out = []
+            for _, c in cells.iterrows():
+                pid = c["player_id"]
+                # A cell can name a player the board no longer carries (a
+                # refresh between runs). Render the id rather than dropping
+                # the cell, so the grid never silently loses a pick.
+                if pid in names.index:
+                    row = names.loc[pid]
+                    name, position, team = row["name"], row["position"], row["team"]
+                else:
+                    name, position, team = pid, None, None
+                out.append({"overall_pick": int(c["overall_pick"]),
+                            "round": int(c["round"]),
+                            "round_pick": int(c["round_pick"]),
+                            "slot": int(c["slot"]),
+                            "alt_rank": int(c["alt_rank"]),
+                            "player_id": pid, "name": name,
+                            "position": position, "team": team,
+                            "prob": float(c["prob"]),
+                            "certain": bool(c["certain"])})
+            return {"run": run, "teams": settings.teams,
+                    "rounds": settings.rounds, "order": order, "cells": out}
+        finally:
+            cur.close()
+
     @app.get("/api/model")
     def model_status():
         """Whether opponent models exist at all, and whether they beat ADP.
