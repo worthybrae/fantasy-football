@@ -281,6 +281,64 @@ page load too, since those columns come from whatever run last finished):
   evaluated: forcing him mostly wouldn't happen, so his "expected value"
   would really be the value of whatever you'd have taken instead.
 
+### The predicted draft board
+
+A simulation run also fills in a full board, not just your own picks: open
+**Grid** in the header, or go to `/draft-board`, for a grid with rounds down
+the side and managers across the top, one predicted player in every cell for
+the whole draft. It's built from the same rollouts as the `Avail%` and `ΔEV`
+columns, `predict_board` in `scoring/draft_sim.py`, so it doesn't form a
+second opinion; it adds roughly 4 seconds to a run that already takes about
+50, and the results are written to a new `sim_board` table and served at
+`GET /api/sim/board`.
+
+Each cell shows the model's single most likely player at that pick. Hover a
+cell to see the second and third most likely players and their
+probabilities.
+
+**The name in the cell is a consistency choice, not just "the highest raw
+number."** If four adjacent picks each have the same player as their
+top individual choice, showing him in all four cells would just look broken.
+So the raw per-pick frequencies get resolved into one board with an
+assignment algorithm (`scipy.optimize.linear_sum_assignment`, minimizing
+`-log(prob)`) that picks the most likely set of names where no player is
+used twice. That's the name you see. It means a cell's primary is the most
+coherent single draft the model can tell, not 120 independent "most likely"
+answers read in isolation, and a cell can end up naming its second-most-likely
+player when that makes the whole board fit together better. The hover
+alternates are how you see the raw, un-deduped picture, and they're worth
+checking on any pick that looks surprising, since nothing about the real
+distribution is hidden, only resolved into one story.
+
+**Your own column is a plan, not a prediction.** The rollouts fill your picks
+with the same greedy, best-marginal-value-right-now policy the simulator
+uses to search candidates, not with a fitted model of your own behavior.
+That policy is close to deterministic given the board state, so its
+cell frequencies would sit near 100% almost everywhere, which would read as
+confidence about the future that the model doesn't have. Those cells are
+labeled **projected** instead of predicted, and show no probability at all.
+Read that column as "what the current plan does at each of your picks," not
+as a forecast of what will happen.
+
+Once a player is marked drafted, that cell renders as fact, at full strength,
+with no probability shown. It isn't a prediction anymore.
+
+The grid shows the last simulation run, merged with whatever is currently
+marked drafted. It does not refresh itself as picks come in; re-running is a
+deliberate step, same as for the board's `Avail%`/`ΔEV` columns. A run made
+before this feature existed (or one that otherwise wrote no per-pick rows)
+produces an empty grid, and the page says so and tells you to re-run rather
+than showing a silently blank board.
+
+Clicking a cell opens a condensed player profile, close enough for a
+draft-night decision, with a link to the full profile page for anything it
+leaves out.
+
+Because the grid is built on the same fitted manager models as the rest of
+the simulator, the backtest line `make fit-managers` prints matters even
+more here than for `Avail%`/`ΔEV`: a full, confident-looking board is easy to
+over-trust, and it's only as good as that line says the model is.
+
 ### A known open question
 
 The simulator dense-ranks the board's "market-known" players 1..k to match
