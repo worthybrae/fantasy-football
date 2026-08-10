@@ -923,6 +923,68 @@ def run_sim(conn, my_slot: int, slot_managers: dict,
 ASSIGNMENT_MISS_COST = 50.0
 
 
+def _assign_primaries(counts: dict, n_rollouts: int) -> dict:
+    """The deduped primary for every predicted pick: `{overall_pick: pool
+    index}`, drawn only from players that pick's own rollouts actually
+    produced (`counts[overall_pick]`) -- this never hands a pick a player
+    the model did not, in fact, sometimes send there.
+
+    Solved as an assignment problem, cost `-log(prob)`, with a finite
+    `ASSIGNMENT_MISS_COST` standing in for a (pick, player) pair the
+    rollouts never produced (`linear_sum_assignment` rejects an all-`-inf`
+    matrix outright). `linear_sum_assignment` is exact, so with that miss
+    cost dominating every real edge (see `ASSIGNMENT_MISS_COST`), its result
+    is already the maximum-cardinality real assignment there is: no smarter
+    algorithm can seat more picks on their own real candidates than this
+    already does. Concretely, that means whenever a pick comes back without
+    a usable answer here (unassigned, or assigned a player outside its own
+    cell), an exchange argument rules out any of that pick's own candidates
+    being free -- if one were, swapping it in would have strictly lowered
+    the total cost, contradicting optimality. So the walk below, which
+    prefers an unclaimed candidate of the pick's own before accepting a
+    repeat, is not a heuristic that sometimes helps: given this cost
+    structure it can only confirm what optimality already forced. It is
+    kept anyway as an explicit, tested invariant (never hand out a player
+    outside the pick's own cell) rather than an implicit consequence of
+    today's specific cost design, which a future change to that design could
+    silently break. A repeat among the results below is therefore a
+    property of the *input* -- some group of picks collectively produced
+    fewer distinct players than there are picks in that group, which no
+    assignment of only-real candidates can avoid -- not of this function.
+    """
+    predicted = sorted(counts)
+    players = sorted({idx for cell in counts.values() for idx in cell})
+    col_of = {idx: j for j, idx in enumerate(players)}
+    cost = np.full((len(predicted), len(players)), ASSIGNMENT_MISS_COST)
+    for r, overall_pick in enumerate(predicted):
+        for idx, n in counts[overall_pick].items():
+            cost[r, col_of[idx]] = -np.log(n / n_rollouts)
+    rows_idx, cols_idx = linear_sum_assignment(cost)
+    raw = {predicted[r]: players[c] for r, c in zip(rows_idx, cols_idx)}
+
+    primary, claimed, needs_fallback = {}, set(), []
+    for overall_pick in predicted:
+        cell = counts[overall_pick]
+        chosen = raw.get(overall_pick)
+        if chosen is not None and chosen in cell:
+            primary[overall_pick] = chosen
+            claimed.add(chosen)
+        else:
+            needs_fallback.append(overall_pick)
+
+    for overall_pick in needs_fallback:
+        cell = counts[overall_pick]
+        # Own candidates, highest-count first, smallest pool index breaking
+        # a tie -- matches the ranking every other cell's alternates use.
+        candidates = sorted(cell, key=lambda idx: (-cell[idx], idx))
+        chosen = next((idx for idx in candidates if idx not in claimed),
+                      candidates[0])
+        primary[overall_pick] = chosen
+        claimed.add(chosen)
+
+    return primary
+
+
 def predict_board(pool, settings, slot_managers, my_slot, taken, betas,
                   n_rollouts: int = DEFAULT_ROLLOUTS, seed: int = 0,
                   alternates: int = 2, taken_order=None) -> pd.DataFrame:
@@ -934,21 +996,23 @@ def predict_board(pool, settings, slot_managers, my_slot, taken, betas,
     The raw per-cell frequencies, which are the honest distribution and
     become the alternates hover shows.
 
-    A deduped primary. Taking each cell's most frequent player independently
-    puts a consensus first-rounder in four adjacent cells, which reads as a
-    bug rather than as "he could go at any of these". So the frequencies are
-    treated as an assignment problem -- picks on one side, players on the
-    other, cost -log(prob) -- and solved for the highest-likelihood board in
-    which nobody appears twice. The name in the cell is therefore the most
-    coherent single draft the model can tell, not 120 independent answers,
-    which is why the alternates matter and are kept.
+    A deduped primary (`_assign_primaries`). Taking each cell's most
+    frequent player independently puts a consensus first-rounder in four
+    adjacent cells, which reads as a bug rather than as "he could go at any
+    of these". So the frequencies are treated as an assignment problem and
+    solved for the highest-likelihood board that repeats a player only when
+    the picks contesting him collectively produced too few distinct players
+    for a repeat-free board to exist at all -- see `_assign_primaries` for
+    why that is a property of the input, not a gap in the solver. The name
+    in the cell is therefore the most coherent single draft the model can
+    tell, not 120 independent answers, which is why the alternates matter
+    and are kept.
 
     Picks already made are reported from `taken_order` as certain, with no
     alternates: they are facts, not predictions.
     """
     slots = snake_slots(settings.teams, settings.rounds)
     teams = max(settings.teams, 1)
-    already = len(taken_order) if taken_order is not None else int(taken.sum())
 
     counts = {}
     for i in range(n_rollouts):
@@ -964,43 +1028,23 @@ def predict_board(pool, settings, slot_managers, my_slot, taken, betas,
     rows = []
 
     # -- picks already made: facts, in pick order --
-    for offset in range(already):
-        overall_pick = offset + 1
-        if taken_order is None or offset >= len(taken_order):
-            continue
-        idx = taken_order[offset]
+    for offset, idx in enumerate(taken_order or []):
         if idx is None:
             continue
-        rows.append(_board_row(pool, slots, teams, overall_pick, 0, idx, 1.0, True))
+        rows.append(_board_row(pool, slots, teams, offset + 1, 0, idx, 1.0, True))
 
     if predicted:
-        # -- assignment over the predicted picks --
-        players = sorted({idx for c in counts.values() for idx in c})
-        col_of = {idx: j for j, idx in enumerate(players)}
-        cost = np.full((len(predicted), len(players)), ASSIGNMENT_MISS_COST)
-        for r, overall_pick in enumerate(predicted):
-            for idx, n in counts[overall_pick].items():
-                cost[r, col_of[idx]] = -np.log(n / n_rollouts)
-        rows_idx, cols_idx = linear_sum_assignment(cost)
-        primary = {predicted[r]: players[c] for r, c in zip(rows_idx, cols_idx)}
-
+        primary = _assign_primaries(counts, n_rollouts)
         for overall_pick in predicted:
             cell = counts[overall_pick]
-            chosen = primary.get(overall_pick)
-            # An assignment can hand a cell a player it never produced, when
-            # that frees a better fit elsewhere. Such a cell has no real
-            # primary, so fall back to its own most frequent player and let
-            # the duplicate stand -- a visible repeat beats inventing a pick
-            # the model never made.
-            if chosen is None or chosen not in cell:
-                chosen = max(cell, key=lambda k: (cell[k], -k))
+            chosen = primary[overall_pick]
             rows.append(_board_row(pool, slots, teams, overall_pick, 0, chosen,
                                    cell[chosen] / n_rollouts, False))
-            ranked = sorted(((n, -idx, idx) for idx, n in cell.items()
+            ranked = sorted(((n, -idx) for idx, n in cell.items()
                              if idx != chosen), reverse=True)
-            for alt_rank, (n, _, idx) in enumerate(ranked[:alternates], start=1):
+            for alt_rank, (n, neg_idx) in enumerate(ranked[:alternates], start=1):
                 rows.append(_board_row(pool, slots, teams, overall_pick,
-                                       alt_rank, idx, n / n_rollouts, False))
+                                       alt_rank, -neg_idx, n / n_rollouts, False))
 
     board = pd.DataFrame(rows, columns=["overall_pick", "round", "round_pick",
                                         "slot", "alt_rank", "player_id",

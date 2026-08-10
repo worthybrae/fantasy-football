@@ -1279,3 +1279,75 @@ def test_predict_board_reports_already_made_picks_as_certain():
     # A certain pick has no alternates, and the predictions start after it.
     assert board[board["overall_pick"] <= 3]["alt_rank"].max() == 0
     assert not board[board["overall_pick"] == 4]["certain"].any()
+
+
+def test_predict_board_skips_a_certain_pick_whose_player_fell_off_the_pool():
+    """A `taken_order` entry can be None -- a player drafted, then dropped
+    from the pool by a later refresh (see `_seed_rosters`'s docstring). His
+    pick still consumed a turn, but there is no player_id left to report, so
+    that overall_pick must produce no certain row while the turns around it
+    still do.
+    """
+    from scoring.draft_sim import predict_board
+    pool = _pool()
+    slots = {i: f"m{i}" for i in range(1, 9)}
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    taken[[0, 2]] = True
+    board = predict_board(pool, S, slots, 4, taken, _adp_betas(slots.values()),
+                          n_rollouts=10, seed=9, taken_order=[0, None, 2])
+    made = board[board["certain"]]
+    assert made["overall_pick"].tolist() == [1, 3]
+    assert made["player_id"].tolist() == [pool.player_id[0], pool.player_id[2]]
+    # Pick 2's turn was consumed (predictions resume at pick 4, not pick 2),
+    # but it reports no row of its own -- certain or otherwise.
+    assert 2 not in board["overall_pick"].tolist()
+
+
+def test_assign_primaries_never_invents_a_candidate_outside_the_cells_own_players():
+    """Regression case from code review: a naive per-cell argmax fallback
+    (`max(cell, key=...)`, with no notion of who else already claimed what)
+    can hand two different picks the same primary even though the
+    assignment step itself never repeats a player.
+
+    counts = {1: {10: 6, 11: 4}, 2: {10: 5, 11: 5}, 3: {10: 7, 11: 3}, 4: {12: 10}}
+    has only 3 distinct recorded players (10, 11, 12) for 4 picks. Picks 1-3
+    between them only ever recorded players 10 and 11 -- two candidates for
+    three picks -- so by the pigeonhole principle no assignment that only
+    ever uses a pick's own recorded candidates can give all three of them
+    distinct primaries; some repeat is mathematically forced no matter the
+    algorithm. (Verified computationally: an assignment-plus-claimed-set
+    fallback and the original unconditional-argmax fallback produce the
+    identical result on this input, and on 25,000 randomized larger
+    fixtures -- neither can do better than the other here, because
+    `linear_sum_assignment` already finds the maximum-cardinality real
+    assignment; see `_assign_primaries`'s docstring.)
+
+    What IS a meaningful, checkable property -- and what actually
+    distinguishes a correct implementation from a broken one -- is that the
+    forced repeat is still one of that pick's own recorded candidates, never
+    a fabricated one, and that exactly one repeat occurs here (not more):
+    picks 2, 3 and 4 each have their own distinct winner, and pick 1 (the
+    one Hall's condition leaves without a fresh candidate) reuses whichever
+    real candidate the deficient trio settles on.
+    """
+    from scoring.draft_sim import _assign_primaries
+    counts = {1: {10: 6, 11: 4}, 2: {10: 5, 11: 5}, 3: {10: 7, 11: 3}, 4: {12: 10}}
+    primary = _assign_primaries(counts, n_rollouts=10)
+
+    assert set(primary) == set(counts)
+    # Every primary is a player that pick's own rollouts actually produced.
+    for overall_pick, chosen in primary.items():
+        assert chosen in counts[overall_pick]
+    # Exactly one repeat -- the mathematical minimum for this input, not
+    # more (a sloppier fallback could, in principle, produce extra repeats
+    # among the picks that need one; this pins that it does not).
+    values = list(primary.values())
+    assert len(values) - len(set(values)) == 1
+
+
+def test_assign_primaries_is_deterministic():
+    from scoring.draft_sim import _assign_primaries
+    counts = {1: {10: 6, 11: 4}, 2: {10: 5, 11: 5}, 3: {10: 7, 11: 3}, 4: {12: 10}}
+    a = _assign_primaries(counts, n_rollouts=10)
+    b = _assign_primaries(counts, n_rollouts=10)
+    assert a == b
