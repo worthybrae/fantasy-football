@@ -170,22 +170,58 @@ def build_observations(conn) -> list:
 # QB is the dropped baseline: with a full set of position dummies plus an
 # intercept-free softmax the columns would be collinear.
 _POSITION_DUMMIES = ["RB", "WR", "TE", "K", "DST"]
+_NEW_FEATURES = ["age", "volatility", "no_track_record", "hype", "trend"]
 FEATURE_NAMES = (["reach", "fall"]
                  + [f"pos_{p}" for p in _POSITION_DUMMIES]
-                 + ["qb_early", "te_early", "need", "run"])
+                 + ["qb_early", "te_early", "need", "run"]
+                 + _NEW_FEATURES)
 EARLY_ROUNDS = 3
+
+# Divisors that put each new feature on roughly the same scale as the
+# others, so no coefficient has to be tiny or huge to matter. They are not
+# fitted -- changing one just rescales its coefficient -- but keeping the
+# columns comparable makes the ridge penalty treat them even-handedly.
+VOLATILITY_SCALE = 10.0
+HYPE_SCALE = 50.0
+
+
+def _log_rank_features(market_rank, pick_no):
+    """Rounds-of-reach on a log axis.
+
+    Linear rank made the gap from rank 1 to 5 (0.5 units) ten times smaller
+    than the gap from 100 to 140 (5.0), so the fit spent its range on
+    deep-bench noise and left the entire top of the board within ~2x of
+    itself in probability -- a coin flip for the first pick of the draft.
+    Log rank inverts that, matching how drafts actually behave. log1p so
+    rank 1 and pick 1 are finite; no division by `teams`, which was a
+    rounds-based scaling that means nothing on a log axis.
+    """
+    delta = np.log1p(market_rank) - np.log1p(pick_no)
+    return np.maximum(0.0, delta), np.maximum(0.0, -delta)
+
+
+def _centre_within_position(values, positions):
+    """Age relative to typical for the position, so the coefficient reads as
+    'younger than his peers' rather than tracking that tight ends last
+    longer than running backs. Unknown ages are neutral, not young."""
+    out = np.zeros(len(values), dtype=float)
+    values = np.asarray(values, dtype=float)
+    for pos in set(positions):
+        mask = positions == pos
+        known = mask & np.isfinite(values)
+        if known.any():
+            out[known] = values[known] - values[known].mean()
+    return out
 
 
 def feature_matrix(obs: PickObservation, settings) -> np.ndarray:
     pool = obs.pool
     n = len(pool)
-    ranks = pool["adp_rank"].to_numpy(dtype=float)
+    ranks = pool["market_rank"].to_numpy(dtype=float)
     positions = pool["position"].to_numpy()
     teams = max(settings.teams, 1)
 
-    delta = ranks - obs.overall_pick
-    reach = np.maximum(0.0, delta) / teams
-    fall = np.maximum(0.0, -delta) / teams
+    reach, fall = _log_rank_features(ranks, obs.overall_pick)
 
     columns = [reach, fall]
     for pos in _POSITION_DUMMIES:
@@ -205,6 +241,14 @@ def feature_matrix(obs: PickObservation, settings) -> np.ndarray:
     recent = obs.recent[:RUN_WINDOW]
     run = np.array([recent.count(p) / RUN_WINDOW for p in positions])
     columns.append(run)
+
+    columns.append(_centre_within_position(pool["age"].to_numpy(), positions))
+    columns.append(pool["ppg_std"].to_numpy(dtype=float) / VOLATILITY_SCALE
+                   + pool["missed_rate"].to_numpy(dtype=float))
+    columns.append(pool["no_track_record"].to_numpy().astype(float))
+    hype = pool["hype"].to_numpy(dtype=float)
+    columns.append(np.nan_to_num(hype, nan=0.0) / HYPE_SCALE)
+    columns.append(pool["trend"].to_numpy(dtype=float))
 
     return np.column_stack(columns) if n else np.zeros((0, len(FEATURE_NAMES)))
 

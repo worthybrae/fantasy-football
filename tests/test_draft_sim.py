@@ -391,7 +391,15 @@ def _pool(n=60):
         adp_rank=np.arange(1, n + 1, dtype=float),
         points=np.linspace(300.0, 60.0, n),
         availability=np.full(n, 90.0),
-        vor=np.linspace(300.0, 60.0, n))
+        vor=np.linspace(300.0, 60.0, n),
+        # Task 4 attribute columns: neutral/unknown for every player. Tests
+        # using this fixture drive scoring with `_flat_betas` (all zeros) or
+        # `_adp_betas` (reach only), so these values are never read for their
+        # magnitude -- they only have to be finite and the right length.
+        market_rank=np.arange(1, n + 1, dtype=float),
+        age=np.full(n, np.nan), ppg_std=np.zeros(n), missed_rate=np.zeros(n),
+        no_track_record=np.full(n, True), hype=np.full(n, np.nan),
+        trend=np.zeros(n))
 
 
 def _flat_betas(managers):
@@ -483,6 +491,16 @@ def _parity_fixture():
     DST not), and a recent-run window that exactly fills RUN_WINDOW -- so
     `need` and `run` come out with a mix of zeros and non-zeros on both
     sides, rather than being trivially zero everywhere.
+
+    The five Task 4 attribute columns are distinct per player (not a
+    uniform neutral value) and set on the FULL twelve, taken players
+    included, not just the ten `available` ones -- a `_live_features`
+    column built from the unsliced `pool.<field>` instead of
+    `pool.<field>[available]` would otherwise go undetected here, since a
+    uniform or fully-available fixture can't tell "right value, wrong
+    player" apart from "right value". RB/WR/QB/TE each repeat (2-3 players),
+    so `age`'s per-position centring has a real, non-singleton group to
+    centre within, not just the trivial "lone player is his own mean" case.
     """
     positions = np.array(["QB", "RB", "WR", "TE", "K", "DST",
                           "RB", "WR", "QB", "TE", "RB", "WR"])
@@ -492,19 +510,40 @@ def _parity_fixture():
     taken[[2, 7]] = True                      # both taken players are WR
     available = np.flatnonzero(~taken)
 
+    n = len(positions)
+    age = np.array([28.0, 24.0, 26.0, 29.0, 31.0, 33.0,
+                    27.0, 23.0, 35.0, 30.0, 25.0, 22.0])
+    ppg_std = np.array([2.0, 5.5, 3.25, 1.0, 0.0, 4.0,
+                        6.5, 2.75, 0.5, 3.0, 1.5, 4.25])
+    missed_rate = np.array([0.1, 0.0, 0.35, 0.05, 0.2, 0.0,
+                            0.15, 0.4, 0.0, 0.25, 0.1, 0.3])
+    no_track_record = np.array([False, False, True, False, True, False,
+                                False, True, False, False, True, False])
+    hype = np.array([-10.0, 5.0, 3.0, 12.0, -3.0, 7.0,
+                     -8.0, 15.0, np.nan, -6.0, 9.0, -1.0])
+    trend = np.array([1.2, -0.5, 0.0, 2.1, -1.8, 0.3,
+                      -0.9, 1.5, 0.7, -0.2, 2.4, -1.1])
+
     pool = SimPool(
-        player_id=np.array([f"p{i}" for i in range(len(positions))]),
+        player_id=np.array([f"p{i}" for i in range(n)]),
         norm=norms, position=positions, adp_rank=adp_rank,
-        points=np.linspace(300.0, 60.0, len(positions)),
-        availability=np.full(len(positions), 90.0),
-        vor=np.linspace(300.0, 60.0, len(positions)))
+        points=np.linspace(300.0, 60.0, n),
+        availability=np.full(n, 90.0),
+        vor=np.linspace(300.0, 60.0, n),
+        market_rank=adp_rank, age=age, ppg_std=ppg_std,
+        missed_rate=missed_rate, no_track_record=no_track_record,
+        hype=hype, trend=trend)
 
     roster = {"RB": 2, "WR": 1, "QB": 1}       # RB need false, others true
     recent = ["WR", "RB", "RB", "QB", "TE"]    # fills RUN_WINDOW exactly
 
     obs_pool = pd.DataFrame({
         "norm": norms[available], "position": positions[available],
-        "adp_rank": adp_rank[available]})
+        "adp_rank": adp_rank[available], "market_rank": adp_rank[available],
+        "age": age[available], "ppg_std": ppg_std[available],
+        "missed_rate": missed_rate[available],
+        "no_track_record": no_track_record[available],
+        "hype": hype[available], "trend": trend[available]})
 
     return pool, available, roster, recent, obs_pool
 
@@ -581,7 +620,11 @@ def test_rollout_never_drafts_past_a_roster_cap_even_when_the_shortlist_is_all_o
         player_id=np.array([f"p{i}" for i in range(n)]),
         norm=np.array([f"player {i}" for i in range(n)]),
         position=positions, adp_rank=np.arange(1, n + 1, dtype=float),
-        points=points, availability=np.full(n, 90.0), vor=points)
+        points=points, availability=np.full(n, 90.0), vor=points,
+        market_rank=np.arange(1, n + 1, dtype=float), age=np.full(n, np.nan),
+        ppg_std=np.zeros(n), missed_rate=np.zeros(n),
+        no_track_record=np.full(n, True), hype=np.full(n, np.nan),
+        trend=np.zeros(n))
     slots = {i: f"m{i}" for i in range(1, 9)}
     taken = np.zeros(n, dtype=bool)
     betas = _flat_betas(slots.values())
@@ -775,7 +818,11 @@ def _anti_correlated_pool(n=60):
         adp_rank=np.arange(1, n + 1, dtype=float),
         points=np.linspace(60.0, 300.0, n),
         availability=np.full(n, 90.0),
-        vor=np.linspace(60.0, 300.0, n))
+        vor=np.linspace(60.0, 300.0, n),
+        market_rank=np.arange(1, n + 1, dtype=float), age=np.full(n, np.nan),
+        ppg_std=np.zeros(n), missed_rate=np.zeros(n),
+        no_track_record=np.full(n, True), hype=np.full(n, np.nan),
+        trend=np.zeros(n))
 
 
 def test_candidate_set_draws_from_both_market_rank_and_vor():
@@ -1422,3 +1469,41 @@ def test_run_sim_writes_sim_board(tmp_path, monkeypatch):
     assert set(board["run_id"]) == {run_id}
     primaries = board[board["alt_rank"] == 0]["player_id"]
     assert len(set(primaries)) == len(primaries)
+
+
+def test_live_features_matches_feature_matrix_on_the_new_columns():
+    """The two implementations of one feature definition must agree. A
+    mismatch silently invalidates every simulation while everything runs."""
+    import numpy as np
+    from scoring.draft_model import FEATURE_NAMES, PickObservation, feature_matrix
+    from scoring.draft_sim import SimPool, _live_features
+    import pandas as pd
+
+    pool_df = pd.DataFrame({
+        "norm": ["a", "b", "c", "d"],
+        "position": ["RB", "WR", "QB", "TE"],
+        "adp_rank": [1.0, 12.0, 40.0, 90.0],
+        "market_rank": [2.0, 10.0, 55.0, 80.0],
+        "hype": [-4.0, 7.0, np.nan, 25.0],
+        "age": [23.0, 29.0, 34.0, np.nan],
+        "ppg_std": [1.5, 6.0, 0.0, 3.25],
+        "missed_rate": [0.0, 0.35, 0.1, 0.0],
+        "no_track_record": [False, False, True, False],
+        "trend": [2.5, -1.75, 0.0, 0.4]})
+    obs = PickObservation(season=2026, overall_pick=9, manager="m", chosen=0,
+                          pool=pool_df, roster={"RB": 1}, recent=["WR", "RB"])
+    sim = SimPool(
+        player_id=np.array(["a", "b", "c", "d"]),
+        norm=pool_df["norm"].to_numpy(), position=pool_df["position"].to_numpy(),
+        adp_rank=pool_df["adp_rank"].to_numpy(),
+        points=np.array([300.0, 250.0, 380.0, 190.0]),
+        availability=np.full(4, 90.0), vor=np.array([150.0, 120.0, 80.0, 60.0]),
+        market_rank=pool_df["market_rank"].to_numpy(),
+        age=pool_df["age"].to_numpy(), ppg_std=pool_df["ppg_std"].to_numpy(),
+        missed_rate=pool_df["missed_rate"].to_numpy(),
+        no_track_record=pool_df["no_track_record"].to_numpy(),
+        hype=pool_df["hype"].to_numpy(), trend=pool_df["trend"].to_numpy())
+    available = np.arange(4)
+    np.testing.assert_allclose(
+        _live_features(sim, available, 9, {"RB": 1}, ["WR", "RB"], S),
+        feature_matrix(obs, S))

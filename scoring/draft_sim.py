@@ -30,8 +30,12 @@ from scipy.optimize import linear_sum_assignment
 from pipeline.db import read_table, write_table
 from scoring import factors
 from scoring.board import FANTASY_POSITIONS, _norm_name, adp_match_key
-from scoring.config import RECENCY_WEIGHTS
-from scoring.draft_model import EARLY_ROUNDS, FEATURE_NAMES, RUN_WINDOW
+from scoring.config import CURRENT_SEASON, RECENCY_WEIGHTS
+from scoring.draft_model import (EARLY_ROUNDS, FEATURE_NAMES, HYPE_SCALE,
+                                 RUN_WINDOW, VOLATILITY_SCALE,
+                                 _ATTRIBUTE_DEFAULTS, _centre_within_position,
+                                 _log_rank_features)
+from scoring.player_history import attributes_as_of
 
 FLEX_POSITIONS = ("RB", "WR", "TE")
 GAMES = 17
@@ -206,6 +210,11 @@ _QB_EARLY = FEATURE_NAMES.index("qb_early")
 _TE_EARLY = FEATURE_NAMES.index("te_early")
 _NEED = FEATURE_NAMES.index("need")
 _RUN = FEATURE_NAMES.index("run")
+_AGE = FEATURE_NAMES.index("age")
+_VOLATILITY = FEATURE_NAMES.index("volatility")
+_NO_TRACK_RECORD = FEATURE_NAMES.index("no_track_record")
+_HYPE = FEATURE_NAMES.index("hype")
+_TREND = FEATURE_NAMES.index("trend")
 
 
 class SimPool(NamedTuple):
@@ -222,6 +231,19 @@ class SimPool(NamedTuple):
     # spec asks for ("the union of the top available by VOR and the top by
     # market rank").
     vor: np.ndarray
+    # Task 4: the same player attributes the historical fit pool carries
+    # (draft_model._enrich_pool), so `_live_features` can mirror
+    # `feature_matrix` exactly. `market_rank` is the board's own consensus
+    # rank (scoring.market.add_market), not `adp_rank` above -- that field
+    # is build_pool's own dense 1..k re-ranking of the board, kept only for
+    # `_candidate_indices`'s market-order candidate selection.
+    market_rank: np.ndarray
+    age: np.ndarray
+    ppg_std: np.ndarray
+    missed_rate: np.ndarray
+    no_track_record: np.ndarray
+    hype: np.ndarray
+    trend: np.ndarray
 
 
 def snake_slots(teams: int, rounds: int) -> list:
@@ -266,10 +288,13 @@ def build_pool(conn, board: pd.DataFrame, settings) -> SimPool:
     ranked = board.copy()
     ranked["proj"] = ranked["player_id"].map(points)
 
-    # `adp_rank` must land on the scale draft_model's reach/fall coefficients
-    # were fitted on: historic_adp.adp_rank is a dense rank over the players
-    # ONE season's ADP source actually ranked, not over `board`'s broader
-    # union of every player with a stat line plus ADP-only rookies and K/DST.
+    # `adp_rank` (the field, not the board column) feeds `_candidate_indices`'s
+    # market-order candidate selection -- reach/fall now read `market_rank`
+    # directly (Task 4), not this field, so it no longer has to land on the
+    # historic fit's scale. It still has to be a real dense rank over players
+    # who carry one: historic_adp.adp_rank is dense over the players ONE
+    # season's ADP source actually ranked, not over `board`'s broader union
+    # of every player with a stat line plus ADP-only rookies and K/DST.
     # Folding a fillna sentinel into the same sort_values as the real
     # market_rank values is not safe here: fp_rank/mfl_rank/cbs_rank (which
     # feed into market_rank, see scoring/market.py) are raw external ranks,
@@ -286,20 +311,70 @@ def build_pool(conn, board: pd.DataFrame, settings) -> SimPool:
     known = ranked[has_rank].sort_values("market_rank", kind="stable")
     unknown = ranked[~has_rank]
     ranked = pd.concat([known, unknown], ignore_index=True)
+    dense_rank = np.arange(1, len(ranked) + 1, dtype=float)
     availability = ranked["player_id"].map(_availability(conn))
     # `vor` is the board's headline ranking and the spec's second candidate
     # source. A board built without it (a bare fixture) falls back to the
     # projection, which keeps the second source meaningful rather than
     # collapsing it onto market order.
     vor_col = ranked["vor"] if "vor" in ranked.columns else ranked["proj"]
+
+    # Task 4: the same player attributes the historical fit pool carries
+    # (draft_model._enrich_pool), joined the same way -- on adp_match_key,
+    # read strictly from seasons before the draft season, so nothing here is
+    # hindsight. A player the join misses (no season of prior stats under
+    # this key) gets the same neutral defaults and no_track_record=True.
+    season = settings.season or CURRENT_SEASON
+    team_col = (ranked["team"] if "team" in ranked.columns
+                else pd.Series([None] * len(ranked), index=ranked.index))
+    ranked = ranked.assign(key=[
+        adp_match_key(name, position, team) for name, position, team
+        in zip(ranked["name"], ranked["position"], team_col)])
+    attrs = attributes_as_of(conn, season)
+    if not attrs.empty:
+        # Same collision guard as _enrich_pool: a non-DST key carries no
+        # team, so two different past players can share (position,
+        # normalized name). Dropping both sides of a collision falls
+        # through to "unknown" rather than guessing whose numbers apply.
+        attrs = attrs.drop_duplicates("key", keep=False)
+    if attrs.empty:
+        for col, default in _ATTRIBUTE_DEFAULTS.items():
+            ranked[col] = default
+    else:
+        ranked = ranked.merge(attrs, on="key", how="left")
+        ranked["no_track_record"] = ranked["no_track_record"].fillna(True).astype(bool)
+        for col, default in _ATTRIBUTE_DEFAULTS.items():
+            if col not in ("no_track_record", "prod_rank"):
+                ranked[col] = ranked[col].fillna(default)
+    # Positive means the market is ahead of what the player has actually
+    # done. NaN when he has no production to rank, which feature_matrix
+    # (and _live_features) read as neutral rather than as zero.
+    ranked["hype"] = ranked["prod_rank"] - ranked["market_rank"]
+    # `reach`/`fall` (_log_rank_features) take log1p of this value and
+    # assume it is finite -- unlike `hype` above, NaN here is not
+    # nan_to_num'd downstream. An unranked player's real market_rank is
+    # NaN by construction (`has_rank` above), so feed the same dense
+    # position this player already sits at in the pool (far down, past
+    # every real rank) rather than letting a NaN propagate through log1p
+    # into every column of that player's whole feature row.
+    market_rank = ranked["market_rank"].fillna(
+        pd.Series(dense_rank, index=ranked.index)).to_numpy(dtype=float)
+
     return SimPool(
         player_id=ranked["player_id"].to_numpy(),
         norm=ranked["name"].map(_norm_name).to_numpy(),
         position=ranked["position"].to_numpy(),
-        adp_rank=np.arange(1, len(ranked) + 1, dtype=float),
+        adp_rank=dense_rank,
         points=ranked["proj"].to_numpy(dtype=float),
         availability=availability.fillna(DEFAULT_AVAILABILITY).to_numpy(dtype=float),
-        vor=pd.to_numeric(vor_col, errors="coerce").fillna(-np.inf).to_numpy(dtype=float))
+        vor=pd.to_numeric(vor_col, errors="coerce").fillna(-np.inf).to_numpy(dtype=float),
+        market_rank=market_rank,
+        age=ranked["age"].to_numpy(dtype=float),
+        ppg_std=ranked["ppg_std"].to_numpy(dtype=float),
+        missed_rate=ranked["missed_rate"].to_numpy(dtype=float),
+        no_track_record=ranked["no_track_record"].to_numpy(dtype=bool),
+        hype=ranked["hype"].to_numpy(dtype=float),
+        trend=ranked["trend"].to_numpy(dtype=float))
 
 
 def _live_features(pool, available, overall_pick, roster, recent, settings):
@@ -307,14 +382,12 @@ def _live_features(pool, available, overall_pick, roster, recent, settings):
     draft_model.feature_matrix exactly -- the fitted coefficients only mean
     anything against the same feature definitions they were fitted on."""
     positions = pool.position[available]
-    ranks = pool.adp_rank[available]
+    ranks = pool.market_rank[available]
     teams = max(settings.teams, 1)
     n = len(positions)
     X = np.zeros((n, len(FEATURE_NAMES)))
 
-    delta = ranks - overall_pick
-    X[:, _REACH] = np.maximum(0.0, delta) / teams
-    X[:, _FALL] = np.maximum(0.0, -delta) / teams
+    X[:, _REACH], X[:, _FALL] = _log_rank_features(ranks, overall_pick)
     for pos, col in _POSITION_DUMMY_INDEX.items():
         X[:, col] = (positions == pos)
 
@@ -339,6 +412,13 @@ def _live_features(pool, available, overall_pick, roster, recent, settings):
         run_share = window.count(pos) / RUN_WINDOW
         if run_share:
             X[mask, _RUN] = run_share
+
+    X[:, _AGE] = _centre_within_position(pool.age[available], positions)
+    X[:, _VOLATILITY] = (pool.ppg_std[available] / VOLATILITY_SCALE
+                         + pool.missed_rate[available])
+    X[:, _NO_TRACK_RECORD] = pool.no_track_record[available].astype(float)
+    X[:, _HYPE] = np.nan_to_num(pool.hype[available], nan=0.0) / HYPE_SCALE
+    X[:, _TREND] = pool.trend[available]
     return X
 
 
@@ -846,14 +926,13 @@ def run_sim(conn, my_slot: int, slot_managers: dict,
             personal = bool(rows["uses_personal"].iloc[0]) if not rows.empty else False
         betas[manager] = beta if personal else pooled
 
-    # `reach` is max(0, adp_rank - pick) / teams, so a positive coefficient
-    # says "the further past his market rank a player is, the more I want
-    # him" -- exp(reach * beta) on a rank-500 player then dominates every
-    # other term and the manager drafts the deepest player in the pool. It is
-    # a symptom, most likely of build_pool's dense 1..k rank not lining up
-    # with the population historic_adp's per-season rank was fitted over, and
-    # it makes that manager's simulated behaviour meaningless rather than
-    # merely noisy. Cheap to check, and there is nowhere else it surfaces.
+    # `reach` is max(0, log1p(market_rank) - log1p(pick)) (Task 4), so a
+    # positive coefficient says "the further past his market rank a player
+    # is, the more I want him" -- exp(reach * beta) on a deep-pool player
+    # then dominates every other term and the manager drafts the deepest
+    # available player in the pool, making that manager's simulated
+    # behaviour meaningless rather than merely noisy. Cheap to check, and
+    # there is nowhere else it surfaces.
     # A slot with no manager, or a manager with no fit, silently fell through
     # to a zeros beta -- the same uniform-random opponent the guard above
     # refuses to run with, arriving one layer later. It is reachable without
@@ -881,7 +960,7 @@ def run_sim(conn, my_slot: int, slot_managers: dict,
         warnings.warn(
             f"draft_sim: fitted reach coefficient is positive for {reaching}; "
             "those managers will be simulated drafting the deepest available "
-            "players. Check the adp_rank scale against historic_adp.",
+            "players. Check the market_rank scale against historic_adp.",
             RuntimeWarning)
 
     taken, taken_order = _drafted_state(conn, pool)

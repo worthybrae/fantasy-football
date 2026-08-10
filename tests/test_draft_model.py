@@ -229,10 +229,13 @@ def test_reach_and_fall_are_nonnegative_and_mutually_exclusive(tmp_path):
     assert ((reach == 0) | (fall == 0)).all()
 
 def test_reach_measures_rounds_of_reach_required(tmp_path):
+    """`reach` is log-rank, not linear, and reads `market_rank` (Task 4) --
+    `_seed`'s pool carries no ESPN data, so `market_rank` falls back to
+    `adp_rank` exactly (see `_enrich_pool`)."""
     obs = build_observations(_seed(tmp_path))[0]      # overall pick 1, 8 teams
     X = feature_matrix(obs, _settings())
-    ranks = obs.pool["adp_rank"].to_numpy()
-    expected = np.maximum(0, ranks - obs.overall_pick) / 8
+    ranks = obs.pool["market_rank"].to_numpy()
+    expected = np.maximum(0, np.log1p(ranks) - np.log1p(obs.overall_pick))
     assert np.allclose(X[:, 0], expected)
 
 def test_need_is_one_while_short_of_a_starter(tmp_path):
@@ -256,7 +259,19 @@ def test_run_counts_same_position_picks_in_the_recent_window(tmp_path):
     assert run[positions.index("RB")] == 1.0 / 5
 
 def _pool(rows):
-    return pd.DataFrame(rows, columns=["norm", "position", "adp_rank"])
+    """`norm, position, adp_rank` from `rows`, plus neutral defaults for the
+    Task 4 columns `feature_matrix` now always reads (`market_rank` mirrors
+    `adp_rank`, same fallback `_enrich_pool` uses with no ESPN data; the rest
+    match `_ATTRIBUTE_DEFAULTS` -- unknown, not a claim)."""
+    df = pd.DataFrame(rows, columns=["norm", "position", "adp_rank"])
+    df["market_rank"] = df["adp_rank"]
+    df["hype"] = np.nan
+    df["age"] = np.nan
+    df["ppg_std"] = 0.0
+    df["missed_rate"] = 0.0
+    df["no_track_record"] = True
+    df["trend"] = 0.0
+    return df
 
 @pytest.mark.parametrize("pick,early", [(8, True), (24, True), (25, False)])
 def test_qb_and_te_early_flags_the_round_boundary(pick, early):
@@ -451,8 +466,63 @@ def test_select_lambda_returns_a_value_from_the_grid():
                         grid=[0.01, 1.0, 100.0])
     assert lam in (0.01, 1.0, 100.0)
 
-def test_fit_all_separates_managers_with_opposite_tastes(tmp_path):
-    fits = fit_all(_seed_many(tmp_path))
+def test_fit_all_separates_managers_with_opposite_tastes(monkeypatch):
+    """Two managers with real, but not literally deterministic, opposite
+    position tastes: choices are drawn from a genuine softmax over a known
+    per-manager beta (like `_synthetic` above), rather than a hand-seeded
+    "every pick is the market's next player" draft.
+
+    This test used to share `_seed_many`, whose "chalk" draft (see that
+    fixture's own docstring) makes every chosen player's `reach` exactly 0
+    while every rejected alternative's is positive -- perfect separation,
+    which sends an unregularized MLE toward the optimizer's iteration limit
+    rather than a real optimum. Under the old linear `reach` the two
+    managers' runaway fits happened to separate by a hairline of
+    floating-point noise (~0.003 out of a coefficient near 2). Task 4's
+    log-rank `reach` lands both optimizer runs on the exact same point
+    instead (see task-4-report.md) -- not a modeling regression, since a
+    *real* separation should never have depended on which side of a
+    numerical coin-flip a nearly-unbounded optimizer happened to land on.
+    This fixture gives each manager a strong (2.0) but genuinely
+    probabilistic preference, so the per-manager MLE is well-posed and the
+    separation it checks for is real, not optimizer noise.
+    """
+    settings = league.default_settings()
+    rng = np.random.default_rng(7)
+    seasons = [2023, 2024, 2025]
+
+    beta_rb = np.zeros(len(FEATURE_NAMES))
+    beta_rb[FEATURE_NAMES.index("pos_RB")] = 2.0
+    beta_rb[FEATURE_NAMES.index("pos_WR")] = -2.0
+    beta_wr = -beta_rb
+
+    def _pool(n=10):
+        positions = rng.choice(["RB", "WR"], size=n)
+        ranks = rng.permutation(np.arange(1, n + 1)).astype(float)
+        return pd.DataFrame({
+            "norm": [f"p{i}" for i in range(n)], "position": positions,
+            "adp_rank": ranks, "market_rank": ranks,
+            "hype": np.full(n, np.nan), "age": np.full(n, np.nan),
+            "ppg_std": np.zeros(n), "missed_rate": np.zeros(n),
+            "no_track_record": np.full(n, True), "trend": np.zeros(n)})
+
+    observations = []
+    for season in seasons:
+        for manager, beta_true in (("rbguy", beta_rb), ("wrguy", beta_wr)):
+            for pick in range(1, 11):
+                pool = _pool()
+                obs = PickObservation(season=season, overall_pick=pick,
+                                      manager=manager, chosen=0, pool=pool,
+                                      roster={}, recent=[])
+                X = feature_matrix(obs, settings)
+                p = np.exp(X @ beta_true)
+                p /= p.sum()
+                chosen = int(rng.choice(len(pool), p=p))
+                observations.append(obs._replace(chosen=chosen))
+
+    monkeypatch.setattr("scoring.draft_model.build_observations",
+                        lambda conn: observations)
+    fits = fit_all(conn=None, settings=settings)
     assert set(fits) >= {"rbguy", "wrguy", "__pooled__"}
     rb_idx = FEATURE_NAMES.index("pos_RB")
     wr_idx = FEATURE_NAMES.index("pos_WR")
@@ -602,3 +672,67 @@ def test_pool_treats_a_name_collision_in_attributes_as_no_track_record(tmp_path)
     assert len(pool) == 2                        # not duplicated by the merge
     row = pool.set_index("norm").loc["player a"]
     assert row["no_track_record"] == True
+
+
+def test_log_rank_makes_the_top_of_the_board_matter_more():
+    """The defect this fixes: with linear rank the gap from rank 1 to 5 was
+    ten times SMALLER than the gap from 100 to 140, so the model treated
+    deep-bench noise as more meaningful than the first pick of the draft."""
+    import numpy as np
+    from scoring.draft_model import feature_matrix, FEATURE_NAMES, PickObservation
+    from scoring import league
+    ri = FEATURE_NAMES.index("reach")
+
+    def reach_at(ranks, pick):
+        pool = pd.DataFrame({
+            "norm": [f"p{r}" for r in ranks], "position": ["RB"] * len(ranks),
+            "adp_rank": ranks, "market_rank": ranks, "hype": [0.0] * len(ranks),
+            "age": [np.nan] * len(ranks), "ppg_std": [0.0] * len(ranks),
+            "missed_rate": [0.0] * len(ranks),
+            "no_track_record": [True] * len(ranks), "trend": [0.0] * len(ranks)})
+        obs = PickObservation(season=2025, overall_pick=pick, manager="m",
+                              chosen=0, pool=pool, roster={}, recent=[])
+        return feature_matrix(obs, league.default_settings())[:, ri]
+
+    top = reach_at([1, 5], 1)
+    deep = reach_at([100, 140], 1)
+    assert (top[1] - top[0]) > (deep[1] - deep[0])
+
+
+def test_new_features_are_present_and_neutral_without_history():
+    import numpy as np
+    from scoring.draft_model import feature_matrix, FEATURE_NAMES, PickObservation
+    from scoring import league
+    assert FEATURE_NAMES[-5:] == ["age", "volatility", "no_track_record",
+                                  "hype", "trend"]
+    pool = pd.DataFrame({
+        "norm": ["a", "b"], "position": ["RB", "WR"], "adp_rank": [1.0, 2.0],
+        "market_rank": [1.0, 2.0], "hype": [np.nan, np.nan],
+        "age": [np.nan, np.nan], "ppg_std": [0.0, 0.0], "missed_rate": [0.0, 0.0],
+        "no_track_record": [True, True], "trend": [0.0, 0.0]})
+    obs = PickObservation(season=2025, overall_pick=1, manager="m", chosen=0,
+                          pool=pool, roster={}, recent=[])
+    X = feature_matrix(obs, league.default_settings())
+    assert X.shape == (2, len(FEATURE_NAMES))
+    for name in ("age", "volatility", "hype", "trend"):
+        assert (X[:, FEATURE_NAMES.index(name)] == 0.0).all()
+    assert (X[:, FEATURE_NAMES.index("no_track_record")] == 1.0).all()
+    assert np.isfinite(X).all()
+
+
+def test_age_is_centred_within_position():
+    import numpy as np
+    from scoring.draft_model import feature_matrix, FEATURE_NAMES, PickObservation
+    from scoring import league
+    pool = pd.DataFrame({
+        "norm": ["a", "b", "c"], "position": ["RB", "RB", "WR"],
+        "adp_rank": [1.0, 2.0, 3.0], "market_rank": [1.0, 2.0, 3.0],
+        "hype": [0.0, 0.0, 0.0], "age": [24.0, 28.0, 30.0],
+        "ppg_std": [0.0, 0.0, 0.0], "missed_rate": [0.0, 0.0, 0.0],
+        "no_track_record": [False, False, False], "trend": [0.0, 0.0, 0.0]})
+    obs = PickObservation(season=2025, overall_pick=1, manager="m", chosen=0,
+                          pool=pool, roster={}, recent=[])
+    age = feature_matrix(obs, league.default_settings())[:, FEATURE_NAMES.index("age")]
+    assert age[0] == pytest.approx(-2.0)   # RB mean 26
+    assert age[1] == pytest.approx(2.0)
+    assert age[2] == pytest.approx(0.0)    # lone WR is its own mean
