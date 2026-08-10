@@ -56,8 +56,9 @@ models, and the current `taken` state, so its predictions agree with the
 Signature:
 
 ```
-predict_board(pool, settings, slot_managers, taken, betas,
-              n_rollouts=DEFAULT_ROLLOUTS, seed=0, alternates=2) -> pd.DataFrame
+predict_board(pool, settings, slot_managers, my_slot, taken, betas,
+              n_rollouts=DEFAULT_ROLLOUTS, seed=0, alternates=2,
+              taken_order=None) -> pd.DataFrame
 ```
 
 Returns one row per (overall_pick, alt_rank) with columns
