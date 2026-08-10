@@ -1161,13 +1161,86 @@ td:first-child {
 .card-row div { color: var(--text-2); }
 .card-row strong { color: var(--text-1); }
 .card-sim { background: var(--accent-bg); padding: 6px 8px; border-radius: 4px; }
-.card-factors { list-style: none; margin: 10px 0; padding: 0; }
-.card-factors li { display: flex; align-items: center; gap: 8px; font-size: 0.75rem; margin-bottom: 3px; }
-.card-factor-name { width: 82px; color: var(--text-3); }
-.card-factor-track { flex: 1; height: 6px; background: var(--bg-2); border-radius: 3px; }
-.card-factor-fill { display: block; height: 100%; border-radius: 3px; background: var(--accent); }
-.card-outlook { color: var(--text-2); font-size: 0.78rem; }
 .card-full { display: inline-block; color: var(--accent); font-size: 0.8rem; }
+
+/* Headline: proj PPG vs. recency-weighted actual, the first thing the eye
+   should land on -- see PlayerCard.tsx's buildTiles/projDelta comments. */
+.card-headline {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  margin: var(--space-3) 0;
+  padding: var(--space-3) var(--space-4);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.card-headline-primary,
+.card-headline-actual {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.card-headline-actual {
+  padding-left: var(--space-4);
+  border-left: 1px solid var(--border);
+}
+.card-headline-value {
+  font-size: 32px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--text-1);
+}
+.card-headline-actual-value {
+  font-size: var(--text-xl);
+  font-weight: 600;
+  line-height: 1;
+  color: var(--text-2);
+}
+.card-headline-label {
+  font-size: var(--text-xs);
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.card-headline-delta {
+  margin-left: auto;
+  align-self: center;
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--text-2);
+}
+.card-headline-delta.warn { color: var(--fail); }
+
+/* Schedule strip: one cell per week, colored on the --ok (soft) to --fail
+   (tough) continuum via sosTone() in PlayerCard.tsx. Compact by design --
+   this is the card's whole-season-in-one-glance element, not a table. */
+.card-sched { margin: var(--space-3) 0; }
+.card-sched-strip { display: flex; flex-wrap: wrap; gap: 3px; }
+.card-sched-cell {
+  flex: 1 1 0;
+  min-width: 16px;
+  text-align: center;
+  font-size: 10px;
+  color: var(--text-2);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  padding: 3px 0;
+}
+.card-sched-bye {
+  border-style: dashed;
+  color: var(--text-3);
+}
+.card-sched-key {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  vertical-align: middle;
+  margin: 0 2px 0 6px;
+}
+.card-sched-key:first-child { margin-left: 0; }
 /* Card footer: the draft-night action on the left, the escape hatch to the
    full research page on the right. */
 .card-actions {
