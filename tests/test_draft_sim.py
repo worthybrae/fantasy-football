@@ -613,20 +613,66 @@ def test_greedy_takes_the_running_back_over_the_higher_scoring_quarterback():
     """The defect this fixes, from a real run: the simulated user opened
     with Josh Allen, market rank 24, at pick 4. A QB outscores every RB in
     raw points, so a one-ply greedy on raw points always takes one early --
-    the error value over replacement exists to prevent."""
+    the error value over replacement exists to prevent.
+
+    The pool must be at least as deep as `S.replacement_ranks` wants (QB 9,
+    RB 22) or `_replacement_points` clamps to the last player actually
+    present -- which, at exactly one player per position, degenerates to
+    that player's own points and makes every candidate's replacement-
+    adjusted value exactly 0.0. A first version of this test used a
+    2-player pool and hit exactly that: both candidates tied at 0.0, and
+    the assertion only passed because of which candidate the (now-reverted)
+    tie-break preferred -- it was pinning shortlist scan order, not
+    replacement value; deleting `_replacement_points` entirely would not
+    have failed it. 14 QBs and 30 RBs give real, non-clamped replacement
+    levels: QB 340 (9th of 14), RB 195 (22nd of 30) -- so QB1 (380) is
+    worth +40 above replacement and RB1 (300) is worth +105, and RB should
+    win despite scoring 80 fewer raw points.
+    """
     import numpy as np
     from scoring.draft_sim import SimPool, _greedy_choice, _roster_cap
-    pool = SimPool(
-        player_id=np.array(["qb", "rb"]), norm=np.array(["qb", "rb"]),
-        position=np.array(["QB", "RB"]), adp_rank=np.array([1.0, 2.0]),
-        points=np.array([380.0, 300.0]), availability=np.full(2, 95.0),
-        vor=np.array([0.0, 0.0]), market_rank=np.array([1.0, 2.0]),
-        age=np.array([28.0, 24.0]), ppg_std=np.zeros(2),
-        missed_rate=np.zeros(2), no_track_record=np.array([False, False]),
-        hype=np.zeros(2), trend=np.zeros(2))
+
+    def pool_of(qb_points, rb_points):
+        n_qb, n_rb = len(qb_points), len(rb_points)
+        n = n_qb + n_rb
+        ids = np.array([f"qb{i}" for i in range(n_qb)] +
+                       [f"rb{i}" for i in range(n_rb)])
+        return SimPool(
+            player_id=ids, norm=ids,
+            position=np.array(["QB"] * n_qb + ["RB"] * n_rb),
+            adp_rank=np.arange(1, n + 1, dtype=float),
+            points=np.concatenate([qb_points, rb_points]),
+            availability=np.full(n, 95.0), vor=np.zeros(n),
+            market_rank=np.arange(1, n + 1, dtype=float),
+            age=np.full(n, 25.0), ppg_std=np.zeros(n),
+            missed_rate=np.zeros(n), no_track_record=np.full(n, False),
+            hype=np.zeros(n), trend=np.zeros(n))
+
     roster = {"counts": {}, "indices": []}
-    choice = _greedy_choice(pool, np.arange(2), roster, S, _roster_cap(S))
+
+    qb_points = np.linspace(380.0, 315.0, 14)   # replacement (9th) = 340
+    rb_points = np.linspace(300.0, 155.0, 30)   # replacement (22nd) = 195
+    pool = pool_of(qb_points, rb_points)
+    choice = _greedy_choice(pool, np.arange(len(pool.player_id)), roster, S,
+                            _roster_cap(S))
     assert pool.position[choice] == "RB"
+
+    # Inverse: swap which position carries the high-value range and which
+    # carries the low one. Both ranges share the same step (5.0) and both
+    # groups are deep enough (22 each, so QB's 9th and RB's 22nd both land
+    # on a real value instead of clamping), so each position's margin above
+    # its own replacement -- QB +40, RB +105 -- is identical to the primary
+    # case above regardless of which raw numbers it's carrying: margin is
+    # step * (rank - 1), independent of which range is attached to which
+    # label. RB must still win. If swapping which position holds the bigger
+    # raw numbers flipped the answer, the policy would be tracking raw
+    # points (or shortlist scan order) after all, not replacement value.
+    high = np.linspace(380.0, 275.0, 22)
+    low = np.linspace(300.0, 195.0, 22)
+    swapped = pool_of(low, high)   # QB now carries the low range, RB the high
+    choice = _greedy_choice(swapped, np.arange(len(swapped.player_id)),
+                            roster, S, _roster_cap(S))
+    assert swapped.position[choice] == "RB"
 
 
 def test_rollout_never_drafts_past_a_roster_cap_even_when_the_shortlist_is_all_one_position():

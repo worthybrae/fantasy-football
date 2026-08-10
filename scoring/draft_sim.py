@@ -510,10 +510,16 @@ def _greedy_choice(pool, available, roster, settings, caps):
     in the pool, but replacement-level QBs also score far more than
     replacement-level RBs, so the QB's real marginal value is smaller.
     One-ply greedy is what makes a rollout cheap enough to run thousands of
-    times; the search in Task 11 is what looks further ahead. This ranks
-    candidates only -- the roster it builds, and the value `roster_value`
-    later reports for it, are always priced in real (unadjusted) points; see
-    the loop body for where the two are kept apart.
+    times; the search in Task 11 is what looks further ahead. Replacement is
+    subtracted from the final scalar `gain`, not from the candidate's points
+    before they go into `roster_value`: `roster_value` is always called with
+    real points, for the candidate and for every player already on the
+    roster alike, so its own sort, FLEX assignment and bench-insurance logic
+    never compare a replacement-adjusted number against a real one. Only the
+    resulting per-candidate delta is shifted down by that position's
+    replacement level, purely to rank candidates against each other -- the
+    roster this builds, and the value `roster_value` later reports for it,
+    stay priced in real (unadjusted) points throughout.
 
     Legality is filtered before the shortlist is built, not inside the loop
     over it. The shortlist is only the top GREEDY_CANDIDATES by raw points,
@@ -537,21 +543,9 @@ def _greedy_choice(pool, available, roster, settings, caps):
     best_idx, best_gain = None, -np.inf
     for i in shortlist:
         pos = pool.position[i]
-        adjusted = pool.points[i] - replacement.get(pos, 0.0)
-        gain = roster_value(current + [(pos, adjusted, pool.availability[i])],
-                            settings) - base
-        # `>=`, not `>`: the shortlist is iterated in descending RAW-points
-        # order (a speed heuristic, see the docstring above), so a strict `>`
-        # silently resolves any tie in *replacement-adjusted* gain by falling
-        # back to whichever candidate has the higher raw points -- exactly
-        # the bias this function exists to remove. A thin position (its
-        # replacement rank deeper than the pool's actual depth at that
-        # position, so `_replacement_points` clamps to the last player
-        # present) can tie a deep one exactly on adjusted value despite a
-        # large gap in raw points; `>=` lets the later, lower-raw-points
-        # candidate win that tie instead of the earlier, higher-raw-points
-        # one.
-        if gain >= best_gain:
+        gain = roster_value(current + [(pos, pool.points[i], pool.availability[i])],
+                            settings) - base - replacement.get(pos, 0.0)
+        if gain > best_gain:
             best_idx, best_gain = i, gain
     return best_idx if best_idx is not None else legal[0]
 
