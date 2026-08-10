@@ -293,3 +293,34 @@ def test_validate_import_uses_each_seasons_own_settings_for_expected_count(tmp_p
     import_seasons(conn, "99", current_season=2026, fetch=fetch)
     lines = "\n".join(validate_import(conn))
     assert "expected" not in lines
+
+
+def test_historic_espn_ranks_by_ppr_rank_and_records_adp_usability(tmp_path):
+    """Ranks come from espn_ppr_rank, which survives seasons where ESPN's
+    espn_adp column resets to a constant."""
+    import pandas as pd
+    from pipeline.db import get_conn, read_table, write_table
+    from pipeline.import_league import build_historic_espn
+
+    frames = {
+        2025: pd.DataFrame([  # corrupt ADP, sane ranks
+            {"espn_name": "Saquon Barkley", "position": "RB",
+             "espn_adp": 170.0, "espn_ppr_rank": 4},
+            {"espn_name": "Jahmyr Gibbs", "position": "RB",
+             "espn_adp": 170.0, "espn_ppr_rank": 5},
+        ]),
+        2024: pd.DataFrame([
+            {"espn_name": "CeeDee Lamb", "position": "WR",
+             "espn_adp": 6.3, "espn_ppr_rank": 1},
+            {"espn_name": "Alvin Kamara", "position": "RB",
+             "espn_adp": 8.3, "espn_ppr_rank": 2},
+        ]),
+    }
+    out = build_historic_espn(frames)
+    assert list(out.columns) == ["season", "espn_name", "position",
+                                 "espn_rank", "adp_usable"]
+    y25 = out[out["season"] == 2025].sort_values("espn_rank")
+    assert y25["espn_name"].tolist() == ["Saquon Barkley", "Jahmyr Gibbs"]
+    assert y25["espn_rank"].tolist() == [1, 2]      # dense, not raw ppr_rank
+    assert not y25["adp_usable"].any()
+    assert out[out["season"] == 2024]["adp_usable"].all()

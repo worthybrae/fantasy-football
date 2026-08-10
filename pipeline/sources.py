@@ -91,6 +91,19 @@ def parse_espn(payload: dict, year: int | None = None) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["espn_id", "espn_name", "position", "team",
                                        "espn_adp", "espn_ppr_rank", "espn_proj"])
 
+def espn_adp_is_usable(df: pd.DataFrame) -> bool:
+    """Whether a season's `espn_adp` column carries real draft positions.
+
+    ESPN serves a reset value -- 170.0 for every player, verified on the
+    2025 season -- for some completed seasons, while that season's
+    `espn_ppr_rank` stays correct. A constant column is not a ranking, and
+    trusting it silently would order a whole season arbitrarily.
+    """
+    if "espn_adp" not in df.columns:
+        return False
+    values = pd.to_numeric(df["espn_adp"], errors="coerce").dropna()
+    return len(values) > 1 and values.nunique() > 1
+
 def fetch_espn_adp(year: int, limit: int = 500) -> pd.DataFrame:
     headers = {**UA, "X-Fantasy-Filter": json.dumps(
         {"players": {"limit": limit,

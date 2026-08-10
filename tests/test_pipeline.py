@@ -206,3 +206,17 @@ def test_parse_cbs_row_without_player_href_does_not_bleed():
     df = parse_cbs(html)
     assert df["cbs_rank"].tolist() == [1, 3]
     assert df["cbs_name"].tolist() == ["jahmyr gibbs", "jamarr chase"]
+
+def test_espn_adp_is_usable_rejects_a_constant_column():
+    # ESPN returns 170.0 for every player in some completed seasons -- a
+    # reset value, not a ranking. Verified against the live 2025 season.
+    from pipeline.sources import espn_adp_is_usable
+    constant = pd.DataFrame({"espn_adp": [170.0, 170.0, 170.0]})
+    assert not espn_adp_is_usable(constant)
+    assert not espn_adp_is_usable(pd.DataFrame({"espn_adp": [None, None]}))
+    assert espn_adp_is_usable(pd.DataFrame({"espn_adp": [1.7, 2.6, 3.8]}))
+
+
+def test_espn_adp_is_usable_on_a_missing_column():
+    from pipeline.sources import espn_adp_is_usable
+    assert not espn_adp_is_usable(pd.DataFrame({"other": [1, 2]}))
