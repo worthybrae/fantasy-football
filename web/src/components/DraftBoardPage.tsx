@@ -86,56 +86,66 @@ export default function DraftBoardPage() {
                   it in.
                 </p>
               )}
+              {/* The tab switcher (and whichever view it's on) renders
+                  whenever there's a league to show columns/cards for, same
+                  as DraftGrid always did before this tab existed --
+                  regardless of whether a sim has ever run. With no cells,
+                  DraftGrid renders its own full skeleton (every cell
+                  `grid-empty`) and ManagerForecast still has something
+                  honest to show per card (identity, real draft history,
+                  tendency text) even with an all-empty picks list, so
+                  neither view needs cells to be worth switching to. */}
+              <div className="board-view-tabs">
+                <button
+                  type="button"
+                  className={view === 'grid' ? 'active' : undefined}
+                  onClick={() => setView('grid')}
+                >
+                  Grid
+                </button>
+                <button
+                  type="button"
+                  className={view === 'forecast' ? 'active' : undefined}
+                  onClick={() => setView('forecast')}
+                >
+                  By manager
+                </button>
+              </div>
+              {/* Only meaningful once there's a real run with per-pick cells
+                  to describe -- an empty grid/forecast has no dedup
+                  behavior or staleness to explain yet. */}
               {board.run && board.cells.length > 0 && (
-                <>
-                  <div className="board-view-tabs">
-                    <button
-                      type="button"
-                      className={view === 'grid' ? 'active' : undefined}
-                      onClick={() => setView('grid')}
-                    >
-                      Grid
-                    </button>
-                    <button
-                      type="button"
-                      className={view === 'forecast' ? 'active' : undefined}
-                      onClick={() => setView('forecast')}
-                    >
-                      By manager
-                    </button>
-                  </div>
-                  <p className="grid-legend">
-                    {view === 'grid' ? (
-                      <>
-                        {/* 18-44% of cells show a name their own hover
-                            disagrees with, depending on the fitted reach
-                            coefficient. The README explains why at length;
-                            without a line here the grid just reads as broken
-                            at the moment of confusion. */}
-                        Names are deduplicated across the whole board, so a
-                        cell can show its second-most-likely player. Hover for
-                        that pick's raw odds.{' '}
-                      </>
-                    ) : (
-                      <>
-                        One card per manager, in draft-slot order — the same
-                        deduplicated prediction the grid's cells show, without
-                        the alternates. Switch to Grid to see a pick's raw
-                        odds against its alternates.{' '}
-                      </>
-                    )}
-                    {/* The rail shows staleness for the same run; the screen
-                        that renders 120 predictions at once showed nothing. */}
-                    <span className="grid-legend-age">
-                      Simulated {ageLabel(board.run.created_at)}.
-                    </span>
-                  </p>
+                <p className="grid-legend">
                   {view === 'grid' ? (
-                    <DraftGrid board={board} onSelectPlayer={setSelected} />
+                    <>
+                      {/* 18-44% of cells show a name their own hover
+                          disagrees with, depending on the fitted reach
+                          coefficient. The README explains why at length;
+                          without a line here the grid just reads as broken
+                          at the moment of confusion. */}
+                      Names are deduplicated across the whole board, so a
+                      cell can show its second-most-likely player. Hover for
+                      that pick's raw odds.{' '}
+                    </>
                   ) : (
-                    <ManagerForecast board={board} managers={managers} history={history} onSelectPlayer={setSelected} />
+                    <>
+                      One card per manager, in draft-slot order — the same
+                      deduplicated prediction the grid's cells show, without
+                      the alternates. Switch to Grid to see a pick's raw
+                      odds against its alternates.{' '}
+                    </>
                   )}
-                </>
+                  {/* The rail shows staleness for the same run; the screen
+                      that renders 120 predictions at once showed nothing. */}
+                  <span className="grid-legend-age">
+                    Simulated {ageLabel(board.run.created_at)}.
+                  </span>
+                </p>
+              )}
+              {view === 'grid' ? (
+                <DraftGrid board={board} onSelectPlayer={setSelected} />
+              ) : (
+                <ManagerForecast board={board} managers={managers} history={history} onSelectPlayer={setSelected} />
               )}
             </>
           )}

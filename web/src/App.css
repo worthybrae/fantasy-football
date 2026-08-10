@@ -1407,6 +1407,10 @@ td:first-child {
 
 .forecast-summary { margin: 0; font-size: var(--text-sm); color: var(--text-2); }
 .forecast-empty { margin: 0; font-size: var(--text-sm); color: var(--text-3); }
+/* One-row context for a pick or two just made, once a draft is live -- see
+   `justTook` in ManagerForecast.tsx. Quiet on purpose: it's backward-looking
+   history, same register as .forecast-history, not part of the forecast. */
+.forecast-recent { margin: 0; font-size: var(--text-xs); color: var(--text-3); }
 
 .forecast-picks {
   display: flex;
@@ -1456,7 +1460,6 @@ td:first-child {
   color: var(--text-3);
 }
 .forecast-pick-plan { color: var(--accent); }
-.forecast-pick-drafted { text-transform: uppercase; letter-spacing: 0.03em; }
 
 .forecast-shape { border-top: 1px solid var(--border); padding-top: var(--space-2); }
 .forecast-shape-label {

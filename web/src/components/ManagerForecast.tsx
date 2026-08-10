@@ -58,9 +58,11 @@ function shapeCounts(picks: SimBoardCell[]): Partial<Record<string, number>> {
 // The per-manager story pulled out of the grid: one card per team, in draft
 // slot order, answering "who is this, what do they do, what are they about
 // to take" without reading the whole round x manager matrix. Mounted as a
-// sibling view to DraftGrid inside the same board.run/board.cells gate in
-// DraftBoardPage, so it inherits that page's empty-state handling (no run,
-// no league, a run that predates per-pick cells) instead of repeating it.
+// sibling view to DraftGrid whenever there's a league to show (same
+// board.order.length > 0 gate DraftGrid has always rendered under, run or
+// no run), so it degrades the same honest way DraftGrid's own empty
+// skeleton does -- a card with no cells yet still shows the manager's
+// identity, real draft history and tendency text, just an empty picks list.
 export default function ManagerForecast({ board, managers, history, onSelectPlayer }: ManagerForecastProps) {
   const bySlot = primaryPicksBySlot(board.cells)
   const byName = new Map(managers.map((m) => [m.manager, m]))
@@ -71,7 +73,17 @@ export default function ManagerForecast({ board, managers, history, onSelectPlay
     <div className="forecast-grid">
       {board.order.map((entry) => {
         const picks = bySlot.get(entry.slot) ?? []
-        const next = picks.slice(0, NEXT_PICKS_SHOWN)
+        // predict_board reports already-made picks as certain and simulates
+        // every REMAINING round to the end of the draft, not just the first
+        // four -- filtering before slicing is what keeps this list showing
+        // "what's next" instead of getting stuck on round 1-4 (all `certain`)
+        // for the rest of draft night once the real draft passes round 4.
+        const upcoming = picks.filter((p) => !p.certain)
+        const next = upcoming.slice(0, NEXT_PICKS_SHOWN)
+        // The one or two picks immediately behind "next" -- cheap context
+        // (one row) for what this manager just did, once a draft is live and
+        // the early rounds have scrolled out of the upcoming list above.
+        const justTook = picks.filter((p) => p.certain).slice(-2)
         const counts = shapeCounts(picks)
         const m = byName.get(entry.manager)
         const h = historyByName.get(entry.manager)
@@ -136,8 +148,12 @@ export default function ManagerForecast({ board, managers, history, onSelectPlay
 
                 <div className="forecast-history-shape">
                   {HISTORY_BUCKETS.map(({ key, label }) => {
-                    const counts = h.shape[key] ?? {}
-                    const nonZero = SHAPE_POSITIONS.filter((p) => (counts[p] ?? 0) > 0)
+                    // Named distinctly from the outer `counts` (this card's
+                    // PREDICTED shape, computed above from `picks`) -- this
+                    // one is a bucket of this manager's ACTUAL history, a
+                    // different thing that happened to share a name.
+                    const bucketCounts = h.shape[key] ?? {}
+                    const nonZero = SHAPE_POSITIONS.filter((p) => (bucketCounts[p] ?? 0) > 0)
                     return (
                       <div key={key} className="forecast-history-bucket">
                         <span className="forecast-history-bucket-label mono">{label}</span>
@@ -146,7 +162,7 @@ export default function ManagerForecast({ board, managers, history, onSelectPlay
                             <span className="forecast-history-bucket-empty">&mdash;</span>
                           ) : (
                             nonZero.map((p) => (
-                              <span key={p} className="hist-badge">{p} {counts[p]}</span>
+                              <span key={p} className="hist-badge">{p} {bucketCounts[p]}</span>
                             ))
                           )}
                         </span>
@@ -165,8 +181,19 @@ export default function ManagerForecast({ board, managers, history, onSelectPlay
               {m ? m.summary : 'No model fitted for this manager yet.'}
             </p>
 
-            {next.length === 0 ? (
+            {justTook.length > 0 && (
+              <p className="forecast-recent">
+                Just took: {justTook.map((c) => `${c.name} (${c.round}.${c.round_pick})`).join(', ')}
+              </p>
+            )}
+
+            {picks.length === 0 ? (
               <p className="forecast-empty">No predicted picks yet.</p>
+            ) : upcoming.length === 0 ? (
+              // Every round for this slot came back `certain` -- their draft
+              // is done, not merely unpredicted. Distinct from the message
+              // above so a finished manager doesn't read as a data gap.
+              <p className="forecast-empty">Draft complete for this manager.</p>
             ) : (
               <ol className="forecast-picks">
                 {next.map((cell) => {
@@ -188,17 +215,15 @@ export default function ManagerForecast({ board, managers, history, onSelectPlay
                         <span className="forecast-pick-name">{cell.name}</span>
                         <span className="forecast-pick-team">{cell.team ?? ''}</span>
                       </button>
-                      {/* Three, mutually exclusive trailing states, matching
-                          DraftGrid's own certain/mine distinction: a pick
-                          already made (certain) needs no odds at all; the
+                      {/* `next` is already filtered to `!certain` above, so
+                          only two trailing states are reachable here: the
                           user's own future pick is a plan, not a forecast,
                           so it gets a label instead of a probability that
                           would overstate what the model is doing; everyone
                           else's future pick is the one place a probability
-                          belongs. */}
-                      {cell.certain ? (
-                        <span className="forecast-pick-tag forecast-pick-drafted">drafted</span>
-                      ) : isMe ? (
+                          belongs. (A pick already made -- `certain` -- gets
+                          no row here at all; see `justTook` above for that.) */}
+                      {isMe ? (
                         <span className="forecast-pick-tag forecast-pick-plan">plan</span>
                       ) : (
                         <span className="forecast-pick-tag mono">{Math.round(cell.prob * 100)}%</span>
