@@ -1170,3 +1170,112 @@ def test_run_draft_without_record_is_unchanged():
                    record=[])
     assert {s: st["indices"] for s, st in a.items()} == \
            {s: st["indices"] for s, st in b.items()}
+
+
+def test_predict_board_covers_every_pick_and_sums_sensibly():
+    from scoring.draft_sim import predict_board
+    pool = _pool()
+    slots = {i: f"m{i}" for i in range(1, 9)}
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    board = predict_board(pool, S, slots, 4, taken, _adp_betas(slots.values()),
+                          n_rollouts=20, seed=1)
+    assert list(board.columns) == ["overall_pick", "round", "round_pick",
+                                   "slot", "alt_rank", "player_id", "prob",
+                                   "certain"]
+    primaries = board[board["alt_rank"] == 0]
+    # 60-player pool, 8 teams x 15 rounds -- the pool runs dry at pick 60.
+    assert primaries["overall_pick"].tolist() == list(range(1, 61))
+    assert (primaries["prob"] > 0).all()
+    assert (primaries["prob"] <= 1).all()
+    assert not primaries["certain"].any()
+
+
+def test_predict_board_round_and_slot_follow_the_snake():
+    from scoring.draft_sim import predict_board
+    pool = _pool()
+    slots = {i: f"m{i}" for i in range(1, 9)}
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    board = predict_board(pool, S, slots, 4, taken, _adp_betas(slots.values()),
+                          n_rollouts=10, seed=2)
+    p = board[board["alt_rank"] == 0].set_index("overall_pick")
+    assert (p.loc[1, "round"], p.loc[1, "slot"]) == (1, 1)
+    assert (p.loc[8, "round"], p.loc[8, "slot"]) == (1, 8)
+    assert (p.loc[9, "round"], p.loc[9, "slot"]) == (2, 8)
+    assert (p.loc[16, "round"], p.loc[16, "slot"]) == (2, 1)
+    assert p.loc[9, "round_pick"] == 1
+
+
+def test_predict_board_never_puts_one_player_in_two_cells():
+    from scoring.draft_sim import predict_board
+    pool = _pool()
+    slots = {i: f"m{i}" for i in range(1, 9)}
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    board = predict_board(pool, S, slots, 4, taken, _adp_betas(slots.values()),
+                          n_rollouts=25, seed=4)
+    primaries = board[board["alt_rank"] == 0]["player_id"]
+    assert len(set(primaries)) == len(primaries)
+
+
+def test_predict_board_keeps_a_deduped_player_as_an_alternate():
+    """The dedupe must not hide information.
+
+    With ADP-disciplined opponents the same early player wins several
+    adjacent cells on raw frequency. Assignment gives him exactly one, and
+    the cells he lost must still list him among their alternates -- that is
+    the whole reason hover exists.
+    """
+    from scoring.draft_sim import predict_board
+    pool = _pool()
+    slots = {i: f"m{i}" for i in range(1, 9)}
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    board = predict_board(pool, S, slots, 4, taken, _adp_betas(slots.values()),
+                          n_rollouts=40, seed=5, alternates=2)
+    top = board[(board["overall_pick"] == 1) & (board["alt_rank"] == 0)]
+    top_id = top["player_id"].iloc[0]
+    nearby = board[(board["overall_pick"].between(2, 5))
+                   & (board["alt_rank"] > 0)]["player_id"].tolist()
+    assert top_id in nearby
+
+
+def test_predict_board_alternates_are_ranked_and_never_repeat_the_primary():
+    from scoring.draft_sim import predict_board
+    pool = _pool()
+    slots = {i: f"m{i}" for i in range(1, 9)}
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    board = predict_board(pool, S, slots, 4, taken, _adp_betas(slots.values()),
+                          n_rollouts=30, seed=6, alternates=2)
+    for pick, grp in board.groupby("overall_pick"):
+        grp = grp.sort_values("alt_rank")
+        assert grp["alt_rank"].tolist() == list(range(len(grp)))
+        assert len(set(grp["player_id"])) == len(grp)
+        alts = grp[grp["alt_rank"] > 0]["prob"].tolist()
+        assert alts == sorted(alts, reverse=True)
+
+
+def test_predict_board_is_deterministic_under_a_fixed_seed():
+    from scoring.draft_sim import predict_board
+    pool = _pool()
+    slots = {i: f"m{i}" for i in range(1, 9)}
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    args = (pool, S, slots, 4, taken, _adp_betas(slots.values()))
+    a = predict_board(*args, n_rollouts=12, seed=7)
+    b = predict_board(*args, n_rollouts=12, seed=7)
+    pd.testing.assert_frame_equal(a, b)
+
+
+def test_predict_board_reports_already_made_picks_as_certain():
+    from scoring.draft_sim import predict_board
+    pool = _pool()
+    slots = {i: f"m{i}" for i in range(1, 9)}
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    taken[:3] = True
+    board = predict_board(pool, S, slots, 4, taken, _adp_betas(slots.values()),
+                          n_rollouts=10, seed=8, taken_order=[0, 1, 2])
+    made = board[board["certain"]]
+    assert made["overall_pick"].tolist() == [1, 2, 3]
+    assert made["player_id"].tolist() == [pool.player_id[i] for i in (0, 1, 2)]
+    assert (made["prob"] == 1.0).all()
+    assert (made["alt_rank"] == 0).all()
+    # A certain pick has no alternates, and the predictions start after it.
+    assert board[board["overall_pick"] <= 3]["alt_rank"].max() == 0
+    assert not board[board["overall_pick"] == 4]["certain"].any()
