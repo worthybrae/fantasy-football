@@ -356,6 +356,22 @@ _PHRASES = {
     "te_early": ("early-TE guy", "waits on TE"),
     "need": ("fills starting slots first", "ignores roster needs"),
     "run": ("chases positional runs", "fades positional runs"),
+    # Task 4 columns. `describe` takes the top-3 |diff| features and drops
+    # any name missing here without looking further down the list -- with
+    # five of sixteen features unnamed, the top three could easily be new
+    # ones, and a manager with a real, strong deviation reported back as
+    # "drafts close to league average". Sign matters: `age` is centred
+    # (positive = older than the position average), `hype` is
+    # prod_rank - market_rank (positive = market ranks him ahead of his own
+    # production -- a leap of faith), so a positive coefficient on either
+    # means "leans toward more of that", not "leans toward the word that
+    # comes first alphabetically".
+    "age": ("leans veteran", "leans youth"),
+    "volatility": ("chases volatile, injury-prone players",
+                   "prefers steady, durable players"),
+    "no_track_record": ("bets on unproven players", "avoids unproven players"),
+    "hype": ("chases hype over production", "fades hype, trusts production"),
+    "trend": ("targets players trending up", "sticks with steady production"),
 }
 
 

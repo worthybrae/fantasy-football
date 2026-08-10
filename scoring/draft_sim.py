@@ -233,10 +233,15 @@ class SimPool(NamedTuple):
     vor: np.ndarray
     # Task 4: the same player attributes the historical fit pool carries
     # (draft_model._enrich_pool), so `_live_features` can mirror
-    # `feature_matrix` exactly. `market_rank` is the board's own consensus
-    # rank (scoring.market.add_market), not `adp_rank` above -- that field
-    # is build_pool's own dense 1..k re-ranking of the board, kept only for
-    # `_candidate_indices`'s market-order candidate selection.
+    # `feature_matrix` exactly. `market_rank` here is build_pool's own dense
+    # 1..k re-ranking of the board (identical to `adp_rank` above -- both
+    # fields are kept, named for what each is used for, so a future split
+    # doesn't require touching every call site). It is NOT
+    # `board["market_rank"]`, the raw multi-source consensus average
+    # (scoring.market.add_market): that value is never re-ranked within
+    # `board`, can exceed len(board), and reads on a different scale than
+    # the dense rank draft_model's coefficients were fitted on -- see
+    # build_pool's own comment for the inversion that mixing the two causes.
     market_rank: np.ndarray
     age: np.ndarray
     ppg_std: np.ndarray
@@ -288,25 +293,31 @@ def build_pool(conn, board: pd.DataFrame, settings) -> SimPool:
     ranked = board.copy()
     ranked["proj"] = ranked["player_id"].map(points)
 
-    # `adp_rank` (the field, not the board column) feeds `_candidate_indices`'s
-    # market-order candidate selection -- reach/fall now read `market_rank`
-    # directly (Task 4), not this field, so it no longer has to land on the
-    # historic fit's scale. It still has to be a real dense rank over players
-    # who carry one: historic_adp.adp_rank is dense over the players ONE
-    # season's ADP source actually ranked, not over `board`'s broader union
-    # of every player with a stat line plus ADP-only rookies and K/DST.
+    # `adp_rank`/`market_rank` (the SimPool fields, not the board column)
+    # must land on the scale draft_model's reach/fall coefficients were
+    # fitted on: a dense 1..k rank, matching historic_adp.adp_rank /
+    # draft_model._enrich_pool's market_rank -- both dense per-season ranks,
+    # not `board`'s raw, multi-source consensus average (scoring/market.py),
+    # which is never re-ranked within `board` and can exceed len(board).
     # Folding a fillna sentinel into the same sort_values as the real
-    # market_rank values is not safe here: fp_rank/mfl_rank/cbs_rank (which
-    # feed into market_rank, see scoring/market.py) are raw external ranks,
-    # not re-ranked within `board`, so a real market_rank can exceed
-    # len(board) once board is a filtered subset of what those sources rank
-    # -- and a sentinel of len(board) + 1 would then be SMALLER than that
-    # real value, scrambling a genuinely-ranked player behind the unranked
-    # ones. Ranking densely among only the players who carry a real
-    # market_rank keeps "rank k" meaning roughly the same thing whether it
-    # came from board or a historic ADP feed. Unranked players are appended
-    # after the last real rank, not interleaved, so they stay takeable but
-    # sit far down the board (an opponent can still draft them).
+    # market_rank values is not safe: a real rank of 500 on a 5-row board
+    # (the pinned regression fixture below) can exceed even a
+    # len(board) + 1 sentinel, scrambling a genuinely-ranked player behind
+    # the unranked ones. Nor is returning the raw value for players who do
+    # carry one, and only filling the gaps: it leaks the board's wider,
+    # unbounded scale into `market_rank`, which distorts reach/fall for
+    # every ranked player, not just the unranked ones -- and can still let
+    # an unranked player's *filled* rank land ahead of a real one, since a
+    # dense pool position can be smaller than a real rank far past
+    # len(board). Ranking densely among only the players who carry a real
+    # market_rank, then USING that dense rank (not the raw value) as
+    # `market_rank` itself, avoids both: "rank k" means the same thing on
+    # the board, in `historic_adp`, and in the fit, an unranked player can
+    # never end up ranked ahead of a real one, and no fillna is needed at
+    # all -- there is no longer a NaN to fill. Unranked players are
+    # appended after the last real rank, not interleaved, so they stay
+    # takeable but sit far down the board (an opponent can still draft
+    # them).
     has_rank = ranked["market_rank"].notna()
     known = ranked[has_rank].sort_values("market_rank", kind="stable")
     unknown = ranked[~has_rank]
@@ -348,17 +359,12 @@ def build_pool(conn, board: pd.DataFrame, settings) -> SimPool:
                 ranked[col] = ranked[col].fillna(default)
     # Positive means the market is ahead of what the player has actually
     # done. NaN when he has no production to rank, which feature_matrix
-    # (and _live_features) read as neutral rather than as zero.
+    # (and _live_features) read as neutral rather than as zero. Deliberately
+    # the raw board `market_rank` (not `dense_rank` below): unlike
+    # reach/fall, `hype`'s scale is not the fit's -- it is nan_to_num'd and
+    # HYPE_SCALE'd downstream regardless, and an unranked player's NaN
+    # market_rank already yields the intended neutral (NaN) hype here.
     ranked["hype"] = ranked["prod_rank"] - ranked["market_rank"]
-    # `reach`/`fall` (_log_rank_features) take log1p of this value and
-    # assume it is finite -- unlike `hype` above, NaN here is not
-    # nan_to_num'd downstream. An unranked player's real market_rank is
-    # NaN by construction (`has_rank` above), so feed the same dense
-    # position this player already sits at in the pool (far down, past
-    # every real rank) rather than letting a NaN propagate through log1p
-    # into every column of that player's whole feature row.
-    market_rank = ranked["market_rank"].fillna(
-        pd.Series(dense_rank, index=ranked.index)).to_numpy(dtype=float)
 
     return SimPool(
         player_id=ranked["player_id"].to_numpy(),
@@ -368,7 +374,10 @@ def build_pool(conn, board: pd.DataFrame, settings) -> SimPool:
         points=ranked["proj"].to_numpy(dtype=float),
         availability=availability.fillna(DEFAULT_AVAILABILITY).to_numpy(dtype=float),
         vor=pd.to_numeric(vor_col, errors="coerce").fillna(-np.inf).to_numpy(dtype=float),
-        market_rank=market_rank,
+        # Same dense rank as `adp_rank` above -- see the comment at the top
+        # of this function for why `board["market_rank"]`'s raw value must
+        # not reach here.
+        market_rank=dense_rank,
         age=ranked["age"].to_numpy(dtype=float),
         ppg_std=ranked["ppg_std"].to_numpy(dtype=float),
         missed_rate=ranked["missed_rate"].to_numpy(dtype=float),

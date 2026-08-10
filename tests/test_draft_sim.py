@@ -346,6 +346,17 @@ def test_build_pool_ranks_market_known_players_before_unranked_ones(tmp_path):
     fix: rank densely among only the players carrying a real market_rank
     (1..k, in market order), then continue the sequence for the rest (k+1..)
     rather than interleaving them.
+
+    `SimPool.market_rank` must land on that exact same dense scale, not
+    `board["market_rank"]`'s raw value: a prior version of this fix filled
+    only the unranked players' NaN with their dense pool position and left
+    the four genuinely-ranked players at their raw board["market_rank"]
+    (5.0, 20.0, 500.0 for p2/p1/p3) -- p3's real 500 stayed 500, but p4
+    (truly unranked) landed at a dense-position fallback of 4.0, BETTER
+    than p2's real, dense-rank-1 market_rank of 5.0. A player nobody ranked
+    read as less of a reach than the market's actual number one. Asserting
+    `market_rank` here, not just `adp_rank`, is what catches that: both
+    fields must be identical, since both must be the dense rank.
     """
     conn = get_conn(str(tmp_path / "t.duckdb"))
     board = pd.DataFrame([
@@ -363,15 +374,27 @@ def test_build_pool_ranks_market_known_players_before_unranked_ones(tmp_path):
          "team": "SF", "market_rank": None, "durability": 90.0, "stats": None},
     ])
     pool = build_pool(conn, board, S)
-    by_id = dict(zip(pool.player_id, pool.adp_rank))
-    # Known market_rank players occupy dense ranks 1..3, in market order --
-    # unaffected by p3's real rank value (500.0) exceeding len(board) (5).
-    assert by_id["p2"] == 1.0     # market_rank 5.0
-    assert by_id["p1"] == 2.0     # market_rank 20.0
-    assert by_id["p3"] == 3.0     # market_rank 500.0 -- still ranked 3rd
-    # Unranked players continue the sequence after the known ones, not
-    # interleaved with them.
-    assert sorted([by_id["p4"], by_id["p5"]]) == [4.0, 5.0]
+    for ranks in (dict(zip(pool.player_id, pool.adp_rank)),
+                 dict(zip(pool.player_id, pool.market_rank))):
+        # Known market_rank players occupy dense ranks 1..3, in market
+        # order -- unaffected by p3's real rank value (500.0) exceeding
+        # len(board) (5).
+        assert ranks["p2"] == 1.0     # market_rank 5.0
+        assert ranks["p1"] == 2.0     # market_rank 20.0
+        assert ranks["p3"] == 3.0     # market_rank 500.0 -- still ranked 3rd
+        # Unranked players continue the sequence after the known ones, not
+        # interleaved with them -- and, critically, never ahead of a real
+        # rank: p4/p5 must land at 4.0/5.0, not at some value below p2's
+        # real 1.0-equivalent (5.0 raw) that would make them read as a
+        # smaller reach than the market's actual number one.
+        assert sorted([ranks["p4"], ranks["p5"]]) == [4.0, 5.0]
+    # The two fields must be identical, not just individually correct --
+    # `reach`/`fall` (_log_rank_features) read `market_rank`, and every
+    # other market-order consumer (_candidate_indices) reads `adp_rank`;
+    # a real bug that only broke one of them (e.g. the fillna reintroduced
+    # for just one field) must fail here even if that one field's own
+    # assertions above happen to still pass.
+    np.testing.assert_array_equal(pool.adp_rank, pool.market_rank)
 
 
 from scoring.draft_model import FEATURE_NAMES

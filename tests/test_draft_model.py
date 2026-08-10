@@ -526,8 +526,14 @@ def test_fit_all_separates_managers_with_opposite_tastes(monkeypatch):
     assert set(fits) >= {"rbguy", "wrguy", "__pooled__"}
     rb_idx = FEATURE_NAMES.index("pos_RB")
     wr_idx = FEATURE_NAMES.index("pos_WR")
-    assert fits["rbguy"][rb_idx] - fits["rbguy"][wr_idx] > \
-           fits["wrguy"][rb_idx] - fits["wrguy"][wr_idx]
+    rb_margin = fits["rbguy"][rb_idx] - fits["rbguy"][wr_idx]
+    wr_margin = fits["wrguy"][rb_idx] - fits["wrguy"][wr_idx]
+    assert rb_margin > wr_margin
+    # Not just the ordering: each manager's own margin has to point the
+    # right way, not merely be less-negative-than-the-other's while both
+    # secretly lean the wrong direction.
+    assert rb_margin > 0     # rbguy actually leans RB over WR
+    assert wr_margin < 0     # wrguy actually leans WR over RB
 
 def test_backtest_reports_accuracy_against_an_adp_baseline(tmp_path):
     report = backtest(_seed_many(tmp_path))
@@ -568,6 +574,28 @@ def test_describe_names_the_strongest_deviations():
     beta[FEATURE_NAMES.index("reach")] = -2.0
     text = describe(beta, pooled)
     assert "reach" in text.lower()
+
+
+def test_describe_names_task_4_features_instead_of_reporting_average(tmp_path):
+    """`describe` takes the top-3 |diff| features and drops any name missing
+    from `_PHRASES` without looking further down the list. With the five
+    Task 4 columns unnamed, a manager whose strongest deviations happened to
+    be among them reported back as "drafts close to league average" even
+    with real, large deviations -- `no_track_record` is a 0/1 dummy on the
+    same scale as the position dummies, so it winning a top-3 slot is the
+    expected case, not an edge case.
+    """
+    pooled = np.zeros(len(FEATURE_NAMES))
+    beta = pooled.copy()
+    beta[FEATURE_NAMES.index("no_track_record")] = 3.0
+    beta[FEATURE_NAMES.index("trend")] = 2.0
+    beta[FEATURE_NAMES.index("volatility")] = 1.5
+    beta[FEATURE_NAMES.index("pos_RB")] = 0.9
+    text = describe(beta, pooled)
+    assert text != "drafts close to league average"
+    assert "unproven" in text.lower()
+    assert "trend" in text.lower()
+    assert "volatile" in text.lower()
 
 
 def _seed_with_espn(tmp_path):
