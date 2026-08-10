@@ -764,3 +764,16 @@ def test_age_is_centred_within_position():
     assert age[0] == pytest.approx(-2.0)   # RB mean 26
     assert age[1] == pytest.approx(2.0)
     assert age[2] == pytest.approx(0.0)    # lone WR is its own mean
+
+
+def test_positional_bias_measures_how_early_a_league_takes_a_position(tmp_path):
+    """If the league takes QBs 20 picks ahead of where the market ranks
+    them, that is a fact about the league, not about any one manager."""
+    from scoring.draft_model import positional_bias
+    conn = _seed_with_espn(tmp_path)
+    bias = positional_bias(conn)
+    assert list(bias.columns) == ["position", "round_bucket", "mean_gap", "n"]
+    assert (bias["n"] > 0).all()
+    # Player A: market_rank 2, taken at pick 1 -> gap +1 (taken early).
+    rb = bias[(bias.position == "RB") & (bias.round_bucket == "early")]
+    assert rb["mean_gap"].iloc[0] == pytest.approx(1.0)

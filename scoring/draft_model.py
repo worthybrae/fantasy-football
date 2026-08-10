@@ -558,6 +558,39 @@ def backtest(conn, settings=None) -> dict:
     return report
 
 
+def _round_bucket(overall_pick: int, teams: int) -> str:
+    round_no = (overall_pick - 1) // max(teams, 1) + 1
+    if round_no <= EARLY_ROUNDS:
+        return "early"
+    return "mid" if round_no <= 8 else "late"
+
+
+def positional_bias(conn, settings=None) -> pd.DataFrame:
+    """How far ahead of the market this league takes each position.
+
+    `mean_gap` is `market_rank - overall_pick`, so positive means the league
+    drafts that position earlier than the market ranks it (a player ranked
+    2 taken at pick 1 scores +1); negative means the league lets it slide
+    past where the market has it. Pooled across managers on purpose: a
+    league-wide habit forced through eight per-manager coefficients would
+    spend scarce data re-learning the same thing eight times.
+    """
+    settings = settings or league_mod.load(conn)
+    observations = build_observations(conn)
+    rows = []
+    for obs in observations:
+        chosen = obs.pool.iloc[obs.chosen]
+        rows.append({"position": chosen["position"],
+                     "round_bucket": _round_bucket(obs.overall_pick, settings.teams),
+                     "gap": float(chosen["market_rank"]) - obs.overall_pick})
+    if not rows:
+        return pd.DataFrame(columns=["position", "round_bucket", "mean_gap", "n"])
+    df = pd.DataFrame(rows)
+    out = df.groupby(["position", "round_bucket"], as_index=False).agg(
+        mean_gap=("gap", "mean"), n=("gap", "size"))
+    return out
+
+
 def write_backtest(conn, settings=None) -> dict:
     """Run the backtest and persist it as a one-row `model_backtest` table.
 
