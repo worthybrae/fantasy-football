@@ -284,18 +284,31 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
             settings = league.load(cur)
             order = draft_order()["order"]
             cells = read_table(cur, "sim_board")
-            latest = read_table(cur, "sim_results")
-            run = None
-            if not latest.empty:
-                head = latest.iloc[0]
-                run = {"run_id": head["run_id"],
-                       "my_slot": int(head["my_slot"]),
-                       "created_at": str(head["created_at"])}
+            # Delegated rather than re-derived: sim_results was created
+            # without my_slot/pick_no/created_at (they arrived eleven commits
+            # later), so a run that predates that migration has no such
+            # columns and reading them raises. sim_latest already guards for
+            # exactly that, and inheriting its guard means the two endpoints
+            # can never disagree about what "the last run" is.
+            run = sim_latest()["run"]
             if cells.empty:
                 return {"run": run, "teams": settings.teams,
                         "rounds": settings.rounds, "order": order, "cells": []}
             board = build_board(cur, settings=settings)
-            names = board.set_index("player_id")[["name", "position", "team"]]
+            # drop_duplicates because board ids are not unique: see
+            # build_board's own comment -- _add_adp_only_players synthesizes
+            # `player_id = "adp_" + norm` with no position in the key, so one
+            # normalized name at two positions in the ADP feed produces two
+            # rows sharing an id. Without this, `names.loc[pid]` is a
+            # DataFrame, `row["name"]` is a Series, and the encoder recurses
+            # until it dies -- one bad row killing all 120 cells.
+            # astype(object) for the same reason /api/players does it: a
+            # missing `team` reaches here as np.nan (json.dumps rejects it,
+            # HTTP 500) or pd.NA (encoded as `{}`, which React refuses to
+            # render as a child), and SimBoardCell.team is `string | null`.
+            names = board[["player_id", "name", "position", "team"]] \
+                .drop_duplicates("player_id").set_index("player_id")
+            names = names.astype(object).where(names.notna(), None)
             out = []
             for _, c in cells.iterrows():
                 pid = c["player_id"]

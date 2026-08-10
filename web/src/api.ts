@@ -267,7 +267,11 @@ export interface SimBoardCell {
 }
 
 export interface SimBoard {
-  run: { run_id: string; my_slot: number; created_at: string } | null
+  // The same SimRun /api/sim/latest serves -- the board handler delegates to
+  // it, so my_slot/pick_no are nullable here too (a run that predates those
+  // columns has no slot on record). DraftGrid degrades to "no column marked
+  // (you)" rather than assuming one.
+  run: SimRun | null
   teams: number
   rounds: number
   order: DraftOrderEntry[]

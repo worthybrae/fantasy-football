@@ -576,6 +576,116 @@ def test_sim_board_serves_cells_with_player_details(tmp_path):
     assert alt["position"] is None
 
 
+def _sim_board_cells(run_id="r1"):
+    return pd.DataFrame([
+        {"run_id": run_id, "overall_pick": 1, "round": 1, "round_pick": 1,
+         "slot": 1, "alt_rank": 0, "player_id": "p1", "prob": 0.42,
+         "certain": False}])
+
+
+def test_sim_board_survives_a_run_that_predates_the_provenance_columns(tmp_path):
+    """`sim_results` was created without my_slot/pick_no/created_at -- they
+    arrived eleven commits later. /api/sim/latest guards for exactly that
+    (`"created_at" not in res.columns`); the board handler must too, or the
+    whole page 500s for anyone whose last run predates the migration."""
+    path = str(tmp_path / "t.duckdb")
+    _seed(path)
+    conn = get_conn(path)
+    write_table(conn, "sim_results", pd.DataFrame(
+        [{"run_id": "r1", "player_id": "p1", "ev": 1.0, "se": 0.1, "rank": 1,
+          "applied_pct": 1.0}]))
+    write_table(conn, "sim_board", _sim_board_cells())
+    conn.close()
+    res = TestClient(create_app(path)).get("/api/sim/board")
+    assert res.status_code == 200
+    body = res.json()
+    # Same answer /api/sim/latest gives for the same table: no provenance on
+    # record, so no run to describe -- and no column marked "(you)".
+    assert body["run"] is None
+    assert [c["name"] for c in body["cells"]] == ["A Star"]
+
+
+def _seed_adp_only(path, rows, keep_a_star=True):
+    """Replace the ADP feed with entries that match nothing in the weekly
+    universe, so `_add_adp_only_players` puts them on the board with a
+    synthetic `"adp_" + norm` id."""
+    conn = get_conn(path)
+    head = [{"adp_name": "A Star", "position": "WR", "team": "DET",
+             "adp": 5.1}] if keep_a_star else []
+    write_table(conn, "adp", pd.DataFrame(head + rows))
+    conn.close()
+
+
+def test_sim_board_survives_a_duplicate_player_id_on_the_board(tmp_path):
+    """A duplicated id makes `names.loc[pid]` a DataFrame, so `row["name"]`
+    is a Series and the response encoder blows up -- one bad board row would
+    otherwise kill all 120 cells."""
+    path = str(tmp_path / "t.duckdb")
+    _seed(path)
+    # One normalized name at two positions, neither in the weekly universe.
+    # `_add_adp_only_players` keys the synthetic id on the name alone, so both
+    # rows land on the board sharing `adp_dup_guy` -- the duplication
+    # `build_board`'s own drop_duplicates comment documents.
+    _seed_adp_only(path, [
+        {"adp_name": "Dup Guy", "position": "RB", "team": "SF", "adp": 6.0},
+        {"adp_name": "Dup Guy", "position": "TE", "team": "GB", "adp": 7.0},
+    ])
+    conn = get_conn(path)
+    write_table(conn, "sim_results", pd.DataFrame(
+        [{"run_id": "r1", "player_id": "p1", "ev": 1.0, "se": 0.1, "rank": 1,
+          "applied_pct": 1.0, "my_slot": 4, "pick_no": 0,
+          "created_at": "2026-08-09 12:00:00"}]))
+    cells = _sim_board_cells()
+    cells.loc[len(cells)] = {"run_id": "r1", "overall_pick": 2, "round": 1,
+                             "round_pick": 2, "slot": 2, "alt_rank": 0,
+                             "player_id": "adp_dup_guy", "prob": 0.3,
+                             "certain": False}
+    write_table(conn, "sim_board", cells)
+    conn.close()
+    res = TestClient(create_app(path)).get("/api/sim/board")
+    assert res.status_code == 200
+    dup = [c for c in res.json()["cells"] if c["player_id"] == "adp_dup_guy"][0]
+    assert dup["name"] == "Dup Guy"
+    # One of the two duplicated rows wins; either is a real board row, and
+    # the cell must carry a plain string rather than a Series.
+    assert dup["position"] in ("RB", "TE")
+
+
+def test_sim_board_serializes_a_missing_team_as_null(tmp_path):
+    """`SimBoardCell.team` is `string | null`, and pandas has two spellings
+    of missing that break it: np.nan makes json.dumps raise ("Out of range
+    float values are not JSON compliant") -> HTTP 500, and pd.NA survives
+    FastAPI's encoder as `{}`, which React then refuses to render as a child
+    (`DraftGrid` does `{primary.team ?? '—'}`) -- no error boundary, so
+    /draft-board white-screens. /api/players carries an explicit comment
+    about exactly this hazard; this handler needs the same normalization.
+
+    Reached the way real data reaches it: an ADP feed that publishes no team
+    at all comes back out of DuckDB as a nullable Int32 column, and
+    build_board's `cur_team.fillna(adp_team).fillna(team)` chain then has
+    nothing to fall back on for an ADP-only player."""
+    path = str(tmp_path / "t.duckdb")
+    _seed(path)
+    _seed_adp_only(path, [
+        {"adp_name": "No Team Guy", "position": "RB", "team": None,
+         "adp": 6.0}], keep_a_star=False)
+    conn = get_conn(path)
+    write_table(conn, "sim_results", pd.DataFrame(
+        [{"run_id": "r1", "player_id": "p1", "ev": 1.0, "se": 0.1, "rank": 1,
+          "applied_pct": 1.0, "my_slot": 4, "pick_no": 0,
+          "created_at": "2026-08-09 12:00:00"}]))
+    write_table(conn, "sim_board", pd.DataFrame([
+        {"run_id": "r1", "overall_pick": 1, "round": 1, "round_pick": 1,
+         "slot": 1, "alt_rank": 0, "player_id": "adp_no_team_guy",
+         "prob": 0.42, "certain": False}]))
+    conn.close()
+    res = TestClient(create_app(path)).get("/api/sim/board")
+    assert res.status_code == 200
+    cell = res.json()["cells"][0]
+    assert cell["name"] == "No Team Guy"
+    assert cell["team"] is None
+
+
 def test_draft_order_seeds_slots_when_espn_has_not_published_an_order(tmp_path):
     # ESPN leaves draftDayPickOrder null until it publishes a draft order,
     # which is the normal state for the season you are preparing for. An
