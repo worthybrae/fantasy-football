@@ -498,3 +498,107 @@ def test_describe_names_the_strongest_deviations():
     beta[FEATURE_NAMES.index("reach")] = -2.0
     text = describe(beta, pooled)
     assert "reach" in text.lower()
+
+
+def _seed_with_espn(tmp_path):
+    """One season, two players, ESPN and FFC disagreeing on the order."""
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    write_table(conn, "draft_picks", pd.DataFrame([
+        {"season": 2025, "overall_pick": 1, "round": 1, "round_pick": 1,
+         "team_id": 1, "espn_player_id": 11, "player_name": "Player A",
+         "position": "RB", "nfl_team": "DET", "keeper": False},
+        {"season": 2025, "overall_pick": 2, "round": 1, "round_pick": 2,
+         "team_id": 2, "espn_player_id": 12, "player_name": "Player B",
+         "position": "WR", "nfl_team": "GB", "keeper": False},
+    ]))
+    write_table(conn, "draft_teams", pd.DataFrame([
+        {"season": 2025, "team_id": 1, "manager": "worthy", "slot": 1},
+        {"season": 2025, "team_id": 2, "manager": "dan", "slot": 2},
+    ]))
+    write_table(conn, "historic_adp", pd.DataFrame([
+        {"season": 2025, "adp_name": "Player A", "position": "RB",
+         "team": "DET", "adp_rank": 1},
+        {"season": 2025, "adp_name": "Player B", "position": "WR",
+         "team": "GB", "adp_rank": 2},
+    ]))
+    # ESPN reverses them.
+    write_table(conn, "historic_espn", pd.DataFrame([
+        {"season": 2025, "espn_name": "Player B", "position": "WR",
+         "espn_rank": 1, "adp_usable": True},
+        {"season": 2025, "espn_name": "Player A", "position": "RB",
+         "espn_rank": 2, "adp_usable": True},
+    ]))
+    return conn
+
+
+def test_pool_market_rank_prefers_espn_over_ffc(tmp_path):
+    obs = build_observations(_seed_with_espn(tmp_path))
+    pool = obs[0].pool.set_index("norm")
+    assert pool.loc["player a"]["adp_rank"] == 1        # FFC, unchanged
+    assert pool.loc["player a"]["market_rank"] == 2     # ESPN's view
+    assert pool.loc["player b"]["market_rank"] == 1
+
+
+def test_pool_falls_back_to_ffc_when_espn_lacks_the_player(tmp_path):
+    from pipeline.db import write_table as wt
+    conn = _seed_with_espn(tmp_path)
+    wt(conn, "historic_espn", pd.DataFrame([
+        {"season": 2025, "espn_name": "Player B", "position": "WR",
+         "espn_rank": 1, "adp_usable": True}]))
+    pool = build_observations(conn)[0].pool.set_index("norm")
+    assert pool.loc["player a"]["market_rank"] == 1     # fell back to adp_rank
+
+
+def test_pool_carries_player_attributes_with_neutral_defaults(tmp_path):
+    obs = build_observations(_seed_with_espn(tmp_path))
+    pool = obs[0].pool
+    for col in ("market_rank", "hype", "age", "ppg_std", "missed_rate",
+                "no_track_record", "trend"):
+        assert col in pool.columns
+    # No `weekly` table at all, so nobody has a track record.
+    assert pool["no_track_record"].all()
+    assert (pool["ppg_std"] == 0.0).all()
+    assert (pool["trend"] == 0.0).all()
+
+
+def test_pool_hype_is_market_ahead_of_production(tmp_path):
+    conn = _seed_with_espn(tmp_path)
+    write_table(conn, "weekly", pd.DataFrame([
+        # Player B produced far less than the market's view of him.
+        {"player_id": "b", "player_display_name": "Player B", "position": "WR",
+         "recent_team": "GB", "opponent_team": "DET", "season": 2024, "week": w,
+         "receptions": 1, "receiving_yards": 5, "targets": 2, "carries": 0}
+        for w in range(1, 18)] + [
+        {"player_id": "a", "player_display_name": "Player A", "position": "RB",
+         "recent_team": "DET", "opponent_team": "GB", "season": 2024, "week": w,
+         "receptions": 9, "receiving_yards": 90, "targets": 11, "carries": 5}
+        for w in range(1, 18)]))
+    pool = build_observations(conn)[0].pool.set_index("norm")
+    # B: market_rank 1, prod_rank 2 -> hype +1. A: market 2, prod 1 -> -1.
+    assert pool.loc["player b"]["hype"] > pool.loc["player a"]["hype"]
+
+
+def test_pool_treats_a_name_collision_in_attributes_as_no_track_record(tmp_path):
+    """`adp_match_key` carries no team for a non-DST position, so two
+    different past players who happen to share (position, normalized name)
+    collide on the same `attributes_as_of` key -- confirmed reachable with
+    real NFL data, common names repeat across eras/rosters. Guessing which
+    one's numbers belong to the player actually drafted would put a wrong
+    value on a `no_track_record: False` row; left-joining the pool against a
+    key that appears twice would also duplicate that pool row, breaking
+    "one pick removes exactly one pool row"."""
+    conn = _seed_with_espn(tmp_path)
+    write_table(conn, "weekly", pd.DataFrame(
+        [{"player_id": "p1", "player_display_name": "Player A", "position": "RB",
+          "recent_team": "DET", "opponent_team": "GB", "season": 2024, "week": w,
+          "receptions": 1, "receiving_yards": 5, "targets": 2, "carries": 10}
+         for w in range(1, 18)] +
+        [{"player_id": "p2", "player_display_name": "Player A", "position": "RB",
+          "recent_team": "CHI", "opponent_team": "GB", "season": 2024, "week": w,
+          "receptions": 1, "receiving_yards": 5, "targets": 2, "carries": 10}
+         for w in range(1, 18)]))
+    obs = build_observations(conn)
+    pool = obs[0].pool
+    assert len(pool) == 2                        # not duplicated by the merge
+    row = pool.set_index("norm").loc["player a"]
+    assert row["no_track_record"] == True

@@ -20,8 +20,60 @@ from scipy.optimize import minimize
 from pipeline.db import read_table, write_table
 from scoring import league as league_mod
 from scoring.board import _ADP_POSITION_ALIASES, _norm_name, adp_match_key
+from scoring.player_history import attributes_as_of
 
 RUN_WINDOW = 5
+
+_ATTRIBUTE_DEFAULTS = {"age": np.nan, "ppg_std": 0.0, "missed_rate": 0.0,
+                       "no_track_record": True, "prod_rank": np.nan,
+                       "trend": 0.0}
+
+
+def _enrich_pool(conn, pool: pd.DataFrame, season: int,
+                 espn: pd.DataFrame) -> pd.DataFrame:
+    """Attach the market reference and the player-at-pick-time attributes.
+
+    `market_rank` prefers ESPN's dense rank -- the league drafts on ESPN,
+    off ESPN's board, so that is the ordering the room actually saw -- and
+    falls back to the FFC `adp_rank` for a player ESPN's top-N did not
+    reach. Both are dense 1..N per season, so the two are on one scale.
+    """
+    pool = pool.copy()
+    if espn.empty:
+        pool["market_rank"] = pool["adp_rank"]
+    else:
+        season_espn = espn[espn["season"] == season].copy()
+        season_espn["key"] = _match_keys(season_espn, "espn_name")
+        season_espn = season_espn.dropna(subset=["key"]).drop_duplicates("key")
+        ranks = season_espn.set_index("key")["espn_rank"]
+        pool["market_rank"] = pool["key"].map(ranks).fillna(pool["adp_rank"])
+
+    attrs = attributes_as_of(conn, season)
+    if not attrs.empty:
+        # `adp_match_key` carries no team for a non-DST position, so two
+        # different past players can share (position, normalized name) --
+        # a real risk with common names, not a contrived one. Guessing
+        # which one's numbers belong to the player actually drafted would
+        # put a wrong value on a "no_track_record: False" row; left-joining
+        # against a key that appears twice would also duplicate the pool
+        # row, breaking "one pick removes exactly one pool row". Drop both
+        # sides of the collision so it falls through to "unknown" instead.
+        attrs = attrs.drop_duplicates("key", keep=False)
+    if attrs.empty:
+        for col, default in _ATTRIBUTE_DEFAULTS.items():
+            pool[col] = default
+    else:
+        pool = pool.merge(attrs, on="key", how="left")
+        pool["no_track_record"] = pool["no_track_record"].fillna(True).astype(bool)
+        for col, default in _ATTRIBUTE_DEFAULTS.items():
+            if col not in ("no_track_record", "prod_rank"):
+                pool[col] = pool[col].fillna(default)
+
+    # Positive means the market is ahead of what the player has actually
+    # done -- taking him is a leap of faith. NaN when he has no production
+    # to rank, which `feature_matrix` reads as neutral rather than as zero.
+    pool["hype"] = pool["prod_rank"] - pool["market_rank"]
+    return pool
 
 
 def _match_keys(frame: pd.DataFrame, name_col: str, team_col: str = "team") -> list:
@@ -52,6 +104,7 @@ def build_observations(conn) -> list:
     picks = read_table(conn, "draft_picks")
     teams = read_table(conn, "draft_teams")
     adp = read_table(conn, "historic_adp")
+    espn = read_table(conn, "historic_espn")
     if picks.empty or teams.empty or adp.empty:
         return []
 
@@ -83,6 +136,7 @@ def build_observations(conn) -> list:
         # scoring.board._dedupe_adp.
         pool = pool.sort_values("adp_rank").drop_duplicates(
             "key", keep="first").reset_index(drop=True)
+        pool = _enrich_pool(conn, pool, season, espn)
         available = pool.copy()
         rosters, recent = {}, []
         for _, pick in season_picks.sort_values("overall_pick").iterrows():
