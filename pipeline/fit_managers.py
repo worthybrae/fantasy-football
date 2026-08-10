@@ -2,7 +2,8 @@
 import sys
 
 from pipeline.db import get_conn, record_freshness
-from scoring.draft_model import write_backtest, write_profiles
+from scoring.draft_model import (ablation, positional_bias, write_backtest,
+                                 write_profiles)
 
 
 def main() -> int:
@@ -20,10 +21,16 @@ def main() -> int:
     total = profiles["manager"].nunique()
     print(f"Fitted {total} managers ({personal} with personal models, "
           f"{total - personal} pooled).")
-    print(f"Backtest on {report['holdout_season']}: "
-          f"top-1 {report['top1']:.0%}, top-5 {report['top5']:.0%}, "
-          f"log-loss {report['logloss']:.3f} "
-          f"(ADP baseline {report['adp_logloss']:.3f})")
+    print(f"Backtest, leave-one-season-out over {report['seasons']}:")
+    print(f"  overall: top-1 {report['top1']:.0%}, top-5 {report['top5']:.0%}, "
+          f"log-loss {report['logloss']:.3f} (ADP baseline {report['adp_logloss']:.3f})")
+    for r in report["by_round"]:
+        print(f"  {r['round_bucket']:>5}: top-1 {r['top1']:.0%}, "
+              f"top-5 {r['top5']:.0%}  (n={r['n']})")
+    print("\nFeature ablation (delta_top1 > 0 means the feature earns its place):")
+    print(ablation(conn).to_string(index=False))
+    print("\nLeague positional bias (positive = drafted ahead of the market):")
+    print(positional_bias(conn).to_string(index=False))
     if not report["beats_adp"]:
         print("WARNING: the fitted model does not beat the ADP baseline "
               "out of sample. Treat simulator output as indicative only.")

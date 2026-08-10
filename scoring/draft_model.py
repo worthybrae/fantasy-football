@@ -498,64 +498,143 @@ def write_profiles(conn, settings=None) -> pd.DataFrame:
     return profiles
 
 
-def backtest(conn, settings=None) -> dict:
-    """Hold out the newest season and score against an ADP-only baseline.
+_ROUND_BUCKET_ORDER = ("early", "mid", "late")
 
-    If the fitted model does not beat "the market's next-best player is next
-    off the board", that is the finding, and the board must not present
-    simulator output as authoritative.
+
+def backtest(conn, settings=None, features=None, observations=None) -> dict:
+    """Leave-one-season-out validation across every season of history.
+
+    Holding out only the newest season (the old behavior) answered one
+    question with a sample six times smaller than what six seasons of
+    history can support -- 112 evaluations instead of ~712 -- which is the
+    difference between a number that moves on noise and one worth acting
+    on. Rotating every season through as the holdout, accumulating hits and
+    log-loss across all of them, is what makes the result trustworthy.
+
+    `features`, when given, restricts both the fit and the score to that
+    subset of `FEATURE_NAMES`: the design matrix handed to `fit` is sliced
+    down to those columns before any fitting happens, so a dropped feature
+    has no coefficient at all and genuinely cannot influence a prediction --
+    not just omitted from the report. This is what makes `ablation` below a
+    real measurement.
+
+    `observations`, when given, is used as-is instead of calling
+    `build_observations(conn)`. `ablation` calls this once per feature; on
+    six seasons of history, deriving the same observations fresh for each
+    call would replay the whole draft history five extra times for no
+    reason.
     """
     settings = settings or league_mod.load(conn)
-    observations = build_observations(conn)
+    if observations is None:
+        observations = build_observations(conn)
     if not observations:
-        return {"holdout_season": None, "top1": 0.0, "top5": 0.0,
+        return {"seasons": [], "top1": 0.0, "top5": 0.0,
                 "logloss": float("inf"), "adp_top1": 0.0,
-                "adp_logloss": float("inf"), "beats_adp": False}
+                "adp_logloss": float("inf"), "beats_adp": False, "by_round": []}
+
     X_list, chosen, managers, seasons = prepare(observations, settings)
-    holdout = max(seasons)
-    train = [i for i, s in enumerate(seasons) if s != holdout]
-    test = [i for i, s in enumerate(seasons) if s == holdout]
-    pooled = fit([X_list[i] for i in train], [chosen[i] for i in train]) \
-        if train else np.zeros(len(FEATURE_NAMES))
+    if features is not None:
+        keep = [i for i, name in enumerate(FEATURE_NAMES) if name in features]
+        X_list = [X[:, keep] for X in X_list]
 
-    fits = {}
-    for manager in set(managers):
-        idx = [i for i in train if managers[i] == manager]
-        if len(idx) < MIN_PICKS_FOR_PERSONAL:
-            fits[manager] = pooled
-            continue
-        lam = select_lambda([X_list[i] for i in idx], [chosen[i] for i in idx],
-                            [seasons[i] for i in idx], prior=pooled)
-        fits[manager] = fit([X_list[i] for i in idx], [chosen[i] for i in idx],
-                            prior=pooled, lam=lam)
+    unique_seasons = sorted(set(seasons))
+    teams = max(settings.teams, 1)
 
-    hits1 = hits5 = 0
+    hits1 = hits5 = adp_hits1 = n_total = 0
     ll = adp_ll = 0.0
-    adp_hits1 = 0
-    for i in test:
-        X, k = X_list[i], chosen[i]
-        probs = _softmax(X @ fits.get(managers[i], pooled))
-        order = np.argsort(-probs)
-        hits1 += int(order[0] == k)
-        hits5 += int(k in order[:5])
-        ll += np.log(max(probs[k], 1e-12))
-        # ADP baseline: the pool is sorted ascending by adp_rank (see
-        # build_observations), so pool position IS market rank order and
-        # index 0 is the market's next player. A uniform distribution over
-        # the pool is not a real baseline -- it would assign the market's #1
-        # player and its #200th the same probability, so "beats the market"
-        # would be true almost by construction. Score the market's own
-        # ranking with a softmax over pool position instead: a real
-        # probability distribution to compare the fitted model against.
-        adp_hits1 += int(k == 0)
-        adp_probs = _softmax(-ADP_BASELINE_TEMPERATURE * np.arange(len(X)))
-        adp_ll += np.log(max(adp_probs[k], 1e-12))
-    n = max(len(test), 1)
-    report = {"holdout_season": int(holdout), "top1": hits1 / n, "top5": hits5 / n,
-              "logloss": -ll / n, "adp_top1": adp_hits1 / n,
-              "adp_logloss": -adp_ll / n}
+    round_stats = {b: [0, 0, 0] for b in _ROUND_BUCKET_ORDER}   # top1, top5, n
+
+    for holdout in unique_seasons:
+        train = [i for i, s in enumerate(seasons) if s != holdout]
+        test = [i for i, s in enumerate(seasons) if s == holdout]
+        if not train or not test:
+            continue
+        pooled = fit([X_list[i] for i in train], [chosen[i] for i in train])
+
+        fits = {}
+        for manager in set(managers):
+            idx = [i for i in train if managers[i] == manager]
+            if len(idx) < MIN_PICKS_FOR_PERSONAL:
+                fits[manager] = pooled
+                continue
+            lam = select_lambda([X_list[i] for i in idx], [chosen[i] for i in idx],
+                                [seasons[i] for i in idx], prior=pooled)
+            fits[manager] = fit([X_list[i] for i in idx], [chosen[i] for i in idx],
+                                prior=pooled, lam=lam)
+
+        for i in test:
+            X, k = X_list[i], chosen[i]
+            probs = _softmax(X @ fits.get(managers[i], pooled))
+            order = np.argsort(-probs)
+            hit1 = int(order[0] == k)
+            hit5 = int(k in order[:5])
+            hits1 += hit1
+            hits5 += hit5
+            ll += np.log(max(probs[k], 1e-12))
+            # ADP baseline: the pool is sorted ascending by adp_rank (see
+            # build_observations), so pool position IS market rank order and
+            # index 0 is the market's next player -- true regardless of
+            # `features`, since masking only drops columns from X, never
+            # rows. A uniform distribution over the pool is not a real
+            # baseline -- it would assign the market's #1 player and its
+            # #200th the same probability, so "beats the market" would be
+            # true almost by construction. Score the market's own ranking
+            # with a softmax over pool position instead: a real probability
+            # distribution to compare the fitted model against, and one
+            # that does not move just because `features` changed what the
+            # model itself sees.
+            adp_hits1 += int(k == 0)
+            adp_probs = _softmax(-ADP_BASELINE_TEMPERATURE * np.arange(len(X)))
+            adp_ll += np.log(max(adp_probs[k], 1e-12))
+            n_total += 1
+
+            stats = round_stats[_round_bucket(observations[i].overall_pick, teams)]
+            stats[0] += hit1
+            stats[1] += hit5
+            stats[2] += 1
+
+    if n_total == 0:
+        # Every season was a degenerate fold (no train or no test partner --
+        # only reachable with fewer than two distinct seasons). Reporting
+        # 0.0/0.0 for hits1/n_total would read as a perfect log-loss of 0.0,
+        # which is a worse lie than admitting nothing was evaluated.
+        return {"seasons": unique_seasons, "top1": 0.0, "top5": 0.0,
+                "logloss": float("inf"), "adp_top1": 0.0,
+                "adp_logloss": float("inf"), "beats_adp": False, "by_round": []}
+
+    by_round = [{"round_bucket": b, "top1": s[0] / s[2], "top5": s[1] / s[2], "n": s[2]}
+                for b, s in round_stats.items() if s[2] > 0]
+    report = {"seasons": unique_seasons, "top1": hits1 / n_total,
+              "top5": hits5 / n_total, "logloss": -ll / n_total,
+              "adp_top1": adp_hits1 / n_total, "adp_logloss": -adp_ll / n_total,
+              "by_round": by_round}
     report["beats_adp"] = bool(report["logloss"] < report["adp_logloss"])
     return report
+
+
+def ablation(conn, settings=None) -> pd.DataFrame:
+    """Each new feature's contribution, measured rather than argued.
+
+    At roughly 105 picks per manager a feature that does not pay for itself
+    is worse than absent: it fits noise and drags every other coefficient
+    with it. This table is what decides which of them ship.
+
+    Builds the observations once and threads them into every `backtest`
+    call below (see that function's docstring) rather than the six
+    independent history replays a literal one-`backtest`-call-per-row
+    reading would cost.
+    """
+    observations = build_observations(conn)
+    full = backtest(conn, settings, observations=observations)
+    rows = [{"dropped": "none", "top1": full["top1"], "top5": full["top5"],
+             "delta_top1": 0.0}]
+    for feature in _NEW_FEATURES:
+        keep = [f for f in FEATURE_NAMES if f != feature]
+        cut = backtest(conn, settings, features=keep, observations=observations)
+        rows.append({"dropped": feature, "top1": cut["top1"],
+                     "top5": cut["top5"],
+                     "delta_top1": full["top1"] - cut["top1"]})
+    return pd.DataFrame(rows)
 
 
 def _round_bucket(overall_pick: int, teams: int) -> str:

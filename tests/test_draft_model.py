@@ -536,8 +536,12 @@ def test_fit_all_separates_managers_with_opposite_tastes(monkeypatch):
     assert wr_margin < 0     # wrguy actually leans WR over RB
 
 def test_backtest_reports_accuracy_against_an_adp_baseline(tmp_path):
+    # Was `report["holdout_season"] == 2025`: backtest held out only the
+    # newest season. Task 6 rotates every season through as the holdout, so
+    # the report now names the full set it validated across rather than a
+    # single one.
     report = backtest(_seed_many(tmp_path))
-    assert report["holdout_season"] == 2025
+    assert sorted(report["seasons"]) == [2023, 2024, 2025]
     assert 0.0 <= report["top1"] <= 1.0
     assert 0.0 <= report["top5"] <= 1.0
     assert isinstance(report["beats_adp"], bool)
@@ -777,3 +781,62 @@ def test_positional_bias_measures_how_early_a_league_takes_a_position(tmp_path):
     # Player A: market_rank 2, taken at pick 1 -> gap +1 (taken early).
     rb = bias[(bias.position == "RB") & (bias.round_bucket == "early")]
     assert rb["mean_gap"].iloc[0] == pytest.approx(1.0)
+
+
+def test_backtest_rotates_through_every_season(tmp_path):
+    from scoring.draft_model import backtest
+    report = backtest(_seed_many(tmp_path, seasons=(2023, 2024, 2025)))
+    assert sorted(report["seasons"]) == [2023, 2024, 2025]
+    assert 0.0 <= report["top1"] <= 1.0
+    assert 0.0 <= report["top5"] <= 1.0
+
+
+def test_backtest_reports_accuracy_by_round(tmp_path):
+    from scoring.draft_model import backtest
+    report = backtest(_seed_many(tmp_path, seasons=(2023, 2024, 2025)))
+    buckets = {r["round_bucket"] for r in report["by_round"]}
+    assert buckets <= {"early", "mid", "late"} and buckets
+    assert sum(r["n"] for r in report["by_round"]) > 0
+
+
+def test_backtest_can_restrict_to_a_feature_subset(tmp_path):
+    from scoring.draft_model import backtest, FEATURE_NAMES
+    conn = _seed_many(tmp_path, seasons=(2023, 2024, 2025))
+    subset = [f for f in FEATURE_NAMES if f != "trend"]
+    full = backtest(conn)
+    cut = backtest(conn, features=subset)
+    assert isinstance(cut["top1"], float)
+    assert full["top1"] >= 0.0 and cut["top1"] >= 0.0
+
+
+def test_backtest_features_mask_restricts_the_design_matrix(tmp_path, monkeypatch):
+    """The point of `features`: a dropped column must be invisible to `fit`,
+    not merely absent from the report. A mask that only filtered the report
+    afterward would still let `fit` learn a coefficient for the dropped
+    feature from the full matrix and let it influence every prediction --
+    this is the check that a report-only mask could never fail.
+    """
+    import scoring.draft_model as dm
+    from scoring.draft_model import FEATURE_NAMES
+    conn = _seed_many(tmp_path, seasons=(2023, 2024, 2025))
+    subset = [f for f in FEATURE_NAMES if f not in ("trend", "hype")]
+    real_fit = dm.fit
+    seen_widths = set()
+
+    def spy_fit(X_list, chosen_list, prior=None, lam=0.0):
+        if X_list:
+            seen_widths.add(X_list[0].shape[1])
+        return real_fit(X_list, chosen_list, prior=prior, lam=lam)
+
+    monkeypatch.setattr(dm, "fit", spy_fit)
+    dm.backtest(conn, features=subset)
+    assert seen_widths == {len(subset)}
+
+
+def test_ablation_has_a_row_per_new_feature(tmp_path):
+    from scoring.draft_model import ablation
+    table = ablation(_seed_many(tmp_path, seasons=(2023, 2024, 2025)))
+    assert list(table.columns) == ["dropped", "top1", "top5", "delta_top1"]
+    assert "none" in table["dropped"].tolist()
+    for f in ("age", "volatility", "hype", "trend"):
+        assert f in table["dropped"].tolist()
