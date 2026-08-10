@@ -220,3 +220,65 @@ def test_espn_adp_is_usable_rejects_a_constant_column():
 def test_espn_adp_is_usable_on_a_missing_column():
     from pipeline.sources import espn_adp_is_usable
     assert not espn_adp_is_usable(pd.DataFrame({"other": [1, 2]}))
+
+
+# --- ESPN preseason cheat sheet (PPR300) ------------------------------------
+# The reference `draft_model._enrich_pool` fits on and `draft_sim.build_pool`
+# ranks the live board on. Text is extracted from a PDF laid out in four
+# columns, so one physical line carries four entries at ranks n, n+80, n+160
+# and n+240 -- a per-line parse would only ever see the first.
+
+_CHEATSHEET_TEXT = (
+    "1. (RB1) Jahmyr Gibbs, DET $57 6 81. (WR40) Brian Thomas Jr., JAC $4 7 "
+    "161. (WR67) Jalen Nailor, LV $0 13 241. (RB70) LeQuint Allen, JAC $0 7\n"
+    "2. (RB2) Bijan Robinson, ATL $56 11 82. (QB8) Trevor Lawrence, JAC $4 7 "
+    "162. (DST1) Broncos D/ST, DEN $0 13 242. (K1) Brandon Aubrey, DAL $0 11\n"
+)
+
+
+def test_parse_cheatsheet_reads_all_four_columns_of_a_line():
+    df = sources.parse_espn_cheatsheet_text(_CHEATSHEET_TEXT, 2026)
+    assert df["cs_rank"].tolist() == [1, 2, 81, 82, 161, 162, 241, 242]
+    assert df.set_index("cs_rank").loc[1, "cs_name"] == "Jahmyr Gibbs"
+    assert df.set_index("cs_rank").loc[241, "cs_name"] == "LeQuint Allen"
+
+
+def test_parse_cheatsheet_drops_the_duplicate_rank_one_header():
+    """Every real sheet yields 301 matches for 300 players -- rank 1 appears
+    twice as a header artifact. Deduping on rank is what makes "one row per
+    rank" hold rather than trusting the match count."""
+    doubled = "1. (RB1) Jahmyr Gibbs, DET $57 6\n" + _CHEATSHEET_TEXT
+    df = sources.parse_espn_cheatsheet_text(doubled, 2026)
+    assert df["cs_rank"].is_unique
+    assert (df["cs_rank"] == 1).sum() == 1
+
+
+def test_parse_cheatsheet_normalizes_dst_and_keeps_auction_value():
+    df = sources.parse_espn_cheatsheet_text(_CHEATSHEET_TEXT, 2026).set_index("cs_rank")
+    # ESPN's position tag is "DST" but the name carries "D/ST"; the rest of
+    # the codebase says DST, and `adp_match_key` keys a defense on its team.
+    assert df.loc[162, "position"] == "DST" and df.loc[162, "team"] == "DEN"
+    assert df.loc[242, "position"] == "K"
+    # Nothing consumes the auction value yet; it is a cardinal price signal
+    # that rank cannot express, captured so a later feature can use it.
+    assert df.loc[1, "auction_value"] == 57.0
+    assert df.loc[161, "auction_value"] == 0.0
+    assert df["season"].unique().tolist() == [2026]
+
+
+def test_parse_cheatsheet_reads_a_row_with_no_space_before_the_price():
+    """A long name pushes the auction column flush against the team
+    ("CLE$0"). Requiring whitespace there silently dropped exactly one
+    player from each of the 2021 and 2022 sheets."""
+    text = "274. (WR100) Donovan Peoples-Jones, CLE$0 13\n"
+    df = sources.parse_espn_cheatsheet_text(text, 2021)
+    assert df["cs_rank"].tolist() == [274]
+    assert df.iloc[0]["cs_name"] == "Donovan Peoples-Jones"
+    assert df.iloc[0]["team"] == "CLE" and df.iloc[0]["auction_value"] == 0.0
+
+
+def test_cheatsheet_url_switches_naming_convention_in_2023():
+    assert sources.cheatsheet_url(2021).endswith("/21/NFLDK2021_CS_PPR300.pdf")
+    assert sources.cheatsheet_url(2022).endswith("/22/NFLDK2022_CS_PPR300.pdf")
+    assert sources.cheatsheet_url(2023).endswith("/23/NFL23_CS_PPR300.pdf")
+    assert sources.cheatsheet_url(2026).endswith("/26/NFL26_CS_PPR300.pdf")

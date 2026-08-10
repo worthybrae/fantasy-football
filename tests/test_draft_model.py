@@ -592,14 +592,14 @@ def test_describe_names_task_4_features_instead_of_reporting_average(tmp_path):
     pooled = np.zeros(len(FEATURE_NAMES))
     beta = pooled.copy()
     beta[FEATURE_NAMES.index("no_track_record")] = 3.0
-    beta[FEATURE_NAMES.index("trend")] = 2.0
-    beta[FEATURE_NAMES.index("volatility")] = 1.5
+    beta[FEATURE_NAMES.index("hype")] = 2.0
+    beta[FEATURE_NAMES.index("age")] = 1.5
     beta[FEATURE_NAMES.index("pos_RB")] = 0.9
     text = describe(beta, pooled)
     assert text != "drafts close to league average"
     assert "unproven" in text.lower()
-    assert "trend" in text.lower()
-    assert "volatile" in text.lower()
+    assert "hype" in text.lower()
+    assert "veteran" in text.lower()
 
 
 def _seed_with_espn(tmp_path):
@@ -633,22 +633,74 @@ def _seed_with_espn(tmp_path):
     return conn
 
 
-def test_pool_market_rank_prefers_espn_over_ffc(tmp_path):
+def test_pool_market_rank_ignores_the_espn_api_ranks(tmp_path):
+    """A `historic_espn` (API) row that disagrees does not move `market_rank`.
+
+    This reverses an earlier decision deliberately, so it is pinned rather
+    than left implicit. ESPN's `kona_player_info` endpoint serves nothing for
+    2020-2022 and a hindsight-contaminated 2023 board (see `_enrich_pool`),
+    which cost ~7 points of top-1 accuracy. The fixture reverses the API's
+    order against FFC's precisely so a re-preference for it fails here
+    instead of silently regressing the fit.
+    """
     obs = build_observations(_seed_with_espn(tmp_path))
     pool = obs[0].pool.set_index("norm")
-    assert pool.loc["player a"]["adp_rank"] == 1        # FFC, unchanged
-    assert pool.loc["player a"]["market_rank"] == 2     # ESPN's view
-    assert pool.loc["player b"]["market_rank"] == 1
+    assert pool.loc["player a"]["adp_rank"] == 1
+    assert pool.loc["player a"]["market_rank"] == 1     # FFC, not the API's 2
+    assert pool.loc["player b"]["market_rank"] == 2
 
 
-def test_pool_falls_back_to_ffc_when_espn_lacks_the_player(tmp_path):
-    from pipeline.db import write_table as wt
+def test_pool_market_rank_prefers_the_espn_cheat_sheet_over_ffc(tmp_path):
+    """The cheat sheet is the reference; FFC only fills what it misses.
+
+    Unlike the API ranks above, the printable PPR300 cheat sheet is a
+    genuine preseason snapshot for every season, which is why it is the
+    fitting reference. Here it reverses FFC's order, so falling back to FFC
+    when a cheat sheet exists fails this test.
+    """
     conn = _seed_with_espn(tmp_path)
-    wt(conn, "historic_espn", pd.DataFrame([
-        {"season": 2025, "espn_name": "Player B", "position": "WR",
-         "espn_rank": 1, "adp_usable": True}]))
+    write_table(conn, "historic_espn_cs", pd.DataFrame([
+        {"season": 2025, "cs_rank": 1, "position": "WR",
+         "cs_name": "Player B", "team": "GB", "auction_value": 50.0},
+        {"season": 2025, "cs_rank": 2, "position": "RB",
+         "cs_name": "Player A", "team": "DET", "auction_value": 40.0},
+    ]))
     pool = build_observations(conn)[0].pool.set_index("norm")
-    assert pool.loc["player a"]["market_rank"] == 1     # fell back to adp_rank
+    assert pool.loc["player b"]["market_rank"] == 1     # cheat sheet's view
+    assert pool.loc["player a"]["market_rank"] == 2
+    assert pool.loc["player a"]["adp_rank"] == 1        # FFC, unchanged
+
+
+def test_pool_falls_back_to_ffc_for_a_player_the_cheat_sheet_misses(tmp_path):
+    """The sheet stops at 300; a deeper pool still has to rank end to end.
+
+    The unranked player continues the sequence behind the ranked one rather
+    than being interleaved or left NaN -- `market_rank` must be a dense
+    1..N with no holes, since that is the scale `reach`/`fall` were fitted
+    on and `build_pool` reproduces.
+    """
+    conn = _seed_with_espn(tmp_path)
+    write_table(conn, "historic_espn_cs", pd.DataFrame([
+        {"season": 2025, "cs_rank": 1, "position": "WR",
+         "cs_name": "Player B", "team": "GB", "auction_value": 50.0},
+    ]))
+    pool = build_observations(conn)[0].pool.set_index("norm")
+    assert pool.loc["player b"]["market_rank"] == 1
+    assert pool.loc["player a"]["market_rank"] == 2
+
+
+def test_market_rank_matches_the_scale_build_pool_ranks_on(tmp_path):
+    """The fit and the simulator must read one source on one scale.
+
+    `_enrich_pool` sets `market_rank` from the dense per-season FFC
+    `adp_rank`; `draft_sim.build_pool` sets its own `market_rank` to a dense
+    1..N re-ranking of the live FFC feed. Both are therefore dense 1..N with
+    no gaps, which is what makes a `reach`/`fall` coefficient fitted on one
+    mean the same thing applied to the other.
+    """
+    pool = build_observations(_seed_with_espn(tmp_path))[0].pool
+    ranks = sorted(pool["market_rank"].tolist())
+    assert ranks == list(range(1, len(ranks) + 1))
 
 
 def test_pool_carries_player_attributes_with_neutral_defaults(tmp_path):
@@ -666,18 +718,19 @@ def test_pool_carries_player_attributes_with_neutral_defaults(tmp_path):
 def test_pool_hype_is_market_ahead_of_production(tmp_path):
     conn = _seed_with_espn(tmp_path)
     write_table(conn, "weekly", pd.DataFrame([
-        # Player B produced far less than the market's view of him.
-        {"player_id": "b", "player_display_name": "Player B", "position": "WR",
-         "recent_team": "GB", "opponent_team": "DET", "season": 2024, "week": w,
-         "receptions": 1, "receiving_yards": 5, "targets": 2, "carries": 0}
-        for w in range(1, 18)] + [
+        # Player A produced far less than the market's view of him. The
+        # market (FFC) ranks A first, so A is the one being taken on faith.
         {"player_id": "a", "player_display_name": "Player A", "position": "RB",
          "recent_team": "DET", "opponent_team": "GB", "season": 2024, "week": w,
+         "receptions": 1, "receiving_yards": 5, "targets": 2, "carries": 0}
+        for w in range(1, 18)] + [
+        {"player_id": "b", "player_display_name": "Player B", "position": "WR",
+         "recent_team": "GB", "opponent_team": "DET", "season": 2024, "week": w,
          "receptions": 9, "receiving_yards": 90, "targets": 11, "carries": 5}
         for w in range(1, 18)]))
     pool = build_observations(conn)[0].pool.set_index("norm")
-    # B: market_rank 1, prod_rank 2 -> hype +1. A: market 2, prod 1 -> -1.
-    assert pool.loc["player b"]["hype"] > pool.loc["player a"]["hype"]
+    # A: market_rank 1, prod_rank 2 -> hype +1. B: market 2, prod 1 -> -1.
+    assert pool.loc["player a"]["hype"] > pool.loc["player b"]["hype"]
 
 
 def test_pool_treats_a_name_collision_in_attributes_as_no_track_record(tmp_path):
@@ -735,8 +788,7 @@ def test_new_features_are_present_and_neutral_without_history():
     import numpy as np
     from scoring.draft_model import feature_matrix, FEATURE_NAMES, PickObservation
     from scoring import league
-    assert FEATURE_NAMES[-5:] == ["age", "volatility", "no_track_record",
-                                  "hype", "trend"]
+    assert FEATURE_NAMES[-4:] == ["age", "no_track_record", "hype", "trend"]
     pool = pd.DataFrame({
         "norm": ["a", "b"], "position": ["RB", "WR"], "adp_rank": [1.0, 2.0],
         "market_rank": [1.0, 2.0], "hype": [np.nan, np.nan],
@@ -746,7 +798,7 @@ def test_new_features_are_present_and_neutral_without_history():
                           pool=pool, roster={}, recent=[])
     X = feature_matrix(obs, league.default_settings())
     assert X.shape == (2, len(FEATURE_NAMES))
-    for name in ("age", "volatility", "hype", "trend"):
+    for name in ("age", "hype", "trend"):
         assert (X[:, FEATURE_NAMES.index(name)] == 0.0).all()
     assert (X[:, FEATURE_NAMES.index("no_track_record")] == 1.0).all()
     assert np.isfinite(X).all()
@@ -774,13 +826,34 @@ def test_positional_bias_measures_how_early_a_league_takes_a_position(tmp_path):
     """If the league takes QBs 20 picks ahead of where the market ranks
     them, that is a fact about the league, not about any one manager."""
     from scoring.draft_model import positional_bias
-    conn = _seed_with_espn(tmp_path)
+    conn = get_conn(str(tmp_path / "bias.duckdb"))
+    write_table(conn, "draft_picks", pd.DataFrame([
+        {"season": 2025, "overall_pick": 1, "round": 1, "round_pick": 1,
+         "team_id": 1, "espn_player_id": 11, "player_name": "Early Qb",
+         "position": "QB", "nfl_team": "BUF", "keeper": False},
+        {"season": 2025, "overall_pick": 2, "round": 1, "round_pick": 2,
+         "team_id": 2, "espn_player_id": 12, "player_name": "Ontime Rb",
+         "position": "RB", "nfl_team": "DET", "keeper": False},
+    ]))
+    write_table(conn, "draft_teams", pd.DataFrame([
+        {"season": 2025, "team_id": 1, "manager": "worthy", "slot": 1},
+        {"season": 2025, "team_id": 2, "manager": "dan", "slot": 2},
+    ]))
+    # The QB is the market's 25th player and goes first overall: 24 picks
+    # ahead of where the market has him. The RB goes exactly on schedule.
+    write_table(conn, "historic_adp", pd.DataFrame([
+        {"season": 2025, "adp_name": "Early Qb", "position": "QB",
+         "team": "BUF", "adp_rank": 25},
+        {"season": 2025, "adp_name": "Ontime Rb", "position": "RB",
+         "team": "DET", "adp_rank": 2},
+    ]))
     bias = positional_bias(conn)
     assert list(bias.columns) == ["position", "round_bucket", "mean_gap", "n"]
     assert (bias["n"] > 0).all()
-    # Player A: market_rank 2, taken at pick 1 -> gap +1 (taken early).
+    qb = bias[(bias.position == "QB") & (bias.round_bucket == "early")]
+    assert qb["mean_gap"].iloc[0] == pytest.approx(24.0)
     rb = bias[(bias.position == "RB") & (bias.round_bucket == "early")]
-    assert rb["mean_gap"].iloc[0] == pytest.approx(1.0)
+    assert rb["mean_gap"].iloc[0] == pytest.approx(0.0)
 
 
 def test_backtest_rotates_through_every_season(tmp_path):
@@ -838,7 +911,7 @@ def test_ablation_has_a_row_per_new_feature(tmp_path):
     table = ablation(_seed_many(tmp_path, seasons=(2023, 2024, 2025)))
     assert list(table.columns) == ["dropped", "top1", "top5", "delta_top1"]
     assert "none" in table["dropped"].tolist()
-    for f in ("age", "volatility", "hype", "trend"):
+    for f in ("age", "hype", "trend"):
         assert f in table["dropped"].tolist()
 
 

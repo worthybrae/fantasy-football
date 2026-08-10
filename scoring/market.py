@@ -11,7 +11,14 @@ import pandas as pd
 # ECR, MFL's IS_PPR-filtered ADP, CBS's ppr top-200. espn_ppr_rank is also
 # a standalone board column, so it is not dropped with the other inputs.
 _RANK_COLS = ["ffc_rank", "espn_ppr_rank", "fp_rank", "mfl_rank", "cbs_rank"]
-_DROP_COLS = ["ffc_rank", "espn_rank", "fp_rank", "mfl_rank", "cbs_rank"]
+# `ffc_rank` is NOT dropped with the other consensus inputs: it is the single
+# source `draft_sim.build_pool` ranks the simulator's pool on, because it is
+# the only one with both a consistent six-season history (`historic_adp`,
+# what `draft_model._enrich_pool` fits `reach`/`fall` against) and a
+# current-season feed. The fit and the simulator have to read the same
+# source or a coefficient learned on one means something else applied to the
+# other. It stays a consensus input as well -- the two uses are independent.
+_DROP_COLS = ["espn_rank", "fp_rank", "mfl_rank", "cbs_rank"]
 
 def _norm(name):
     from scoring.board import _norm_name  # deferred: avoids circular import

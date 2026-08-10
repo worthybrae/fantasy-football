@@ -31,9 +31,8 @@ from scoring import factors
 from scoring.board import FANTASY_POSITIONS, _norm_name, adp_match_key
 from scoring.config import CURRENT_SEASON, RECENCY_WEIGHTS
 from scoring.draft_model import (EARLY_ROUNDS, FEATURE_NAMES, HYPE_SCALE,
-                                 RUN_WINDOW, VOLATILITY_SCALE,
-                                 _ATTRIBUTE_DEFAULTS, _centre_within_position,
-                                 _log_rank_features)
+                                 RUN_WINDOW, _ATTRIBUTE_DEFAULTS,
+                                 _centre_within_position, _log_rank_features)
 from scoring.player_history import attributes_as_of
 
 FLEX_POSITIONS = ("RB", "WR", "TE")
@@ -210,7 +209,6 @@ _TE_EARLY = FEATURE_NAMES.index("te_early")
 _NEED = FEATURE_NAMES.index("need")
 _RUN = FEATURE_NAMES.index("run")
 _AGE = FEATURE_NAMES.index("age")
-_VOLATILITY = FEATURE_NAMES.index("volatility")
 _NO_TRACK_RECORD = FEATURE_NAMES.index("no_track_record")
 _HYPE = FEATURE_NAMES.index("hype")
 _TREND = FEATURE_NAMES.index("trend")
@@ -243,8 +241,6 @@ class SimPool(NamedTuple):
     # build_pool's own comment for the inversion that mixing the two causes.
     market_rank: np.ndarray
     age: np.ndarray
-    ppg_std: np.ndarray
-    missed_rate: np.ndarray
     no_track_record: np.ndarray
     hype: np.ndarray
     trend: np.ndarray
@@ -287,6 +283,27 @@ def _availability(conn) -> dict:
     return dict(zip(raw["player_id"], rate))
 
 
+def _cheatsheet_ranks(conn, ranked: pd.DataFrame, season: int) -> pd.Series:
+    """This season's ESPN preseason cheat-sheet rank per board row.
+
+    All-NaN when the table is absent or does not cover `season`, which makes
+    `build_pool` fall through to `ffc_rank` -- the same fallback ladder
+    `draft_model._enrich_pool` uses, so the fit and the simulator degrade
+    together rather than diverging.
+    """
+    cs = read_table(conn, "historic_espn_cs")
+    if cs.empty or "season" not in cs.columns:
+        return pd.Series(np.nan, index=ranked.index)
+    cs = cs[cs["season"] == season].copy()
+    if cs.empty:
+        return pd.Series(np.nan, index=ranked.index)
+    cs["key"] = [adp_match_key(name, position, team) for name, position, team
+                 in zip(cs["cs_name"], cs["position"], cs["team"])]
+    cs = cs.dropna(subset=["key"]).sort_values("cs_rank").drop_duplicates(
+        "key", keep="first")
+    return ranked["key"].map(cs.set_index("key")["cs_rank"])
+
+
 def build_pool(conn, board: pd.DataFrame, settings) -> SimPool:
     points = projections(conn, board)
     ranked = board.copy()
@@ -298,6 +315,18 @@ def build_pool(conn, board: pd.DataFrame, settings) -> SimPool:
     # draft_model._enrich_pool's market_rank -- both dense per-season ranks,
     # not `board`'s raw, multi-source consensus average (scoring/market.py),
     # which is never re-ranked within `board` and can exceed len(board).
+    #
+    # SOURCE, not just scale: the ordering comes from this season's ESPN
+    # preseason cheat sheet, falling back to `ffc_rank` (Fantasy Football
+    # Calculator) and then to the consensus -- the same ladder, in the same
+    # order, that `draft_model._enrich_pool` fits on. See its docstring for
+    # why the cheat sheet and not ESPN's API. Ranking on
+    # `board["market_rank"]`, the five-source consensus, would put the fit
+    # and the simulator on two different orderings of the same players, so a
+    # `reach` coefficient learned against one would be applied to a board
+    # that disagrees with it. A board built without either column (a bare
+    # fixture) falls back to the consensus, which keeps such fixtures
+    # working without silently changing what production reads.
     # Folding a fillna sentinel into the same sort_values as the real
     # market_rank values is not safe: a real rank of 500 on a 5-row board
     # (the pinned regression fixture below) can exceed even a
@@ -317,8 +346,30 @@ def build_pool(conn, board: pd.DataFrame, settings) -> SimPool:
     # appended after the last real rank, not interleaved, so they stay
     # takeable but sit far down the board (an opponent can still draft
     # them).
-    has_rank = ranked["market_rank"].notna()
-    known = ranked[has_rank].sort_values("market_rank", kind="stable")
+    # The season being DRAFTED, which is always the current one -- not
+    # `settings.season`. `league.load` returns the newest *imported* season's
+    # rules (2025 for a league whose last completed draft was 2025), which is
+    # the right source for teams/starters/scoring and the wrong answer to
+    # "which season's board is this". Reading `settings.season or
+    # CURRENT_SEASON` meant the fallback only ever fired for a league with no
+    # import history at all; with any history it silently ranked this year's
+    # board on last year's cheat sheet and read player attributes one season
+    # stale (`attributes_as_of` looks strictly before `season`, so a 2026
+    # draft never saw 2025's production).
+    season = CURRENT_SEASON
+    team_col = (ranked["team"] if "team" in ranked.columns
+                else pd.Series([None] * len(ranked), index=ranked.index))
+    ranked = ranked.assign(key=[
+        adp_match_key(name, position, team) for name, position, team
+        in zip(ranked["name"], ranked["position"], team_col)])
+    ranked["_cs_rank"] = _cheatsheet_ranks(conn, ranked, season)
+
+    rank_col = "ffc_rank" if "ffc_rank" in ranked.columns else "market_rank"
+    # The cheat sheet leads; `rank_col` both fills the players it never
+    # ranked (it stops at 300) and breaks ties within it.
+    has_rank = ranked["_cs_rank"].notna() | ranked[rank_col].notna()
+    known = ranked[has_rank].sort_values(["_cs_rank", rank_col], kind="stable",
+                                         na_position="last")
     unknown = ranked[~has_rank]
     ranked = pd.concat([known, unknown], ignore_index=True)
     dense_rank = np.arange(1, len(ranked) + 1, dtype=float)
@@ -334,12 +385,8 @@ def build_pool(conn, board: pd.DataFrame, settings) -> SimPool:
     # read strictly from seasons before the draft season, so nothing here is
     # hindsight. A player the join misses (no season of prior stats under
     # this key) gets the same neutral defaults and no_track_record=True.
-    season = settings.season or CURRENT_SEASON
-    team_col = (ranked["team"] if "team" in ranked.columns
-                else pd.Series([None] * len(ranked), index=ranked.index))
-    ranked = ranked.assign(key=[
-        adp_match_key(name, position, team) for name, position, team
-        in zip(ranked["name"], ranked["position"], team_col)])
+    # `key` is already on `ranked`: the cheat-sheet join above needs it too,
+    # so it is built once, before the sort.
     attrs = attributes_as_of(conn, season)
     if not attrs.empty:
         # Same collision guard as _enrich_pool: a non-DST key carries no
@@ -358,12 +405,15 @@ def build_pool(conn, board: pd.DataFrame, settings) -> SimPool:
                 ranked[col] = ranked[col].fillna(default)
     # Positive means the market is ahead of what the player has actually
     # done. NaN when he has no production to rank, which feature_matrix
-    # (and _live_features) read as neutral rather than as zero. Deliberately
-    # the raw board `market_rank` (not `dense_rank` below): unlike
-    # reach/fall, `hype`'s scale is not the fit's -- it is nan_to_num'd and
-    # HYPE_SCALE'd downstream regardless, and an unranked player's NaN
-    # market_rank already yields the intended neutral (NaN) hype here.
-    ranked["hype"] = ranked["prod_rank"] - ranked["market_rank"]
+    # (and _live_features) read as neutral rather than as zero.
+    #
+    # `dense_rank`, not the raw board `market_rank`: `_enrich_pool` computes
+    # this as `prod_rank - market_rank` against its own dense per-season
+    # rank, so subtracting anything else here would fit and apply `hype` on
+    # two different scales. The left merge above cannot reorder or duplicate
+    # rows (`attrs` is deduped on `key`), so `dense_rank` still lines up
+    # positionally with `ranked`.
+    ranked["hype"] = ranked["prod_rank"] - dense_rank
 
     return SimPool(
         player_id=ranked["player_id"].to_numpy(),
@@ -378,8 +428,6 @@ def build_pool(conn, board: pd.DataFrame, settings) -> SimPool:
         # not reach here.
         market_rank=dense_rank,
         age=ranked["age"].to_numpy(dtype=float),
-        ppg_std=ranked["ppg_std"].to_numpy(dtype=float),
-        missed_rate=ranked["missed_rate"].to_numpy(dtype=float),
         no_track_record=ranked["no_track_record"].to_numpy(dtype=bool),
         hype=ranked["hype"].to_numpy(dtype=float),
         trend=ranked["trend"].to_numpy(dtype=float))
@@ -422,8 +470,6 @@ def _live_features(pool, available, overall_pick, roster, recent, settings):
             X[mask, _RUN] = run_share
 
     X[:, _AGE] = _centre_within_position(pool.age[available], positions)
-    X[:, _VOLATILITY] = (pool.ppg_std[available] / VOLATILITY_SCALE
-                         + pool.missed_rate[available])
     X[:, _NO_TRACK_RECORD] = pool.no_track_record[available].astype(float)
     X[:, _HYPE] = np.nan_to_num(pool.hype[available], nan=0.0) / HYPE_SCALE
     X[:, _TREND] = pool.trend[available]

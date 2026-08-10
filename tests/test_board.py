@@ -74,12 +74,16 @@ def test_board_column_contract(tmp_path):
     # Task 13 deliberately extends the contract with exactly avail_pct, ev,
     # ev_se (sim output) -- see test_board_sim_columns_are_null_without_a_sim
     # for the null-by-default guarantee this list alone doesn't cover.
+    # Task 9 adds `ffc_rank`: `draft_sim.build_pool` ranks the simulator's
+    # pool on it so the simulator and the fit read one source (see
+    # `scoring.market._DROP_COLS`), which means it has to survive onto the
+    # board rather than being dropped with the other consensus inputs.
     board = build_board(_seed(tmp_path))
     expected = ["player_id", "name", "position", "team", "bye", "production",
                 "durability", "role", "environment", "schedule", "composite",
                 "vor", "tier", "market_rank", "market_spread", "market_sources",
-                "espn_ppr_rank", "edge", "rookie", "drafted", "rank", "stats",
-                "avail_pct", "ev", "ev_se"]
+                "espn_ppr_rank", "ffc_rank", "edge", "rookie", "drafted", "rank",
+                "stats", "avail_pct", "ev", "ev_se"]
     assert list(board.columns) == expected
     assert board["rank"].tolist() == list(range(1, len(board) + 1))
 

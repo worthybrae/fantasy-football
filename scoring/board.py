@@ -61,7 +61,8 @@ _ADP_TEAM_ALIASES = {"LAR": "LA", "WSH": "WAS", "JAC": "JAX", "SD": "LAC", "OAK"
 _BOARD_COLUMNS = [
     "player_id", "name", "position", "team", "bye", "production", "durability",
     "role", "environment", "schedule", "composite", "vor", "tier", "market_rank",
-    "market_spread", "market_sources", "espn_ppr_rank", "edge", "rookie", "drafted", "rank",
+    "market_spread", "market_sources", "espn_ppr_rank", "ffc_rank", "edge",
+    "rookie", "drafted", "rank",
     "stats", "avail_pct", "ev", "ev_se",
 ]
 

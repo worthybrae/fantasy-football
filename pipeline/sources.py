@@ -91,6 +91,79 @@ def parse_espn(payload: dict, year: int | None = None) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["espn_id", "espn_name", "position", "team",
                                        "espn_adp", "espn_ppr_rank", "espn_proj"])
 
+# ESPN's printable preseason draft cheat sheet: the PPR top 300 as it stood
+# BEFORE each season, which is exactly what `draft_model` needs and what the
+# `kona_player_info` API above does not reliably give (see
+# `draft_model._enrich_pool`). The filename convention changed in 2023.
+CHEATSHEET_URL = "https://g.espncdn.com/s/ffldraftkit/{yy}/{name}"
+_CHEATSHEET_RENAMED_FROM = 2023
+
+# "12. (RB5) Bijan Robinson, ATL $56 11" -> rank, position, position rank,
+# name, team, auction value. The trailing integer is the bye week, which
+# nothing reads. Text extracts in a four-column layout, so one physical line
+# holds four entries and `findall` (not a per-line parse) is what recovers
+# them.
+#
+# The space before `$` is optional: a long enough name pushes the column
+# flush against the team ("Donovan Peoples-Jones, CLE$0 13"), which silently
+# cost one player in each of 2021 and 2022 when this required whitespace.
+_CHEATSHEET_ROW = re.compile(
+    r"(\d+)\.\s+\((QB|RB|WR|TE|K|DST|D/ST)(\d+)\)\s+([^,]+),\s+([A-Z]{2,3})\s*\$(\d+)")
+
+_CHEATSHEET_COLUMNS = ["season", "cs_rank", "position", "cs_name", "team",
+                       "auction_value"]
+
+
+def cheatsheet_url(year: int) -> str:
+    yy = f"{year % 100:02d}"
+    name = (f"NFL{yy}_CS_PPR300.pdf" if year >= _CHEATSHEET_RENAMED_FROM
+            else f"NFLDK{year}_CS_PPR300.pdf")
+    return CHEATSHEET_URL.format(yy=yy, name=name)
+
+
+def parse_espn_cheatsheet_text(text: str, year: int) -> pd.DataFrame:
+    """Rows from one cheat sheet's extracted text, deduped to one per rank.
+
+    The extract yields 301 matches for 300 players: rank 1 appears a second
+    time as a header artifact. Deduping on rank (keeping the first) is what
+    makes "one row per rank, 1..300" hold, rather than trusting the count.
+
+    Split from `parse_espn_cheatsheet` so the parse is testable from a
+    literal string rather than requiring a binary PDF fixture.
+    """
+    rows = [{"season": year, "cs_rank": int(rank),
+             # "D/ST" is ESPN's spelling in the position tag; the rest of the
+             # codebase says "DST".
+             "position": "DST" if pos == "D/ST" else pos,
+             "cs_name": name.strip(), "team": team,
+             "auction_value": float(value)}
+            for rank, pos, _posrank, name, team, value
+            in _CHEATSHEET_ROW.findall(text)]
+    df = pd.DataFrame(rows, columns=_CHEATSHEET_COLUMNS)
+    if df.empty:
+        return df
+    return (df.sort_values("cs_rank").drop_duplicates("cs_rank", keep="first")
+              .reset_index(drop=True))
+
+
+def parse_espn_cheatsheet(data: bytes, year: int) -> pd.DataFrame:
+    from pypdf import PdfReader          # deferred: only this path needs it
+    from io import BytesIO
+
+    text = "".join(page.extract_text() for page in PdfReader(BytesIO(data)).pages)
+    return parse_espn_cheatsheet_text(text, year)
+
+
+def fetch_espn_cheatsheet(year: int) -> pd.DataFrame:
+    resp = requests.get(cheatsheet_url(year), headers=UA, timeout=60)
+    resp.raise_for_status()
+    df = parse_espn_cheatsheet(resp.content, year)
+    if df.empty:
+        raise ValueError(f"no rows parsed from {cheatsheet_url(year)} "
+                         "- upstream layout drift?")
+    return df
+
+
 def espn_adp_is_usable(df: pd.DataFrame) -> bool:
     """Whether a season's `espn_adp` column carries real draft positions.
 

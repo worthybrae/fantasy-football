@@ -111,6 +111,30 @@ def main(argv: list[str]) -> int:
             print(f"  note: ESPN ADP unusable for {unusable} "
                   "(reset to a constant) -- ranked on espn_ppr_rank instead")
 
+    # ESPN's printable preseason cheat sheet -- the reference the fit and the
+    # simulator both rank on (`draft_model._enrich_pool`,
+    # `draft_sim.build_pool`). CURRENT_SEASON is imported alongside the
+    # drafted seasons because `build_pool` needs this season's ordering to
+    # put the live board on the same scale the coefficients were fitted on.
+    cs_seasons = sorted(set(summary["seasons"]) | {CURRENT_SEASON})
+    cs_frames, cs_missing = [], []
+    for season in cs_seasons:
+        try:
+            cs_frames.append(sources.fetch_espn_cheatsheet(season))
+        except Exception as e:
+            cs_missing.append(season)
+            print(f"  WARN ESPN cheat sheet {season}: {e}")
+    if cs_frames:
+        rows = pd.concat(cs_frames, ignore_index=True)
+        write_table(conn, "historic_espn_cs", rows)
+        record_freshness(conn, "historic_espn_cs", True, len(rows))
+        got = rows.groupby("season").size().to_dict()
+        print("  ESPN cheat sheets: "
+              + ", ".join(f"{s} {n}" for s, n in sorted(got.items())))
+    if cs_missing:
+        print(f"  note: no ESPN cheat sheet for {cs_missing} "
+              "-- those seasons fall back to the FFC ADP rank")
+
     print(f"Imported {summary['picks']} picks across "
           f"{len(summary['seasons'])} seasons:")
     print("\n".join(validate_import(conn)))

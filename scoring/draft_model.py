@@ -31,23 +31,56 @@ _ATTRIBUTE_DEFAULTS = {"age": np.nan, "ppg_std": 0.0, "missed_rate": 0.0,
 
 
 def _enrich_pool(conn, pool: pd.DataFrame, season: int,
-                 espn: pd.DataFrame) -> pd.DataFrame:
+                 cheatsheet: pd.DataFrame = None) -> pd.DataFrame:
     """Attach the market reference and the player-at-pick-time attributes.
 
-    `market_rank` prefers ESPN's dense rank -- the league drafts on ESPN,
-    off ESPN's board, so that is the ordering the room actually saw -- and
-    falls back to the FFC `adp_rank` for a player ESPN's top-N did not
-    reach. Both are dense 1..N per season, so the two are on one scale.
+    `market_rank` is ESPN's printable preseason cheat sheet (`PPR300`),
+    dense-ranked 1..N per season, falling back to the Fantasy Football
+    Calculator `adp_rank` for any season or player it does not cover. This
+    is the same reference `draft_sim.build_pool` ranks the live board on,
+    and that identity is the point: `reach`/`fall` are fitted here and
+    applied there, so the two must mean the same thing.
+
+    The cheat sheet is what the room actually saw -- the league drafts off
+    ESPN -- and, unlike ESPN's `kona_player_info` API, it is a genuine
+    *preseason* snapshot. The API is deliberately NOT the reference here
+    (Task 9 measured this; do not re-litigate it without re-measuring):
+
+    - It serves no `draftRanksByRankType.PPR.rank` at all for 2020-2022, so
+      half of a six-season fit would silently fall back to FFC anyway and
+      `market_rank` would mean two different things across the training set.
+    - Its 2023 board is contaminated with hindsight: it correlates 0.905
+      with FFC's *2024* ADP against 0.678 with 2023's own, 9 of the top 10
+      against 5, and ranks Kyren Williams 7th when he was a late-round
+      flier that preseason. The players are correctly 2023; the ranks are
+      not. 2024 does not show this, so the contamination is specific to
+      2023 rather than uniform across ESPN's history.
+
+    Using the API ranks cost ~7 points of top-1 accuracy. `historic_espn` is
+    still imported and is still correct for the current season -- it feeds
+    the live board's consensus via `scoring.market` -- it is just not the
+    historical fitting reference.
     """
     pool = pool.copy()
-    if espn.empty:
+    if cheatsheet is None or cheatsheet.empty:
         pool["market_rank"] = pool["adp_rank"]
     else:
-        season_espn = espn[espn["season"] == season].copy()
-        season_espn["key"] = _match_keys(season_espn, "espn_name")
-        season_espn = season_espn.dropna(subset=["key"]).drop_duplicates("key")
-        ranks = season_espn.set_index("key")["espn_rank"]
-        pool["market_rank"] = pool["key"].map(ranks).fillna(pool["adp_rank"])
+        season_cs = cheatsheet[cheatsheet["season"] == season].copy()
+        season_cs["key"] = _match_keys(season_cs, "cs_name")
+        season_cs = season_cs.dropna(subset=["key"]).sort_values(
+            "cs_rank").drop_duplicates("key", keep="first")
+        ranks = season_cs.set_index("key")["cs_rank"]
+        mapped = pool["key"].map(ranks)
+        # Dense 1..N over the pool, cheat-sheet order first and the players
+        # it never ranked continuing the sequence behind them in FFC order.
+        # Re-ranking rather than passing `cs_rank` through is what keeps this
+        # on `adp_rank`'s scale: the cheat sheet stops at 300 while a
+        # season's ADP pool is longer, so a raw cs_rank of 300 and an
+        # adp_rank of 300 would otherwise describe different depths.
+        order = pool.assign(_cs=mapped).sort_values(
+            ["_cs", "adp_rank"], na_position="last").index
+        pool["market_rank"] = pd.Series(
+            np.arange(1, len(pool) + 1, dtype=float), index=order).reindex(pool.index)
 
     attrs = attributes_as_of(conn, season)
     if not attrs.empty:
@@ -105,7 +138,7 @@ def build_observations(conn) -> list:
     picks = read_table(conn, "draft_picks")
     teams = read_table(conn, "draft_teams")
     adp = read_table(conn, "historic_adp")
-    espn = read_table(conn, "historic_espn")
+    cheatsheet = read_table(conn, "historic_espn_cs")
     if picks.empty or teams.empty or adp.empty:
         return []
 
@@ -137,7 +170,7 @@ def build_observations(conn) -> list:
         # scoring.board._dedupe_adp.
         pool = pool.sort_values("adp_rank").drop_duplicates(
             "key", keep="first").reset_index(drop=True)
-        pool = _enrich_pool(conn, pool, season, espn)
+        pool = _enrich_pool(conn, pool, season, cheatsheet)
         available = pool.copy()
         rosters, recent = {}, []
         for _, pick in season_picks.sort_values("overall_pick").iterrows():
@@ -171,18 +204,17 @@ def build_observations(conn) -> list:
 # QB is the dropped baseline: with a full set of position dummies plus an
 # intercept-free softmax the columns would be collinear.
 _POSITION_DUMMIES = ["RB", "WR", "TE", "K", "DST"]
-_NEW_FEATURES = ["age", "volatility", "no_track_record", "hype", "trend"]
+_NEW_FEATURES = ["age", "no_track_record", "hype", "trend"]
 FEATURE_NAMES = (["reach", "fall"]
                  + [f"pos_{p}" for p in _POSITION_DUMMIES]
                  + ["qb_early", "te_early", "need", "run"]
                  + _NEW_FEATURES)
 EARLY_ROUNDS = 3
 
-# Divisors that put each new feature on roughly the same scale as the
-# others, so no coefficient has to be tiny or huge to matter. They are not
-# fitted -- changing one just rescales its coefficient -- but keeping the
-# columns comparable makes the ridge penalty treat them even-handedly.
-VOLATILITY_SCALE = 10.0
+# Divisor that puts `hype` on roughly the same scale as the other columns,
+# so no coefficient has to be tiny or huge to matter. Not fitted -- changing
+# it just rescales the coefficient -- but keeping the columns comparable
+# makes the ridge penalty treat them even-handedly.
 HYPE_SCALE = 50.0
 
 
@@ -244,8 +276,6 @@ def feature_matrix(obs: PickObservation, settings) -> np.ndarray:
     columns.append(run)
 
     columns.append(_centre_within_position(pool["age"].to_numpy(), positions))
-    columns.append(pool["ppg_std"].to_numpy(dtype=float) / VOLATILITY_SCALE
-                   + pool["missed_rate"].to_numpy(dtype=float))
     columns.append(pool["no_track_record"].to_numpy().astype(float))
     hype = pool["hype"].to_numpy(dtype=float)
     columns.append(np.nan_to_num(hype, nan=0.0) / HYPE_SCALE)
@@ -368,8 +398,6 @@ _PHRASES = {
     # means "leans toward more of that", not "leans toward the word that
     # comes first alphabetically".
     "age": ("leans veteran", "leans youth"),
-    "volatility": ("chases volatile, injury-prone players",
-                   "prefers steady, durable players"),
     "no_track_record": ("bets on unproven players", "avoids unproven players"),
     "hype": ("chases hype over production", "fades hype, trusts production"),
     "trend": ("targets players trending up", "sticks with steady production"),

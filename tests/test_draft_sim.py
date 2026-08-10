@@ -330,6 +330,116 @@ def test_projections_zero_ppg_falls_back_to_position_floor(tmp_path):
     assert proj["p1"] == POSITION_FLOOR["RB"]
 
 
+def test_build_pool_ranks_on_ffc_not_the_consensus(tmp_path):
+    """The simulator and the fit must order players by the same source.
+
+    `draft_model._enrich_pool` fits `reach`/`fall` against the FFC
+    `adp_rank` (see its docstring for why FFC and not ESPN). If `build_pool`
+    ordered the live pool by `board["market_rank"]` -- the five-source
+    consensus -- a coefficient learned on FFC's ordering would be applied to
+    a board that disagrees with it, which is the residual Task 4 logged and
+    Task 9 closed. Here the two orderings are deliberately reversed against
+    each other, so ranking on the wrong one fails.
+    """
+    conn = get_conn(str(tmp_path / "ffc.duckdb"))
+    board = pd.DataFrame([
+        {"player_id": "p1", "name": "Ffc First", "position": "RB",
+         "team": "DET", "ffc_rank": 1.0, "market_rank": 50.0,
+         "durability": 90.0, "stats": None},
+        {"player_id": "p2", "name": "Ffc Second", "position": "WR",
+         "team": "DAL", "ffc_rank": 2.0, "market_rank": 20.0,
+         "durability": 90.0, "stats": None},
+        {"player_id": "p3", "name": "Ffc Third", "position": "TE",
+         "team": "GB", "ffc_rank": 3.0, "market_rank": 1.0,
+         "durability": 90.0, "stats": None},
+    ])
+    pool = build_pool(conn, board, S)
+    ranks = dict(zip(pool.player_id, pool.market_rank))
+    assert ranks == {"p1": 1.0, "p2": 2.0, "p3": 3.0}
+
+
+def test_build_pool_ranks_on_the_cheat_sheet_ahead_of_ffc(tmp_path):
+    """The same reference ladder `draft_model._enrich_pool` fits on: ESPN's
+    preseason cheat sheet first, FFC only for what it misses.
+
+    The two are reversed against each other here, and the third player is
+    absent from the sheet entirely, so ranking on FFC alone or dropping the
+    unranked player both fail.
+    """
+    from scoring.config import CURRENT_SEASON
+    conn = get_conn(str(tmp_path / "cs.duckdb"))
+    write_table(conn, "historic_espn_cs", pd.DataFrame([
+        {"season": CURRENT_SEASON, "cs_rank": 1, "position": "WR",
+         "cs_name": "Sheet First", "team": "DAL", "auction_value": 55.0},
+        {"season": CURRENT_SEASON, "cs_rank": 2, "position": "RB",
+         "cs_name": "Sheet Second", "team": "DET", "auction_value": 50.0},
+    ]))
+    board = pd.DataFrame([
+        {"player_id": "p1", "name": "Sheet Second", "position": "RB",
+         "team": "DET", "ffc_rank": 1.0, "market_rank": 1.0,
+         "durability": 90.0, "stats": None},
+        {"player_id": "p2", "name": "Sheet First", "position": "WR",
+         "team": "DAL", "ffc_rank": 2.0, "market_rank": 2.0,
+         "durability": 90.0, "stats": None},
+        {"player_id": "p3", "name": "Not On Sheet", "position": "TE",
+         "team": "GB", "ffc_rank": 3.0, "market_rank": 3.0,
+         "durability": 90.0, "stats": None},
+    ])
+    pool = build_pool(conn, board, S)
+    assert dict(zip(pool.player_id, pool.market_rank)) == {
+        "p2": 1.0, "p1": 2.0, "p3": 3.0}
+
+
+def test_build_pool_drafts_the_current_season_not_the_rules_season(tmp_path):
+    """`settings.season` is the season the league's RULES were imported from
+    (the newest completed draft), not the season being drafted.
+
+    Reading it as the draft season ranked a 2026 board on the 2025 cheat
+    sheet and read player attributes a year stale. The fixture gives the two
+    seasons contradictory sheets, so honouring `settings.season` fails.
+    """
+    from scoring.config import CURRENT_SEASON
+    from dataclasses import replace
+    stale = CURRENT_SEASON - 1
+    conn = get_conn(str(tmp_path / "season.duckdb"))
+    write_table(conn, "historic_espn_cs", pd.DataFrame([
+        # Last season's sheet ranks them one way...
+        {"season": stale, "cs_rank": 1, "position": "RB",
+         "cs_name": "Last Year Guy", "team": "DET", "auction_value": 50.0},
+        {"season": stale, "cs_rank": 2, "position": "WR",
+         "cs_name": "This Year Guy", "team": "DAL", "auction_value": 40.0},
+        # ...this season's reverses it.
+        {"season": CURRENT_SEASON, "cs_rank": 1, "position": "WR",
+         "cs_name": "This Year Guy", "team": "DAL", "auction_value": 55.0},
+        {"season": CURRENT_SEASON, "cs_rank": 2, "position": "RB",
+         "cs_name": "Last Year Guy", "team": "DET", "auction_value": 45.0},
+    ]))
+    board = pd.DataFrame([
+        {"player_id": "p1", "name": "Last Year Guy", "position": "RB",
+         "team": "DET", "ffc_rank": 1.0, "market_rank": 1.0,
+         "durability": 90.0, "stats": None},
+        {"player_id": "p2", "name": "This Year Guy", "position": "WR",
+         "team": "DAL", "ffc_rank": 2.0, "market_rank": 2.0,
+         "durability": 90.0, "stats": None},
+    ])
+    settings = replace(S, season=stale)
+    pool = build_pool(conn, board, settings)
+    assert dict(zip(pool.player_id, pool.market_rank)) == {"p2": 1.0, "p1": 2.0}
+
+
+def test_build_pool_falls_back_to_the_consensus_without_ffc_rank(tmp_path):
+    """A board with no `ffc_rank` column (a bare fixture) still ranks."""
+    conn = get_conn(str(tmp_path / "noffc.duckdb"))
+    board = pd.DataFrame([
+        {"player_id": "p1", "name": "Second", "position": "RB",
+         "team": "DET", "market_rank": 9.0, "durability": 90.0, "stats": None},
+        {"player_id": "p2", "name": "First", "position": "WR",
+         "team": "DAL", "market_rank": 4.0, "durability": 90.0, "stats": None},
+    ])
+    pool = build_pool(conn, board, S)
+    assert dict(zip(pool.player_id, pool.market_rank)) == {"p2": 1.0, "p1": 2.0}
+
+
 def test_build_pool_ranks_market_known_players_before_unranked_ones(tmp_path):
     """adp_rank must land on the scale draft_model's reach/fall coefficients
     were fitted on: historic_adp.adp_rank is a dense rank over the players
@@ -420,7 +530,7 @@ def _pool(n=60):
         # `_adp_betas` (reach only), so these values are never read for their
         # magnitude -- they only have to be finite and the right length.
         market_rank=np.arange(1, n + 1, dtype=float),
-        age=np.full(n, np.nan), ppg_std=np.zeros(n), missed_rate=np.zeros(n),
+        age=np.full(n, np.nan),
         no_track_record=np.full(n, True), hype=np.full(n, np.nan),
         trend=np.zeros(n))
 
@@ -536,10 +646,6 @@ def _parity_fixture():
     n = len(positions)
     age = np.array([28.0, 24.0, 26.0, 29.0, 31.0, 33.0,
                     27.0, 23.0, 35.0, 30.0, 25.0, 22.0])
-    ppg_std = np.array([2.0, 5.5, 3.25, 1.0, 0.0, 4.0,
-                        6.5, 2.75, 0.5, 3.0, 1.5, 4.25])
-    missed_rate = np.array([0.1, 0.0, 0.35, 0.05, 0.2, 0.0,
-                            0.15, 0.4, 0.0, 0.25, 0.1, 0.3])
     no_track_record = np.array([False, False, True, False, True, False,
                                 False, True, False, False, True, False])
     hype = np.array([-10.0, 5.0, 3.0, 12.0, -3.0, 7.0,
@@ -553,8 +659,7 @@ def _parity_fixture():
         points=np.linspace(300.0, 60.0, n),
         availability=np.full(n, 90.0),
         vor=np.linspace(300.0, 60.0, n),
-        market_rank=adp_rank, age=age, ppg_std=ppg_std,
-        missed_rate=missed_rate, no_track_record=no_track_record,
+        market_rank=adp_rank, age=age, no_track_record=no_track_record,
         hype=hype, trend=trend)
 
     roster = {"RB": 2, "WR": 1, "QB": 1}       # RB need false, others true
@@ -563,8 +668,7 @@ def _parity_fixture():
     obs_pool = pd.DataFrame({
         "norm": norms[available], "position": positions[available],
         "adp_rank": adp_rank[available], "market_rank": adp_rank[available],
-        "age": age[available], "ppg_std": ppg_std[available],
-        "missed_rate": missed_rate[available],
+        "age": age[available],
         "no_track_record": no_track_record[available],
         "hype": hype[available], "trend": trend[available]})
 
@@ -644,8 +748,7 @@ def test_greedy_takes_the_running_back_over_the_higher_scoring_quarterback():
             points=np.concatenate([qb_points, rb_points]),
             availability=np.full(n, 95.0), vor=np.zeros(n),
             market_rank=np.arange(1, n + 1, dtype=float),
-            age=np.full(n, 25.0), ppg_std=np.zeros(n),
-            missed_rate=np.zeros(n), no_track_record=np.full(n, False),
+            age=np.full(n, 25.0), no_track_record=np.full(n, False),
             hype=np.zeros(n), trend=np.zeros(n))
 
     roster = {"counts": {}, "indices": []}
@@ -711,7 +814,6 @@ def test_rollout_never_drafts_past_a_roster_cap_even_when_the_shortlist_is_all_o
         position=positions, adp_rank=np.arange(1, n + 1, dtype=float),
         points=points, availability=np.full(n, 90.0), vor=points,
         market_rank=np.arange(1, n + 1, dtype=float), age=np.full(n, np.nan),
-        ppg_std=np.zeros(n), missed_rate=np.zeros(n),
         no_track_record=np.full(n, True), hype=np.full(n, np.nan),
         trend=np.zeros(n))
     slots = {i: f"m{i}" for i in range(1, 9)}
@@ -909,7 +1011,6 @@ def _anti_correlated_pool(n=60):
         availability=np.full(n, 90.0),
         vor=np.linspace(60.0, 300.0, n),
         market_rank=np.arange(1, n + 1, dtype=float), age=np.full(n, np.nan),
-        ppg_std=np.zeros(n), missed_rate=np.zeros(n),
         no_track_record=np.full(n, True), hype=np.full(n, np.nan),
         trend=np.zeros(n))
 
@@ -1665,8 +1766,6 @@ def test_live_features_matches_feature_matrix_on_the_new_columns():
         "market_rank": [2.0, 10.0, 55.0, 80.0],
         "hype": [-4.0, 7.0, np.nan, 25.0],
         "age": [23.0, 29.0, 34.0, np.nan],
-        "ppg_std": [1.5, 6.0, 0.0, 3.25],
-        "missed_rate": [0.0, 0.35, 0.1, 0.0],
         "no_track_record": [False, False, True, False],
         "trend": [2.5, -1.75, 0.0, 0.4]})
     obs = PickObservation(season=2026, overall_pick=9, manager="m", chosen=0,
@@ -1678,8 +1777,7 @@ def test_live_features_matches_feature_matrix_on_the_new_columns():
         points=np.array([300.0, 250.0, 380.0, 190.0]),
         availability=np.full(4, 90.0), vor=np.array([150.0, 120.0, 80.0, 60.0]),
         market_rank=pool_df["market_rank"].to_numpy(),
-        age=pool_df["age"].to_numpy(), ppg_std=pool_df["ppg_std"].to_numpy(),
-        missed_rate=pool_df["missed_rate"].to_numpy(),
+        age=pool_df["age"].to_numpy(),
         no_track_record=pool_df["no_track_record"].to_numpy(),
         hype=pool_df["hype"].to_numpy(), trend=pool_df["trend"].to_numpy())
     available = np.arange(4)
