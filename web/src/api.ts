@@ -27,6 +27,19 @@ export interface Player {
   rank: number; tier: number; edge: number | null;
 }
 
+// The baseline every ΔEV on screen is measured against: the highest `ev` on
+// the whole board, so the top sim candidate reads as a dash and everything
+// else reads as what it costs you to take instead. Shared rather than
+// recomputed per view -- two views disagreeing about the baseline would show
+// two different ΔEVs for the same player. Null when no sim has run (`ev` is
+// null for every player until then), and note the baseline is over the board
+// list, never over a subset: `search_pick` only scores about twelve
+// candidates, so a subset's maximum is not the board's.
+export function bestEv(players: Player[]): number | null {
+  const values = players.map((p) => p.ev).filter((v): v is number => v !== null)
+  return values.length ? Math.max(...values) : null
+}
+
 // URL slug for a player page: accent-folded kebab-case name
 // ("Amon-Ra St. Brown" -> "amon-ra-st-brown"). Resolved back to a player by
 // scanning the board list, so it must be a pure function of the name.
@@ -221,6 +234,19 @@ export interface SimRun {
   /** Overall pick number the run was computed for. */
   pick_no: number | null
   created_at: string
+}
+
+/** How stale a sim run is. Shared: the rail and the predicted grid both
+ *  render the age of the SAME run, and two spellings of "12m ago" on two
+ *  screens for one number would read as two different numbers. */
+export function ageLabel(createdAt: string): string {
+  const ms = Date.now() - new Date(createdAt).getTime()
+  if (!Number.isFinite(ms) || ms < 60_000) return 'just now'
+  const minutes = Math.floor(ms / 60_000)
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  return `${Math.floor(hours / 24)}d ago`
 }
 
 export async function fetchSimLatest(): Promise<SimRun | null> {

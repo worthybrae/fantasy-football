@@ -7,7 +7,7 @@ import {
   getSortedRowModel,
   useReactTable,
 } from '@tanstack/react-table'
-import type { Player } from '../api'
+import { bestEv as boardBestEv, type Player } from '../api'
 import { boardColumnsFor } from '../statColumns'
 
 // Selectable sort/rank sources for the board's rank column. 'agg' is the
@@ -93,14 +93,11 @@ export default function PlayerTable({
   }, [rankSource])
   const tableRef = useRef<HTMLTableElement>(null)
 
-  // ΔEV (below) is rendered relative to the best EV on the board -- the top
-  // sim candidate reads as a dash and everything else reads as what it
-  // costs you to take instead. Computed from `players` (not the sorted
-  // table rows), so it doesn't shift as the sort/filter changes.
-  const bestEv = useMemo(() => {
-    const values = players.map((p) => p.ev).filter((v): v is number => v !== null)
-    return values.length ? Math.max(...values) : null
-  }, [players])
+  // ΔEV (below) is rendered relative to the best EV on the board. Computed
+  // from `players` (not the sorted table rows), so it doesn't shift as the
+  // sort/filter changes -- and via the shared helper, so PlayerCard's own
+  // ΔEV can't end up measured against a different baseline.
+  const bestEv = useMemo(() => boardBestEv(players), [players])
 
   const columns = useMemo<ColumnDef<Player>[]>(
     () => [

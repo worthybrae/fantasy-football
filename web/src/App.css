@@ -1167,13 +1167,32 @@ td:first-child {
 .card-factor-track { flex: 1; height: 6px; background: var(--bg-2); border-radius: 3px; }
 .card-factor-fill { display: block; height: 100%; border-radius: 3px; background: var(--accent); }
 .card-outlook { color: var(--text-2); font-size: 0.78rem; }
-.card-full { display: inline-block; margin-top: 10px; color: var(--accent); font-size: 0.8rem; }
+.card-full { display: inline-block; color: var(--accent); font-size: 0.8rem; }
+/* Card footer: the draft-night action on the left, the escape hatch to the
+   full research page on the right. */
+.card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-top: 10px;
+}
 
 /* -- draft board grid (predicted draft board) -- */
 
 .top-nav { display: flex; gap: var(--space-3); margin-right: var(--space-3); }
 .top-nav a { color: var(--text-3); text-decoration: none; font-size: 0.85rem; }
 .top-nav a.active { color: var(--text-1); }
+
+/* Explains the dedupe at the point of confusion: a cell whose hover shows a
+   likelier player than the cell itself. */
+.grid-legend {
+  color: var(--text-3);
+  font-size: 0.78rem;
+  max-width: 62ch;
+  margin: 0 0 var(--space-3);
+}
+.grid-legend-age { color: var(--text-2); }
 
 .grid-wrap { overflow-x: auto; }
 .draft-grid { border-collapse: collapse; font-size: 0.78rem; }

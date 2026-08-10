@@ -2,15 +2,21 @@ import { useEffect, useRef, type KeyboardEvent, type ReactNode } from 'react'
 import { NavLink } from 'react-router-dom'
 
 interface TopBarProps {
-  search: string
-  onSearch: (s: string) => void
+  /** Both omitted on a page with nothing to search (the draft grid): the
+   *  box is skipped entirely rather than rendered inert. A controlled input
+   *  pinned to "" with a no-op onChange still takes focus and still eats
+   *  every keystroke, which reads as a broken search rather than as no
+   *  search at all. */
+  search?: string
+  onSearch?: (s: string) => void
   /** Right-hand slot -- App passes <FreshnessBadge /> here so TopBar stays
    *  a plain layout shell rather than owning that fetch itself. */
   meta?: ReactNode
   /** True while the profile drawer is open. App owns selectedPlayerId, not
    *  TopBar, so it's threaded in as a prop -- the `/` shortcut is inert in
    *  that state since the search box it would focus is hidden behind the
-   *  drawer. */
+   *  drawer. Pages with no search at all don't need it: omitting onSearch
+   *  already suppresses the shortcut. */
   searchShortcutDisabled?: boolean
 }
 
@@ -21,8 +27,12 @@ export default function TopBar({ search, onSearch, meta, searchShortcutDisabled 
   // board -- except while the user is already typing somewhere (this input
   // included; browsers report it as INPUT too), where a literal "/" should
   // just be typed, or while the profile drawer is open (searchShortcutDisabled),
-  // where the search box it would focus isn't even visible.
+  // where the search box it would focus isn't even visible. A page with no
+  // search at all (no onSearch) has no box to focus either, and swallowing
+  // the keypress with preventDefault would be worse than ignoring it.
+  const hasSearch = onSearch !== undefined
   useEffect(() => {
+    if (!hasSearch) return
     function onKeyDown(e: globalThis.KeyboardEvent) {
       if (searchShortcutDisabled) return
       if (e.key !== '/') return
@@ -35,7 +45,7 @@ export default function TopBar({ search, onSearch, meta, searchShortcutDisabled 
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [searchShortcutDisabled])
+  }, [searchShortcutDisabled, hasSearch])
 
   function handleInputKeyDown(e: KeyboardEvent<HTMLInputElement>) {
     if (e.key !== 'Escape') return
@@ -45,7 +55,7 @@ export default function TopBar({ search, onSearch, meta, searchShortcutDisabled 
     // keeps the two Esc behaviors from fighting when both are "live" at
     // once (drawer open, search focused).
     e.stopPropagation()
-    onSearch('')
+    onSearch?.('')
     inputRef.current?.blur()
   }
 
@@ -55,18 +65,20 @@ export default function TopBar({ search, onSearch, meta, searchShortcutDisabled 
         <span className="topbar-dot" aria-hidden="true" />
         <h1 className="topbar-title">Draft Board</h1>
       </div>
-      <div className="topbar-search">
-        <input
-          ref={inputRef}
-          type="text"
-          className="search-input"
-          placeholder="Search players…  /"
-          value={search}
-          onChange={(e) => onSearch(e.target.value)}
-          onKeyDown={handleInputKeyDown}
-          aria-label="Search players by name or team"
-        />
-      </div>
+      {onSearch && (
+        <div className="topbar-search">
+          <input
+            ref={inputRef}
+            type="text"
+            className="search-input"
+            placeholder="Search players…  /"
+            value={search ?? ''}
+            onChange={(e) => onSearch(e.target.value)}
+            onKeyDown={handleInputKeyDown}
+            aria-label="Search players by name or team"
+          />
+        </div>
+      )}
       <nav className="top-nav">
         <NavLink to="/" end>Board</NavLink>
         <NavLink to="/draft-board">Grid</NavLink>

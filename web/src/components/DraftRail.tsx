@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import {
+  ageLabel,
   fetchDraftOrder, fetchLeague, fetchManagers, fetchModel, fetchSimLatest, pollSim,
   saveDraftOrder, startSim,
   type DraftOrder, type DraftOrderEntry, type LeagueInfo, type Manager, type ModelStatus,
@@ -41,16 +42,6 @@ function nextPickLabel(slot: number, drafted: number, teams: number, rounds: num
 function pickLabel(overall: number, teams: number): string {
   const offset = overall - 1
   return `${Math.floor(offset / teams) + 1}.${(offset % teams) + 1}`
-}
-
-function ageLabel(createdAt: string): string {
-  const ms = Date.now() - new Date(createdAt).getTime()
-  if (!Number.isFinite(ms) || ms < 60_000) return 'just now'
-  const minutes = Math.floor(ms / 60_000)
-  if (minutes < 60) return `${minutes}m ago`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
-  return `${Math.floor(hours / 24)}d ago`
 }
 
 interface DraftRailProps {

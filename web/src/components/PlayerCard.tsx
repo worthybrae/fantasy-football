@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { fetchProfile, playerSlug, type PlayerProfileData } from '../api'
+import { fetchProfile, playerSlug, setDrafted, type PlayerProfileData } from '../api'
 import SeasonRangeChart from './SeasonRangeChart'
 
 interface PlayerCardProps {
@@ -63,6 +63,12 @@ export default function PlayerCard({ playerId, onClose, avail_pct = null, evDelt
   const [profile, setProfile] = useState<PlayerProfileData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  // Optimistic override for the drafted toggle, null while it agrees with
+  // whatever the profile fetch returned. PlayerProfile re-fetches the whole
+  // profile after toggling; this card is the draft-night view, where a
+  // round-trip between "he's gone" and the button changing is the cost the
+  // toggle exists to avoid.
+  const [draftedOverride, setDraftedOverride] = useState<boolean | null>(null)
 
   // Same guard PlayerProfile.tsx uses (see its playerIdRef comment for the
   // full rationale): mirrors the current `playerId` synchronously every
@@ -77,6 +83,7 @@ export default function PlayerCard({ playerId, onClose, avail_pct = null, evDelt
     setProfile(null)
     setError(null)
     setLoading(true)
+    setDraftedOverride(null)
     fetchProfile(forPlayerId)
       .then((data) => {
         if (playerIdRef.current === forPlayerId) setProfile(data)
@@ -107,6 +114,20 @@ export default function PlayerCard({ playerId, onClose, avail_pct = null, evDelt
   const player = profile?.header
   const depthSlot = player ? depthSlotLabel(player.position, profile.outlook.depth_slot) : null
   const showSim = avail_pct !== null || evDelta !== null
+  const drafted = draftedOverride ?? player?.drafted ?? false
+
+  async function handleToggleDrafted() {
+    if (!player) return
+    const next = !drafted
+    setDraftedOverride(next)
+    try {
+      await setDrafted(player.player_id, next)
+    } catch {
+      // The board is the source of truth; if the write never landed, don't
+      // leave the card claiming a pick that didn't happen.
+      setDraftedOverride(!next)
+    }
+  }
 
   return (
     <div className="card-backdrop" onClick={onClose}>
@@ -178,9 +199,18 @@ export default function PlayerCard({ playerId, onClose, avail_pct = null, evDelt
               {sosLabel(profile.outlook.sos_raw, profile.outlook.sos_pct)}
             </p>
 
-            <Link to={`/players/${playerSlug(player.name)}`} className="card-full">
-              Full profile →
-            </Link>
+            <div className="card-actions">
+              <button
+                type="button"
+                className="drawer-draft-btn"
+                onClick={handleToggleDrafted}
+              >
+                {drafted ? 'Undo draft' : 'Mark drafted'}
+              </button>
+              <Link to={`/players/${playerSlug(player.name)}`} className="card-full">
+                Full profile →
+              </Link>
+            </div>
           </>
         )}
       </div>
