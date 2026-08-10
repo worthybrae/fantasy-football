@@ -65,8 +65,11 @@ export default function TopBar({ search, onSearch, meta, searchShortcutDisabled 
         <span className="topbar-dot" aria-hidden="true" />
         <h1 className="topbar-title">Draft Board</h1>
       </div>
-      {onSearch && (
-        <div className="topbar-search">
+      {/* The wrapper stays even with no search: it is `flex: 1`, i.e. the
+          spacer that pushes the nav and the meta slot to the right edge.
+          Only the input is conditional. */}
+      <div className="topbar-search">
+        {onSearch && (
           <input
             ref={inputRef}
             type="text"
@@ -77,8 +80,8 @@ export default function TopBar({ search, onSearch, meta, searchShortcutDisabled 
             onKeyDown={handleInputKeyDown}
             aria-label="Search players by name or team"
           />
-        </div>
-      )}
+        )}
+      </div>
       <nav className="top-nav">
         <NavLink to="/" end>Board</NavLink>
         <NavLink to="/draft-board">Grid</NavLink>
