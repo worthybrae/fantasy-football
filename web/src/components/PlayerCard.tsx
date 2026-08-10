@@ -10,21 +10,31 @@ interface PlayerCardProps {
   // grid (Task 5) already has the full board list in hand when it opens
   // this card, so it passes the one row's values down instead of this card
   // re-fetching the whole board just to pick one out. Both default to null
-  // so the card renders correctly when mounted with only a playerId (e.g.
-  // before any sim has run).
+  // so the card renders correctly when mounted with only a playerId -- e.g.
+  // the grid's own data source, GET /api/sim/board, carries no per-player
+  // `ev` at all, so it will mount this card with neither prop set.
   avail_pct?: number | null
-  ev?: number | null
+  // Already relative to the board's best available option -- the same
+  // `delta = p.ev - bestEv` PlayerTable.tsx computes for its ΔEV column, not
+  // the raw `Player.ev`. The caller must do that subtraction before passing
+  // it down; this card has no board list to compute bestEv from itself.
+  // Because of that contract, 0 specifically means "tied for the board's
+  // best," which is what justifies rendering it as a dash below -- a raw
+  // absolute ev of 0 would have no such meaning and dashing it would make a
+  // real (low) value indistinguishable from "no sim data."
+  evDelta?: number | null
 }
 
+// duplicated from PlayerProfile.tsx (both are unexported there)
 function depthSlotLabel(position: string, depthSlot: number | null): string | null {
   if (depthSlot === null) return null
   return `${position}${depthSlot}`
 }
 
-// Higher sos_raw/sos_pct = opponents allow more fantasy points at this
-// position = an easier ("softer") schedule; lower = a tougher one. Copied
-// from PlayerProfile.tsx rather than shared -- two three-line consumers of a
-// pure function don't earn a module of their own.
+// duplicated from PlayerProfile.tsx -- higher sos_raw/sos_pct = opponents
+// allow more fantasy points at this position = an easier ("softer")
+// schedule; lower = a tougher one. Copied rather than shared -- two
+// three-line consumers of a pure function don't earn a module of their own.
 function sosLabel(sosRaw: number | null, sosPct: number | null): string {
   if (sosRaw === null || sosPct === null) return 'SoS —'
   const direction = sosPct >= 50 ? 'softer' : 'tougher'
@@ -49,7 +59,7 @@ const FACTOR_ROWS: [string, keyof PlayerProfileData['factors']][] = [
 // worth of decision-making context in a modal, instead of the full research
 // page. Opened by clicking a grid cell (Task 5); closed by Escape, a
 // backdrop click, or the close button.
-export default function PlayerCard({ playerId, onClose, avail_pct = null, ev = null }: PlayerCardProps) {
+export default function PlayerCard({ playerId, onClose, avail_pct = null, evDelta = null }: PlayerCardProps) {
   const [profile, setProfile] = useState<PlayerProfileData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -92,24 +102,26 @@ export default function PlayerCard({ playerId, onClose, avail_pct = null, ev = n
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [onClose])
 
-  const header = profile?.header
-  const depthSlot = header ? depthSlotLabel(header.position, profile.outlook.depth_slot) : null
-  const showSim = avail_pct !== null || ev !== null
+  // Named `player`, not `header`, so it doesn't shadow the literal <header>
+  // JSX tag below (the brief's CSS targets `.player-card header`).
+  const player = profile?.header
+  const depthSlot = player ? depthSlotLabel(player.position, profile.outlook.depth_slot) : null
+  const showSim = avail_pct !== null || evDelta !== null
 
   return (
     <div className="card-backdrop" onClick={onClose}>
       <div className="player-card" onClick={(e) => e.stopPropagation()}>
         {loading && !profile && <p>Loading…</p>}
         {error && <p className="error">{error}</p>}
-        {header && profile && (
+        {player && profile && (
           <>
             <header>
-              <h2>{header.name}</h2>
+              <h2>{player.name}</h2>
               <span className="card-sub">
-                <span className={`pos-badge pos-badge-${header.position.toLowerCase()}`}>
-                  {header.position}
+                <span className={`pos-badge pos-badge-${player.position.toLowerCase()}`}>
+                  {player.position}
                 </span>{' '}
-                {header.team} · Bye {header.bye ?? '—'}
+                {player.team} · Bye {player.bye ?? '—'}
               </span>
               <button type="button" className="card-close" onClick={onClose} aria-label="Close">
                 ✕
@@ -117,10 +129,10 @@ export default function PlayerCard({ playerId, onClose, avail_pct = null, ev = n
             </header>
 
             <div className="card-row">
-              <div>Rank <strong className="mono">{header.rank}</strong></div>
-              <div>Tier <strong className="mono">{header.tier}</strong></div>
-              <div>Mkt <strong className="mono">{fmt1(header.market_rank)}</strong></div>
-              <div>Edge <strong className="mono">{fmtSigned1(header.edge)}</strong></div>
+              <div>Rank <strong className="mono">{player.rank}</strong></div>
+              <div>Tier <strong className="mono">{player.tier}</strong></div>
+              <div>Mkt <strong className="mono">{fmt1(player.market_rank)}</strong></div>
+              <div>Edge <strong className="mono">{fmtSigned1(player.edge)}</strong></div>
               <div>Proj <strong className="mono">{fmt1(profile.summary.proj_ppg)}</strong></div>
             </div>
 
@@ -129,8 +141,8 @@ export default function PlayerCard({ playerId, onClose, avail_pct = null, ev = n
                 {avail_pct !== null && (
                   <div>Avail% <strong className="mono">{Math.round(avail_pct * 100)}%</strong></div>
                 )}
-                {ev !== null && (
-                  <div>ΔEV <strong className="mono">{ev === 0 ? '—' : ev.toFixed(1)}</strong></div>
+                {evDelta !== null && (
+                  <div>ΔEV <strong className="mono">{evDelta === 0 ? '—' : evDelta.toFixed(1)}</strong></div>
                 )}
               </div>
             )}
@@ -153,7 +165,7 @@ export default function PlayerCard({ playerId, onClose, avail_pct = null, ev = n
             </ul>
 
             {profile.seasons.length > 0 && (
-              <SeasonRangeChart seasons={profile.seasons} position={header.position} />
+              <SeasonRangeChart seasons={profile.seasons} position={player.position} />
             )}
 
             <p className="card-outlook">
@@ -166,7 +178,7 @@ export default function PlayerCard({ playerId, onClose, avail_pct = null, ev = n
               {sosLabel(profile.outlook.sos_raw, profile.outlook.sos_pct)}
             </p>
 
-            <Link to={`/players/${playerSlug(header.name)}`} className="card-full">
+            <Link to={`/players/${playerSlug(player.name)}`} className="card-full">
               Full profile →
             </Link>
           </>
