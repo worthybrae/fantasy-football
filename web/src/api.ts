@@ -16,6 +16,15 @@ export interface Player {
   stats: BoardStats | null;
   rookie: boolean; drafted: boolean;
   avail_pct: number | null; ev: number | null; ev_se: number | null;
+  // Model-native rank (VOR order across the whole board), tier (gap-based,
+  // within position), and market_rank - rank ("edge": positive = the model
+  // likes this player more than the market does). Dropped from the board
+  // table's columns in 1f8ba18 as too dense for a sortable grid, but still
+  // computed on every board row -- PlayerCard's decision row surfaces them
+  // again for the condensed, single-player view. edge is nullable because
+  // it's undefined whenever market_rank is (no market source covers the
+  // player at all).
+  rank: number; tier: number; edge: number | null;
 }
 
 // URL slug for a player page: accent-folded kebab-case name

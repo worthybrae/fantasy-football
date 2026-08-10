@@ -1132,3 +1132,39 @@ td:first-child {
 .rail-warning code { font-size: 0.75rem; }
 .order-name { flex: 1; font-size: 0.85rem; color: var(--text-2); }
 .sim-status { font-size: 0.8rem; color: var(--text-2); white-space: nowrap; }
+
+/* -- condensed player card (draft-board modal) -- */
+
+.card-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 20;
+}
+.player-card {
+  width: min(440px, 92vw);
+  max-height: 86vh;
+  overflow-y: auto;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: var(--space-4);
+}
+.player-card header { display: flex; align-items: baseline; gap: 8px; }
+.player-card header h2 { margin: 0; font-size: 1.05rem; }
+.card-sub { color: var(--text-3); font-size: 0.8rem; }
+.card-close { margin-left: auto; background: none; border: 0; color: var(--text-3); cursor: pointer; font: inherit; }
+.card-row { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0; font-size: 0.8rem; }
+.card-row div { color: var(--text-2); }
+.card-row strong { color: var(--text-1); }
+.card-sim { background: var(--accent-bg); padding: 6px 8px; border-radius: 4px; }
+.card-factors { list-style: none; margin: 10px 0; padding: 0; }
+.card-factors li { display: flex; align-items: center; gap: 8px; font-size: 0.75rem; margin-bottom: 3px; }
+.card-factor-name { width: 82px; color: var(--text-3); }
+.card-factor-track { flex: 1; height: 6px; background: var(--bg-2); border-radius: 3px; }
+.card-factor-fill { display: block; height: 100%; border-radius: 3px; background: var(--accent); }
+.card-outlook { color: var(--text-2); font-size: 0.78rem; }
+.card-full { display: inline-block; margin-top: 10px; color: var(--accent); font-size: 0.8rem; }
