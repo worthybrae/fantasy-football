@@ -459,7 +459,7 @@ def _seed_rosters(pool, settings, taken_order):
 
 
 def _run_draft(pool, settings, slot_managers, my_slot, taken, betas, rng,
-               forced=None, taken_order=None) -> dict:
+               forced=None, taken_order=None, *, record=None) -> dict:
     """Simulate the remainder of one snake draft and return every slot's
     roster, as `{slot: {"counts": {position: n, ...}, "indices": [pool
     index, ...]}}`.
@@ -480,6 +480,12 @@ def _run_draft(pool, settings, slot_managers, my_slot, taken, betas, rng,
     free to take three more. Callers that know the pick order must pass it;
     `run_sim` always does. Omitting it while players are already off the
     board warns rather than failing silently.
+
+    `record`, when given a list, receives `(overall_pick, pool index)` for
+    every pick this call simulates, in pick order. The per-slot return value
+    already says WHO holds a player but not WHEN he went, and the predicted
+    draft board is exactly that mapping. Opt-in because the common caller
+    (`rollout`, run thousands of times inside a search) has no use for it.
 
     `rollout` wraps this and returns only my `roster_value` as a scalar --
     Task 11's search depends on that scalar return type -- so this returns
@@ -537,6 +543,8 @@ def _run_draft(pool, settings, slot_managers, my_slot, taken, betas, rng,
         pos = pool.position[choice]
         rosters[slot]["counts"][pos] = rosters[slot]["counts"].get(pos, 0) + 1
         rosters[slot]["indices"].append(choice)
+        if record is not None:
+            record.append((overall_pick, int(choice)))
         recent.insert(0, pos)
 
     return rosters

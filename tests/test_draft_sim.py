@@ -375,7 +375,7 @@ def test_build_pool_ranks_market_known_players_before_unranked_ones(tmp_path):
 
 
 from scoring.draft_model import FEATURE_NAMES
-from scoring.draft_sim import SimPool, rollout, snake_slots
+from scoring.draft_sim import SimPool, _run_draft, rollout, snake_slots
 
 
 def test_snake_slots_reverses_every_other_round():
@@ -1140,3 +1140,33 @@ def test_run_sim_refuses_a_draft_order_that_does_not_cover_every_slot(tmp_path, 
         "solo": np.zeros(len(FEATURE_NAMES))})
     with pytest.raises(ValueError, match="have no manager"):
         run_sim(conn, my_slot=1, slot_managers={None: "solo"}, n_rollouts=2)
+
+
+def test_run_draft_records_every_pick_in_order_when_asked():
+    pool = _pool()
+    slots = {i: f"m{i}" for i in range(1, 9)}
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    record = []
+    rosters = _run_draft(pool, S, slots, 4, taken, _flat_betas(slots.values()),
+                         rng=np.random.default_rng(3), record=record)
+    picks = [p for p, _ in record]
+    assert picks == list(range(1, len(picks) + 1))
+    # Every recorded index is a real pool index, and no player goes twice.
+    indices = [i for _, i in record]
+    assert len(set(indices)) == len(indices)
+    assert all(0 <= i < len(pool.player_id) for i in indices)
+    # The record and the rosters describe the same draft.
+    from_rosters = sorted(i for st in rosters.values() for i in st["indices"])
+    assert sorted(indices) == from_rosters
+
+
+def test_run_draft_without_record_is_unchanged():
+    pool = _pool()
+    slots = {i: f"m{i}" for i in range(1, 9)}
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    betas = _flat_betas(slots.values())
+    a = _run_draft(pool, S, slots, 4, taken, betas, rng=np.random.default_rng(9))
+    b = _run_draft(pool, S, slots, 4, taken, betas, rng=np.random.default_rng(9),
+                   record=[])
+    assert {s: st["indices"] for s, st in a.items()} == \
+           {s: st["indices"] for s, st in b.items()}
