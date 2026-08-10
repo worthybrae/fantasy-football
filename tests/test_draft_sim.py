@@ -1275,15 +1275,48 @@ def test_predict_board_round_and_slot_follow_the_snake():
     assert p.loc[9, "round_pick"] == 1
 
 
-def test_predict_board_never_puts_one_player_in_two_cells():
+def test_predict_board_never_puts_one_player_in_two_cells_unless_forced():
+    """The old global assignment guaranteed no duplicate primary whenever a
+    repeat-free board existed at all -- it was solving for exactly that.
+    Draft-order greedy (Task 7) deliberately trades that guarantee away: it
+    only looks at one pick at a time, in ascending overall_pick, so a
+    duplicate is now allowed whenever a pick's own rollouts recorded no
+    candidate that an earlier pick hadn't already claimed.
+
+    A blanket "no duplicates ever" assertion is therefore no longer a true
+    statement about this system -- it would be pinning the retired
+    algorithm's behavior, not this one's contract. What must still hold is
+    narrower: every duplicate that does appear is *forced*, i.e. by the time
+    that pick was processed, every player its own rollouts ever sent there
+    was already somebody else's primary. `alternates` is set to the whole
+    pool so each cell's full recorded candidate set is visible in `board`,
+    not just the top two -- otherwise this couldn't be checked from the
+    outside at all.
+    """
     from scoring.draft_sim import predict_board
     pool = _pool()
     slots = {i: f"m{i}" for i in range(1, 9)}
     taken = np.zeros(len(pool.player_id), dtype=bool)
     board = predict_board(pool, S, slots, 4, taken, _adp_betas(slots.values()),
-                          n_rollouts=25, seed=4)
-    primaries = board[board["alt_rank"] == 0]["player_id"]
-    assert len(set(primaries)) == len(primaries)
+                          n_rollouts=25, seed=4, alternates=len(pool.player_id))
+    by_pick = {pick: grp for pick, grp in board.groupby("overall_pick")}
+
+    claimed_by = {}
+    for pick in sorted(by_pick):
+        cell = by_pick[pick]
+        chosen = cell.loc[cell["alt_rank"] == 0, "player_id"].iloc[0]
+        if chosen in claimed_by:
+            # A repeat is legitimate only if this pick's own full candidate
+            # set -- every player its own rollouts ever produced here, alt
+            # rows included -- was already exhausted by an earlier pick.
+            own_candidates = set(cell["player_id"])
+            already_claimed = set(claimed_by)
+            unclaimed = own_candidates - already_claimed
+            assert not unclaimed, (
+                f"pick {pick} repeated {chosen!r} while {unclaimed} of its "
+                "own recorded candidates were still free")
+        else:
+            claimed_by[chosen] = pick
 
 
 def test_predict_board_keeps_a_deduped_player_as_an_alternate():
@@ -1396,8 +1429,8 @@ def test_predict_board_drops_picks_past_the_end_of_the_draft():
 def test_assign_primaries_never_invents_a_candidate_outside_the_cells_own_players():
     """Regression case from code review: a naive per-cell argmax fallback
     (`max(cell, key=...)`, with no notion of who else already claimed what)
-    can hand two different picks the same primary even though the
-    assignment step itself never repeats a player.
+    can hand two different picks the same primary even though a
+    claimed-set-aware walk never repeats a player it doesn't have to.
 
     counts = {1: {10: 6, 11: 4}, 2: {10: 5, 11: 5}, 3: {10: 7, 11: 3}, 4: {12: 10}}
     has only 3 distinct recorded players (10, 11, 12) for 4 picks. Picks 1-3
@@ -1405,20 +1438,18 @@ def test_assign_primaries_never_invents_a_candidate_outside_the_cells_own_player
     three picks -- so by the pigeonhole principle no assignment that only
     ever uses a pick's own recorded candidates can give all three of them
     distinct primaries; some repeat is mathematically forced no matter the
-    algorithm. (Verified computationally: an assignment-plus-claimed-set
-    fallback and the original unconditional-argmax fallback produce the
-    identical result on this input, and on 25,000 randomized larger
-    fixtures -- neither can do better than the other here, because
-    `linear_sum_assignment` already finds the maximum-cardinality real
-    assignment; see `_assign_primaries`'s docstring.)
+    algorithm (draft-order greedy included -- this pins that the current
+    implementation is one of the algorithms this reasoning covers).
 
     What IS a meaningful, checkable property -- and what actually
     distinguishes a correct implementation from a broken one -- is that the
     forced repeat is still one of that pick's own recorded candidates, never
     a fabricated one, and that exactly one repeat occurs here (not more):
-    picks 2, 3 and 4 each have their own distinct winner, and pick 1 (the
-    one Hall's condition leaves without a fresh candidate) reuses whichever
-    real candidate the deficient trio settles on.
+    picks 1, 2 and 4 each come away with their own distinct winner (1 and 2
+    are processed first and split the only two players anyone recorded for
+    them), and pick 3 -- processed last among the trio, by which point both
+    10 and 11 are already claimed -- reuses its own top candidate, 10,
+    rather than being handed a player nobody ever recorded for it.
     """
     from scoring.draft_sim import _assign_primaries
     counts = {1: {10: 6, 11: 4}, 2: {10: 5, 11: 5}, 3: {10: 7, 11: 3}, 4: {12: 10}}
@@ -1441,6 +1472,41 @@ def test_assign_primaries_is_deterministic():
     a = _assign_primaries(counts, n_rollouts=10)
     b = _assign_primaries(counts, n_rollouts=10)
     assert a == b
+
+
+def test_assign_primaries_gives_pick_one_its_most_likely_player():
+    """The defect this fixes, from a real run: pick 1 showed a 12% player
+    while a 16% player sat in the hover, because the global assignment
+    'saved' him for pick 13 where he scored 40%."""
+    from scoring.draft_sim import _assign_primaries
+    counts = {1: {10: 6, 11: 8}, 13: {11: 20, 12: 5}}
+    primary = _assign_primaries(counts, n_rollouts=50)
+    assert primary[1] == 11          # pick 1 gets its own most likely
+    assert primary[13] == 12         # 11 is claimed, 13 takes the next
+
+
+def test_assign_primaries_processes_picks_in_draft_order():
+    # Pick 5's cell must carry a real second candidate (4): with only {1: 10}
+    # as originally drafted, player 1 is pick 5's *only* recorded candidate,
+    # so once pick 2 claims him first, primary[5] == 1 is forced by the
+    # "keep your own best when every candidate is claimed" rule -- the same
+    # rule test_assign_primaries_allows_a_duplicate_only_when_forced pins
+    # elsewhere. `primary[5] != 1` cannot hold for that input under any
+    # implementation of the stated rule; giving pick 5 a genuine fallback
+    # candidate is what actually exercises "a later, non-priority pick falls
+    # back to its own next-best rather than inheriting the earlier claim".
+    from scoring.draft_sim import _assign_primaries
+    counts = {5: {1: 10, 4: 1}, 2: {1: 9, 2: 3}, 9: {1: 30, 3: 2}}
+    primary = _assign_primaries(counts, n_rollouts=50)
+    assert primary[2] == 1           # earliest pick wins the contested player
+    assert primary[5] != 1 and primary[9] != 1
+
+
+def test_assign_primaries_allows_a_duplicate_only_when_forced():
+    from scoring.draft_sim import _assign_primaries
+    counts = {1: {7: 5}, 2: {7: 5}}   # one candidate, two picks
+    primary = _assign_primaries(counts, n_rollouts=10)
+    assert primary == {1: 7, 2: 7}
 
 
 def _seed_board_tables(conn):
@@ -1490,8 +1556,14 @@ def test_run_sim_writes_sim_board(tmp_path, monkeypatch):
                                    "player_id", "prob", "certain"]
     assert not board.empty
     assert set(board["run_id"]) == {run_id}
-    primaries = board[board["alt_rank"] == 0]["player_id"]
-    assert len(set(primaries)) == len(primaries)
+    # No blanket "every primary is unique" check here: with uniform-random
+    # opponents (zero betas) and only 3 rollouts, a forced duplicate is a
+    # likely, legitimate outcome of the draft-order-greedy rule (Task 7),
+    # not a bug -- see
+    # test_predict_board_never_puts_one_player_in_two_cells_unless_forced
+    # for the rigorous version of this check, which needs full per-cell
+    # alternates that this table (written with run_sim's default of 2) does
+    # not carry.
 
 
 def test_live_features_matches_feature_matrix_on_the_new_columns():

@@ -25,7 +25,6 @@ from typing import NamedTuple
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import linear_sum_assignment
 
 from pipeline.db import read_table, write_table
 from scoring import factors
@@ -1006,94 +1005,28 @@ def run_sim(conn, my_slot: int, slot_managers: dict,
     return run_id
 
 
-# Cost charged for assigning a player to a cell he never once won. Any
-# finite value works as long as it dominates every real -log(prob): with
-# probabilities floored at 1/n_rollouts, a real cost never exceeds
-# log(n_rollouts), which stays under 50 for any rollout count anyone will
-# run. It must be finite -- linear_sum_assignment rejects an infeasible
-# matrix outright, and a board where one cell has no candidate should still
-# render the other 119.
-ASSIGNMENT_MISS_COST = 50.0
-
-
 def _assign_primaries(counts: dict, n_rollouts: int) -> dict:
-    """The deduped primary for every predicted pick: `{overall_pick: pool
-    index}`, drawn only from players that pick's own rollouts actually
-    produced (`counts[overall_pick]`) -- this never hands a pick a player
-    the model did not, in fact, sometimes send there.
+    """Each pick's most likely player, walking the board in draft order.
 
-    Solved as an assignment problem, cost `-log(prob)`, with a finite
-    `ASSIGNMENT_MISS_COST` standing in for a (pick, player) pair the
-    rollouts never produced (`linear_sum_assignment` rejects an all-`-inf`
-    matrix outright). `linear_sum_assignment` is exact for total cost, not
-    for the count of real edges used -- those are the same goal only as long
-    as no chain of real costs can sum past `ASSIGNMENT_MISS_COST`. At the
-    rollout counts this system actually runs (`DEFAULT_ROLLOUTS` is 300; the
-    smallest this codebase's own tests use is 10), the worst a single real
-    edge ever costs is `log(n_rollouts)` -- under 6 -- so no realistic
-    handful of them summed comes anywhere near 50, and minimizing total cost
-    and maximizing real-edge count agree in practice. Concretely: if a pick
-    comes back here without a usable answer (unassigned, or assigned a
-    player outside its own cell) while one of its own candidates sits
-    unused elsewhere in that same solution, reassigning the pick onto that
-    unused candidate is a real edge costing under 6 in place of whatever it
-    was costing before -- a 50-cost miss, which the swap strictly beats; or,
-    if the pick was excluded from the matching altogether, nothing at all,
-    which the swap cannot beat on cost alone, but that case cannot arise
-    here in the first place, because `linear_sum_assignment` always
-    saturates every column when there are more picks than distinct players,
-    so no column is ever sitting unused for an excluded pick to claim. So at
-    this system's scale, no candidate of a pick's own is ever left
-    unclaimed when that pick needs one, which is why the walk below (prefer
-    an unclaimed candidate of the pick's own before accepting a repeat) is
-    not a heuristic that sometimes helps: it can only confirm what
-    optimality already forced. It is kept anyway as an explicit, tested
-    invariant (never hand out a player outside the pick's own cell) rather
-    than an implicit consequence of today's specific cost design, which a
-    future change to that design could silently break. This is a claim
-    about realistic scale, not every possible input: an adversarial
-    `n_rollouts` far outside anything this system runs (code review's
-    counterexample: `n_rollouts = 10**20`, `counts = {1: {10: 1}, 2: {10:
-    n_rollouts - 1, 11: 1}}`) can make a chain of real costs exceed 50, and
-    `linear_sum_assignment` will then knowingly spend one pick on a repeat
-    to save more than 50 elsewhere -- a real, repeat-free assignment exists
-    there, LSA just doesn't take it, because it isn't the cheapest one. So:
-    a repeat among the results below is a property of the *input* -- at this
-    system's rollout counts, because some group of picks collectively
-    produced fewer distinct players than there are picks in that group;
-    that is what actually happens here, not a mathematical certainty for
-    every input this function could theoretically be called with.
+    Was a global assignment minimizing total -log(prob), which maximizes the
+    joint likelihood of all 120 cells at once. That is a coherent
+    statistical object and the wrong one for a draft board: it would trade
+    pick 1 away to improve pick 13, and did -- a real run showed a 12%
+    player at pick 1 while the 16% player sat in the hover, because he
+    scored 40% at pick 13.
+
+    A board is read top to bottom and the earliest picks are the ones that
+    must be right, so earliest pick wins. Not the maximum-likelihood board,
+    deliberately. A pick whose every candidate is already claimed keeps its
+    own best anyway: a visible repeat beats inventing a pick nobody made.
     """
-    predicted = sorted(counts)
-    players = sorted({idx for cell in counts.values() for idx in cell})
-    col_of = {idx: j for j, idx in enumerate(players)}
-    cost = np.full((len(predicted), len(players)), ASSIGNMENT_MISS_COST)
-    for r, overall_pick in enumerate(predicted):
-        for idx, n in counts[overall_pick].items():
-            cost[r, col_of[idx]] = -np.log(n / n_rollouts)
-    rows_idx, cols_idx = linear_sum_assignment(cost)
-    raw = {predicted[r]: players[c] for r, c in zip(rows_idx, cols_idx)}
-
-    primary, claimed, needs_fallback = {}, set(), []
-    for overall_pick in predicted:
+    primary, claimed = {}, set()
+    for overall_pick in sorted(counts):
         cell = counts[overall_pick]
-        chosen = raw.get(overall_pick)
-        if chosen is not None and chosen in cell:
-            primary[overall_pick] = chosen
-            claimed.add(chosen)
-        else:
-            needs_fallback.append(overall_pick)
-
-    for overall_pick in needs_fallback:
-        cell = counts[overall_pick]
-        # Own candidates, highest-count first, smallest pool index breaking
-        # a tie -- matches the ranking every other cell's alternates use.
-        candidates = sorted(cell, key=lambda idx: (-cell[idx], idx))
-        chosen = next((idx for idx in candidates if idx not in claimed),
-                      candidates[0])
-        primary[overall_pick] = chosen
-        claimed.add(chosen)
-
+        ranked = sorted(cell, key=lambda idx: (-cell[idx], idx))
+        pick = next((idx for idx in ranked if idx not in claimed), ranked[0])
+        primary[overall_pick] = pick
+        claimed.add(pick)
     return primary
 
 
@@ -1111,16 +1044,15 @@ def predict_board(pool, settings, slot_managers, my_slot, taken, betas,
     A deduped primary (`_assign_primaries`). Taking each cell's most
     frequent player independently puts a consensus first-rounder in four
     adjacent cells, which reads as a bug rather than as "he could go at any
-    of these". So the frequencies are treated as an assignment problem and
-    solved for the lowest-total-cost board -- which, at the rollout counts
-    this system runs, repeats a player only when the picks contesting him
-    collectively produced too few distinct players for a repeat-free board
-    to exist at all. See `_assign_primaries` for why that is a statement
-    about this system's realistic scale, not an unconditional guarantee, and
-    for the (unreachable-in-practice) input where it stops holding. The name
-    in the cell is therefore the most coherent single draft the model can
-    tell, not 120 independent answers, which is why the alternates matter
-    and are kept.
+    of these". So the picks are walked in draft order and each claims its
+    own most likely player not already claimed by an earlier pick -- the
+    earliest picks are the ones a board is actually read for, so they win
+    any contest over a shared player. A pick only repeats a player already
+    claimed when every one of its own recorded candidates is already gone,
+    which is a property of that input (the contesting picks collectively
+    produced too few distinct players), not something the algorithm could
+    avoid. The name in the cell is therefore not the maximum-likelihood
+    board, deliberately, which is why the alternates matter and are kept.
 
     Picks already made are reported from `taken_order` as certain, with no
     alternates: they are facts, not predictions.
