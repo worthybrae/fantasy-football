@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
-  ageLabel, bestEv as boardBestEv, fetchManagers, fetchPlayers, fetchSimBoard,
-  type Manager, type Player, type SimBoard,
+  ageLabel, bestEv as boardBestEv, fetchManagerHistory, fetchManagers, fetchPlayers, fetchSimBoard,
+  type Manager, type ManagerHistory, type Player, type SimBoard,
 } from '../api'
 import DraftGrid from './DraftGrid'
 import ManagerForecast from './ManagerForecast'
@@ -26,6 +26,11 @@ export default function DraftBoardPage() {
   // cards. Fetched alongside the board rather than only when that tab is
   // selected, so switching tabs never shows a loading flash.
   const [managers, setManagers] = useState<Manager[]>([])
+  // Each manager's real draft history (first-rounders, positional shape) --
+  // the evidence the forecast cards rest on. Same failure treatment as
+  // managers above: a fetch failure just leaves the history section empty
+  // per card, it never blocks the grid tab.
+  const [history, setHistory] = useState<ManagerHistory[]>([])
 
   useEffect(() => {
     fetchSimBoard()
@@ -44,6 +49,10 @@ export default function DraftBoardPage() {
   // taking down a page the grid tab doesn't need this data for at all.
   useEffect(() => {
     fetchManagers().then(setManagers).catch(() => setManagers([]))
+  }, [])
+
+  useEffect(() => {
+    fetchManagerHistory().then(setHistory).catch(() => setHistory([]))
   }, [])
 
   const bestEv = useMemo(() => boardBestEv(players), [players])
@@ -124,7 +133,7 @@ export default function DraftBoardPage() {
                   {view === 'grid' ? (
                     <DraftGrid board={board} onSelectPlayer={setSelected} />
                   ) : (
-                    <ManagerForecast board={board} managers={managers} onSelectPlayer={setSelected} />
+                    <ManagerForecast board={board} managers={managers} history={history} onSelectPlayer={setSelected} />
                   )}
                 </>
               )}

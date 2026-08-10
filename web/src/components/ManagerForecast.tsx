@@ -1,10 +1,20 @@
-import type { Manager, SimBoard, SimBoardCell } from '../api'
+import type { Manager, ManagerHistory, SimBoard, SimBoardCell } from '../api'
 
 interface ManagerForecastProps {
   board: SimBoard
   managers: Manager[]
+  history: ManagerHistory[]
   onSelectPlayer: (playerId: string) => void
 }
+
+// Round-bucket keys ManagerHistory.shape carries, in draft order, with the
+// label the card prints for each -- the same "early/mid/late" split
+// api/main.py's _history_round_bucket cuts on.
+const HISTORY_BUCKETS: { key: 'early' | 'mid' | 'late'; label: string }[] = [
+  { key: 'early', label: 'R1-3' },
+  { key: 'mid', label: 'R4-8' },
+  { key: 'late', label: 'R9+' },
+]
 
 // Position order the shape row counts in -- matches the order --pos-* tokens
 // are declared in (index.css) and the order pos-badge-* rules follow in
@@ -51,9 +61,10 @@ function shapeCounts(picks: SimBoardCell[]): Partial<Record<string, number>> {
 // sibling view to DraftGrid inside the same board.run/board.cells gate in
 // DraftBoardPage, so it inherits that page's empty-state handling (no run,
 // no league, a run that predates per-pick cells) instead of repeating it.
-export default function ManagerForecast({ board, managers, onSelectPlayer }: ManagerForecastProps) {
+export default function ManagerForecast({ board, managers, history, onSelectPlayer }: ManagerForecastProps) {
   const bySlot = primaryPicksBySlot(board.cells)
   const byName = new Map(managers.map((m) => [m.manager, m]))
+  const historyByName = new Map(history.map((h) => [h.manager, h]))
   const mySlot = board.run?.my_slot ?? null
 
   return (
@@ -63,6 +74,7 @@ export default function ManagerForecast({ board, managers, onSelectPlayer }: Man
         const next = picks.slice(0, NEXT_PICKS_SHOWN)
         const counts = shapeCounts(picks)
         const m = byName.get(entry.manager)
+        const h = historyByName.get(entry.manager)
         const isMe = entry.slot === mySlot
 
         return (
@@ -89,6 +101,61 @@ export default function ManagerForecast({ board, managers, onSelectPlayer }: Man
                 </span>
               )}
             </div>
+
+            {/* The evidence the forecast below rests on -- what this manager
+                has actually done, not what the model guesses they'll do.
+                Kept in its own quiet, monochrome panel (see .forecast-history
+                in App.css) so it reads as fact next to the colored,
+                probability-tagged prediction below it, never as more of the
+                same guess. Omitted entirely (not an empty placeholder) when
+                no history is imported for this manager at all -- see
+                DraftBoardPage's fetchManagerHistory().catch(() => []). */}
+            {h && (
+              <section className="forecast-history">
+                <div className="forecast-history-head">
+                  <span className="forecast-history-label">Actual history</span>
+                  <span className="forecast-history-meta">
+                    {h.seasons} draft{h.seasons === 1 ? '' : 's'} &middot; {h.total_picks} picks
+                  </span>
+                </div>
+
+                {h.first_rounders.length > 0 && (
+                  <ol className="forecast-history-firsts">
+                    {h.first_rounders.map((fr) => (
+                      <li key={fr.season} className="forecast-history-first">
+                        <span className="forecast-history-year mono">{fr.season}</span>
+                        {fr.position && <span className="hist-badge">{fr.position}</span>}
+                        <span className="forecast-history-name">
+                          {fr.player_name ?? 'unidentified pick'}
+                        </span>
+                        {fr.keeper && <span className="forecast-history-keeper">kept</span>}
+                      </li>
+                    ))}
+                  </ol>
+                )}
+
+                <div className="forecast-history-shape">
+                  {HISTORY_BUCKETS.map(({ key, label }) => {
+                    const counts = h.shape[key] ?? {}
+                    const nonZero = SHAPE_POSITIONS.filter((p) => (counts[p] ?? 0) > 0)
+                    return (
+                      <div key={key} className="forecast-history-bucket">
+                        <span className="forecast-history-bucket-label mono">{label}</span>
+                        <span className="forecast-history-bucket-pills">
+                          {nonZero.length === 0 ? (
+                            <span className="forecast-history-bucket-empty">&mdash;</span>
+                          ) : (
+                            nonZero.map((p) => (
+                              <span key={p} className="hist-badge">{p} {counts[p]}</span>
+                            ))
+                          )}
+                        </span>
+                      </div>
+                    )
+                  })}
+                </div>
+              </section>
+            )}
 
             {/* Backend's own text already says "league average, not enough
                 signal" verbatim when uses_personal is false (draft_model.py)

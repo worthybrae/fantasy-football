@@ -38,6 +38,22 @@ def _seasons_or_none(value):
         return None
 
 
+# Positions the history shape row always reports, zero-filled -- matches the
+# web's SHAPE_POSITIONS order (ManagerForecast.tsx) so a manager who has
+# never taken a position at all still shows a badge for it, not a gap.
+_HISTORY_POSITIONS = ("QB", "RB", "WR", "TE", "K", "DST")
+
+
+def _history_round_bucket(round_no: int) -> str:
+    """Same "early" cutoff (round <= 3) scoring.draft_model.EARLY_ROUNDS
+    trains against, and the same mid/late split _round_bucket there uses --
+    kept as a local constant rather than an import so this endpoint has no
+    dependency on the model module while it's under separate active edit."""
+    if round_no <= 3:
+        return "early"
+    return "mid" if round_no <= 8 else "late"
+
+
 def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
     app = FastAPI(title="Draft Board API")
     conn = get_conn(db_path)
@@ -173,6 +189,79 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
                         {"feature": r["feature"], "value": float(r["value"]),
                          "pooled_value": float(r["pooled_value"])}
                         for _, r in grp.iterrows()],
+                })
+            return {"managers": out}
+        finally:
+            cur.close()
+
+    @app.get("/api/managers/history")
+    def managers_history():
+        """Every manager's real draft picks, shaped for the forecast cards.
+
+        Right now every manager falls back to the league-average model (see
+        /api/model -- n_managers with uses_personal is 0), so this raw
+        history is genuinely more informative about a specific manager than
+        the fitted coefficients are. One read of each table plus a pandas
+        groupby -- not a query per manager.
+        """
+        cur = conn.cursor()
+        try:
+            picks = read_table(cur, "draft_picks")
+            teams = read_table(cur, "draft_teams")
+            if picks.empty or teams.empty:
+                return {"managers": []}
+            merged = picks.merge(
+                teams[["season", "team_id", "manager"]],
+                on=["season", "team_id"], how="inner")
+
+            out = []
+            for manager, grp in merged.groupby("manager"):
+                n_seasons = int(
+                    teams.loc[teams["manager"] == manager, "season"].nunique())
+
+                # One entry per season: the round-1 pick. A manager who held
+                # two team_ids in the same season (a mid-draft trade) could
+                # in principle produce two round-1 rows for that season --
+                # keep the earliest overall_pick so the list stays one entry
+                # per season, most recent season first.
+                firsts = (grp[grp["round"] == 1]
+                          .sort_values("overall_pick")
+                          .drop_duplicates("season", keep="first")
+                          .sort_values("season", ascending=False))
+                # player_name/position/nfl_team are null when a pick's
+                # espn_player_id was missing from that season's ESPN player
+                # directory (import_seasons' left join) -- passed through as
+                # JSON null rather than papered over, so the frontend decides
+                # how to render an unidentified pick instead of this endpoint
+                # guessing a label for it.
+                first_rounders = [
+                    {"season": int(r["season"]),
+                     "player_name": None if pd.isna(r["player_name"]) else r["player_name"],
+                     "position": None if pd.isna(r["position"]) else r["position"],
+                     "nfl_team": None if pd.isna(r["nfl_team"]) else r["nfl_team"],
+                     "keeper": bool(r["keeper"])}
+                    for _, r in firsts.iterrows()]
+
+                # Positional shape by round bucket, across every season on
+                # record. Picks with no matched player have no position to
+                # bucket and are excluded here (though they still count
+                # toward total_picks below) -- there is nothing dishonest
+                # about that: they are absent from the shape, not silently
+                # folded into some position they weren't.
+                positioned = grp.dropna(subset=["position"])
+                bucket_counts = (
+                    positioned.assign(bucket=positioned["round"].map(_history_round_bucket))
+                    .groupby(["bucket", "position"]).size())
+                shape = {b: {p: int(bucket_counts.get((b, p), 0))
+                             for p in _HISTORY_POSITIONS}
+                         for b in ("early", "mid", "late")}
+
+                out.append({
+                    "manager": manager,
+                    "seasons": n_seasons,
+                    "total_picks": int(len(grp)),
+                    "first_rounders": first_rounders,
+                    "shape": shape,
                 })
             return {"managers": out}
         finally:

@@ -1472,3 +1472,83 @@ td:first-child {
    text-3 rather than left in its usual tinted hue, so the shape row reads
    as "here's what's missing" at a glance instead of six equally-loud pills. */
 .forecast-shape-zero { background: var(--bg-2); color: var(--text-3); }
+
+/* -- real draft history (fact) -- deliberately the visual opposite of the
+   prediction above it: a quiet, monochrome panel with no position-tinted
+   colors and no accent, versus the colored pos-badges and probability tags
+   the predicted-picks list uses. History is what happened; it should never
+   read as one more forecast on the card. */
+.forecast-history {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-3);
+}
+.forecast-history-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.forecast-history-label {
+  color: var(--text-3);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.forecast-history-meta { color: var(--text-3); font-size: var(--text-xs); flex: 0 0 auto; }
+
+.forecast-history-firsts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.forecast-history-first {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg-2);
+  border-radius: var(--radius);
+  padding: 2px 6px;
+  font-size: var(--text-xs);
+  color: var(--text-2);
+}
+.forecast-history-year { color: var(--text-3); }
+.forecast-history-name { color: var(--text-1); }
+.forecast-history-keeper {
+  color: var(--text-3);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.forecast-history-shape { display: flex; flex-direction: column; gap: 3px; }
+.forecast-history-bucket { display: flex; align-items: center; gap: 6px; }
+.forecast-history-bucket-label {
+  flex: 0 0 auto;
+  width: 32px;
+  color: var(--text-3);
+  font-size: var(--text-xs);
+}
+.forecast-history-bucket-pills { display: flex; flex-wrap: wrap; gap: 4px; }
+.forecast-history-bucket-empty { color: var(--text-3); font-size: var(--text-xs); }
+
+/* Monochrome pill shared by the first-rounder position tag and the shape
+   row's counts -- never colored by position (unlike .pos-badge), so nothing
+   in the history panel is mistakable for a piece of the prediction. */
+.hist-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-2);
+  background: var(--bg-2);
+}

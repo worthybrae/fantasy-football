@@ -187,6 +187,42 @@ export async function fetchManagers(): Promise<Manager[]> {
   return (await res.json()).managers
 }
 
+// A manager's real round-1 pick in one season. player_name/position/
+// nfl_team are null when that pick's ESPN id was missing from that season's
+// player directory (a real gap in ESPN's own data, not a bug) -- render as
+// an explicit "unidentified pick" rather than the literal string "null".
+export interface ManagerFirstRounder {
+  season: number
+  player_name: string | null
+  position: string | null
+  nfl_team: string | null
+  keeper: boolean
+}
+
+// Pick counts by position within a round bucket ("early" = rounds 1-3,
+// "mid" = 4-8, "late" = 9+ -- the same cutoffs the model trains against, see
+// api/main.py's _history_round_bucket). Keyed loosely rather than by a fixed
+// position union so an unexpected position from the backend degrades to
+// "not shown" instead of a type error.
+export type ManagerShapeBucket = Record<string, number>
+
+export interface ManagerHistory {
+  manager: string
+  // Distinct seasons this manager appears in draft_teams for -- "how many
+  // drafts they appear in."
+  seasons: number
+  total_picks: number
+  // Most recent season first.
+  first_rounders: ManagerFirstRounder[]
+  shape: { early: ManagerShapeBucket; mid: ManagerShapeBucket; late: ManagerShapeBucket }
+}
+
+export async function fetchManagerHistory(): Promise<ManagerHistory[]> {
+  const res = await fetch('/api/managers/history')
+  if (!res.ok) throw new Error('Failed to load manager history')
+  return (await res.json()).managers
+}
+
 export async function fetchDraftOrder(): Promise<DraftOrder> {
   const res = await fetch('/api/draft-order')
   if (!res.ok) throw new Error('Failed to load draft order')

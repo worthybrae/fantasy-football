@@ -299,6 +299,68 @@ def test_managers_endpoint_null_heldout_gain_serializes_as_json_null(tmp_path):
     entry = r.json()["managers"][0]
     assert entry["heldout_gain"] is None
 
+def test_managers_history_endpoint_empty_without_import(tmp_path):
+    assert _client(tmp_path).get("/api/managers/history").json() == {"managers": []}
+
+
+def test_managers_history_endpoint_shapes_real_picks(tmp_path):
+    """Two managers, two seasons, exercising every shape in the payload:
+    first-rounders sorted most-recent-first, a keeper flagged, a pick whose
+    espn_player_id had no match in that season's ESPN player directory
+    (player_name/position/nfl_team come back JSON null rather than a
+    literal-"null" string), and round-bucketed position counts spanning
+    early (<=3) and late (9+)."""
+    path = str(tmp_path / "t.duckdb")
+    _seed(path)
+    conn = get_conn(path)
+    write_table(conn, "draft_teams", pd.DataFrame([
+        {"season": 2024, "team_id": 1, "manager": "worthy", "slot": 1},
+        {"season": 2024, "team_id": 2, "manager": "dan", "slot": 2},
+        {"season": 2025, "team_id": 1, "manager": "worthy", "slot": 1},
+    ]))
+    write_table(conn, "draft_picks", pd.DataFrame([
+        {"season": 2024, "overall_pick": 1, "round": 1, "round_pick": 1,
+         "team_id": 1, "espn_player_id": 11, "player_name": "Bijan Robinson",
+         "position": "RB", "nfl_team": "ATL", "keeper": False},
+        {"season": 2024, "overall_pick": 2, "round": 1, "round_pick": 2,
+         "team_id": 2, "espn_player_id": 99, "player_name": None,
+         "position": None, "nfl_team": None, "keeper": False},
+        {"season": 2024, "overall_pick": 9, "round": 2, "round_pick": 1,
+         "team_id": 1, "espn_player_id": 12, "player_name": "Breece Hall",
+         "position": "RB", "nfl_team": "NYJ", "keeper": False},
+        {"season": 2024, "overall_pick": 73, "round": 10, "round_pick": 1,
+         "team_id": 1, "espn_player_id": 13, "player_name": "Late WR",
+         "position": "WR", "nfl_team": "GB", "keeper": False},
+        {"season": 2025, "overall_pick": 1, "round": 1, "round_pick": 1,
+         "team_id": 1, "espn_player_id": 14, "player_name": "Ja'Marr Chase",
+         "position": "WR", "nfl_team": "CIN", "keeper": True},
+    ]))
+    conn.close()
+
+    body = TestClient(create_app(path)).get("/api/managers/history").json()
+    by_name = {m["manager"]: m for m in body["managers"]}
+    assert set(by_name) == {"worthy", "dan"}
+
+    worthy = by_name["worthy"]
+    assert worthy["seasons"] == 2
+    assert worthy["total_picks"] == 4
+    assert [fr["season"] for fr in worthy["first_rounders"]] == [2025, 2024]
+    assert worthy["first_rounders"][0] == {
+        "season": 2025, "player_name": "Ja'Marr Chase", "position": "WR",
+        "nfl_team": "CIN", "keeper": True}
+    assert worthy["shape"]["early"]["RB"] == 2   # round 1 + round 2
+    assert worthy["shape"]["early"]["WR"] == 1   # 2025's round-1 keeper
+    assert worthy["shape"]["late"]["WR"] == 1    # round 10
+    assert worthy["shape"]["mid"]["RB"] == 0
+
+    dan = by_name["dan"]
+    assert dan["seasons"] == 1
+    assert dan["total_picks"] == 1
+    assert dan["first_rounders"] == [
+        {"season": 2024, "player_name": None, "position": None,
+         "nfl_team": None, "keeper": False}]
+
+
 def test_draft_order_round_trip(tmp_path):
     client = _client(tmp_path)
     assert client.get("/api/draft-order").json()["source"] == "none"
