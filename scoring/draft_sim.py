@@ -932,25 +932,44 @@ def _assign_primaries(counts: dict, n_rollouts: int) -> dict:
     Solved as an assignment problem, cost `-log(prob)`, with a finite
     `ASSIGNMENT_MISS_COST` standing in for a (pick, player) pair the
     rollouts never produced (`linear_sum_assignment` rejects an all-`-inf`
-    matrix outright). `linear_sum_assignment` is exact, so with that miss
-    cost dominating every real edge (see `ASSIGNMENT_MISS_COST`), its result
-    is already the maximum-cardinality real assignment there is: no smarter
-    algorithm can seat more picks on their own real candidates than this
-    already does. Concretely, that means whenever a pick comes back without
-    a usable answer here (unassigned, or assigned a player outside its own
-    cell), an exchange argument rules out any of that pick's own candidates
-    being free -- if one were, swapping it in would have strictly lowered
-    the total cost, contradicting optimality. So the walk below, which
-    prefers an unclaimed candidate of the pick's own before accepting a
-    repeat, is not a heuristic that sometimes helps: given this cost
-    structure it can only confirm what optimality already forced. It is
-    kept anyway as an explicit, tested invariant (never hand out a player
-    outside the pick's own cell) rather than an implicit consequence of
-    today's specific cost design, which a future change to that design could
-    silently break. A repeat among the results below is therefore a
-    property of the *input* -- some group of picks collectively produced
-    fewer distinct players than there are picks in that group, which no
-    assignment of only-real candidates can avoid -- not of this function.
+    matrix outright). `linear_sum_assignment` is exact for total cost, not
+    for the count of real edges used -- those are the same goal only as long
+    as no chain of real costs can sum past `ASSIGNMENT_MISS_COST`. At the
+    rollout counts this system actually runs (`DEFAULT_ROLLOUTS` is 300; the
+    smallest this codebase's own tests use is 10), the worst a single real
+    edge ever costs is `log(n_rollouts)` -- under 6 -- so no realistic
+    handful of them summed comes anywhere near 50, and minimizing total cost
+    and maximizing real-edge count agree in practice. Concretely: if a pick
+    comes back here without a usable answer (unassigned, or assigned a
+    player outside its own cell) while one of its own candidates sits
+    unused elsewhere in that same solution, reassigning the pick onto that
+    unused candidate is a real edge costing under 6 in place of whatever it
+    was costing before -- a 50-cost miss, which the swap strictly beats; or,
+    if the pick was excluded from the matching altogether, nothing at all,
+    which the swap cannot beat on cost alone, but that case cannot arise
+    here in the first place, because `linear_sum_assignment` always
+    saturates every column when there are more picks than distinct players,
+    so no column is ever sitting unused for an excluded pick to claim. So at
+    this system's scale, no candidate of a pick's own is ever left
+    unclaimed when that pick needs one, which is why the walk below (prefer
+    an unclaimed candidate of the pick's own before accepting a repeat) is
+    not a heuristic that sometimes helps: it can only confirm what
+    optimality already forced. It is kept anyway as an explicit, tested
+    invariant (never hand out a player outside the pick's own cell) rather
+    than an implicit consequence of today's specific cost design, which a
+    future change to that design could silently break. This is a claim
+    about realistic scale, not every possible input: an adversarial
+    `n_rollouts` far outside anything this system runs (code review's
+    counterexample: `n_rollouts = 10**20`, `counts = {1: {10: 1}, 2: {10:
+    n_rollouts - 1, 11: 1}}`) can make a chain of real costs exceed 50, and
+    `linear_sum_assignment` will then knowingly spend one pick on a repeat
+    to save more than 50 elsewhere -- a real, repeat-free assignment exists
+    there, LSA just doesn't take it, because it isn't the cheapest one. So:
+    a repeat among the results below is a property of the *input* -- at this
+    system's rollout counts, because some group of picks collectively
+    produced fewer distinct players than there are picks in that group;
+    that is what actually happens here, not a mathematical certainty for
+    every input this function could theoretically be called with.
     """
     predicted = sorted(counts)
     players = sorted({idx for cell in counts.values() for idx in cell})
@@ -1000,10 +1019,12 @@ def predict_board(pool, settings, slot_managers, my_slot, taken, betas,
     frequent player independently puts a consensus first-rounder in four
     adjacent cells, which reads as a bug rather than as "he could go at any
     of these". So the frequencies are treated as an assignment problem and
-    solved for the highest-likelihood board that repeats a player only when
-    the picks contesting him collectively produced too few distinct players
-    for a repeat-free board to exist at all -- see `_assign_primaries` for
-    why that is a property of the input, not a gap in the solver. The name
+    solved for the lowest-total-cost board -- which, at the rollout counts
+    this system runs, repeats a player only when the picks contesting him
+    collectively produced too few distinct players for a repeat-free board
+    to exist at all. See `_assign_primaries` for why that is a statement
+    about this system's realistic scale, not an unconditional guarantee, and
+    for the (unreachable-in-practice) input where it stops holding. The name
     in the cell is therefore the most coherent single draft the model can
     tell, not 120 independent answers, which is why the alternates matter
     and are kept.
