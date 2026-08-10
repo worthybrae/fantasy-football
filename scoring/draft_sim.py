@@ -1055,6 +1055,13 @@ def predict_board(pool, settings, slot_managers, my_slot, taken, betas,
 
     # -- picks already made: facts, in pick order --
     for offset, idx in enumerate(taken_order or []):
+        if offset >= len(slots):
+            # More picks on record than the draft has turns -- the same
+            # condition `_seed_rosters` breaks on, and for the same reason:
+            # there is no slot that was on the clock for them. Emitting them
+            # anyway meant a slot of 0, which no column on the grid carries,
+            # so they vanished off the page with no trace.
+            break
         if idx is None:
             continue
         rows.append(_board_row(pool, slots, teams, offset + 1, 0, idx, 1.0, True))
@@ -1079,11 +1086,17 @@ def predict_board(pool, settings, slot_managers, my_slot, taken, betas,
 
 
 def _board_row(pool, slots, teams, overall_pick, alt_rank, idx, prob, certain):
+    """One grid cell. `overall_pick` must be a real turn (1..len(slots)) --
+    both callers in `predict_board` guarantee it, the already-made loop by
+    breaking past the end of the draft and the predicted loop because
+    `_run_draft`'s `record` only ever walks `slots`. Indexed directly rather
+    than falling back to a slot of 0, which no column on the grid carries and
+    which therefore silently dropped the row."""
     offset = overall_pick - 1
     return {"overall_pick": overall_pick,
             "round": offset // teams + 1,
             "round_pick": offset % teams + 1,
-            "slot": slots[offset] if offset < len(slots) else 0,
+            "slot": slots[offset],
             "alt_rank": alt_rank,
             "player_id": pool.player_id[idx],
             "prob": float(prob),

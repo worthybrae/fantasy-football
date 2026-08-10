@@ -6,28 +6,38 @@ interface DraftGridProps {
   onSelectPlayer: (playerId: string) => void
 }
 
-/** Cells keyed by overall pick, primary first. */
-function byPick(cells: SimBoardCell[]): Map<number, SimBoardCell[]> {
-  const map = new Map<number, SimBoardCell[]>()
+/** Cells keyed by the grid coordinate they belong in, primary first.
+ *
+ *  Keyed on the payload's own `round` and `slot` rather than on a snake
+ *  mapping re-derived here from (round, slot, teams). `_board_row` already
+ *  derives round/round_pick/slot from `overall_pick` server-side and sends
+ *  all three on every cell, so re-deriving the inverse was a second
+ *  implementation of the same rule with nothing to keep the two in step --
+ *  and the only way for them to ever disagree. It also handles the one input
+ *  where they genuinely do: `board.order` carrying a slot outside 1..teams
+ *  (nothing validates that -- PUT /api/draft-order checks uniqueness only,
+ *  and run_sim's guard rejects missing slots but permits extras) used to
+ *  alias onto another cell's pick and render that player twice. Keying on
+ *  the cell's own slot leaves the column empty instead. */
+function cellKey(round: number, slot: number): string {
+  return `${round}|${slot}`
+}
+
+function byCell(cells: SimBoardCell[]): Map<string, SimBoardCell[]> {
+  const map = new Map<string, SimBoardCell[]>()
   for (const c of cells) {
-    const list = map.get(c.overall_pick) ?? []
+    const key = cellKey(c.round, c.slot)
+    const list = map.get(key) ?? []
     list.push(c)
-    map.set(c.overall_pick, list)
+    map.set(key, list)
   }
   for (const list of map.values()) list.sort((a, b) => a.alt_rank - b.alt_rank)
   return map
 }
 
-/** Overall pick number for a (round, slot) in a snake draft. Round 1 runs
- *  slot 1..teams, round 2 runs teams..1, and so on. */
-function pickNumber(round: number, slot: number, teams: number): number {
-  const offsetInRound = round % 2 === 1 ? slot - 1 : teams - slot
-  return (round - 1) * teams + offsetInRound + 1
-}
-
 export default function DraftGrid({ board, onSelectPlayer }: DraftGridProps) {
-  const cells = useMemo(() => byPick(board.cells), [board.cells])
-  const [hovered, setHovered] = useState<number | null>(null)
+  const cells = useMemo(() => byCell(board.cells), [board.cells])
+  const [hovered, setHovered] = useState<string | null>(null)
   const rounds = Array.from({ length: board.rounds }, (_, i) => i + 1)
   const mySlot = board.run?.my_slot ?? null
 
@@ -52,8 +62,8 @@ export default function DraftGrid({ board, onSelectPlayer }: DraftGridProps) {
               <td className="grid-round">{round}</td>
               <td className="grid-dir">{round % 2 === 1 ? '›' : '‹'}</td>
               {board.order.map((e) => {
-                const pick = pickNumber(round, e.slot, board.teams)
-                const list = cells.get(pick) ?? []
+                const key = cellKey(round, e.slot)
+                const list = cells.get(key) ?? []
                 const primary = list[0]
                 const alts = list.slice(1)
                 const mine = e.slot === mySlot
@@ -67,8 +77,8 @@ export default function DraftGrid({ board, onSelectPlayer }: DraftGridProps) {
                     key={e.slot}
                     className={`grid-cell ${state}`}
                     style={pos ? { borderLeftColor: `var(--pos-${pos})` } : undefined}
-                    onMouseEnter={() => setHovered(pick)}
-                    onMouseLeave={() => setHovered((h) => (h === pick ? null : h))}
+                    onMouseEnter={() => setHovered(key)}
+                    onMouseLeave={() => setHovered((h) => (h === key ? null : h))}
                   >
                     <button
                       type="button"
@@ -87,9 +97,13 @@ export default function DraftGrid({ board, onSelectPlayer }: DraftGridProps) {
                         )}
                       </span>
                     </button>
-                    {hovered === pick && alts.length > 0 && (
+                    {hovered === key && alts.length > 0 && (
                       <div className="grid-alts" role="tooltip">
-                        <div className="grid-alts-title">Also in play</div>
+                        {/* Not "Also in play": these are this pick's raw,
+                            un-deduped frequencies, and saying so is what
+                            makes an alternate outranking the primary read as
+                            the dedupe rather than as a bug. */}
+                        <div className="grid-alts-title">Raw odds for this pick</div>
                         {alts.map((a) => (
                           <button
                             key={a.player_id}

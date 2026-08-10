@@ -1303,6 +1303,26 @@ def test_predict_board_skips_a_certain_pick_whose_player_fell_off_the_pool():
     assert 2 not in board["overall_pick"].tolist()
 
 
+def test_predict_board_drops_picks_past_the_end_of_the_draft():
+    """`taken_order` can be longer than the draft has turns -- 8 x 15 is 120
+    slots, and nothing stops the drafted table holding more rows than that.
+    Those picks used to be emitted with `slot = 0`, and no column on the grid
+    carries slot 0, so they disappeared off the page with no trace.
+    `_seed_rosters` already breaks on exactly this condition; report the same
+    set of picks it does.
+    """
+    from scoring.draft_sim import predict_board
+    pool = _pool(150)                     # more players than teams x rounds
+    slots = {i: f"m{i}" for i in range(1, 9)}
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    taken[:125] = True
+    board = predict_board(pool, S, slots, 4, taken, _adp_betas(slots.values()),
+                          n_rollouts=5, seed=3, taken_order=list(range(125)))
+    assert (board["slot"] >= 1).all()
+    assert board["overall_pick"].tolist() == list(range(1, 121))
+    assert board["certain"].all()
+
+
 def test_assign_primaries_never_invents_a_candidate_outside_the_cells_own_players():
     """Regression case from code review: a naive per-cell argmax fallback
     (`max(cell, key=...)`, with no notion of who else already claimed what)
