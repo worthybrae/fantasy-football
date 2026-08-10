@@ -1556,14 +1556,32 @@ def test_run_sim_writes_sim_board(tmp_path, monkeypatch):
                                    "player_id", "prob", "certain"]
     assert not board.empty
     assert set(board["run_id"]) == {run_id}
-    # No blanket "every primary is unique" check here: with uniform-random
-    # opponents (zero betas) and only 3 rollouts, a forced duplicate is a
-    # likely, legitimate outcome of the draft-order-greedy rule (Task 7),
-    # not a bug -- see
-    # test_predict_board_never_puts_one_player_in_two_cells_unless_forced
-    # for the rigorous version of this check, which needs full per-cell
-    # alternates that this table (written with run_sim's default of 2) does
-    # not carry.
+    # No blanket "every primary is unique" check: with uniform-random
+    # opponents (zero betas), a forced duplicate is a likely, legitimate
+    # outcome of the draft-order-greedy rule (Task 7), not a bug. But the
+    # weaker, real invariant -- any duplicate must be forced -- IS checkable
+    # here without touching run_sim's interface: a cell's distinct
+    # candidate count can never exceed n_rollouts (each rollout contributes
+    # at most one entry per pick), and this run uses n_rollouts=3 against
+    # `predict_board`'s default alternates=2, i.e. n_rollouts <= alternates
+    # + 1. That bound means every cell's full candidate set (up to 3
+    # distinct players) fits inside the 3 rows (1 primary + 2 alternates)
+    # `sim_board` already carries -- nothing is truncated. Same walk as
+    # test_predict_board_never_puts_one_player_in_two_cells_unless_forced.
+    by_pick = {pick: grp for pick, grp in board.groupby("overall_pick")}
+    claimed_by = {}
+    for pick in sorted(by_pick):
+        cell = by_pick[pick]
+        chosen = cell.loc[cell["alt_rank"] == 0, "player_id"].iloc[0]
+        if chosen in claimed_by:
+            own_candidates = set(cell["player_id"])
+            already_claimed = set(claimed_by)
+            unclaimed = own_candidates - already_claimed
+            assert not unclaimed, (
+                f"pick {pick} repeated {chosen!r} while {unclaimed} of its "
+                "own recorded candidates were still free")
+        else:
+            claimed_by[chosen] = pick
 
 
 def test_live_features_matches_feature_matrix_on_the_new_columns():
