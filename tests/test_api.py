@@ -1,3 +1,4 @@
+import json
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from fastapi.testclient import TestClient
@@ -444,7 +445,14 @@ def test_model_endpoint_surfaces_the_persisted_backtest(tmp_path):
     """Spec Part 3: if the model does not beat ADP-only, the board must not
     present simulator output as authoritative. The backtest was printed to
     stdout by `make fit-managers` and then dropped, so nothing downstream
-    could ever know."""
+    could ever know.
+
+    `seasons` (not `holdout_season`, which leave-one-season-out has no
+    single value for) is stored as a JSON string -- see
+    `draft_model.write_backtest` -- so the fixture row writes it that way
+    too, matching what `write_backtest` actually persists rather than what
+    `backtest()` returns in memory.
+    """
     path = str(tmp_path / "t.duckdb")
     _seed(path)
     conn = get_conn(path)
@@ -453,24 +461,28 @@ def test_model_endpoint_surfaces_the_persisted_backtest(tmp_path):
          "pooled_value": 0.0, "n_picks": 40, "heldout_gain": 0.1,
          "uses_personal": True, "summary": "reaches"}]))
     write_table(conn, "model_backtest", pd.DataFrame([
-        {"holdout_season": 2025, "top1": 0.1, "top5": 0.3, "logloss": 4.0,
-         "adp_top1": 0.2, "adp_logloss": 3.0, "beats_adp": False}]))
+        {"seasons": json.dumps([2023, 2024, 2025]), "top1": 0.1, "top5": 0.3,
+         "logloss": 4.0, "adp_top1": 0.2, "adp_logloss": 3.0,
+         "beats_adp": False}]))
     conn.close()
 
     body = TestClient(create_app(path)).get("/api/model").json()
     assert body["fitted"] is True
     assert body["n_managers"] == 1
     assert body["backtest"]["beats_adp"] is False
-    assert body["backtest"]["holdout_season"] == 2025
+    assert body["backtest"]["seasons"] == [2023, 2024, 2025]
 
 def test_model_endpoint_serializes_an_infinite_logloss_as_null(tmp_path):
     """backtest() genuinely returns inf when there is nothing to score, and
-    JSON has no infinity -- FastAPI's encoder rejects it outright."""
+    JSON has no infinity -- FastAPI's encoder rejects it outright. `seasons`
+    is `[]` in that case (see `backtest`'s empty-observations branch), not
+    `None` -- LOSO always returns a list, just an empty one when there is
+    nothing to rotate through."""
     path = str(tmp_path / "t.duckdb")
     _seed(path)
     conn = get_conn(path)
     write_table(conn, "model_backtest", pd.DataFrame([
-        {"holdout_season": None, "top1": 0.0, "top5": 0.0,
+        {"seasons": json.dumps([]), "top1": 0.0, "top5": 0.0,
          "logloss": float("inf"), "adp_top1": 0.0,
          "adp_logloss": float("inf"), "beats_adp": False}]))
     conn.close()
@@ -478,7 +490,7 @@ def test_model_endpoint_serializes_an_infinite_logloss_as_null(tmp_path):
     r = TestClient(create_app(path)).get("/api/model")
     assert r.status_code == 200
     assert r.json()["backtest"]["logloss"] is None
-    assert r.json()["backtest"]["holdout_season"] is None
+    assert r.json()["backtest"]["seasons"] == []
 
 def test_players_expose_sim_columns_as_null_without_a_sim(tmp_path):
     row = _client(tmp_path).get("/api/players").json()["players"][0]

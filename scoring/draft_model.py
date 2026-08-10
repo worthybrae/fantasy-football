@@ -10,6 +10,7 @@ model's core feature is a player's position relative to market rank, which is
 undefined without one -- and the import step reports how many picks this
 removes per season so a bad join surfaces as a number, not a silent shrug.
 """
+import json
 import warnings
 from typing import NamedTuple
 
@@ -548,6 +549,13 @@ def backtest(conn, settings=None, features=None, observations=None) -> dict:
         train = [i for i, s in enumerate(seasons) if s != holdout]
         test = [i for i, s in enumerate(seasons) if s == holdout]
         if not train or not test:
+            # Fewer than two distinct seasons: this fold has no other side to
+            # train or test against, so it is skipped rather than falling
+            # back to the old single-holdout behavior of scoring a
+            # zero-initialized, effectively-uniform model against it. If
+            # every fold is skipped this way (genuinely one season total),
+            # n_total stays 0 and the guard below reports top1/top5 = 0.0,
+            # logloss = inf -- not that old uniform-prediction score.
             continue
         pooled = fit([X_list[i] for i in train], [chosen[i] for i in train])
 
@@ -678,7 +686,18 @@ def write_backtest(conn, settings=None) -> dict:
     Printing it to stdout from `make fit-managers` cannot reach the board, so
     nothing stopped the board presenting the simulator as authoritative
     regardless. `/api/model` serves this row and the rail warns on it.
+
+    `seasons` is persisted as a JSON-encoded string (`json.dumps`), not as
+    DuckDB's native LIST column. Every other field in this row is a scalar
+    that `/api/model` reads with a plain `row.get(...)` and a small
+    `_..._or_none` conversion; a JSON string round-trips through that same
+    shape (decode with `json.loads` on the way out) without `/api/model`
+    needing a separate code path for one column's storage type. The
+    returned `report` itself is untouched -- `seasons` stays a real list for
+    `fit_managers`, which prints it directly.
     """
     report = backtest(conn, settings)
-    write_table(conn, "model_backtest", pd.DataFrame([report]))
+    row = dict(report)
+    row["seasons"] = json.dumps(report["seasons"])
+    write_table(conn, "model_backtest", pd.DataFrame([row]))
     return report

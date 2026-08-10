@@ -256,7 +256,8 @@ export async function fetchSimLatest(): Promise<SimRun | null> {
 }
 
 export interface Backtest {
-  holdout_season: number | null
+  /** Every season rotated through as the LOSO holdout, not a single one. */
+  seasons: number[] | null
   top1: number | null
   top5: number | null
   logloss: number | null

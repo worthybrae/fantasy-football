@@ -1,3 +1,4 @@
+import json
 import math
 import threading
 import uuid
@@ -22,6 +23,19 @@ def _float_or_none(value):
         return None
     number = float(value)
     return number if math.isfinite(number) else None
+
+
+def _seasons_or_none(value):
+    """`model_backtest.seasons` is a JSON-encoded list of ints (see
+    `draft_model.write_backtest`) -- decode it back into a real list for the
+    response. None for a missing/NA cell, including a `model_backtest` row
+    written before this column existed (a pre-Task-6 backtest table)."""
+    if value is None or pd.isna(value):
+        return None
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
@@ -352,7 +366,7 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
             report = None
             if not bt.empty:
                 row = bt.iloc[0]
-                report = {"holdout_season": _int_or_none(row.get("holdout_season")),
+                report = {"seasons": _seasons_or_none(row.get("seasons")),
                           "top1": _float_or_none(row.get("top1")),
                           "top5": _float_or_none(row.get("top5")),
                           "logloss": _float_or_none(row.get("logloss")),

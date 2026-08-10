@@ -840,3 +840,25 @@ def test_ablation_has_a_row_per_new_feature(tmp_path):
     assert "none" in table["dropped"].tolist()
     for f in ("age", "volatility", "hype", "trend"):
         assert f in table["dropped"].tolist()
+
+
+def test_write_backtest_persists_seasons_as_json(tmp_path):
+    """`backtest()["seasons"]` is a real list -- LOSO rotates through every
+    season, there is no single `holdout_season` left to store as an int.
+    `model_backtest` is a one-row table of otherwise-scalar columns that
+    `/api/model` reads with plain `row.get(...)`, so `seasons` is persisted
+    as a JSON string (`write_backtest`'s choice, documented there) rather
+    than relying on DuckDB's native LIST column type. This is the write
+    side of that contract: `/api/model`'s `_seasons_or_none` in
+    `tests/test_api.py` covers the read side.
+    """
+    import json
+    from pipeline.db import read_table
+    from scoring.draft_model import write_backtest
+    conn = _seed_many(tmp_path, seasons=(2023, 2024, 2025))
+    report = write_backtest(conn)
+    assert isinstance(report["seasons"], list)          # return value: untouched
+
+    row = read_table(conn, "model_backtest").iloc[0]
+    assert isinstance(row["seasons"], str)               # persisted: JSON string
+    assert json.loads(row["seasons"]) == sorted(report["seasons"])

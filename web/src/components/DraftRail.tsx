@@ -182,7 +182,12 @@ export default function DraftRail({ onSimComplete, onStatus, draftedCount }: Dra
         {!unfitted && losesToAdp && (
           <p className="rail-warning">
             The fitted model does not beat the ADP baseline out of sample
-            {model?.backtest?.holdout_season ? ` (${model.backtest.holdout_season} held out)` : ''}.
+            {/* Leave-one-season-out: every season in `seasons` was rotated
+                through as a holdout in turn, so there is no single season to
+                name -- report how many were rotated instead. */}
+            {model?.backtest?.seasons?.length
+              ? ` (${model.backtest.seasons.length} season${model.backtest.seasons.length === 1 ? '' : 's'}, rotated)`
+              : ''}.
             Treat Avail% and ΔEV as indicative only, not as predictions.
           </p>
         )}
