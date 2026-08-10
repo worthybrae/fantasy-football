@@ -92,3 +92,35 @@ def test_empty_before_the_first_season(tmp_path):
     assert a.empty
     assert list(a.columns) == ["key", "age", "ppg_std", "missed_rate",
                                "no_track_record", "prod_rank", "trend"]
+
+
+def _seed_tie(tmp_path):
+    conn = get_conn(str(tmp_path / "tie.duckdb"))
+    rows = []
+    # Two RBs post the exact same 2023 ppg (15) -- a tie in most-recent
+    # production. A third player sits clearly behind them at 10 ppg.
+    for pid, name, team in (("p_tie_a", "Tie A", "DET"), ("p_tie_b", "Tie B", "GB")):
+        rows += [{"player_id": pid, "player_display_name": name,
+                  "position": "RB", "recent_team": team, "opponent_team": "CHI",
+                  "season": 2023, "week": w, "receptions": 15, "receiving_yards": 0,
+                  "targets": 15, "carries": 0} for w in range(1, 18)]
+    rows += [{"player_id": "p_third", "player_display_name": "Third Guy",
+              "position": "RB", "recent_team": "CHI", "opponent_team": "GB",
+              "season": 2023, "week": w, "receptions": 10, "receiving_yards": 0,
+              "targets": 10, "carries": 0} for w in range(1, 18)]
+    write_table(conn, "weekly", pd.DataFrame(rows))
+    write_table(conn, "players", pd.DataFrame(columns=[
+        "gsis_id", "display_name", "birth_date", "rookie_season"]))
+    return conn
+
+
+def test_prod_rank_is_dense_for_tied_players(tmp_path):
+    """Two players with identical most-recent-season ppg must share a rank,
+    and the next distinct player down must be exactly one rank behind --
+    not two, which would invent a distinction the data doesn't support."""
+    a = attributes_as_of(_seed_tie(tmp_path), 2024).set_index("key")
+    tie_a = a.loc["RB|tie a"]["prod_rank"]
+    tie_b = a.loc["RB|tie b"]["prod_rank"]
+    third = a.loc["RB|third guy"]["prod_rank"]
+    assert tie_a == tie_b
+    assert third == tie_a + 1

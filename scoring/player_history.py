@@ -83,6 +83,10 @@ def attributes_as_of(conn, season: int, rules: dict | None = None) -> pd.DataFra
         birth = pd.to_datetime(out["birth_date"], errors="coerce")
         out["age"] = (draft_day - birth).dt.days / 365.25
 
-    out = out.sort_values("last_ppg", ascending=False).reset_index(drop=True)
-    out["prod_rank"] = out.index + 1
+    # Dense, not ordinal: two players who actually tied on production must
+    # tie on rank too. `prod_rank` feeds `hype` downstream (a claim about
+    # how far the market sits ahead of production), and an invented rank
+    # gap between equals would put a number on a distinction that doesn't
+    # exist in the data.
+    out["prod_rank"] = out["last_ppg"].rank(method="dense", ascending=False).astype(int)
     return out[COLUMNS]
