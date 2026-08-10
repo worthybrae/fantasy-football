@@ -1168,3 +1168,83 @@ td:first-child {
 .card-factor-fill { display: block; height: 100%; border-radius: 3px; background: var(--accent); }
 .card-outlook { color: var(--text-2); font-size: 0.78rem; }
 .card-full { display: inline-block; margin-top: 10px; color: var(--accent); font-size: 0.8rem; }
+
+/* -- draft board grid (predicted draft board) -- */
+
+.top-nav { display: flex; gap: var(--space-3); margin-right: var(--space-3); }
+.top-nav a { color: var(--text-3); text-decoration: none; font-size: 0.85rem; }
+.top-nav a.active { color: var(--text-1); }
+
+.grid-wrap { overflow-x: auto; }
+.draft-grid { border-collapse: collapse; font-size: 0.78rem; }
+.draft-grid th,
+.draft-grid td { border: 1px solid var(--border); vertical-align: top; }
+.draft-grid th {
+  background: var(--bg-1);
+  color: var(--text-2);
+  padding: 6px 8px;
+  text-align: left;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.draft-grid th.grid-mine { color: var(--accent); }
+.grid-you { color: var(--text-3); }
+.grid-round,
+.grid-dir {
+  background: var(--bg-1);
+  color: var(--text-3);
+  text-align: center;
+  padding: 6px;
+  font-variant-numeric: tabular-nums;
+}
+.grid-dir { width: 20px; }
+.grid-cell { position: relative; width: 150px; border-left-width: 3px; }
+.grid-cell.is-predicted { background: var(--bg-0); }
+.grid-cell.is-projected { background: var(--bg-2); }
+.grid-cell.is-certain { background: var(--bg-1); }
+.grid-empty { background: var(--bg-0); height: 42px; }
+.grid-pick {
+  display: block;
+  width: 100%;
+  background: none;
+  border: 0;
+  padding: 5px 7px;
+  text-align: left;
+  color: var(--text-1);
+  cursor: pointer;
+  font: inherit;
+}
+.grid-pick:hover { background: var(--accent-bg); }
+.grid-name { display: block; }
+.grid-meta { display: block; color: var(--text-3); font-size: 0.72rem; }
+.grid-prob { margin-left: 6px; }
+.grid-alts {
+  position: absolute;
+  z-index: 5;
+  top: 100%;
+  left: 0;
+  min-width: 170px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  padding: 5px;
+}
+.grid-alts-title {
+  color: var(--text-3);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 2px 4px;
+}
+.grid-alt {
+  display: flex;
+  justify-content: space-between;
+  width: 100%;
+  background: none;
+  border: 0;
+  padding: 3px 4px;
+  color: var(--text-2);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.74rem;
+}
+.grid-alt:hover { background: var(--accent-bg); color: var(--text-1); }

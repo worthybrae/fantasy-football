@@ -251,3 +251,31 @@ export async function fetchModel(): Promise<ModelStatus> {
   if (!res.ok) throw new Error('Failed to load model status')
   return res.json()
 }
+
+export interface SimBoardCell {
+  overall_pick: number
+  round: number
+  round_pick: number
+  slot: number
+  alt_rank: number
+  player_id: string
+  name: string
+  position: string | null
+  team: string | null
+  prob: number
+  certain: boolean
+}
+
+export interface SimBoard {
+  run: { run_id: string; my_slot: number; created_at: string } | null
+  teams: number
+  rounds: number
+  order: DraftOrderEntry[]
+  cells: SimBoardCell[]
+}
+
+export async function fetchSimBoard(): Promise<SimBoard> {
+  const res = await fetch('/api/sim/board')
+  if (!res.ok) throw new Error('Failed to load the predicted board')
+  return res.json()
+}

@@ -3,6 +3,7 @@ import { Route, Routes, useNavigate } from 'react-router-dom'
 import { fetchPlayers, playerSlug, setDrafted, type Player } from './api'
 import PlayerTable, { RANK_SOURCES, type RankSourceId } from './components/PlayerTable'
 import PlayerPage from './components/PlayerPage'
+import DraftBoardPage from './components/DraftBoardPage'
 import { BoardSkeleton } from './components/PageSkeleton'
 import PositionTabs from './components/PositionTabs'
 import FreshnessBadge from './components/FreshnessBadge'
@@ -17,6 +18,7 @@ function App() {
     <Routes>
       <Route path="/" element={<Board />} />
       <Route path="/players/:slug" element={<PlayerPage />} />
+      <Route path="/draft-board" element={<DraftBoardPage />} />
     </Routes>
   )
 }

@@ -1,4 +1,5 @@
 import { useEffect, useRef, type KeyboardEvent, type ReactNode } from 'react'
+import { NavLink } from 'react-router-dom'
 
 interface TopBarProps {
   search: string
@@ -66,6 +67,10 @@ export default function TopBar({ search, onSearch, meta, searchShortcutDisabled 
           aria-label="Search players by name or team"
         />
       </div>
+      <nav className="top-nav">
+        <NavLink to="/" end>Board</NavLink>
+        <NavLink to="/draft-board">Grid</NavLink>
+      </nav>
       <div className="topbar-meta">{meta}</div>
     </header>
   )
