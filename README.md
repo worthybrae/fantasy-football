@@ -315,24 +315,32 @@ with the same greedy, best-marginal-value-right-now policy the simulator
 uses to search candidates, not with a fitted model of your own behavior.
 That policy is close to deterministic given the board state, so its
 cell frequencies would sit near 100% almost everywhere, which would read as
-confidence about the future that the model doesn't have. Those cells are
-labeled **projected** instead of predicted, and show no probability at all.
-Read that column as "what the current plan does at each of your picks," not
-as a forecast of what will happen.
+confidence about the future that the model doesn't have. Those cells get
+their own background shade and show no probability at all — that missing
+percentage is the tell, since every predicted cell has one. Read that column
+as "what the current plan does at each of your picks," not as a forecast of
+what will happen.
 
-Once a player is marked drafted, that cell renders as fact, at full strength,
-with no probability shown. It isn't a prediction anymore.
+A player who was already marked drafted when the run happened gets a third
+background shade, again with no probability. It isn't a prediction anymore.
+All three states keep the same position colour on the left edge, so the
+shade and the presence or absence of a percentage are what tell them apart.
 
-The grid shows the last simulation run, merged with whatever is currently
-marked drafted. It does not refresh itself as picks come in; re-running is a
-deliberate step, same as for the board's `Avail%`/`ΔEV` columns. A run made
+The grid shows the last simulation run, including the drafted state as of
+that run — a player you mark drafted afterwards still has predictions sitting
+in his cell, because `certain` was computed inside `predict_board` from the
+picks that existed when it ran and written into `sim_board` then. The grid
+does not refresh itself as picks come in; re-running is a deliberate step,
+same as for the board's `Avail%`/`ΔEV` columns. A run made
 before this feature existed (or one that otherwise wrote no per-pick rows)
 produces an empty grid, and the page says so and tells you to re-run rather
 than showing a silently blank board.
 
 Clicking a cell opens a condensed player profile, close enough for a
 draft-night decision, with a link to the full profile page for anything it
-leaves out.
+leaves out. It carries that player's `Avail%` and `ΔEV` from the same run
+(`ΔEV` only for the handful of players scored at your next pick) and a
+mark-drafted button, so a pick doesn't send you back to the board page.
 
 Because the grid is built on the same fitted manager models as the rest of
 the simulator, the backtest line `make fit-managers` prints matters even

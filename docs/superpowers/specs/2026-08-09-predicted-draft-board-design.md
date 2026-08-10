@@ -212,8 +212,10 @@ frontend test runner, and standing one up is a separate project.
 - Exporting it
 - More than two alternates per cell (a primary plus a second and third choice)
 - Historical replay of past drafts in this grid
-- Live auto-refresh as picks come in; the grid reflects whatever the last sim
-  run and the current drafted state say, and re-running is a deliberate action
+- Live auto-refresh as picks come in; the grid reflects the last sim run,
+  including the drafted state as of that run (`certain` is computed inside
+  `predict_board` and frozen into `sim_board`, so marking a player drafted
+  afterwards does not change his cell), and re-running is a deliberate action
 
 ## Risks
 
