@@ -1,23 +1,31 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
-  ageLabel, bestEv as boardBestEv, fetchPlayers, fetchSimBoard,
-  type Player, type SimBoard,
+  ageLabel, bestEv as boardBestEv, fetchManagers, fetchPlayers, fetchSimBoard,
+  type Manager, type Player, type SimBoard,
 } from '../api'
 import DraftGrid from './DraftGrid'
+import ManagerForecast from './ManagerForecast'
 import PlayerCard from './PlayerCard'
 import TopBar from './TopBar'
 import FreshnessBadge from './FreshnessBadge'
+
+type BoardView = 'grid' | 'forecast'
 
 export default function DraftBoardPage() {
   const [board, setBoard] = useState<SimBoard | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
+  const [view, setView] = useState<BoardView>('grid')
   // Avail%/ΔEV live on the board row, not on /api/sim/board's cells, and ΔEV
   // is defined against the best EV across the WHOLE board -- the cells cover
   // only 120 players, so a cell-local baseline would disagree with the number
   // the board page shows for the same player. Same list PlayerPage fetches
   // for its slug lookup.
   const [players, setPlayers] = useState<Player[]>([])
+  // Per-manager tendency (summary, uses_personal) for the forecast tab's
+  // cards. Fetched alongside the board rather than only when that tab is
+  // selected, so switching tabs never shows a loading flash.
+  const [managers, setManagers] = useState<Manager[]>([])
 
   useEffect(() => {
     fetchSimBoard()
@@ -29,6 +37,13 @@ export default function DraftBoardPage() {
   // without it, and only the card's two extra numbers go missing.
   useEffect(() => {
     fetchPlayers().then(setPlayers).catch(() => setPlayers([]))
+  }, [])
+
+  // Same treatment: a manager fetch failing just means the forecast cards
+  // fall back to "No model fitted for this manager yet." per card instead of
+  // taking down a page the grid tab doesn't need this data for at all.
+  useEffect(() => {
+    fetchManagers().then(setManagers).catch(() => setManagers([]))
   }, [])
 
   const bestEv = useMemo(() => boardBestEv(players), [players])
@@ -63,22 +78,56 @@ export default function DraftBoardPage() {
                 </p>
               )}
               {board.run && board.cells.length > 0 && (
-                <p className="grid-legend">
-                  {/* 18-44% of cells show a name their own hover disagrees
-                      with, depending on the fitted reach coefficient. The
-                      README explains why at length; without a line here the
-                      grid just reads as broken at the moment of confusion. */}
-                  Names are deduplicated across the whole board, so a cell can
-                  show its second-most-likely player. Hover for that pick's raw
-                  odds.{' '}
-                  {/* The rail shows staleness for the same run; the screen
-                      that renders 120 predictions at once showed nothing. */}
-                  <span className="grid-legend-age">
-                    Simulated {ageLabel(board.run.created_at)}.
-                  </span>
-                </p>
+                <>
+                  <div className="board-view-tabs">
+                    <button
+                      type="button"
+                      className={view === 'grid' ? 'active' : undefined}
+                      onClick={() => setView('grid')}
+                    >
+                      Grid
+                    </button>
+                    <button
+                      type="button"
+                      className={view === 'forecast' ? 'active' : undefined}
+                      onClick={() => setView('forecast')}
+                    >
+                      By manager
+                    </button>
+                  </div>
+                  <p className="grid-legend">
+                    {view === 'grid' ? (
+                      <>
+                        {/* 18-44% of cells show a name their own hover
+                            disagrees with, depending on the fitted reach
+                            coefficient. The README explains why at length;
+                            without a line here the grid just reads as broken
+                            at the moment of confusion. */}
+                        Names are deduplicated across the whole board, so a
+                        cell can show its second-most-likely player. Hover for
+                        that pick's raw odds.{' '}
+                      </>
+                    ) : (
+                      <>
+                        One card per manager, in draft-slot order — the same
+                        deduplicated prediction the grid's cells show, without
+                        the alternates. Switch to Grid to see a pick's raw
+                        odds against its alternates.{' '}
+                      </>
+                    )}
+                    {/* The rail shows staleness for the same run; the screen
+                        that renders 120 predictions at once showed nothing. */}
+                    <span className="grid-legend-age">
+                      Simulated {ageLabel(board.run.created_at)}.
+                    </span>
+                  </p>
+                  {view === 'grid' ? (
+                    <DraftGrid board={board} onSelectPlayer={setSelected} />
+                  ) : (
+                    <ManagerForecast board={board} managers={managers} onSelectPlayer={setSelected} />
+                  )}
+                </>
               )}
-              <DraftGrid board={board} onSelectPlayer={setSelected} />
             </>
           )}
         </main>
