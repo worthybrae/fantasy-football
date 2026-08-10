@@ -37,6 +37,13 @@ export default function DraftBoardPage() {
                   press Run — this grid fills in with the prediction.
                 </p>
               )}
+              {board.run && board.cells.length === 0 && (
+                <p className="rail-empty">
+                  The last simulation predates this board and left no per-pick
+                  predictions. Run a new simulation on the board page to fill
+                  it in.
+                </p>
+              )}
               <DraftGrid board={board} onSelectPlayer={setSelected} />
             </>
           )}
