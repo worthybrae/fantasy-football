@@ -148,6 +148,11 @@ export interface ManagerCoefficient {
   feature: string
   value: number
   pooled_value: number
+  /** Whether a three-bar card may summarize this coefficient on its own.
+   *  Comes from `draft_model.SUMMARY_FEATURES`; false for the position
+   *  dummies, which only mean anything relative to each other. Server-side
+   *  so adding a feature to the model doesn't need a matching edit here. */
+  shown: boolean
 }
 
 export interface Manager {
@@ -299,7 +304,9 @@ export interface Backtest {
   logloss: number | null
   adp_top1: number | null
   adp_logloss: number | null
-  beats_adp: boolean
+  /** Null when the stored backtest row predates the column -- no comparison
+   *  was made, which is not the same as the model having lost one. */
+  beats_adp: boolean | null
 }
 
 export interface ModelStatus {

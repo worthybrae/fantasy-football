@@ -279,6 +279,26 @@ def test_managers_endpoint_groups_coefficients(tmp_path):
     assert entry["uses_personal"] is True
     assert {c["feature"] for c in entry["coefficients"]} == {"reach", "run"}
 
+def test_managers_endpoint_marks_every_non_dummy_coefficient_shown(tmp_path):
+    """`shown` comes from the model, so a feature added there reaches the
+    rail's card without a second, hand-kept list in the web client going
+    stale (which is exactly what happened when the model grew `age`,
+    `hype`, `trend` and `no_track_record`). Position dummies stay off: one
+    bar for `pos_RB` says nothing without the others beside it."""
+    from scoring.draft_model import FEATURE_NAMES
+    path = str(tmp_path / "t.duckdb")
+    _seed(path)
+    conn = get_conn(path)
+    write_table(conn, "manager_profiles", pd.DataFrame([
+        {"manager": "worthy", "feature": f, "value": 0.1, "pooled_value": 0.0,
+         "n_picks": 105, "heldout_gain": 0.08, "uses_personal": True,
+         "summary": "s"} for f in FEATURE_NAMES]))
+    conn.close()
+    body = TestClient(create_app(path)).get("/api/managers").json()
+    shown = {c["feature"] for c in body["managers"][0]["coefficients"] if c["shown"]}
+    assert shown == {f for f in FEATURE_NAMES if not f.startswith("pos_")}
+    assert {"age", "hype", "trend", "no_track_record"} <= shown
+
 def test_managers_endpoint_null_heldout_gain_serializes_as_json_null(tmp_path):
     """heldout_gain is written as None (-> NaN on the DuckDB/pandas round trip)
     whenever a manager has too few picks or too few seasons for a holdout
@@ -533,6 +553,24 @@ def test_model_endpoint_surfaces_the_persisted_backtest(tmp_path):
     assert body["n_managers"] == 1
     assert body["backtest"]["beats_adp"] is False
     assert body["backtest"]["seasons"] == [2023, 2024, 2025]
+
+def test_model_endpoint_beats_adp_is_null_when_the_column_is_missing(tmp_path):
+    """A `model_backtest` row written before `beats_adp` existed made no
+    comparison. `bool(None)` is False, and the rail renders False as the
+    positive claim "the fitted model does not beat the ADP baseline" -- an
+    accusation about a comparison nobody ran. Null, like the numbers beside
+    it, so the rail can stay quiet."""
+    path = str(tmp_path / "t.duckdb")
+    _seed(path)
+    conn = get_conn(path)
+    write_table(conn, "model_backtest", pd.DataFrame([
+        {"seasons": json.dumps([2025]), "top1": 0.2, "top5": 0.5,
+         "logloss": 3.0}]))
+    conn.close()
+
+    body = TestClient(create_app(path)).get("/api/model").json()
+    assert body["backtest"]["beats_adp"] is None
+    assert body["backtest"]["adp_top1"] is None
 
 def test_model_endpoint_serializes_an_infinite_logloss_as_null(tmp_path):
     """backtest() genuinely returns inf when there is nothing to score, and

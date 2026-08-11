@@ -9,6 +9,7 @@ from pipeline.db import get_conn, read_table, write_table, DEFAULT_PATH
 from scoring import league
 from scoring.board import build_board
 from scoring.config import DEFAULT_WEIGHTS
+from scoring.draft_model import SUMMARY_FEATURES
 from scoring.draft_sim import DEFAULT_ROLLOUTS, run_sim
 from scoring.profile import build_profile
 
@@ -23,6 +24,15 @@ def _float_or_none(value):
         return None
     number = float(value)
     return number if math.isfinite(number) else None
+
+
+def _bool_or_none(value):
+    """None, not False, for a missing/NA cell -- same rule as the numeric
+    fields beside it. `bool(None)` is False, and the rail renders False as
+    the positive claim "the fitted model does not beat the ADP baseline",
+    so a `model_backtest` row written before this column existed would
+    accuse the model of losing a comparison nobody ran."""
+    return None if value is None or pd.isna(value) else bool(value)
 
 
 def _seasons_or_none(value):
@@ -185,9 +195,16 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
                     "n_picks": int(head["n_picks"]),
                     "uses_personal": bool(head["uses_personal"]),
                     "heldout_gain": None if pd.isna(gain) else float(gain),
+                    # `shown` is `draft_model.SUMMARY_FEATURES`, sent per
+                    # coefficient so the rail's card filters on a flag from
+                    # the model rather than on its own copy of the feature
+                    # list -- a copy that went stale as soon as the model
+                    # grew a feature. Every coefficient still ships; the
+                    # client decides only what to draw.
                     "coefficients": [
                         {"feature": r["feature"], "value": float(r["value"]),
-                         "pooled_value": float(r["pooled_value"])}
+                         "pooled_value": float(r["pooled_value"]),
+                         "shown": r["feature"] in SUMMARY_FEATURES}
                         for _, r in grp.iterrows()],
                 })
             return {"managers": out}
@@ -461,7 +478,7 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
                           "logloss": _float_or_none(row.get("logloss")),
                           "adp_top1": _float_or_none(row.get("adp_top1")),
                           "adp_logloss": _float_or_none(row.get("adp_logloss")),
-                          "beats_adp": bool(row.get("beats_adp"))}
+                          "beats_adp": _bool_or_none(row.get("beats_adp"))}
             return {"fitted": n_managers > 0, "n_managers": n_managers,
                     "backtest": report}
         finally:

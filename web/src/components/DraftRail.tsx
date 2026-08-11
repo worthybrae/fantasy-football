@@ -6,10 +6,11 @@ import {
   type DraftOrder, type DraftOrderEntry, type LeagueInfo, type Manager, type ModelStatus,
 } from '../api'
 
-// Coefficients worth showing on a card. The rest are position dummies that
-// only make sense relative to each other, which a three-bar summary cannot
-// convey honestly.
-const SHOWN_FEATURES = ['reach', 'fall', 'need', 'run', 'qb_early', 'te_early']
+// Which coefficients a card may show is `coefficient.shown`, straight from
+// the model (`draft_model.SUMMARY_FEATURES`, served by /api/managers). It
+// used to be a hand-kept list here, which silently went stale when the model
+// grew features: the filter runs before the top-3 slice, so a manager whose
+// strongest deviation was on one of the new ones got bars for weaker ones.
 
 // A real run_sim takes ~10s fitting manager models plus ~50s searching --
 // comfortably under a minute, but nowhere near instant. Poll patiently, but
@@ -159,7 +160,10 @@ export default function DraftRail({ onSimComplete, onStatus, draftedCount }: Dra
   const byName = new Map(managers.map((m) => [m.manager, m]))
   // `model === null` is still loading -- don't claim anything either way yet.
   const unfitted = model !== null && !model.fitted
-  const losesToAdp = model?.backtest ? !model.backtest.beats_adp : false
+  // Explicitly false, not merely falsy: null means the stored backtest never
+  // recorded the comparison, and warning that the model loses one nobody ran
+  // is the same lie in the other direction.
+  const losesToAdp = model?.backtest?.beats_adp === false
 
   return (
     <aside className="draft-rail">
@@ -256,7 +260,7 @@ export default function DraftRail({ onSimComplete, onStatus, draftedCount }: Dra
           const m = byName.get(entry.manager)
           if (!m) return null
           const shown = m.coefficients
-            .filter((c) => SHOWN_FEATURES.includes(c.feature))
+            .filter((c) => c.shown)
             .sort((a, b) => Math.abs(b.value - b.pooled_value) - Math.abs(a.value - a.pooled_value))
             .slice(0, 3)
           return (
