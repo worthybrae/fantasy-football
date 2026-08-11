@@ -219,23 +219,35 @@ _POSITION_DUMMIES = ["RB", "WR", "TE", "K", "DST"]
 # Read those with the standard error in mind -- se(top-1) is 1.6pp at this
 # n, so `trend` in particular is "not shown to hurt" rather than "shown to
 # help", and the same feature flipped sign across the three references this
-# was measured against (contaminated ESPN API, FFC, cheat sheets). The rule
-# is to cut at or below zero. Re-run `make fit-managers` and re-read the
-# table before adding a fifth, because a feature that does not pay for
-# itself at ~105 picks per manager fits noise and drags every other
-# coefficient with it.
+# was measured against (contaminated ESPN API, FFC, cheat sheets).
 #
-# Re-measured again after LAMBDA_GRID stopped being truncated (the grid feeds
-# `backtest`'s per-manager fits, so the ablation moves with it):
+# THE RULE, stated once so it cannot be applied selectively: delta_top1 is
+# the decision metric and a feature is cut at or below zero on it. delta_top5
+# is reported alongside because a feature can trade one against the other,
+# but it is not a tiebreak -- reaching for it only when it defends the
+# incumbent is how a table stops being a measurement.
 #
-#     age +0.29pp (2 picks)   hype +0.29pp (2)   trend +0.29pp (2)
-#     no_track_record 0.00pp (0)
+# Re-measured after LAMBDA_GRID stopped being truncated (the grid feeds
+# `backtest`'s per-manager fits, so the ablation moves with it), n=696:
 #
-# `no_track_record` is now exactly at the cut line on top-1, though dropping
-# it still costs top-5 (0.5805 against 0.5848). "At zero" on a 2-pick
-# resolution is not the same finding as "below zero", so it is left in
-# rather than cut on a number that cannot distinguish the two -- but it is
-# the first thing to re-measure when a seventh season lands.
+#     dropped           delta_top1        delta_top5
+#     age               +0.29pp (2)       -1.29pp (9)
+#     no_track_record    0.00pp (0)       +0.43pp (3)
+#     hype              +0.29pp (2)       -0.43pp (3)
+#     trend             +0.29pp (2)       -0.14pp (1)
+#
+# Two of these are now uncomfortable and both are left in place, deliberately
+# and with the reason stated rather than by omission:
+#
+# - `no_track_record` sits exactly ON the cut line on top-1. "At zero" at a
+#   2-pick resolution is not the same finding as "below zero", and cutting on
+#   a number that cannot tell the two apart is a coin flip dressed as a rule.
+# - `age` is the mirror image: it is the only survivor top-5 actively argues
+#   against (dropping it recovers 9 picks of top-5 while costing 2 of top-1).
+#   The rule says top-1 decides, so it stays -- but it is not the clean
+#   "+1.29pp, earns its place" the earlier note claimed.
+#
+# Both are the first things to re-measure when a seventh season lands.
 _NEW_FEATURES = ["age", "no_track_record", "hype", "trend"]
 FEATURE_NAMES = (["reach", "fall"]
                  + [f"pos_{p}" for p in _POSITION_DUMMIES]
@@ -569,7 +581,71 @@ def fit_all(conn, settings=None) -> dict:
     return fits
 
 
-def _heldout_gain(X_list, chosen, seasons, pooled, keep=None) -> float:
+class PooledFits:
+    """The league-average fit, refitted for every set of seasons it is not
+    allowed to have seen.
+
+    A baseline that has seen the picks it is scored on is not a baseline.
+    `_heldout_gain` compares a personal fit trained on five seasons against
+    pooled; when pooled was the all-seasons fit, it had already read the
+    holdout draft. That is not a rounding error -- on this league the
+    all-seasons pooled beats its own leave-that-season-out version by 0.028 to
+    0.079 nats per pick, mean 0.043, which is larger than seven of the eight
+    personal gains it was being used to judge. Every manager was being charged
+    for a head start handed to their opponent.
+
+    `backtest` has always refitted pooled inside each fold; this is the same
+    discipline for the per-manager numbers, which are the ones on the cards.
+
+    Two depths are needed, which is why this is a cache rather than a dict.
+    The outer fold wants pooled without its holdout season. The inner
+    selection inside `_nested_subset_gain` then holds out a second season, and
+    its "stay pooled" candidate has to be scored without THAT season too --
+    otherwise pooled is judged in-sample while every subset is judged out of
+    it, and the procedure declines more often than the evidence warrants.
+    Six single exclusions plus thirty pairs, fitted once and reused across
+    every manager and candidate.
+
+    Fitted over the whole league, all managers, because "the league-average
+    model that has not seen this draft" is a statement about the league.
+    """
+
+    def __init__(self, X_list, chosen_list, seasons):
+        self._X = X_list
+        self._chosen = chosen_list
+        self._seasons = seasons
+        self._cache = {}
+
+    def excluding(self, *seasons) -> np.ndarray:
+        """Pooled coefficients fitted on every pick EXCEPT those seasons."""
+        key = frozenset(seasons)
+        if key not in self._cache:
+            idx = [i for i, s in enumerate(self._seasons) if s not in key]
+            self._cache[key] = fit([self._X[i] for i in idx],
+                                   [self._chosen[i] for i in idx])
+        return self._cache[key]
+
+    @property
+    def all_seasons(self) -> np.ndarray:
+        """The fit that ships: every season, no exclusions."""
+        return self.excluding()
+
+
+def _fold_pooled(pooled, pooled_fits, *exclude):
+    """Pooled coefficients for one fold, blind to `exclude`.
+
+    Falling back to the caller's `pooled` when no `PooledFits` is given keeps
+    synthetic and single-fold callers working, but it is the leaky comparison
+    `PooledFits` documents -- both production callers (`write_profiles`,
+    `reduced_model_report`) pass one.
+    """
+    if pooled_fits is None:
+        return pooled
+    return pooled_fits.excluding(*exclude)
+
+
+def _heldout_gain(X_list, chosen, seasons, pooled, keep=None,
+                  pooled_fits=None) -> float:
     """Per-pick log-likelihood advantage of a personal fit over pooled.
 
     Positive means the manager's own coefficients predict held-out picks
@@ -581,6 +657,11 @@ def _heldout_gain(X_list, chosen, seasons, pooled, keep=None) -> float:
     same lambda search, same yardstick as the full fit, which is the point:
     "would two coefficients have worked where fifteen didn't" is only a real
     question if both are asked the same way.
+
+    `pooled_fits` supplies a baseline that has not seen the season being
+    scored, and is used as the fold's ridge prior as well so both sides of the
+    comparison know the same amount. See `PooledFits` for what omitting it
+    costs.
     """
     unique = sorted(set(seasons))
     if len(unique) < 2:
@@ -592,15 +673,16 @@ def _heldout_gain(X_list, chosen, seasons, pooled, keep=None) -> float:
         test = [i for i, s in enumerate(seasons) if s == holdout]
         if not train or not test:
             continue
+        fold_pooled = _fold_pooled(pooled, pooled_fits, holdout)
         Xtr = [X_list[i] for i in train]
         ctr = [chosen[i] for i in train]
         lam = select_lambda(Xtr, ctr, [seasons[i] for i in train],
-                            prior=pooled, keep=keep)
-        beta = _fit_maybe_subset(Xtr, ctr, pooled, lam, keep)
+                            prior=fold_pooled, keep=keep)
+        beta = _fit_maybe_subset(Xtr, ctr, fold_pooled, lam, keep)
         Xt = [X_list[i] for i in test]
         ct = [chosen[i] for i in test]
         personal_ll += log_likelihood(beta, Xt, ct)
-        pooled_ll += log_likelihood(pooled, Xt, ct)
+        pooled_ll += log_likelihood(fold_pooled, Xt, ct)
         n += len(test)
     return (personal_ll - pooled_ll) / n if n else -np.inf
 
@@ -642,7 +724,11 @@ def write_profiles(conn, settings=None) -> pd.DataFrame:
         return empty
 
     X_list, chosen, managers, seasons = prepare(observations, settings)
-    pooled = fit(X_list, chosen)
+    # `pooled` (all seasons) is what ships as the fallback model; the
+    # leave-one-season-out fits inside `pooled_fits` are only ever used to
+    # SCORE, so the coefficients written below are unchanged by this.
+    pooled_fits = PooledFits(X_list, chosen, seasons)
+    pooled = pooled_fits.all_seasons
     rows = []
     for manager in sorted(set(managers)):
         idx = [i for i, m in enumerate(managers) if m == manager]
@@ -650,7 +736,7 @@ def write_profiles(conn, settings=None) -> pd.DataFrame:
         sm = [seasons[i] for i in idx]
         lam = select_lambda(Xm, cm, sm, prior=pooled)
         beta = fit(Xm, cm, prior=pooled, lam=lam)
-        gain = _heldout_gain(Xm, cm, sm, pooled)
+        gain = _heldout_gain(Xm, cm, sm, pooled, pooled_fits=pooled_fits)
         uses_personal = bool(len(idx) >= MIN_PICKS_FOR_PERSONAL and gain > 0)
         effective = beta if uses_personal else pooled
         summary = describe(effective, pooled) if uses_personal else POOLED_SUMMARY
@@ -805,13 +891,18 @@ def ablation(conn, settings=None) -> pd.DataFrame:
     observations = build_observations(conn)
     full = backtest(conn, settings, observations=observations)
     rows = [{"dropped": "none", "top1": full["top1"], "top5": full["top5"],
-             "delta_top1": 0.0}]
+             "delta_top1": 0.0, "delta_top5": 0.0}]
     for feature in _NEW_FEATURES:
         keep = [f for f in FEATURE_NAMES if f != feature]
         cut = backtest(conn, settings, features=keep, observations=observations)
+        # Both deltas, always. Reporting delta_top1 and leaving top5 as a raw
+        # column invites reading the second one only when it agrees with the
+        # first -- which is how `no_track_record` got defended on top-5 while
+        # `age`, which top-5 argues against, kept its place unexamined.
         rows.append({"dropped": feature, "top1": cut["top1"],
                      "top5": cut["top5"],
-                     "delta_top1": full["top1"] - cut["top1"]})
+                     "delta_top1": full["top1"] - cut["top1"],
+                     "delta_top5": full["top5"] - cut["top5"]})
     return pd.DataFrame(rows)
 
 
@@ -840,7 +931,8 @@ def _subset_indices(names) -> tuple:
     return tuple(FEATURE_NAMES.index(name) for name in names)
 
 
-def _nested_subset_gain(X_list, chosen, seasons, pooled) -> tuple:
+def _nested_subset_gain(X_list, chosen, seasons, pooled,
+                        pooled_fits=None) -> tuple:
     """Held-out gain of the whole selection *procedure*, not of one subset.
 
     Picking each manager's best subset by comparing held-out gains and then
@@ -854,6 +946,10 @@ def _nested_subset_gain(X_list, chosen, seasons, pooled) -> tuple:
     decline, and a manager it always declines for scores exactly 0.0 rather
     than being forced into a personal fit it did not want. Returns
     (gain, [chosen candidate per fold]).
+
+    `pooled_fits` is threaded through to both the inner selection and the
+    outer score, so no baseline anywhere has seen the season it is judged on
+    -- see `PooledFits`.
     """
     unique = sorted(set(seasons))
     if len(unique) < 2:
@@ -866,15 +962,20 @@ def _nested_subset_gain(X_list, chosen, seasons, pooled) -> tuple:
         test = [i for i, s in enumerate(seasons) if s == holdout]
         if not train or not test:
             continue
+        fold_pooled = _fold_pooled(pooled, pooled_fits, holdout)
         inner_seasons = [seasons[i] for i in train]
         Xtr = [X_list[i] for i in train]
         ctr = [chosen[i] for i in train]
         # Inner selection: the pooled fit's own inner-holdout score is the bar
-        # every subset has to clear.
-        best_name, best_ll = None, _inner_ll(Xtr, ctr, inner_seasons, pooled, None)
+        # every subset has to clear, and it is scored out of sample like they
+        # are -- `_inner_ll` drops the inner season from pooled as well as from
+        # the subset fits.
+        best_name, best_ll = None, _inner_ll(Xtr, ctr, inner_seasons,
+                                             fold_pooled, None,
+                                             pooled_fits, holdout)
         for name, features in PERSONAL_SUBSETS.items():
-            score = _inner_ll(Xtr, ctr, inner_seasons, pooled,
-                              _subset_indices(features))
+            score = _inner_ll(Xtr, ctr, inner_seasons, fold_pooled,
+                              _subset_indices(features), pooled_fits, holdout)
             if score > best_ll:
                 best_name, best_ll = name, score
         picked.append(best_name or "pooled")
@@ -882,22 +983,31 @@ def _nested_subset_gain(X_list, chosen, seasons, pooled) -> tuple:
         Xt = [X_list[i] for i in test]
         ct = [chosen[i] for i in test]
         if best_name is None:
-            personal_ll += log_likelihood(pooled, Xt, ct)
+            personal_ll += log_likelihood(fold_pooled, Xt, ct)
         else:
             keep = _subset_indices(PERSONAL_SUBSETS[best_name])
-            lam = select_lambda(Xtr, ctr, inner_seasons, prior=pooled, keep=keep)
-            beta = fit_subset(Xtr, ctr, pooled, keep, lam=lam)
+            lam = select_lambda(Xtr, ctr, inner_seasons, prior=fold_pooled,
+                                keep=keep)
+            beta = fit_subset(Xtr, ctr, fold_pooled, keep, lam=lam)
             personal_ll += log_likelihood(beta, Xt, ct)
-        pooled_ll += log_likelihood(pooled, Xt, ct)
+        pooled_ll += log_likelihood(fold_pooled, Xt, ct)
         n += len(test)
     return ((personal_ll - pooled_ll) / n if n else -np.inf), picked
 
 
-def _inner_ll(X_list, chosen, seasons, pooled, keep) -> float:
+def _inner_ll(X_list, chosen, seasons, pooled, keep,
+              pooled_fits=None, outer_holdout=None) -> float:
     """Total held-out log-likelihood of one candidate across an inner
-    leave-one-season-out over `seasons`. `keep=None` scores pooled, which
-    needs no fitting at all -- pooled was fitted on the whole league, so no
-    fold of one manager's seasons changes it."""
+    leave-one-season-out over `seasons`.
+
+    `keep=None` scores pooled, which needs no fitting -- but it still needs the
+    *right* pooled. Scored by a fit that saw the inner fold, the "stay pooled"
+    candidate is judged in sample while every subset is judged out of it, and
+    the selection declines far more often than the evidence warrants. That
+    asymmetry is why this takes `outer_holdout`: the fit used here must be
+    blind to both the season the outer fold is scoring and the season this
+    inner fold is scoring.
+    """
     total = 0.0
     unique = sorted(set(seasons))
     for holdout in unique:
@@ -905,17 +1015,19 @@ def _inner_ll(X_list, chosen, seasons, pooled, keep) -> float:
         test = [i for i, s in enumerate(seasons) if s == holdout]
         if not train or not test:
             continue
+        exclude = [holdout] if outer_holdout is None else [outer_holdout, holdout]
+        inner_pooled = _fold_pooled(pooled, pooled_fits, *exclude)
         Xt = [X_list[i] for i in test]
         ct = [chosen[i] for i in test]
         if keep is None:
-            total += log_likelihood(pooled, Xt, ct)
+            total += log_likelihood(inner_pooled, Xt, ct)
             continue
         Xtr = [X_list[i] for i in train]
         ctr = [chosen[i] for i in train]
         lam = select_lambda(Xtr, ctr, [seasons[i] for i in train],
-                            prior=pooled, keep=keep)
-        total += log_likelihood(fit_subset(Xtr, ctr, pooled, keep, lam=lam),
-                                Xt, ct)
+                            prior=inner_pooled, keep=keep)
+        total += log_likelihood(
+            fit_subset(Xtr, ctr, inner_pooled, keep, lam=lam), Xt, ct)
     return total
 
 
@@ -947,7 +1059,8 @@ def reduced_model_report(conn, settings=None) -> pd.DataFrame:
         return pd.DataFrame(columns=["manager", "subset", "n_free",
                                      "heldout_gain", "picked"])
     X_list, chosen, managers, seasons = prepare(observations, settings)
-    pooled = fit(X_list, chosen)
+    pooled_fits = PooledFits(X_list, chosen, seasons)
+    pooled = pooled_fits.all_seasons
     rows = []
     for manager in sorted(set(managers)):
         idx = [i for i, m in enumerate(managers) if m == manager]
@@ -955,15 +1068,18 @@ def reduced_model_report(conn, settings=None) -> pd.DataFrame:
         sm = [seasons[i] for i in idx]
         rows.append({"manager": manager, "subset": "full",
                      "n_free": len(FEATURE_NAMES),
-                     "heldout_gain": _heldout_gain(Xm, cm, sm, pooled),
+                     "heldout_gain": _heldout_gain(Xm, cm, sm, pooled,
+                                                   pooled_fits=pooled_fits),
                      "picked": ""})
         for name, features in PERSONAL_SUBSETS.items():
             gain = _heldout_gain(Xm, cm, sm, pooled,
-                                 keep=_subset_indices(features))
+                                 keep=_subset_indices(features),
+                                 pooled_fits=pooled_fits)
             rows.append({"manager": manager, "subset": name,
                          "n_free": len(features), "heldout_gain": gain,
                          "picked": ""})
-        gain, picked = _nested_subset_gain(Xm, cm, sm, pooled)
+        gain, picked = _nested_subset_gain(Xm, cm, sm, pooled,
+                                           pooled_fits=pooled_fits)
         rows.append({"manager": manager, "subset": "nested", "n_free": -1,
                      "heldout_gain": gain, "picked": ",".join(picked)})
     return pd.DataFrame(rows)
@@ -1013,6 +1129,21 @@ FIRST_AT_POSITIONS = ("QB", "TE", "K", "DST")
 # printing; below this it is one or two drafts talking.
 MIN_PICKS_FOR_POSITION_REACH = 4
 
+# Positions kept out of every reach number. A kicker's market rank sits at
+# 129-245 while every roster needs exactly one, so kickers go at picks 82-128
+# and score +38 to +126 against the board *by construction*. That is a fact
+# about roster slots, not about a manager, and left in it swamps the average:
+# MaxMandia reads +2.89 overall and -0.39 without kickers, jtague99 +3.06 and
+# -0.65. The card was asserting "takes players ahead of the board" about two
+# people who do the opposite on every pick that was actually a choice, and the
+# per-position row printed "K +49..+67" on all eight cards -- eight cards
+# making one league-wide claim about eight different people.
+#
+# `positional_bias` deliberately keeps kickers, because it IS the league-wide
+# claim and that +58 is the interesting part of it. This table is the
+# per-manager one, and there the same number is noise with a sign.
+REACH_EXCLUDED_POSITIONS = ("K", "DST")
+
 # Long-format `metric` values `manager_tendencies` emits, in the order the card
 # reads them. Exported so the API and its tests name them from one place.
 TENDENCY_METRICS = ("first_pick", "reach_overall", "reach_bucket",
@@ -1037,11 +1168,15 @@ def manager_tendencies(conn, settings=None) -> pd.DataFrame:
     | reach_overall     | None     | mean `market_rank - overall_pick`  | picks behind the mean    |
     | reach_bucket      | bucket   | same, within early/mid/late        | picks behind the mean    |
     | reach_position    | position | same, within that position         | picks behind the mean    |
-    | first_at_position | position | mean round of their first such pick| drafts they took one in  |
+    | first_at_position | position | mean round of their first such pick| drafts it was averaged over |
 
     Sign on the reach metrics matches `positional_bias`: positive means taken
     earlier than the market ranked them (a player ranked 20 taken at pick 10
     scores +10), negative means let slide.
+
+    Every reach metric excludes `REACH_EXCLUDED_POSITIONS` -- see that constant
+    for why a kicker's +58 is a fact about roster slots rather than about a
+    person, and what leaving them in did to two managers' headline number.
 
     Two different picks tables feed this on purpose. The position facts
     (`first_pick`, `first_at_position`) count `draft_picks` directly, so they
@@ -1081,9 +1216,18 @@ def manager_tendencies(conn, settings=None) -> pd.DataFrame:
     firsts_at = (at_pos.sort_values("overall_pick")
                  .drop_duplicates(["manager", "season", "position"], keep="first"))
     for (manager, position), grp in firsts_at.groupby(["manager", "position"]):
+        # `round` is a nullable Int64 from the ESPN import: .mean() on an
+        # all-null group returns pd.NA, and float(pd.NA) raises -- which would
+        # abort write_tendencies after write_profiles had already committed.
+        # A partially-null group is worse than a crash: it averages the rounds
+        # it has while `n` counts every season, rendering "K R15.0, 6 of 6
+        # drafts" out of one real value. Count what was actually averaged.
+        rounds = grp["round"].dropna()
+        if rounds.empty:
+            continue
         rows.append({"manager": manager, "metric": "first_at_position",
-                     "key": position, "value": float(grp["round"].mean()),
-                     "n": int(grp["season"].nunique())})
+                     "key": position, "value": float(rounds.mean()),
+                     "n": int(len(rounds))})
 
     gaps = pd.DataFrame([
         {"manager": o.manager,
@@ -1091,6 +1235,8 @@ def manager_tendencies(conn, settings=None) -> pd.DataFrame:
          "bucket": _round_bucket(o.overall_pick, settings.teams),
          "gap": float(o.pool.iloc[o.chosen]["market_rank"]) - o.overall_pick}
         for o in build_observations(conn)])
+    if not gaps.empty:
+        gaps = gaps[~gaps["position"].isin(REACH_EXCLUDED_POSITIONS)]
     if not gaps.empty:
         for manager, grp in gaps.groupby("manager"):
             rows.append({"manager": manager, "metric": "reach_overall",

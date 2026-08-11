@@ -16,7 +16,9 @@ espn-import: ## import ESPN draft history: make espn-import LEAGUE=<url-or-id>
 	.venv/bin/python -m pipeline.import_league "$(LEAGUE)"
 
 fit-managers: ## fit per-manager pick models from imported draft history (REDUCED=1 also measures reduced personal models -- slow)
-	.venv/bin/python -m pipeline.fit_managers $(if $(REDUCED),--reduced,)
+	# filter-out, not a bare $(if): $(if) tests emptiness, so REDUCED=0 would
+	# have switched the slow path ON.
+	.venv/bin/python -m pipeline.fit_managers $(if $(filter-out 0 no false,$(REDUCED)),--reduced,)
 
 sim: ## run the draft simulator: make sim SLOT=4 [ROLLOUTS=300]
 	.venv/bin/python -m pipeline.run_sim "$(SLOT)" $(ROLLOUTS)

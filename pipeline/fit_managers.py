@@ -16,20 +16,27 @@ from scoring.draft_model import (ablation, positional_bias,
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     conn = get_conn()
+
+    # Descriptive per-manager statistics: first pick, reach against the board,
+    # when they take their first QB/TE/K. None of it depends on a coefficient
+    # generalizing, so it is the part of a manager card that stays informative
+    # whichever way the fit lands. Persisted here rather than computed per
+    # request because it replays every season's draft to get a market rank for
+    # each pick.
+    #
+    # Written BEFORE the profiles, not after: the profile summary line points
+    # at "the measured history", so a failure between the two writes must
+    # leave the history without the claim rather than the claim without the
+    # history.
+    tendencies = write_tendencies(conn)
+    if not tendencies.empty:
+        record_freshness(conn, "manager_tendencies", True, len(tendencies))
+
     profiles = write_profiles(conn)
     if profiles.empty:
         print("No draft history found -- run `make espn-import` first.")
         return 1
     record_freshness(conn, "manager_profiles", True, len(profiles))
-
-    # Descriptive per-manager statistics: first pick, reach against the board,
-    # when they take their first QB/TE/K/DST. None of it depends on a
-    # coefficient generalizing, so it is the part of a manager card that stays
-    # informative while every manager falls back to the pooled fit. Persisted
-    # here rather than computed per request because it replays every season's
-    # draft to get a market rank for each pick.
-    tendencies = write_tendencies(conn)
-    record_freshness(conn, "manager_tendencies", True, len(tendencies))
 
     # Persisted, not just printed: the board reads it back through
     # /api/model and says so in the rail when the model loses to ADP.

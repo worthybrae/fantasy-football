@@ -977,7 +977,10 @@ def test_backtest_features_mask_restricts_the_design_matrix(tmp_path, monkeypatc
 def test_ablation_has_a_row_per_new_feature(tmp_path):
     from scoring.draft_model import ablation
     table = ablation(_seed_many(tmp_path, seasons=(2023, 2024, 2025)))
-    assert list(table.columns) == ["dropped", "top1", "top5", "delta_top1"]
+    # delta_top5 alongside delta_top1: both are always reported, so neither
+    # can be reached for only when it supports the feature already in place.
+    assert list(table.columns) == ["dropped", "top1", "top5", "delta_top1",
+                                   "delta_top5"]
     assert "none" in table["dropped"].tolist()
     for f in ("age", "hype", "trend"):
         assert f in table["dropped"].tolist()
@@ -1006,8 +1009,10 @@ def test_write_backtest_persists_seasons_as_json(tmp_path):
 
 
 from scoring.draft_model import (FIRST_AT_POSITIONS, PERSONAL_SUBSETS,
-                                 _heldout_gain, _subset_indices, fit_subset,
-                                 manager_tendencies, write_tendencies)
+                                 PooledFits, _heldout_gain,
+                                 _nested_subset_gain, _subset_indices,
+                                 fit_subset, manager_tendencies,
+                                 reduced_model_report, write_tendencies)
 
 
 def test_fit_subset_leaves_every_unlisted_coefficient_at_pooled():
@@ -1138,16 +1143,19 @@ def test_manager_tendencies_measures_reach_against_the_board(tmp_path):
     """`market_rank - overall_pick`, positive = taken ahead of the board.
 
     worthy's four picks each season are ranks 1, 5, 6, 8 at overall picks
-    1, 4, 5, 8: gaps 0, +1, +1, 0, so +0.5 per pick over eight picks across
-    two identical seasons.
+    1, 4, 5, 8: gaps 0, +1, +1, 0. Rank 8 is the kicker and is excluded (see
+    REACH_EXCLUDED_POSITIONS), leaving +2/3 per pick over six picks across two
+    identical seasons.
     """
     tendencies = manager_tendencies(_seed_tendencies(tmp_path))
     overall = _tendency(tendencies, "worthy", "reach_overall")
-    assert float(overall.iloc[0]["value"]) == pytest.approx(0.5)
-    assert int(overall.iloc[0]["n"]) == 8
-    # dan takes ranks 2, 3, 4, 7 at overall picks 2, 3, 6, 7: gaps 0, 0, -2, 0.
+    assert float(overall.iloc[0]["value"]) == pytest.approx(2 / 3)
+    assert int(overall.iloc[0]["n"]) == 6
+    # dan takes ranks 2, 3, 4, 7 at overall picks 2, 3, 6, 7: gaps 0, 0, -2, 0,
+    # no kicker among them, so all eight picks count.
     dan = _tendency(tendencies, "dan", "reach_overall")
     assert float(dan.iloc[0]["value"]) == pytest.approx(-0.5)
+    assert int(_tendency(tendencies, "dan", "reach_overall").iloc[0]["n"]) == 8
 
 
 def test_manager_tendencies_splits_reach_by_round_bucket(tmp_path):
@@ -1157,7 +1165,8 @@ def test_manager_tendencies_splits_reach_by_round_bucket(tmp_path):
     tendencies = manager_tendencies(conn, league.default_settings())
     buckets = _tendency(tendencies, "worthy", "reach_bucket")
     assert set(buckets["key"]) <= {"early", "mid", "late"}
-    assert int(buckets["n"].sum()) == 8
+    # Six, not eight: the two kicker picks are out of the reach family.
+    assert int(buckets["n"].sum()) == 6
 
 
 def test_manager_tendencies_is_empty_without_an_import(tmp_path):
@@ -1175,3 +1184,123 @@ def test_write_tendencies_persists_the_table(tmp_path):
     assert not stored.empty
     assert len(stored) == len(written)
     assert set(stored["metric"]) == set(written["metric"])
+
+
+def _multi_season_synthetic(beta, n_seasons=6, per_season=15, pool=12, seed=0):
+    """Choices drawn from `beta`, labelled with a season each, at the real
+    shape of this league's history: six drafts of ~15 picks per manager."""
+    X_list, chosen = _synthetic(beta, n_choices=n_seasons * per_season,
+                                pool=pool, seed=seed)
+    seasons = [2020 + i // per_season for i in range(n_seasons * per_season)]
+    return X_list, chosen, seasons
+
+
+def test_pooled_fits_excluding_a_season_is_fitted_without_that_season():
+    """The anti-leak primitive, checked against the fit it claims to be."""
+    beta = np.zeros(len(FEATURE_NAMES))
+    beta[FEATURE_NAMES.index("reach")] = 1.0
+    X_list, chosen, seasons = _multi_season_synthetic(beta, seed=3)
+    fits = PooledFits(X_list, chosen, seasons)
+
+    keep = [i for i, s in enumerate(seasons) if s != 2022]
+    expected = fit([X_list[i] for i in keep], [chosen[i] for i in keep])
+    assert np.allclose(fits.excluding(2022), expected, atol=1e-8)
+    # ...and it is genuinely a different fit from the all-seasons one, so the
+    # assertion above isn't passing because both sides ignore the argument.
+    assert not np.allclose(fits.excluding(2022), fits.all_seasons, atol=1e-6)
+    # Pairs, which the nested inner selection needs.
+    both = [i for i, s in enumerate(seasons) if s not in (2021, 2022)]
+    assert np.allclose(fits.excluding(2021, 2022),
+                       fit([X_list[i] for i in both], [chosen[i] for i in both]),
+                       atol=1e-8)
+
+
+def test_heldout_gain_baseline_must_not_have_seen_the_season_it_scores():
+    """Scoring a five-season personal fit against an all-seasons pooled
+    baseline is not a comparison: the baseline has read the holdout draft.
+
+    Here the manager drafts from pooled exactly, so the honest answer is
+    "no personal advantage" -- a gain at or a hair below zero. Handed the
+    leaky baseline the same manager is charged a visible penalty, which is
+    the bug that made every card read "not enough signal".
+    """
+    pooled_beta = np.zeros(len(FEATURE_NAMES))
+    pooled_beta[FEATURE_NAMES.index("reach")] = 1.5
+    pooled_beta[FEATURE_NAMES.index("pos_RB")] = 0.4
+    X_list, chosen, seasons = _multi_season_synthetic(pooled_beta, seed=17)
+    fits = PooledFits(X_list, chosen, seasons)
+    pooled = fits.all_seasons
+
+    leaky = _heldout_gain(X_list, chosen, seasons, pooled)
+    clean = _heldout_gain(X_list, chosen, seasons, pooled, pooled_fits=fits)
+
+    assert clean > leaky
+    assert clean > -0.01
+
+
+def test_nested_selection_finds_a_manager_who_really_differs():
+    """The procedure that produced the headline, exercised end to end.
+
+    The reduced-model control elsewhere in this file only drives
+    `_heldout_gain(keep=...)`, so it would pass unchanged if `_inner_ll`
+    always returned the pooled score -- and a dead `_inner_ll` produces
+    "declines for everyone", which is exactly the finding that was reported.
+    This routes a manager who genuinely drafts two units off pooled on
+    `reach` through `_nested_subset_gain` itself, and asserts the selection
+    both clears zero and names the feature that actually differs.
+    """
+    pooled_beta = np.zeros(len(FEATURE_NAMES))
+    personal = pooled_beta.copy()
+    personal[FEATURE_NAMES.index("reach")] = 2.0
+    X_list, chosen, seasons = _multi_season_synthetic(
+        personal, n_seasons=5, per_season=30, pool=12, seed=21)
+
+    gain, picked = _nested_subset_gain(X_list, chosen, seasons, pooled_beta)
+
+    assert gain > 0
+    assert any("reach" in name for name in picked), picked
+
+
+def test_nested_selection_at_this_leagues_real_sample_size():
+    """Power check at the shape that matters: six drafts, ~15 picks each.
+
+    The negative finding on real managers is only meaningful if the procedure
+    could have found something at 90 picks. A difference this large is far
+    bigger than anything the real managers show, so passing here is a floor on
+    sensitivity, not a claim that 90 picks is generally enough.
+    """
+    pooled_beta = np.zeros(len(FEATURE_NAMES))
+    personal = pooled_beta.copy()
+    personal[FEATURE_NAMES.index("reach")] = 3.0
+    X_list, chosen, seasons = _multi_season_synthetic(personal, seed=23)
+
+    gain, _ = _nested_subset_gain(X_list, chosen, seasons, pooled_beta)
+    assert gain > 0
+
+
+def test_reduced_model_report_covers_every_manager_and_candidate(tmp_path):
+    report = reduced_model_report(_seed_many(tmp_path))
+    assert set(report.columns) == {"manager", "subset", "n_free",
+                                   "heldout_gain", "picked"}
+    for manager in ("rbguy", "wrguy"):
+        subsets = set(report[report["manager"] == manager]["subset"])
+        assert subsets == {"full", "nested"} | set(PERSONAL_SUBSETS)
+    # The nested row is the one that carries a per-fold trail.
+    nested = report[report["subset"] == "nested"]
+    assert (nested["picked"].str.len() > 0).all()
+
+
+def test_reach_metrics_exclude_kickers(tmp_path):
+    """A kicker's market rank is a roster-slot artifact: ranked ~130+, taken
+    in the double-digit rounds, so every kicker pick scores a huge positive
+    gap by construction and drags the manager's headline number with it.
+    On the real history this flipped two managers from negative to positive.
+    """
+    conn = _seed_tendencies(tmp_path)
+    tendencies = manager_tendencies(conn)
+    # `worthy` takes Player 8, the K, at overall pick 8 in both seasons.
+    assert "K" not in set(_tendency(tendencies, "worthy", "reach_position")["key"])
+    overall = _tendency(tendencies, "worthy", "reach_overall")
+    assert int(overall.iloc[0]["n"]) == 6      # 8 picks, both kickers dropped
+    # The kicker still counts everywhere it is a fact about the manager.
+    assert not _tendency(tendencies, "worthy", "first_at_position", "K").empty

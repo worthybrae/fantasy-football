@@ -269,10 +269,16 @@ accumulate across all six rotations, 696 evaluations rather than the ~112
 you'd get from holding out only the newest season. It prints top-1 and
 top-5 accuracy and log-loss overall, broken down by round (early/mid/late),
 against a pure-market baseline, and a feature-ablation table showing what
-each of the five candidate features above did to held-out top-1. On this
-league's real history the fitted model scores top-1 24.4%, top-5 59.6%,
-log-loss 2.871, against a gate of 16% / 53% and a pre-recalibration
-baseline of 19.4% / 51.1% / 3.163 measured the same way. If a future refit
+each of the five candidate features above did to held-out top-1 *and* top-5.
+On this league's real history the fitted model scores top-1 23.6%, top-5
+58.5%, log-loss 2.868, against a gate of 16% / 53% and a pre-recalibration
+baseline of 19.4% / 51.1% / 3.163 measured the same way.
+
+Those first two numbers used to read 24.4% and 59.6%, and the drop is a real
+cost of un-truncating `LAMBDA_GRID`: the grid feeds the per-manager fits
+inside the backtest, so letting cross-validation shrink harder costs 6 picks
+of top-1 and 8 of top-5 while improving log-loss from 2.871 to 2.868. Better
+calibrated, very slightly less accurate at the top of the list. If a future refit
 doesn't clear that baseline out of sample, the command prints a warning,
 and it means what it says: treat the simulator's output as indicative only,
 not as a real prediction, until the fit improves. The result is also saved
@@ -287,34 +293,62 @@ takes kickers roughly 58 ranks ahead of the market in the late rounds and
 tight ends roughly 9 ahead in the middle rounds. That's a fact about the
 league, not a guess the model is making.
 
-**No manager currently earns a personal model.** A manager needs enough
-picks, and needs their own fit to actually beat the pooled fit on held-out
-seasons; if it doesn't, the simulator falls back to the pooled model for
-that manager. Right now that's every manager: at roughly 87 fitted picks
-each (six seasons, one league), none of the eight beats the pooled fit on
-held-out data. `make fit-managers` prints the number that decides it, the
-per-pick log-likelihood gain against the pooled fit, and all eight are
-negative: -0.0001 (Lane Bohman), -0.0002, -0.0013, -0.0215, -0.0276,
--0.0508, -0.0519, -0.0537 (espn45456832). That's expected, not a bug — 87
-picks isn't enough to fit 15 coefficients, under six observations per
-parameter.
+**These eight managers demonstrably differ from each other.** Their fitted
+`reach` coefficients run from -5.8 to -10.9, a between-manager spread of
+1.92. Under a parametric bootstrap where every manager is made to draft from
+the pooled model on their own real choice sets, that spread has a null median
+of 0.85 and a maximum of 1.77 across 40 replicates — none of them reaches
+1.92, so p is at most 0.024 at that many replicates. The differences are
+real. What follows is about whether a per-manager *fit* can convert a real
+difference into better prediction, which is a different question.
 
-**A smaller personal model doesn't rescue it either.** Fifteen coefficients
-can't work on 87 picks, but two or three might, so that was measured rather
-than assumed: `make fit-managers REDUCED=1` fits a named handful of features
-per manager (`reach`, `fall`, `run`, the position dummies) with everything
-else held at pooled, and scores it on exactly the same leave-one-season-out
-yardstick. Four of the seven candidate subsets clear zero for *some* manager
-— John Titolo reaches +0.0365 on `reach` plus the RB/WR/TE dummies — but
-that is the best of seven subsets picked by looking at the seasons it's
-scored on, which finds winners on noise alone. The `nested` row is the
-honest version: it chooses the subset inside each training fold, with "stay
-pooled" among the options, then scores that choice on a season the choice
-never saw. Under it every manager is negative except MaxMandia at exactly
-0.0000, and that zero is the procedure declining to fit anything personal in
-all six folds. Titolo's +0.0365 becomes -0.0120. Six seasons of one league
-is not enough for a personal model of any size, and the report says so
-rather than shipping the flattering number.
+**Nearly no manager earns a personal model, and the one that clears the bar
+clears it by nothing.** A manager needs enough picks and needs their own fit
+to beat the pooled fit on held-out seasons; otherwise the simulator falls
+back to pooled. `make fit-managers` prints the per-pick log-likelihood gain
+that decides it: -0.0000 (Lane Bohman), -0.0001, +0.0002 (Reed1998), -0.0013,
+-0.0065, -0.0102, -0.0343, -0.0421 (jtague99). Only Reed1998 is positive, by
+0.0002 nats/pick — 0.018 nats across 88 picks. Cross-validation then shrinks
+that personal fit onto pooled so hard (lambda 1e5) that its coefficients
+differ from the league's by 0.0001 at most and its summary line reads "drafts
+close to league average". The chip changes; the simulator's behaviour does
+not. **Do not read `uses_personal` as evidence of anything at this margin** —
+a bare `gain > 0` test cannot tell +0.0002 from zero, and tightening it into
+a real significance test is the obvious next piece of work.
+
+These numbers are much closer to zero than the ones this README carried
+before, because the baseline used to cheat: the pooled fit a personal model
+was scored against had been trained on all six seasons, including the one
+being held out. On this history that head start is worth 0.028 to 0.079
+nats/pick — larger than seven of the eight gains it was used to judge. It is
+fixed (see `PooledFits`), and the mean gain moved from -0.0259 to -0.0118.
+
+**A smaller personal model works for one manager, and that is a finding, not
+a shipping decision.** `make fit-managers REDUCED=1` fits a named handful of
+features per manager (`reach`, `fall`, `run`, the position dummies) with
+everything else held at pooled, on the same leave-one-season-out yardstick.
+The row to read is `nested`: it chooses the subset inside each training fold,
+with "stay pooled" among the options, then scores that choice on a season the
+choice never saw — so it cannot be gamed by picking whichever subset happens
+to fit best. Two of eight come out positive. John Titolo reaches **+0.0527**,
+and the inner selection picks `reach` plus the RB/WR/TE dummies in all six
+folds, which is not a coin landing the same way six times by accident.
+jtague99 is +0.0047, small enough to ignore.
+
+Titolo's number is still not a licence to ship him a personal model. One
+manager out of eight clearing a bar, with seven candidate subsets in play, is
+exactly the shape a multiplicity argument has to answer and this has not
+answered it; and 62% of his total advantage comes from a single season (2023,
++0.186 against a per-fold spread of -0.029 to +0.186). So the gate stays on
+the full 15-feature fit, Titolo stays pooled, and the evidence is written
+down instead of acted on.
+
+The defensible summary is narrower than "six seasons isn't enough for a
+personal model of any size", which is what this README used to say and which
+the evidence does not support: **at ~86 picks a per-manager fit does not
+reliably convert a real difference into better held-out log-likelihood.**
+Sometimes it does. Not dependably, and not in a way that survives asking how
+many chances it had.
 
 **What the manager cards show instead is measured, not fitted.** Every card
 on `/draft-board`'s "By manager" tab carries statistics counted straight
@@ -322,7 +356,12 @@ from that manager's real picks: what they open a draft with and in how many
 of their drafts, how many picks ahead of or behind the market board they
 take players and which rounds that's strongest in, which positions they jump
 the board hardest for, and the typical round of their first QB, TE, K and
-DST. None of it depends on a coefficient generalizing, so all of it stays
+DST. The reach numbers exclude kickers and defenses on purpose: a kicker is
+ranked around 130th and taken in the double-digit rounds because every roster
+needs exactly one, so every kicker pick scores a huge "reach" by construction
+— left in, it flipped two managers' headline number from negative to positive
+and printed the same league-wide "K +49..+67" on all eight cards. None of it
+depends on a coefficient generalizing, so all of it stays
 true while the forecast underneath runs on league-average coefficients —
 which is what the summary line now says, instead of calling a manager with
 six drafts on record "not enough signal". `make fit-managers` precomputes

@@ -175,18 +175,25 @@ export default function ManagerForecast({ board, managers, history, onSelectPlay
                     )}
 
                     {t.reach && (
-                      <div
-                        className="forecast-tendency-row"
-                        title="Picks earlier (+) or later (-) than the market board ranked the player, averaged over every pick with a board rank"
-                      >
+                      <div className="forecast-tendency-row">
                         <dt className="forecast-tendency-label">Board</dt>
                         <dd className="forecast-tendency-value">
+                          {/* The direction is spelled out in the text, not
+                              parked in a hover title: the badges beside it
+                              carry their own titles, which shadow a title on
+                              this row, so hovering "R9+ +8.4" would never have
+                              explained what the sign meant. */}
                           <span className="mono">{signed(t.reach.mean_gap)}</span>
+                          <span>{t.reach.mean_gap < 0 ? 'behind board' : 'ahead of board'}</span>
                           <span className="forecast-tendency-note">
-                            over {t.reach.n} picks
+                            over {t.reach.n} picks, no K/DST
                           </span>
                           {t.reach_by_bucket.map((b) => (
-                            <span key={b.bucket} className="hist-badge">
+                            <span
+                              key={b.bucket}
+                              className="hist-badge"
+                              title={`${b.n} picks`}
+                            >
                               {BUCKET_LABEL.get(b.bucket) ?? b.bucket} {signed(b.mean_gap)}
                             </span>
                           ))}
@@ -198,10 +205,7 @@ export default function ManagerForecast({ board, managers, history, onSelectPlay
                         negative gap here means "waits on it", which the
                         Board row above already covers in aggregate. */}
                     {reaches.length > 0 && (
-                      <div
-                        className="forecast-tendency-row"
-                        title="Positions this manager jumps the board hardest for"
-                      >
+                      <div className="forecast-tendency-row">
                         <dt className="forecast-tendency-label">Reaches</dt>
                         <dd className="forecast-tendency-value">
                           {reaches.slice(0, REACH_POSITIONS_SHOWN).map((p) => (
@@ -214,17 +218,21 @@ export default function ManagerForecast({ board, managers, history, onSelectPlay
                     )}
 
                     {t.first_at_position.length > 0 && (
-                      <div
-                        className="forecast-tendency-row"
-                        title="Average round of their first pick at each position, and how many drafts they took one at all"
-                      >
+                      <div className="forecast-tendency-row">
                         <dt className="forecast-tendency-label">First</dt>
                         <dd className="forecast-tendency-value">
+                          <span className="forecast-tendency-note">
+                            avg round they take one
+                          </span>
                           {t.first_at_position.map((f) => (
+                            // `f.drafts` alone, never "x of h.seasons": drafts
+                            // comes from the precomputed table and seasons is
+                            // counted live, so an import without a refit would
+                            // print two denominators on one card.
                             <span
                               key={f.position}
                               className="hist-badge"
-                              title={`${f.drafts} of ${h.seasons} drafts`}
+                              title={`${f.drafts} draft${f.drafts === 1 ? '' : 's'}`}
                             >
                               {f.position} R{f.mean_round.toFixed(1)}
                             </span>
