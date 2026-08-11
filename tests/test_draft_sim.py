@@ -1620,7 +1620,7 @@ def test_assign_primaries_never_invents_a_candidate_outside_the_cells_own_player
     """
     from scoring.draft_sim import _assign_primaries
     counts = {1: {10: 6, 11: 4}, 2: {10: 5, 11: 5}, 3: {10: 7, 11: 3}, 4: {12: 10}}
-    primary = _assign_primaries(counts, n_rollouts=10)
+    primary = _assign_primaries(counts)
 
     assert set(primary) == set(counts)
     # Every primary is a player that pick's own rollouts actually produced.
@@ -1636,8 +1636,8 @@ def test_assign_primaries_never_invents_a_candidate_outside_the_cells_own_player
 def test_assign_primaries_is_deterministic():
     from scoring.draft_sim import _assign_primaries
     counts = {1: {10: 6, 11: 4}, 2: {10: 5, 11: 5}, 3: {10: 7, 11: 3}, 4: {12: 10}}
-    a = _assign_primaries(counts, n_rollouts=10)
-    b = _assign_primaries(counts, n_rollouts=10)
+    a = _assign_primaries(counts)
+    b = _assign_primaries(counts)
     assert a == b
 
 
@@ -1647,7 +1647,7 @@ def test_assign_primaries_gives_pick_one_its_most_likely_player():
     'saved' him for pick 13 where he scored 40%."""
     from scoring.draft_sim import _assign_primaries
     counts = {1: {10: 6, 11: 8}, 13: {11: 20, 12: 5}}
-    primary = _assign_primaries(counts, n_rollouts=50)
+    primary = _assign_primaries(counts)
     assert primary[1] == 11          # pick 1 gets its own most likely
     assert primary[13] == 12         # 11 is claimed, 13 takes the next
 
@@ -1664,7 +1664,7 @@ def test_assign_primaries_processes_picks_in_draft_order():
     # back to its own next-best rather than inheriting the earlier claim".
     from scoring.draft_sim import _assign_primaries
     counts = {5: {1: 10, 4: 1}, 2: {1: 9, 2: 3}, 9: {1: 30, 3: 2}}
-    primary = _assign_primaries(counts, n_rollouts=50)
+    primary = _assign_primaries(counts)
     assert primary[2] == 1           # earliest pick wins the contested player
     assert primary[5] != 1 and primary[9] != 1
 
@@ -1672,7 +1672,7 @@ def test_assign_primaries_processes_picks_in_draft_order():
 def test_assign_primaries_allows_a_duplicate_only_when_forced():
     from scoring.draft_sim import _assign_primaries
     counts = {1: {7: 5}, 2: {7: 5}}   # one candidate, two picks
-    primary = _assign_primaries(counts, n_rollouts=10)
+    primary = _assign_primaries(counts)
     assert primary == {1: 7, 2: 7}
 
 

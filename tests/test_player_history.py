@@ -38,8 +38,7 @@ def test_uses_only_seasons_before_the_draft(tmp_path):
     """The no-lookahead rule: attributes for the 2023 draft may not see 2023."""
     a = attributes_as_of(_seed(tmp_path), 2023).set_index("key")
     steady = a.loc["RB|steady sam"]
-    # 2021 + 2022 only, both 10 ppg -> flat, zero spread.
-    assert steady["ppg_std"] == pytest.approx(0.0)
+    # 2021 + 2022 only, both 10 ppg -> flat.
     assert steady["trend"] == pytest.approx(0.0)
     # Hurt Harry only played in 2023, so as of the 2023 draft he is unknown.
     assert "RB|hurt harry" not in a.index
@@ -51,17 +50,10 @@ def test_trend_is_positive_for_a_rising_player(tmp_path):
     assert a.loc["RB|steady sam"]["trend"] == pytest.approx(0.0)
 
 
-def test_volatility_separates_steady_from_rising(tmp_path):
-    a = attributes_as_of(_seed(tmp_path), 2024).set_index("key")
-    assert a.loc["RB|steady sam"]["ppg_std"] == pytest.approx(0.0)
-    assert a.loc["WR|rising rick"]["ppg_std"] > 0
-
-
-def test_missed_rate_flags_a_short_season(tmp_path):
-    a = attributes_as_of(_seed(tmp_path), 2024).set_index("key")
-    # Hurt Harry: 8 of 17 possible games in his one season.
-    assert a.loc["RB|hurt harry"]["missed_rate"] == pytest.approx(9 / 17)
-    assert a.loc["RB|steady sam"]["missed_rate"] == pytest.approx(0.0)
+# `ppg_std` and `missed_rate` had a test each here. They fed the proposed
+# `volatility` feature, which `ablation()` measured at -0.0029 and cut; the
+# columns outlived it by a branch, filled by both pools and read by nothing.
+# Removed with them rather than left as coverage of a dead column.
 
 
 def test_age_is_computed_at_the_drafts_september(tmp_path):
@@ -90,8 +82,8 @@ def test_no_track_record_is_false_for_everyone_with_history(tmp_path):
 def test_empty_before_the_first_season(tmp_path):
     a = attributes_as_of(_seed(tmp_path), 2020)
     assert a.empty
-    assert list(a.columns) == ["key", "age", "ppg_std", "missed_rate",
-                               "no_track_record", "prod_rank", "trend"]
+    assert list(a.columns) == ["key", "age", "no_track_record",
+                               "prod_rank", "trend"]
 
 
 def _seed_tie(tmp_path):

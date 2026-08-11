@@ -1086,7 +1086,7 @@ def run_sim(conn, my_slot: int, slot_managers: dict,
     return run_id
 
 
-def _assign_primaries(counts: dict, n_rollouts: int) -> dict:
+def _assign_primaries(counts: dict) -> dict:
     """Each pick's most likely player, walking the board in draft order.
 
     Was a global assignment minimizing total -log(prob), which maximizes the
@@ -1168,7 +1168,7 @@ def predict_board(pool, settings, slot_managers, my_slot, taken, betas,
         rows.append(_board_row(pool, slots, teams, offset + 1, 0, idx, 1.0, True))
 
     if predicted:
-        primary = _assign_primaries(counts, n_rollouts)
+        primary = _assign_primaries(counts)
         for overall_pick in predicted:
             cell = counts[overall_pick]
             chosen = primary[overall_pick]

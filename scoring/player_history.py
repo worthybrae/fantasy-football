@@ -16,9 +16,7 @@ from pipeline.db import read_table
 from scoring.board import adp_match_key
 from scoring.ppr import compute_ppr_points
 
-COLUMNS = ["key", "age", "ppg_std", "missed_rate", "no_track_record",
-           "prod_rank", "trend"]
-GAMES = 17
+COLUMNS = ["key", "age", "no_track_record", "prod_rank", "trend"]
 # Drafts happen at the end of August, so age at 1 September of the draft
 # year is the age the room would have said out loud.
 DRAFT_MONTH_DAY = "-09-01"
@@ -59,9 +57,6 @@ def attributes_as_of(conn, season: int, rules: dict | None = None) -> pd.DataFra
         ppg = grp["ppg"].to_numpy(dtype=float)
         rows.append({
             "player_id": player_id, "key": key,
-            "ppg_std": float(ppg.std(ddof=0)) if len(ppg) > 1 else 0.0,
-            "missed_rate": float(max(0.0, 1.0 - grp["games"].sum()
-                                     / (GAMES * len(grp)))),
             "no_track_record": False,
             "last_ppg": float(latest["ppg"]),
             "trend": _slope(grp["season"].to_numpy(dtype=float), ppg),
