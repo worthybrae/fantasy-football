@@ -325,7 +325,8 @@ def test_feature_matrix_of_an_empty_pool_has_the_right_shape():
     X = feature_matrix(obs, _settings())
     assert X.shape == (0, len(FEATURE_NAMES))
 
-from scoring.draft_model import fit, log_likelihood, neg_log_likelihood
+from scoring.draft_model import (LAMBDA_GRID, fit, log_likelihood,
+                                 neg_log_likelihood)
 
 def _synthetic(beta_true, n_choices=40, pool=20, seed=0):
     """Generate choices from a known beta so the fit can be checked for recovery."""
@@ -365,6 +366,37 @@ def test_shrinkage_pulls_a_thin_fit_toward_the_prior():
     loose = fit(X_list, chosen, prior=prior, lam=0.01)
     tight = fit(X_list, chosen, prior=prior, lam=100.0)
     assert np.linalg.norm(tight - prior) < np.linalg.norm(loose - prior)
+
+def test_lambda_grid_reaches_the_shrinkage_that_collapses_a_fit_onto_its_prior():
+    """The property the top of LAMBDA_GRID exists to buy.
+
+    `_heldout_gain` asks whether a manager's own coefficients beat the pooled
+    ones on a season they didn't train on. The floor of that question is "they
+    ARE the pooled ones" -- a gain of exactly zero -- and it is only reachable
+    if cross-validation is allowed a lambda strong enough to pull a personal
+    fit all the way onto its prior. A grid that stops at 100 cannot get there:
+    on this fixture 100 still leaves the fit 0.45 away from the prior, so a
+    manager whose own data carries nothing transferable is charged for wander
+    the grid never let cross-validation shrink away, and the penalty printed
+    on their card is a fact about the length of a list.
+    """
+    beta_true = np.array([1.5, -1.0, 0.5])
+    prior = np.zeros(3)
+    X_list, chosen = _synthetic(beta_true, n_choices=90, pool=15, seed=3)
+
+    capped = np.linalg.norm(fit(X_list, chosen, prior=prior, lam=100.0) - prior)
+    collapsed = np.linalg.norm(
+        fit(X_list, chosen, prior=prior, lam=LAMBDA_GRID[-1]) - prior)
+
+    assert capped > 0.05, "100 is nowhere near the collapse floor"
+    assert collapsed < 1e-3
+    assert collapsed * 100 < capped
+
+def test_lambda_grid_is_ascending():
+    """select_lambda returns `grid[-1]` as its "shrink hard" answer when there
+    aren't two seasons to cross-validate over, which is only the hardest
+    shrinkage available if the grid is sorted."""
+    assert list(LAMBDA_GRID) == sorted(LAMBDA_GRID)
 
 def test_log_likelihood_of_uniform_beta_is_pool_entropy():
     X_list, chosen = _synthetic(np.array([1.0, 0.0, 0.0]), n_choices=4, pool=10, seed=4)

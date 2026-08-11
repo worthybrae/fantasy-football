@@ -386,7 +386,23 @@ def prepare(observations, settings):
     return X_list, chosen, managers, seasons
 
 
-LAMBDA_GRID = [0.01, 0.1, 1.0, 10.0, 100.0]
+# Ridge strengths `select_lambda` cross-validates over. The top of the grid
+# matters as much as the bottom, and for a different reason: the penalty pulls
+# a personal fit toward the pooled prior, so at a large enough lambda the two
+# coincide, `_heldout_gain` goes to exactly zero, and "this manager has no
+# transferable signal of their own" is expressible. A grid that stops short of
+# that cannot say it -- the best it can do is report the least-bad lambda it
+# was allowed, and the shortfall it prints is a fact about the grid rather than
+# about the manager.
+#
+# This grid used to stop at 100. On this league's six seasons four of the eight
+# managers selected that maximum at every fold, which is cross-validation
+# saying "more shrinkage, please" into a wall; extending the grid moved all
+# four sharply toward zero (e.g. -0.0254 -> -0.0001). None of them crossed into
+# positive, so the truncation was hiding an artifact rather than a signal --
+# but a reported penalty that shrinks 250x when you lengthen a list is not a
+# measurement, and the fix is to let the search finish.
+LAMBDA_GRID = [0.01, 0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0, 100000.0]
 MIN_PICKS_FOR_PERSONAL = 20
 
 # Decay rate for the ADP baseline in backtest(): the baseline orders the pool
