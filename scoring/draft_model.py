@@ -220,10 +220,22 @@ _POSITION_DUMMIES = ["RB", "WR", "TE", "K", "DST"]
 # n, so `trend` in particular is "not shown to hurt" rather than "shown to
 # help", and the same feature flipped sign across the three references this
 # was measured against (contaminated ESPN API, FFC, cheat sheets). The rule
-# is to cut at or below zero; none of these are. Re-run `make fit-managers`
-# and re-read the table before adding a fifth, because a feature that does
-# not pay for itself at ~105 picks per manager fits noise and drags every
-# other coefficient with it.
+# is to cut at or below zero. Re-run `make fit-managers` and re-read the
+# table before adding a fifth, because a feature that does not pay for
+# itself at ~105 picks per manager fits noise and drags every other
+# coefficient with it.
+#
+# Re-measured again after LAMBDA_GRID stopped being truncated (the grid feeds
+# `backtest`'s per-manager fits, so the ablation moves with it):
+#
+#     age +0.29pp (2 picks)   hype +0.29pp (2)   trend +0.29pp (2)
+#     no_track_record 0.00pp (0)
+#
+# `no_track_record` is now exactly at the cut line on top-1, though dropping
+# it still costs top-5 (0.5805 against 0.5848). "At zero" on a 2-pick
+# resolution is not the same finding as "below zero", so it is left in
+# rather than cut on a number that cannot distinguish the two -- but it is
+# the first thing to re-measure when a seventh season lands.
 _NEW_FEATURES = ["age", "no_track_record", "hype", "trend"]
 FEATURE_NAMES = (["reach", "fall"]
                  + [f"pos_{p}" for p in _POSITION_DUMMIES]
