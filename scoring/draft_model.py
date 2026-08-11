@@ -204,6 +204,22 @@ def build_observations(conn) -> list:
 # QB is the dropped baseline: with a full set of position dummies plus an
 # intercept-free softmax the columns would be collinear.
 _POSITION_DUMMIES = ["RB", "WR", "TE", "K", "DST"]
+# These four are what survived `ablation()`. Five were proposed; `volatility`
+# measured at -0.0029 against the cheat sheets and was cut. Re-measured on a
+# clean re-import (Task 9, six-season LOSO, n=696), every survivor's
+# delta_top1 is positive, in picks recovered out of 696:
+#
+#     age +1.29pp (9 picks)   no_track_record +1.29pp (9)
+#     hype +0.72pp (5)        trend +0.29pp (2)
+#
+# Read those with the standard error in mind -- se(top-1) is 1.6pp at this
+# n, so `trend` in particular is "not shown to hurt" rather than "shown to
+# help", and the same feature flipped sign across the three references this
+# was measured against (contaminated ESPN API, FFC, cheat sheets). The rule
+# is to cut at or below zero; none of these are. Re-run `make fit-managers`
+# and re-read the table before adding a fifth, because a feature that does
+# not pay for itself at ~105 picks per manager fits noise and drags every
+# other coefficient with it.
 _NEW_FEATURES = ["age", "no_track_record", "hype", "trend"]
 FEATURE_NAMES = (["reach", "fall"]
                  + [f"pos_{p}" for p in _POSITION_DUMMIES]
