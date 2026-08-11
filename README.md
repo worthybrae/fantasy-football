@@ -169,12 +169,11 @@ make espn-import LEAGUE=<your-league-url-or-id>
 This pulls your league's draft picks, team rosters, league settings, and
 that season's market data for every season it can find, walking seasons
 back from the current one and stopping after two consecutive misses (so one
-gap year in ESPN's history won't cut the walk short). It writes six tables:
+gap year in ESPN's history won't cut the walk short). It writes five tables:
 `draft_picks`, `draft_teams`, `league`, `historic_adp` (Fantasy Football
-Calculator's ADP), `historic_espn` (ESPN's own historical rankings, still
-used for the live board's Mkt column), and `historic_espn_cs` (ESPN's
-preseason cheat sheets, the pick model's actual fitting reference; more on
-that below). It also pulls a cheat sheet for the current season, even
+Calculator's ADP), and `historic_espn_cs` (ESPN's preseason cheat sheets,
+the pick model's actual fitting reference; more on that below). It also
+pulls a cheat sheet for the current season, even
 though there's no draft to import for it yet, because the simulator needs
 this year's board ranked the same way the model was fitted. The ADP table
 and the cheat sheets are what make "reach" measurable at all: a pick only
@@ -238,9 +237,12 @@ following year's board (2024) against just 0.678 with 2023's own, and has a
 running back who was a late-round flier that August sitting inside the top
 ten, a rank he only earned by breaking out during the season. The cheat
 sheets don't have that problem. Every season checked opens with the right
-players for that year. (`historic_espn`, from the API, is still imported
-and still feeds the live board's Mkt column; it's just not what the pick
-model fits against.)
+players for that year. Those API ranks used to be imported per season into
+a `historic_espn` table; that table is gone, because once the cheat sheets
+became the reference nothing read it. The board's Mkt column never came
+from it and doesn't now — that's `espn_adp`, which `make refresh` pulls for
+the current season only, where "where does ESPN have this player right now"
+is a fair question to ask.
 
 **`reach` and `fall` are on a log scale**, not linear. Linear rank put a
 bigger gap between rank 100 and rank 140 than between rank 1 and rank 5, so
