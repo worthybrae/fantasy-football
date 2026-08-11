@@ -26,6 +26,13 @@ from scoring.player_history import assert_no_column_collision, attributes_as_of
 
 RUN_WINDOW = 5
 
+# How much of the market reference comes from FFC ADP rather than ESPN's
+# preseason cheat sheet. Fitted here and applied in `draft_sim.build_pool`,
+# which MUST use the same value: reach/fall are learned against this board
+# and mean something else against any other. See the table in `_enrich_pool`
+# for the measurement that chose it.
+FFC_BLEND_WEIGHT = 0.25
+
 _ATTRIBUTE_DEFAULTS = {"age": np.nan, "no_track_record": True,
                        "prod_rank": np.nan, "trend": 0.0,
                        # Carried on the pool but read by no feature. These
@@ -91,8 +98,38 @@ def _enrich_pool(conn, pool: pd.DataFrame, season: int,
         # adp_rank of 300 would otherwise describe different depths.
         order = pool.assign(_cs=mapped).sort_values(
             ["_cs", "adp_rank"], na_position="last").index
-        pool["market_rank"] = pd.Series(
+        cs_dense = pd.Series(
             np.arange(1, len(pool) + 1, dtype=float), index=order).reindex(pool.index)
+        # Blend in the FFC ADP order. The cheat sheet is what the room reads,
+        # and alone it beats FFC ADP outright (top-1 0.2356 to 0.2011), but
+        # it is one publication's opinion and it is occasionally idiosyncratic
+        # -- in 2026 it has Jeremiyah Love 13th where 5,789 real PPR mock
+        # drafts have him 25.9, and Chase Brown 21st where they have him 12.2.
+        # FFC ADP is the opposite kind of evidence: not an opinion at all, but
+        # a record of what thousands of drafters actually did.
+        #
+        # Weighted 3:1 toward the cheat sheet, which is where the measurement
+        # puts the optimum. Six-season LOSO, n=696:
+        #
+        #     w_ffc   top-1     top-5     log-loss
+        #     0.00    0.2356    0.5848    2.8681      <- cheat sheet alone
+        #     0.25    0.2514    0.6250    2.7903      <- here
+        #     0.50    0.2270    0.5977    2.7957
+        #     0.75    0.2155    0.5776    2.8802
+        #     1.00    0.2011    0.5560    2.9819      <- FFC alone
+        #
+        # All three metrics peak together, which noise-chasing does not
+        # usually do. The weight was still chosen by looking at the number it
+        # is reported against, so it was re-checked by holding each season out
+        # of the selection set: 0.25 beats 0 on top-1 and top-5 in 6 of 6.
+        #
+        # Re-dense after blending so "rank k" keeps meaning "the kth player on
+        # this board" -- reach/fall are log-rank differences and a weighted
+        # average of two ranks is not itself a rank.
+        ffc_dense = pool["adp_rank"].rank(method="first")
+        pool["market_rank"] = (
+            (1.0 - FFC_BLEND_WEIGHT) * cs_dense
+            + FFC_BLEND_WEIGHT * ffc_dense).rank(method="first")
 
     attrs = attributes_as_of(conn, season)
     if not attrs.empty:

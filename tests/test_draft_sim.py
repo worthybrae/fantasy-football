@@ -390,6 +390,43 @@ def test_build_pool_ranks_on_the_cheat_sheet_ahead_of_ffc(tmp_path):
         "p2": 1.0, "p1": 2.0, "p3": 3.0}
 
 
+def test_build_pool_blends_ffc_into_the_cheat_sheet_order(tmp_path):
+    """The simulator's board must be the same blend `_enrich_pool` fits on.
+
+    The cheat sheet leads at 3:1, so a small FFC disagreement changes
+    nothing -- that is what the test above pins. This one pins the other
+    half: FFC is genuinely in the mix, and a player the market likes far
+    more than the sheet does moves up.
+
+    This is the Chase Brown case from 2026, where ESPN's sheet says 21st and
+    5,789 real PPR mock drafts say 12.2. `c` sits third on the sheet and
+    first on FFC; at w=0.25 that is worth 0.75*3 + 0.25*1 = 2.50 against
+    `b`'s 0.75*2 + 0.25*5 = 2.75, so `c` passes `b` and nothing else moves.
+    Under cheat-sheet-only ordering they stay a, b, c, d, e.
+
+    If this ever fails after a change to `FFC_BLEND_WEIGHT`, the fix is to
+    re-derive the arithmetic above -- not to loosen the assertion. The fit
+    and the simulator reading the same board is the invariant; a reach
+    coefficient learned on one board means something else on another.
+    """
+    from scoring.config import CURRENT_SEASON
+    conn = get_conn(str(tmp_path / "blend.duckdb"))
+    sheet = ["a", "b", "c", "d", "e"]                      # cheat-sheet order
+    ffc = {"a": 2.0, "b": 5.0, "c": 1.0, "d": 3.0, "e": 4.0}
+    write_table(conn, "historic_espn_cs", pd.DataFrame([
+        {"season": CURRENT_SEASON, "cs_rank": i + 1, "position": "RB",
+         "cs_name": f"Player {n.upper()}", "team": "DET", "auction_value": 10.0}
+        for i, n in enumerate(sheet)]))
+    board = pd.DataFrame([
+        {"player_id": n, "name": f"Player {n.upper()}", "position": "RB",
+         "team": "DET", "ffc_rank": ffc[n], "market_rank": ffc[n],
+         "durability": 90.0, "stats": None}
+        for n in sheet])
+    pool = build_pool(conn, board, S)
+    assert list(pool.player_id) == ["a", "c", "b", "d", "e"]
+    assert list(pool.market_rank) == [1.0, 2.0, 3.0, 4.0, 5.0]
+
+
 def test_build_pool_drafts_the_current_season_not_the_rules_season(tmp_path):
     """`settings.season` is the season the league's RULES were imported from
     (the newest completed draft), not the season being drafted.

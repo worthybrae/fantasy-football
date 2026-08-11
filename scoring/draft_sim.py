@@ -30,8 +30,8 @@ from pipeline.db import read_table, write_table
 from scoring import factors
 from scoring.board import FANTASY_POSITIONS, _norm_name, adp_match_key
 from scoring.config import CURRENT_SEASON, RECENCY_WEIGHTS
-from scoring.draft_model import (EARLY_ROUNDS, FEATURE_NAMES, HYPE_SCALE,
-                                 RUN_WINDOW, _ATTRIBUTE_DEFAULTS,
+from scoring.draft_model import (EARLY_ROUNDS, FEATURE_NAMES, FFC_BLEND_WEIGHT,
+                                 HYPE_SCALE, RUN_WINDOW, _ATTRIBUTE_DEFAULTS,
                                  _centre_within_position, _log_rank_features)
 from scoring.player_history import assert_no_column_collision, attributes_as_of
 
@@ -372,6 +372,27 @@ def build_pool(conn, board: pd.DataFrame, settings) -> SimPool:
                                          na_position="last")
     unknown = ranked[~has_rank]
     ranked = pd.concat([known, unknown], ignore_index=True)
+
+    # The same cheat-sheet/FFC blend `draft_model._enrich_pool` fits against,
+    # at the same weight, because a reach coefficient learned on one board
+    # means something else applied to another. That file carries the
+    # measurement; this one must not drift from it, which is why the weight
+    # is imported rather than repeated.
+    #
+    # Only the players `rank_col` actually ranks take part: the tail the cheat
+    # sheet never reached and FFC never priced has no second opinion to blend,
+    # and giving it one by position in this list would be inventing a market.
+    # Those keep the cheat-sheet-led order they already have.
+    cs_dense = pd.Series(np.arange(1, len(ranked) + 1, dtype=float),
+                         index=ranked.index)
+    ffc = pd.to_numeric(ranked.get(rank_col), errors="coerce")
+    both = ffc.notna()
+    if both.any():
+        ffc_dense = ffc[both].rank(method="first")
+        blended = cs_dense.copy()
+        blended[both] = ((1.0 - FFC_BLEND_WEIGHT) * cs_dense[both]
+                         + FFC_BLEND_WEIGHT * ffc_dense)
+        ranked = ranked.loc[blended.sort_values(kind="stable").index].reset_index(drop=True)
     dense_rank = np.arange(1, len(ranked) + 1, dtype=float)
     availability = ranked["player_id"].map(_availability(conn))
     # `vor` is the board's headline ranking and the spec's second candidate
