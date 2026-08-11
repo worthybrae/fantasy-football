@@ -167,12 +167,18 @@ make espn-import LEAGUE=<your-league-url-or-id>
 ```
 
 This pulls your league's draft picks, team rosters, league settings, and
-that season's ADP for every season it can find, walking seasons back from
-the current one and stopping after two consecutive misses (so one gap year
-in ESPN's history won't cut the walk short). It writes four tables:
-`draft_picks`, `draft_teams`, `league`, and `historic_adp`. Historic ADP is
-what makes "reach" measurable at all — a pick only means something relative
-to where the market had that player *that* year.
+that season's market data for every season it can find, walking seasons
+back from the current one and stopping after two consecutive misses (so one
+gap year in ESPN's history won't cut the walk short). It writes six tables:
+`draft_picks`, `draft_teams`, `league`, `historic_adp` (Fantasy Football
+Calculator's ADP), `historic_espn` (ESPN's own historical rankings, still
+used for the live board's Mkt column), and `historic_espn_cs` (ESPN's
+preseason cheat sheets, the pick model's actual fitting reference; more on
+that below). It also pulls a cheat sheet for the current season, even
+though there's no draft to import for it yet, because the simulator needs
+this year's board ranked the same way the model was fitted. The ADP table
+and the cheat sheets are what make "reach" measurable at all: a pick only
+means something relative to where the market had that player *that* year.
 
 The first run opens a real Chromium window at the ESPN login page and waits
 for you to sign in. Disney SSO's 2FA and bot checks need a human, and a
@@ -214,24 +220,85 @@ ridge-shrunk toward a fit pooled across the whole league, so a manager with
 few or noisy picks lands close to league average instead of overfitting to
 a handful of decisions.
 
-**Read the printed backtest line before trusting anything downstream.** It
-holds out the most recent season and reports top-1 and top-5 pick accuracy
-and log-loss against a pure-ADP baseline. If the fitted model doesn't beat
-that baseline out of sample, the command prints a warning, and it means
-what it says: treat the simulator's output as indicative only, not as a
-real prediction, until more seasons are imported. The result is also saved
+**The market reference is ESPN's own preseason cheat sheets.** This league
+drafts on ESPN, off ESPN's board, so "reach" and "fall" are measured
+against how far a pick landed from where ESPN's own printable PPR top-300
+ranked that player before the season, not against some other site's
+consensus. The importer downloads that PDF for every season it can
+(`NFLDK{YYYY}_CS_PPR300.pdf` through 2022, `NFL{YY}_CS_PPR300.pdf` from
+2023, both under `espncdn.com/s/ffldraftkit`) and parses it with `pypdf`
+into `historic_espn_cs`, 300 players a season. Fantasy Football Calculator's
+ADP fills in anyone the sheet doesn't rank; that's the only fallback.
+
+ESPN's own live rankings API was tried first and rejected as a historical
+reference, which is worth knowing before you go looking for a shortcut
+there. It serves no preseason rank at all for 2020-2022, and the 2023 rank
+it does serve isn't preseason either: it correlates 0.905 with the
+following year's board (2024) against just 0.678 with 2023's own, and has a
+running back who was a late-round flier that August sitting inside the top
+ten, a rank he only earned by breaking out during the season. The cheat
+sheets don't have that problem. Every season checked opens with the right
+players for that year. (`historic_espn`, from the API, is still imported
+and still feeds the live board's Mkt column; it's just not what the pick
+model fits against.)
+
+**`reach` and `fall` are on a log scale**, not linear. Linear rank put a
+bigger gap between rank 100 and rank 140 than between rank 1 and rank 5, so
+the model couldn't tell elite players apart: pick 1 of a real draft came
+back close to a coin flip. On a log scale the gap from 1 to 5 is bigger than
+the gap from 100 to 140, which is closer to how a draft actually goes.
+
+**Four features beyond reach/fall/position/need survived a held-out test**:
+`age` (centered within position, so the coefficient reads as "younger than
+typical for a QB" rather than picking up that QBs simply last longer than
+RBs), `no_track_record` (no prior seasons at all, kept separate from a
+fabricated zero), `hype` (how far the market's rank sits ahead of a rank
+derived from the player's own prior production, i.e. whether the pick is a
+leap of faith), and `trend` (the slope of his points per game across prior
+seasons). A fifth, `volatility` (points-per-game variance plus a
+games-missed rate), was measured and cut: it made the backtest slightly
+worse, not better. All five were decided the same way, by whether they
+improved held-out accuracy, not by whether they sounded plausible.
+
+**Read the printed backtest line before trusting anything downstream.** It's
+leave-one-season-out over all six imported seasons: each season takes a
+turn as the held-out test while the other five train the model, and results
+accumulate across all six rotations, 696 evaluations rather than the ~112
+you'd get from holding out only the newest season. It prints top-1 and
+top-5 accuracy and log-loss overall, broken down by round (early/mid/late),
+against a pure-market baseline, and a feature-ablation table showing what
+each of the five candidate features above did to held-out top-1. On this
+league's real history the fitted model scores top-1 24.4%, top-5 59.6%,
+log-loss 2.871, against a gate of 16% / 53% and a pre-recalibration
+baseline of 19.4% / 51.1% / 3.163 measured the same way. If a future refit
+doesn't clear that baseline out of sample, the command prints a warning,
+and it means what it says: treat the simulator's output as indicative only,
+not as a real prediction, until the fit improves. The result is also saved
 and served from `/api/model`, so the same warning appears in the draft rail
 rather than only in the terminal you happened to run `make fit-managers` in.
 
-Not every manager gets a personal model. A manager needs enough picks, and
-needs their own fit to actually beat the pooled fit on held-out seasons —
-if it doesn't, the simulator falls back to the pooled model for that
-manager, and their card in the rail says "league average, not enough
-signal" rather than pretending otherwise. That's expected, not a bug: with
-roughly 105 picks per manager (7 seasons of 15 rounds), there's enough
-signal for around a dozen coefficients with shrinkage, and no more. It's
-nowhere near enough to learn player-level preferences, like a manager's
-favorite NFL team, which is why the model doesn't attempt that.
+The same fit also measures one league-wide **positional bias**: how far
+ahead of or behind the market this league takes each position, by round.
+`make fit-managers` prints that table too, and it's worth reading on its
+own regardless of the pick model. Right now, for instance, this league
+takes kickers roughly 58 ranks ahead of the market in the late rounds and
+tight ends roughly 9 ahead in the middle rounds. That's a fact about the
+league, not a guess the model is making.
+
+**No manager currently earns a personal model.** A manager needs enough
+picks, and needs their own fit to actually beat the pooled fit on held-out
+seasons; if it doesn't, the simulator falls back to the pooled model for
+that manager, and their card says "league average, not enough signal"
+rather than pretending otherwise. Right now that's every manager: at
+roughly 87 fitted picks each (six seasons, one league), none of the eight
+beats the pooled fit on held-out data. That's expected, not a bug: 87 picks
+isn't enough to fit 15 coefficients on its own, and even with shrinkage
+pulling a thin fit toward the pooled one, none of the eight personal fits
+comes out ahead. It's why the manager cards on `/draft-board`'s "By
+manager" tab show the league-average read next to each manager's actual
+draft history rather than a personalized forecast: right now the real
+history is a better guide to what a specific manager will do than the
+model's coefficients are.
 
 ### Running a simulation
 
@@ -253,6 +320,20 @@ of your best legal starting lineup at the end (with an insurance term so
 picks past the first several rounds still matter instead of scoring as
 noise). `ROLLOUTS` trades runtime for resolution — more rollouts, tighter
 standard error on each candidate's score.
+
+Every pick inside a rollout that isn't one of those forced candidates
+(every opponent's pick, and your own picks past the one being evaluated) is
+chosen by a one-ply greedy policy: take whichever available player raises
+roster value the most, where a candidate's points are valued above his
+position's replacement level rather than counted raw. Raw points used to
+be the rule, and a raw-points greedy takes the best quarterback in the
+first round every time, because a quarterback outscores every running back
+and receiver on the board in raw points, even though a replacement-level
+quarterback is easy to find and a replacement-level running back isn't.
+Value over replacement is what the board's own VOR ranking already uses;
+the simulator's in-rollout policy just wasn't using it before.
+`roster_value` itself, the number a finished rollout reports, is
+unchanged; only the policy that picks candidates during a rollout changed.
 
 `make fit-managers` has to have been run first. Without fitted opponent
 models every opponent would pick uniformly at random over the whole pool,
@@ -299,16 +380,20 @@ probabilities.
 **The name in the cell is a consistency choice, not just "the highest raw
 number."** If four adjacent picks each have the same player as their
 top individual choice, showing him in all four cells would just look broken.
-So the raw per-pick frequencies get resolved into one board with an
-assignment algorithm (`scipy.optimize.linear_sum_assignment`, minimizing
-`-log(prob)`) that picks the most likely set of names where no player is
-used twice. That's the name you see. It means a cell's primary is the most
-coherent single draft the model can tell, not 120 independent "most likely"
-answers read in isolation, and a cell can end up naming its second-most-likely
-player when that makes the whole board fit together better. The hover
-alternates are how you see the raw, un-deduped picture, and they're worth
-checking on any pick that looks surprising, since nothing about the real
-distribution is hidden, only resolved into one story.
+So the raw per-pick frequencies get resolved into one board by walking the
+picks in draft order and giving each pick its most likely player, as long
+as an earlier pick hasn't already claimed him. Earliest pick wins any
+contest over a shared name: a board is read top to bottom, and a wrong name
+at pick 1 discredits the whole grid in a way a wrong name at pick 90
+doesn't, so the early picks are the ones that have to be right. That's a
+deliberate trade, not the assignment that maximizes the whole board's joint
+likelihood, and it has a visible cost: on a recent 120-cell run, 79 cells
+showed a primary that the same cell's own hover ranks *below* one of its
+alternates, because an earlier pick had already claimed the alternate. The
+hover is titled "raw odds for this pick" for exactly this reason. It's the
+undeduped picture, and it's worth checking on any cell that looks
+surprising, since nothing about the real distribution is hidden, only
+resolved into one story.
 
 **Your own column is a plan, not a prediction.** The rollouts fill your picks
 with the same greedy, best-marginal-value-right-now policy the simulator
@@ -336,26 +421,42 @@ before this feature existed (or one that otherwise wrote no per-pick rows)
 produces an empty grid, and the page says so and tells you to re-run rather
 than showing a silently blank board.
 
-Clicking a cell opens a condensed player profile, close enough for a
-draft-night decision, with a link to the full profile page for anything it
-leaves out. It carries that player's `Avail%` and `ΔEV` from the same run
-(`ΔEV` only for the handful of players scored at your next pick) and a
-mark-drafted button, so a pick doesn't send you back to the board page.
+Clicking a cell opens the **player card**: a condensed, draft-night version
+of the full profile, not the profile itself. It leads with projected
+points per game next to the player's recent actual PPG (a wide gap between
+the two is flagged, since a projection well ahead of recent real production
+is a bet, not a fact), a row of Rank/Tier/Mkt/Edge plus that player's
+`Avail%` and `ΔEV` from the same run (`ΔEV` only for the handful of players
+scored at your next pick), a row of critical numbers specific to his
+position (finish, role, snap share, games played, strength of schedule,
+whichever apply), and an 18-cell strength-of-schedule strip, one cell per
+week, coloured soft to tough with the bye week marked. A link to the full
+profile page covers anything the card leaves out, and a mark-drafted button
+means a pick doesn't send you back to the board page.
 
 Because the grid is built on the same fitted manager models as the rest of
 the simulator, the backtest line `make fit-managers` prints matters even
 more here than for `Avail%`/`ΔEV`: a full, confident-looking board is easy to
 over-trust, and it's only as good as that line says the model is.
 
-### A known open question
+### Viewing the board by manager
 
-The simulator dense-ranks the board's "market-known" players 1..k to match
-the scale the pick model was fitted on (`historic_adp`'s per-season dense
-rank over that season's ADP pool). Whether k, for your league, actually
-lines up with the population size that scale assumes hasn't been confirmed
-against a real import yet — only against test fixtures. If reach/fall
-behavior looks off once you run this against your own league's real
-history, that's the first thing to check.
+`/draft-board` has two tabs. **Grid** is the round-by-manager table above.
+**By manager** shows the same run as one card per team instead of one row
+of cells per round. Each card pairs two different kinds of information and
+keeps them visually apart on purpose: a quiet, monochrome panel of that
+manager's real draft history (their actual first-round pick every season
+it's imported, and their overall positional shape by round bucket: rounds
+1-3, 4-8, 9+), and below it, in colour with probabilities attached, their
+tendency in one line and their next few predicted picks from this run. Fact
+and forecast never share a color, so a real pick can't be mistaken for one
+more guess. The history comes from `GET /api/managers/history`, a plain
+read of `draft_picks` and `draft_teams`, no model involved.
+
+Since no manager currently earns a personal model (above), that real
+history is, for now, more informative about a specific manager than the
+forecast next to it is, which is exactly why the card leads with it rather
+than hiding it behind the coefficients.
 
 ## Data sources and quirks
 
