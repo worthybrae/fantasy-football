@@ -16,10 +16,34 @@ from pipeline.db import read_table
 from scoring.board import adp_match_key
 from scoring.ppr import compute_ppr_points
 
-COLUMNS = ["key", "age", "no_track_record", "prod_rank", "trend"]
+COLUMNS = ["key", "age", "no_track_record", "prod_rank", "trend",
+           "usage", "efficiency", "played_share", "peak_gap"]
 # Drafts happen at the end of August, so age at 1 September of the draft
 # year is the age the room would have said out loud.
 DRAFT_MONTH_DAY = "-09-01"
+
+# The three ways a player touches the ball. Summed into one "opportunities"
+# count rather than kept apart, because a manager choosing between a running
+# back and a wide receiver is comparing how often each gets the ball at all,
+# not carries against targets. Per-position meaning comes from centring
+# within position downstream, not from separate columns here.
+_OPPORTUNITY_COLUMNS = ("carries", "targets", "attempts")
+
+
+def assert_no_column_collision(frame: pd.DataFrame) -> None:
+    """Fail before a left join silently renames both sides.
+
+    `attributes_as_of` is merged onto pools that also carry board columns.
+    pandas resolves a name held by both frames by suffixing them `_x`/`_y`,
+    so the caller's later `frame["durability"]` raises a KeyError far from
+    the cause -- or, worse, finds a column that happens to survive and reads
+    the wrong numbers. This turns both into one error naming the column.
+    """
+    clash = sorted(set(frame.columns) & set(COLUMNS) - {"key"})
+    if clash:
+        raise ValueError(
+            f"{clash} would collide with attributes_as_of on merge; rename "
+            "the attribute rather than letting pandas suffix both sides")
 
 
 def _slope(seasons: np.ndarray, values: np.ndarray) -> float:
@@ -41,11 +65,25 @@ def attributes_as_of(conn, season: int, rules: dict | None = None) -> pd.DataFra
 
     wk = prior.copy()
     wk["ppr_points"] = compute_ppr_points(wk, rules)
+    wk["opportunities"] = sum(
+        pd.to_numeric(wk[col], errors="coerce").fillna(0)
+        if col in wk.columns else 0.0
+        for col in _OPPORTUNITY_COLUMNS)
     per_season = wk.groupby(["player_id", "season"], as_index=False).agg(
         points=("ppr_points", "sum"), games=("week", "nunique"),
+        opportunities=("opportunities", "sum"),
         name=("player_display_name", "last"), position=("position", "last"),
         team=("recent_team", "last"))
     per_season["ppg"] = per_season["points"] / per_season["games"]
+
+    # Games the player's team actually played, so a season cut short by
+    # injury reads differently from one played in the 14-game era or ended
+    # by a bye. Counted from the same weekly rows rather than hardcoded per
+    # era, which keeps it right for partial seasons in the current table.
+    team_games = wk.groupby(["recent_team", "season"])["week"].nunique()
+    per_season["team_games"] = pd.Series(
+        list(zip(per_season["team"], per_season["season"]))).map(
+            team_games).to_numpy()
 
     rows = []
     for player_id, grp in per_season.groupby("player_id"):
@@ -55,11 +93,32 @@ def attributes_as_of(conn, season: int, rules: dict | None = None) -> pd.DataFra
         if key is None:
             continue
         ppg = grp["ppg"].to_numpy(dtype=float)
+        games = float(latest["games"])
+        opportunities = float(latest["opportunities"])
+        team_games = float(latest["team_games"])
         rows.append({
             "player_id": player_id, "key": key,
             "no_track_record": False,
             "last_ppg": float(latest["ppg"]),
             "trend": _slope(grp["season"].to_numpy(dtype=float), ppg),
+            # Volume and rate, kept apart on purpose: a 20-touch grinder and
+            # a 6-touch big-play threat can post the same points per game,
+            # and managers demonstrably treat those as different players.
+            "usage": opportunities / games if games else np.nan,
+            "efficiency": (float(latest["points"]) / opportunities
+                           if opportunities else np.nan),
+            # Named for what it measures, not "durability": `board` already
+            # has a `durability` column meaning a within-position percentile,
+            # and a left join of two columns with one name silently suffixes
+            # both to _x/_y rather than failing.
+            "played_share": (games / team_games
+                             if team_games and np.isfinite(team_games)
+                             else np.nan),
+            # How far last season fell short of the best he has ever played.
+            # Distinct from `trend`, which is a slope: a player three years
+            # past a career year and flat since has a trend near zero and a
+            # large gap, and the market treats him as a bounce-back bet.
+            "peak_gap": float(ppg.max() - latest["ppg"]),
         })
     out = pd.DataFrame(rows)
     if out.empty:

@@ -343,6 +343,21 @@ answered it; and 62% of his total advantage comes from a single season (2023,
 the full 15-feature fit, Titolo stays pooled, and the evidence is written
 down instead of acted on.
 
+**The position dummies survived a challenge.** The obvious complaint about
+them is that "leans RB" is a thin description of a person, and that what a
+manager drafts would be better described by the *stat profile* of the players
+he takes — usage, efficiency, availability, distance from a career year, all
+computed from seasons strictly before each draft. That was built and measured.
+Replacing the RB/WR/TE dummies with those four columns costs top-1 accuracy
+(23.6% to 22.0%, with nine of the eleven lost picks in the late rounds) while
+improving log-loss and top-5, and the descriptive version separates nobody:
+one of 32 manager-by-stat cells clears two standard errors, which is what
+chance produces at 32 cells. Titolo's advantage, notably, disappears — his
+signal was positional. The columns are still computed and carried on every
+pool so a seventh season can re-measure cheaply; nothing reads them. Full
+numbers, including the by-round split and the per-manager table:
+[docs/superpowers/findings/2026-08-11-stat-profile-vs-position-dummies.md](docs/superpowers/findings/2026-08-11-stat-profile-vs-position-dummies.md).
+
 The defensible summary is narrower than "six seasons isn't enough for a
 personal model of any size", which is what this README used to say and which
 the evidence does not support: **at ~86 picks a per-manager fit does not

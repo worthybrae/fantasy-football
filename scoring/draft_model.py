@@ -22,12 +22,20 @@ from scipy.optimize import minimize
 from pipeline.db import read_table, write_table
 from scoring import league as league_mod
 from scoring.board import _ADP_POSITION_ALIASES, _norm_name, adp_match_key
-from scoring.player_history import attributes_as_of
+from scoring.player_history import assert_no_column_collision, attributes_as_of
 
 RUN_WINDOW = 5
 
 _ATTRIBUTE_DEFAULTS = {"age": np.nan, "no_track_record": True,
-                       "prod_rank": np.nan, "trend": 0.0}
+                       "prod_rank": np.nan, "trend": 0.0,
+                       # Carried on the pool but read by no feature. These
+                       # are the stat-profile columns from the measurement
+                       # in docs/superpowers/findings/2026-08-11-stat-profile
+                       # -vs-position-dummies.md; they stay filled so a
+                       # re-measurement on a seventh season is a change to
+                       # FEATURE_NAMES rather than a rebuild of the join.
+                       "usage": np.nan, "efficiency": np.nan,
+                       "played_share": np.nan, "peak_gap": np.nan}
 
 
 def _enrich_pool(conn, pool: pd.DataFrame, season: int,
@@ -101,6 +109,7 @@ def _enrich_pool(conn, pool: pd.DataFrame, season: int,
         for col, default in _ATTRIBUTE_DEFAULTS.items():
             pool[col] = default
     else:
+        assert_no_column_collision(pool)
         pool = pool.merge(attrs, on="key", how="left")
         pool["no_track_record"] = pool["no_track_record"].fillna(True).astype(bool)
         for col, default in _ATTRIBUTE_DEFAULTS.items():

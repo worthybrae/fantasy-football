@@ -33,7 +33,7 @@ from scoring.config import CURRENT_SEASON, RECENCY_WEIGHTS
 from scoring.draft_model import (EARLY_ROUNDS, FEATURE_NAMES, HYPE_SCALE,
                                  RUN_WINDOW, _ATTRIBUTE_DEFAULTS,
                                  _centre_within_position, _log_rank_features)
-from scoring.player_history import attributes_as_of
+from scoring.player_history import assert_no_column_collision, attributes_as_of
 
 FLEX_POSITIONS = ("RB", "WR", "TE")
 GAMES = 17
@@ -398,6 +398,7 @@ def build_pool(conn, board: pd.DataFrame, settings) -> SimPool:
         for col, default in _ATTRIBUTE_DEFAULTS.items():
             ranked[col] = default
     else:
+        assert_no_column_collision(ranked)
         ranked = ranked.merge(attrs, on="key", how="left")
         ranked["no_track_record"] = ranked["no_track_record"].fillna(True).astype(bool)
         for col, default in _ATTRIBUTE_DEFAULTS.items():
