@@ -172,6 +172,29 @@ def test_espn_marks_a_retired_player_undraftable_however_stale_the_others_are():
     assert g1["market_sources"]["cbs"] == 184.0
 
 
+def test_the_filter_fires_on_a_board_much_larger_than_espn_ranks(_=None):
+    """The shape that actually ships, and the shape a coverage-share gate got
+    wrong: the board carries 676 non-DST players and ESPN ranks 223 of them,
+    a share of 0.33. A `>= 0.5` gate read that as a broken feed and disabled
+    the filter on the one board it was written for -- and the wider the gap,
+    the more there is to drop, the less likely it would ever have fired.
+
+    Here ESPN ranks 150 of 600. The unranked 450 are what the filter is FOR;
+    they must not be mistaken for evidence that ESPN is down.
+    """
+    n_board, n_ranked = 600, 150
+    board = pd.DataFrame([
+        {"player_id": f"p{i}", "name": f"Player {i}", "position": "RB",
+         "team": "DET", "rank": i + 1, "adp": float(i + 1)} for i in range(n_board)])
+    espn = pd.DataFrame([
+        {"espn_id": i, "espn_name": f"Player {i}", "position": "RB",
+         "team": "DET", "espn_adp": float(i + 1), "espn_ppr_rank": float(i + 1)}
+        for i in range(n_ranked)])
+    sleeper = pd.DataFrame([{"gsis_id": f"p{i}", "espn_id": i} for i in range(n_ranked)])
+    out = add_market(board, espn, _fp(), sleeper)
+    assert int(out["espn_unranked"].sum()) == n_board - n_ranked
+
+
 def _wide(n=140, retired_at=None):
     """A board big enough for the undraftable flag to be trusted.
 

@@ -19,14 +19,17 @@ _RANK_COLS = ["ffc_rank", "espn_ppr_rank", "fp_rank", "mfl_rank", "cbs_rank"]
 # source or a coefficient learned on one means something else applied to the
 # other. It stays a consensus input as well -- the two uses are independent.
 _DROP_COLS = ["espn_rank", "fp_rank", "mfl_rank", "cbs_rank"]
-# What it takes to believe ESPN's feed is actually present, before "ESPN
-# doesn't rank him" is allowed to mean "undraftable". Both conditions ask the
-# same question from different sides, and both are needed: a share alone
-# cannot tell a live feed from a two-row fixture where one row happens to
-# match (50%, and no evidence of anything), and a count alone cannot catch a
-# join that half failed. The live feed ranks ~252 of ~249 non-DST board rows;
-# an absent or failed fetch ranks none.
-ESPN_MIN_COVERAGE = 0.5
+# How many players ESPN must rank before "ESPN doesn't rank him" is allowed
+# to mean "undraftable". This is a presence test on the feed: live it ranks
+# ~223, a failed fetch or an unjoined crosswalk ranks none, and a fixture
+# ranks one or two.
+#
+# Deliberately NOT a coverage *share*. That was tried and was self-defeating:
+# the board carries 676 non-DST players against ESPN's 223, a share of 0.33,
+# so a >= 0.5 gate switched the filter off on exactly the real board it was
+# written for -- and the wider the gap, the more there is to drop, the less
+# likely it would ever fire. The gap is the thing being removed, not evidence
+# the feed is broken.
 ESPN_MIN_RANKED = 100
 
 def _norm(name):
@@ -151,15 +154,14 @@ def add_market(board, espn, fp, sleeper, mfl=None, cbs=None):
     # ranks at all -- so "ESPN has no opinion" means undraftable for everyone
     # but a DST, where it means nothing.
     #
-    # Only trusted when ESPN actually covers this board. A missing, failed or
+    # Only trusted when ESPN's feed is actually here. A missing, failed or
     # unjoined ESPN feed leaves every row unranked, and a filter that reads
     # that as "nobody is draftable" would empty the board -- turning one
     # source being down into a total outage, which is far worse than carrying
     # a few stale players. Below the threshold the flag is all-False and the
     # board keeps everyone.
     covered = out.loc[out["position"] != "DST", "espn_ppr_rank"].notna()
-    trustworthy = (int(covered.sum()) >= ESPN_MIN_RANKED
-                   and covered.mean() >= ESPN_MIN_COVERAGE)
+    trustworthy = int(covered.sum()) >= ESPN_MIN_RANKED
     out["espn_unranked"] = (out["espn_ppr_rank"].isna()
                             & (out["position"] != "DST")) & trustworthy
 
