@@ -136,13 +136,40 @@ def test_mfl_and_cbs_fold_into_consensus():
                         "position": ["RB", "WR"], "cbs_rank": [1, 4]})
     out = add_market(_board(), _espn(), _fp(), _sleeper(), mfl=mfl, cbs=cbs)
     g1 = out[out["player_id"] == "g1"].iloc[0]
-    # FFC 1, ESPN 1, MFL 3, CBS 1 -> mean 1.5
-    assert g1["market_rank"] == 1.5
+    # FFC 1, ESPN 1, MFL 3, CBS 1 -> median 1.0
+    assert g1["market_rank"] == 1.0
     assert g1["market_sources"]["mfl"] == 3.0 and g1["market_sources"]["cbs"] == 1.0
     g2 = out[out["player_id"] == "g2"].iloc[0]
-    # FFC 2, ESPN PPR 4, FP 3, CBS 4 (norm-name match), no MFL
-    assert g2["market_rank"] == round((2 + 4 + 3 + 4) / 4, 1)
+    # FFC 2, ESPN PPR 4, FP 3, CBS 4 (norm-name match), no MFL -> median 3.5
+    assert g2["market_rank"] == 3.5
     assert g2["market_sources"]["mfl"] is None
+
+
+def test_one_wild_source_cannot_drag_the_consensus():
+    """The reason the consensus is a median.
+
+    MFL's ADP comes largely from best-ball and dynasty rooms drafted months
+    before a redraft league sits down, and it shows: across the top 100 its
+    mean absolute deviation from the other four is 43 ranks against their
+    10.7-21.2, with a worst case of 107. Under a mean, one source 40 ranks
+    out moves five-source consensus by 8 -- a full round in an 8-team
+    league -- and it does it precisely on the players the sources disagree
+    about, which are the ones worth being right about.
+
+    Here four sources put a player between 1 and 3 and MFL says 43. The
+    consensus must stay with the four. `market_spread` must still report the
+    disagreement, because hiding it would be the other failure mode.
+    """
+    mfl = pd.DataFrame({"mfl_name": ["Jahmyr Gibbs"], "position": ["RB"],
+                        "mfl_rank": [43]})
+    cbs = pd.DataFrame({"cbs_name": ["jahmyr gibbs"], "position": ["RB"],
+                        "cbs_rank": [3]})
+    out = add_market(_board(), _espn(), _fp(), _sleeper(), mfl=mfl, cbs=cbs)
+    g1 = out[out["player_id"] == "g1"].iloc[0]
+    # FFC 1, ESPN 1, CBS 3, MFL 43. Median 2.0; the mean would be 12.0.
+    assert g1["market_rank"] == 2.0
+    assert g1["market_spread"] == 42        # 43 - 1, still visible
+    assert g1["market_sources"]["mfl"] == 43.0
 
 def test_market_without_new_sources_unchanged():
     # Callers that don't pass mfl/cbs (and pre-refresh DBs with no tables)

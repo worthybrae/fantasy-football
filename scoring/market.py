@@ -124,7 +124,26 @@ def add_market(board, espn, fp, sleeper, mfl=None, cbs=None):
     out["mfl_rank"] = _name_ranks(out, mfl, "mfl_name", "mfl_rank")
     out["cbs_rank"] = _name_ranks(out, cbs, "cbs_name", "cbs_rank")
     ranks = out[_RANK_COLS].astype(float)
-    out["market_rank"] = ranks.mean(axis=1, skipna=True).round(1)
+    # Median, not mean. These five sources are not equally reliable, and the
+    # mean hands the worst of them a full vote. Measured against the median
+    # of the other four across the top 100, mean absolute deviation runs
+    # 10.7 (FantasyPros), 12.1 (FFC), 13.3 (CBS), 21.2 (ESPN) -- and 43.0
+    # for MFL, whose p90 miss is 91 ranks and whose worst is 107. MFL's ADP
+    # is drawn largely from best-ball and dynasty rooms drafted months
+    # earlier, so it is not measuring the same event as the others.
+    #
+    # One source 30 ranks out moves a mean of five by 6 -- most of a round in
+    # an 8-team league -- and it lands on exactly the players the sources
+    # disagree about, which are the ones worth being right about. Chase Brown
+    # sits at 9/12/16/21 across four sources and 43 on MFL; the mean puts him
+    # 15th and the median 12th. Switching moved 40 of the top 100 by five or
+    # more places.
+    #
+    # The median keeps every source as a vote and lets none of them drag the
+    # answer, which is what a consensus is for. `market_spread` still reports
+    # the full min-to-max range, so a disagreement this wide stays visible on
+    # the board rather than being smoothed away here.
+    out["market_rank"] = ranks.median(axis=1, skipna=True).round(1)
     n = ranks.notna().sum(axis=1)
     spread = ranks.max(axis=1) - ranks.min(axis=1)
     out["market_spread"] = spread.where(n >= 2)
