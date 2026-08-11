@@ -267,8 +267,6 @@ def _pool(rows):
     df["market_rank"] = df["adp_rank"]
     df["hype"] = np.nan
     df["age"] = np.nan
-    df["ppg_std"] = 0.0
-    df["missed_rate"] = 0.0
     df["no_track_record"] = True
     df["trend"] = 0.0
     return df
@@ -503,7 +501,6 @@ def test_fit_all_separates_managers_with_opposite_tastes(monkeypatch):
             "norm": [f"p{i}" for i in range(n)], "position": positions,
             "adp_rank": ranks, "market_rank": ranks,
             "hype": np.full(n, np.nan), "age": np.full(n, np.nan),
-            "ppg_std": np.zeros(n), "missed_rate": np.zeros(n),
             "no_track_record": np.full(n, True), "trend": np.zeros(n)})
 
     observations = []
@@ -545,6 +542,46 @@ def test_backtest_reports_accuracy_against_an_adp_baseline(tmp_path):
     assert 0.0 <= report["top1"] <= 1.0
     assert 0.0 <= report["top5"] <= 1.0
     assert isinstance(report["beats_adp"], bool)
+
+def test_adp_baseline_is_scored_on_market_rank_not_pool_order(monkeypatch):
+    """The baseline reads the same board the model does.
+
+    `build_observations` sorts the pool by the FFC `adp_rank`, but
+    `market_rank` -- what `feature_matrix` actually reads -- is the ESPN
+    cheat-sheet ordering. On the league's own history those two disagree
+    about who is top-of-pool in 550 of 696 observations, so scoring the
+    baseline on pool position measured a market the model never sees and
+    flattered it by ~3.7 points of top-1.
+
+    Here the two orders are exactly reversed and every pick is the market's
+    #1 by `market_rank`, so a baseline on `market_rank` scores 1.0 and one
+    on pool position scores 0.0. Two seasons because LOSO needs a fold to
+    train on.
+    """
+    import numpy as np
+    from scoring import league
+    from scoring.draft_model import PickObservation, backtest
+
+    n = 6
+
+    def pool():
+        return pd.DataFrame({
+            "norm": [f"p{i}" for i in range(n)], "position": ["RB"] * n,
+            "adp_rank": np.arange(1.0, n + 1.0),          # pool sort order
+            "market_rank": np.arange(float(n), 0.0, -1.0),   # reversed
+            "hype": np.zeros(n), "age": np.full(n, np.nan),
+            "no_track_record": np.full(n, True), "trend": np.zeros(n)})
+
+    observations = [
+        PickObservation(season=season, overall_pick=1, manager="m",
+                        chosen=n - 1,          # market_rank 1, last in the pool
+                        pool=pool(), roster={}, recent=[])
+        for season in (2024, 2025)]
+    monkeypatch.setattr("scoring.draft_model.build_observations",
+                        lambda conn: observations)
+    report = backtest(None, settings=league.default_settings())
+    assert report["adp_top1"] == 1.0
+
 
 def test_beats_adp_is_false_for_a_model_no_better_than_the_market(tmp_path, monkeypatch):
     # _seed_many's draft is chalk: every pick is the market's next player by
@@ -623,7 +660,10 @@ def _seed_with_espn(tmp_path):
         {"season": 2025, "adp_name": "Player B", "position": "WR",
          "team": "GB", "adp_rank": 2},
     ]))
-    # ESPN reverses them.
+    # A stale `historic_espn` left behind by an older import, reversing the
+    # two. The importer no longer writes this table, but every database
+    # imported before it was removed still carries the rows, so "ignored"
+    # has to keep meaning ignored rather than merely absent.
     write_table(conn, "historic_espn", pd.DataFrame([
         {"season": 2025, "espn_name": "Player B", "position": "WR",
          "espn_rank": 1, "adp_usable": True},
@@ -634,7 +674,7 @@ def _seed_with_espn(tmp_path):
 
 
 def test_pool_market_rank_ignores_the_espn_api_ranks(tmp_path):
-    """A `historic_espn` (API) row that disagrees does not move `market_rank`.
+    """A leftover `historic_espn` (API) row does not move `market_rank`.
 
     This reverses an earlier decision deliberately, so it is pinned rather
     than left implicit. ESPN's `kona_player_info` endpoint serves nothing for
@@ -706,12 +746,10 @@ def test_market_rank_matches_the_scale_build_pool_ranks_on(tmp_path):
 def test_pool_carries_player_attributes_with_neutral_defaults(tmp_path):
     obs = build_observations(_seed_with_espn(tmp_path))
     pool = obs[0].pool
-    for col in ("market_rank", "hype", "age", "ppg_std", "missed_rate",
-                "no_track_record", "trend"):
+    for col in ("market_rank", "hype", "age", "no_track_record", "trend"):
         assert col in pool.columns
     # No `weekly` table at all, so nobody has a track record.
     assert pool["no_track_record"].all()
-    assert (pool["ppg_std"] == 0.0).all()
     assert (pool["trend"] == 0.0).all()
 
 
@@ -772,8 +810,7 @@ def test_log_rank_makes_the_top_of_the_board_matter_more():
         pool = pd.DataFrame({
             "norm": [f"p{r}" for r in ranks], "position": ["RB"] * len(ranks),
             "adp_rank": ranks, "market_rank": ranks, "hype": [0.0] * len(ranks),
-            "age": [np.nan] * len(ranks), "ppg_std": [0.0] * len(ranks),
-            "missed_rate": [0.0] * len(ranks),
+            "age": [np.nan] * len(ranks),
             "no_track_record": [True] * len(ranks), "trend": [0.0] * len(ranks)})
         obs = PickObservation(season=2025, overall_pick=pick, manager="m",
                               chosen=0, pool=pool, roster={}, recent=[])
@@ -792,7 +829,7 @@ def test_new_features_are_present_and_neutral_without_history():
     pool = pd.DataFrame({
         "norm": ["a", "b"], "position": ["RB", "WR"], "adp_rank": [1.0, 2.0],
         "market_rank": [1.0, 2.0], "hype": [np.nan, np.nan],
-        "age": [np.nan, np.nan], "ppg_std": [0.0, 0.0], "missed_rate": [0.0, 0.0],
+        "age": [np.nan, np.nan],
         "no_track_record": [True, True], "trend": [0.0, 0.0]})
     obs = PickObservation(season=2025, overall_pick=1, manager="m", chosen=0,
                           pool=pool, roster={}, recent=[])
@@ -812,7 +849,6 @@ def test_age_is_centred_within_position():
         "norm": ["a", "b", "c"], "position": ["RB", "RB", "WR"],
         "adp_rank": [1.0, 2.0, 3.0], "market_rank": [1.0, 2.0, 3.0],
         "hype": [0.0, 0.0, 0.0], "age": [24.0, 28.0, 30.0],
-        "ppg_std": [0.0, 0.0, 0.0], "missed_rate": [0.0, 0.0, 0.0],
         "no_track_record": [False, False, False], "trend": [0.0, 0.0, 0.0]})
     obs = PickObservation(season=2025, overall_pick=1, manager="m", chosen=0,
                           pool=pool, roster={}, recent=[])

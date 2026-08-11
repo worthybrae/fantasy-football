@@ -25,9 +25,8 @@ from scoring.player_history import attributes_as_of
 
 RUN_WINDOW = 5
 
-_ATTRIBUTE_DEFAULTS = {"age": np.nan, "ppg_std": 0.0, "missed_rate": 0.0,
-                       "no_track_record": True, "prod_rank": np.nan,
-                       "trend": 0.0}
+_ATTRIBUTE_DEFAULTS = {"age": np.nan, "no_track_record": True,
+                       "prod_rank": np.nan, "trend": 0.0}
 
 
 def _enrich_pool(conn, pool: pd.DataFrame, season: int,
@@ -56,10 +55,14 @@ def _enrich_pool(conn, pool: pd.DataFrame, season: int,
       not. 2024 does not show this, so the contamination is specific to
       2023 rather than uniform across ESPN's history.
 
-    Using the API ranks cost ~7 points of top-1 accuracy. `historic_espn` is
-    still imported and is still correct for the current season -- it feeds
-    the live board's consensus via `scoring.market` -- it is just not the
-    historical fitting reference.
+    Using the API ranks cost ~7 points of top-1 accuracy, which is why the
+    `historic_espn` table they were imported into is gone: nothing read it
+    once this became the reference, and six network calls per import to a
+    discredited board is not provenance worth paying for. The live board's
+    Mkt column is unaffected -- `scoring.market` reads `espn_adp`, which
+    `pipeline.refresh` writes from the current-season API. That is a
+    different table and a legitimate use: "where does ESPN have this player
+    right now" makes no claim about any past preseason.
     """
     pool = pool.copy()
     if cheatsheet is None or cheatsheet.empty:
@@ -227,6 +230,18 @@ FEATURE_NAMES = (["reach", "fall"]
                  + _NEW_FEATURES)
 EARLY_ROUNDS = 3
 
+# Coefficients the rail's three-bar manager card may show. Everything except
+# the position dummies, which only mean anything relative to each other and
+# so cannot be summarized honestly one bar at a time.
+#
+# Derived from FEATURE_NAMES, not hand-listed, and served per-coefficient by
+# /api/managers as `shown` so the web client has nothing to keep in sync. The
+# hand-kept copy in DraftRail.tsx went stale the moment this branch added
+# `age`/`hype`/`trend`/`no_track_record`: the filter runs before the top-3
+# slice, so a manager whose strongest deviation was on a new feature got bars
+# for weaker ones instead. `_PHRASES` above had the identical bug.
+SUMMARY_FEATURES = [f for f in FEATURE_NAMES if not f.startswith("pos_")]
+
 # Divisor that puts `hype` on roughly the same scale as the other columns,
 # so no coefficient has to be tiny or huge to matter. Not fitted -- changing
 # it just rescales the coefficient -- but keeping the columns comparable
@@ -374,18 +389,17 @@ def prepare(observations, settings):
 LAMBDA_GRID = [0.01, 0.1, 1.0, 10.0, 100.0]
 MIN_PICKS_FOR_PERSONAL = 20
 
-# Decay rate for the ADP baseline in backtest(): the pool passed to
-# feature_matrix is always sorted ascending by adp_rank (build_observations
-# never reorders it), so pool position IS market rank order and a softmax
-# over -TEMPERATURE * position gives a real probability distribution over
-# "who does the market think goes next" -- unlike a uniform distribution,
-# which assigns the market's #1 player and its #200th the same probability
-# and so would be beaten by nearly anything. TEMPERATURE=1.0 means each step
-# down the ADP board is ~e times less likely than the one before it: sharp
-# enough to be a meaningful baseline (most snake-draft picks land within a
-# few spots of the top of the board), not so sharp that it degenerates into
-# "always predict index 0" and stops being a distribution worth comparing
-# log-loss against.
+# Decay rate for the ADP baseline in backtest(): the baseline orders the pool
+# by `market_rank` -- the same reference the model reads -- and a softmax over
+# -TEMPERATURE * (0-based position in that order) gives a real probability
+# distribution over "who does the market think goes next", unlike a uniform
+# distribution, which assigns the market's #1 player and its #200th the same
+# probability and so would be beaten by nearly anything. TEMPERATURE=1.0 means
+# each step down the market's board is ~e times less likely than the one
+# before it: sharp enough to be a meaningful baseline (most snake-draft picks
+# land within a few spots of the top of the board), not so sharp that it
+# degenerates into "always predict the market's next player" and stops being a
+# distribution worth comparing log-loss against.
 ADP_BASELINE_TEMPERATURE = 1.0
 
 # Plain-language templates for the coefficients worth surfacing. Keyed by
@@ -404,10 +418,11 @@ _PHRASES = {
     "need": ("fills starting slots first", "ignores roster needs"),
     "run": ("chases positional runs", "fades positional runs"),
     # Task 4 columns. `describe` takes the top-3 |diff| features and drops
-    # any name missing here without looking further down the list -- with
-    # five of sixteen features unnamed, the top three could easily be new
-    # ones, and a manager with a real, strong deviation reported back as
-    # "drafts close to league average". Sign matters: `age` is centred
+    # any name missing here without looking further down the list, so a
+    # feature added to FEATURE_NAMES and not to this table can report a
+    # manager with a real, strong deviation back as "drafts close to league
+    # average". All 15 of FEATURE_NAMES are named here; keep it that way
+    # when adding one. Sign matters: `age` is centred
     # (positive = older than the position average), `hype` is
     # prod_rank - market_rank (positive = market ranks him ahead of his own
     # production -- a leap of faith), so a positive coefficient on either
@@ -623,20 +638,24 @@ def backtest(conn, settings=None, features=None, observations=None) -> dict:
             hits1 += hit1
             hits5 += hit5
             ll += np.log(max(probs[k], 1e-12))
-            # ADP baseline: the pool is sorted ascending by adp_rank (see
-            # build_observations), so pool position IS market rank order and
-            # index 0 is the market's next player -- true regardless of
-            # `features`, since masking only drops columns from X, never
-            # rows. A uniform distribution over the pool is not a real
-            # baseline -- it would assign the market's #1 player and its
-            # #200th the same probability, so "beats the market" would be
-            # true almost by construction. Score the market's own ranking
-            # with a softmax over pool position instead: a real probability
-            # distribution to compare the fitted model against, and one
-            # that does not move just because `features` changed what the
-            # model itself sees.
-            adp_hits1 += int(k == 0)
-            adp_probs = _softmax(-ADP_BASELINE_TEMPERATURE * np.arange(len(X)))
+            # ADP baseline, scored on `market_rank` -- the same board the
+            # model reads. NOT pool position: build_observations sorts the
+            # pool by the FFC `adp_rank`, while `market_rank` has been the
+            # ESPN cheat-sheet ordering since _enrich_pool switched
+            # references, and on this league's history the two disagree
+            # about who is top-of-pool in 550 of 696 observations. Scoring
+            # the baseline on a board the model never sees would confound a
+            # better model with a worse yardstick; same reference both
+            # sides. A uniform distribution over the pool is not a real
+            # baseline either -- it would assign the market's #1 player and
+            # its #200th the same probability, so "beats the market" would
+            # be true almost by construction. Still immune to `features`:
+            # masking drops columns from X, never rows, and this reads the
+            # pool rather than X at all.
+            mr = observations[i].pool["market_rank"].to_numpy(dtype=float)
+            rankpos = np.argsort(np.argsort(mr))   # 0-based place on that board
+            adp_hits1 += int(rankpos[k] == 0)
+            adp_probs = _softmax(-ADP_BASELINE_TEMPERATURE * rankpos)
             adp_ll += np.log(max(adp_probs[k], 1e-12))
             n_total += 1
 
