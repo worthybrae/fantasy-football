@@ -549,24 +549,68 @@ def _replacement_points(pool, settings) -> dict:
     return out
 
 
-def _greedy_choice(pool, available, roster, settings, caps):
-    """My in-rollout policy: the available, cap-legal player who most
-    increases roster value, valued above their position's replacement level
-    (`_replacement_points`) rather than on raw points. Raw points would take
-    a quarterback over a running back every time -- a QB outscores every RB
-    in the pool, but replacement-level QBs also score far more than
-    replacement-level RBs, so the QB's real marginal value is smaller.
-    One-ply greedy is what makes a rollout cheap enough to run thousands of
-    times; the search in Task 11 is what looks further ahead. Replacement is
-    subtracted from the final scalar `gain`, not from the candidate's points
-    before they go into `roster_value`: `roster_value` is always called with
-    real points, for the candidate and for every player already on the
-    roster alike, so its own sort, FLEX assignment and bench-insurance logic
-    never compare a replacement-adjusted number against a real one. Only the
-    resulting per-candidate delta is shifted down by that position's
-    replacement level, purely to rank candidates against each other -- the
-    roster this builds, and the value `roster_value` later reports for it,
-    stay priced in real (unadjusted) points throughout.
+def _picks_until_my_next_turn(slots, offset, my_slot):
+    """How many other teams pick between this pick of mine and my next one.
+
+    None when this is my last pick of the draft, which is a different thing
+    from zero: at my last pick nothing I pass over can be taken from me, so
+    there is no opportunity cost to price, and `_greedy_choice` falls back to
+    comparing raw roster value.
+    """
+    for j in range(offset + 1, len(slots)):
+        if slots[j] == my_slot:
+            return j - offset - 1
+    return None
+
+
+def _next_turn_survivors(pool, available, gap):
+    """Who is plausibly still on the board when I pick again.
+
+    The next `gap` picks are approximated as the top `gap` available players
+    by market rank. That is not what will happen -- managers reach and let
+    players slide, which is the whole subject of `draft_model` -- but it is
+    what the room believes will happen, it costs one argsort, and it is the
+    same reasoning a human drafter does out loud ("those six will be gone").
+    Running the real pick model here instead would mean simulating the
+    intervening picks inside every candidate evaluation of every rollout.
+    """
+    order = available[np.argsort(pool.market_rank[available], kind="stable")]
+    return order[gap:]
+
+
+def _greedy_choice(pool, available, roster, settings, caps, gap=None):
+    """My in-rollout policy: the available, cap-legal player whose roster
+    value most exceeds what I could get at his position when I pick again.
+
+    `gap` is how many other teams pick before my next turn
+    (`_picks_until_my_next_turn`). Given it, each candidate is scored against
+    the best player at his own position expected to survive that long, which
+    is the opportunity cost of taking him now. Without it -- my last pick of
+    the draft -- there is no next turn to forgo, and candidates are compared
+    on raw roster value.
+
+    This replaced a static replacement level (`_replacement_points`, still
+    used by the board's VOR column) and the difference is the whole point.
+    Replacement level is a season-long constant: it prices a quarterback
+    against the 9th-best QB *of the original board* however deep the draft
+    has gone. That is right on average and wrong exactly when it matters. At
+    pick 13 of this league it valued Josh Allen at +76 over replacement and
+    the best available running back at +73, and took Allen -- correctly, on
+    its own terms, and absurdly on the board's. What it could not see is that
+    seven picks later the quarterback position would be barely worse while
+    the running back position would have fallen off a cliff. Opportunity cost
+    is a function of when I pick next, not of the league's roster shape.
+
+    One-ply greedy is still what makes a rollout cheap enough to run
+    thousands of times; the search in Task 11 is what looks further ahead.
+    The subtraction happens on the final scalar, never on the points that go
+    into `roster_value`: that function is always called with real points, for
+    the candidate and for every player already rostered alike, so its sort,
+    FLEX assignment and bench-insurance logic never compare an adjusted
+    number against a real one. Only the per-candidate delta is shifted, and
+    only to rank candidates against each other -- the roster this builds, and
+    the value `roster_value` later reports for it, stay priced in real
+    points throughout.
 
     Legality is filtered before the shortlist is built, not inside the loop
     over it. The shortlist is only the top GREEDY_CANDIDATES by raw points,
@@ -586,12 +630,28 @@ def _greedy_choice(pool, available, roster, settings, caps):
         # unavoidable, not a shortlist artifact -- so caps no longer apply.
         return available[0] if len(available) else None
     shortlist = legal[np.argsort(-pool.points[legal])][:GREEDY_CANDIDATES]
-    replacement = _replacement_points(pool, settings)
+
+    def delta(i):
+        return roster_value(
+            current + [(pool.position[i], pool.points[i], pool.availability[i])],
+            settings) - base
+
+    # What this position is worth to me if I wait. Computed per position that
+    # actually appears on the shortlist, in the same units as `delta` -- a
+    # roster-value increment, not raw points -- so the subtraction compares
+    # like with like and a position I have no room for nets out near zero on
+    # both sides instead of being penalized twice.
+    forgone = {}
+    if gap is not None:
+        survivors = _next_turn_survivors(pool, available, gap)
+        for pos in {pool.position[i] for i in shortlist}:
+            at_pos = survivors[pool.position[survivors] == pos]
+            forgone[pos] = (delta(at_pos[np.argmax(pool.points[at_pos])])
+                            if len(at_pos) else 0.0)
+
     best_idx, best_gain = None, -np.inf
     for i in shortlist:
-        pos = pool.position[i]
-        gain = roster_value(current + [(pos, pool.points[i], pool.availability[i])],
-                            settings) - base - replacement.get(pos, 0.0)
+        gain = delta(i) - forgone.get(pool.position[i], 0.0)
         if gain > best_gain:
             best_idx, best_gain = i, gain
     return best_idx if best_idx is not None else legal[0]
@@ -693,7 +753,9 @@ def _run_draft(pool, settings, slot_managers, my_slot, taken, betas, rng,
                 choice = forced
                 forced = None
             else:
-                choice = _greedy_choice(pool, available, roster, settings, caps)
+                choice = _greedy_choice(
+                    pool, available, roster, settings, caps,
+                    gap=_picks_until_my_next_turn(slots, offset, my_slot))
         else:
             beta = betas.get(slot_managers.get(slot))
             if beta is None:

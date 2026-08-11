@@ -511,6 +511,31 @@ from scoring.draft_model import FEATURE_NAMES
 from scoring.draft_sim import SimPool, _run_draft, rollout, snake_slots
 
 
+def test_picks_until_my_next_turn_counts_the_teams_in_between():
+    """The gap prices every one of my picks, so an off-by-one here shifts
+    the whole policy quietly rather than failing. Counted on a real snake:
+    8 teams, 3 rounds, slot 4 picks at offsets 3, 12 and 19."""
+    from scoring.draft_sim import _picks_until_my_next_turn, snake_slots
+    slots = snake_slots(8, 3)
+    assert [i for i, s in enumerate(slots) if s == 4] == [3, 12, 19]
+    assert _picks_until_my_next_turn(slots, 3, 4) == 8
+    assert _picks_until_my_next_turn(slots, 12, 4) == 6
+    # Last pick of the draft: nothing left to forgo, which is None rather
+    # than 0 -- `_greedy_choice` treats them differently on purpose.
+    assert _picks_until_my_next_turn(slots, 19, 4) is None
+
+
+def test_picks_until_my_next_turn_is_zero_at_the_snake_turn():
+    """At the turn I pick twice with nobody in between, so the gap is 0 and
+    genuinely nothing can be taken from me. Distinct from None, which means
+    no next pick at all."""
+    from scoring.draft_sim import _picks_until_my_next_turn, snake_slots
+    slots = snake_slots(8, 3)
+    assert [i for i, s in enumerate(slots) if s == 1] == [0, 15, 16]
+    assert _picks_until_my_next_turn(slots, 15, 1) == 0
+    assert _picks_until_my_next_turn(slots, 0, 1) == 14
+
+
 def test_snake_slots_reverses_every_other_round():
     assert snake_slots(4, 3) == [1, 2, 3, 4, 4, 3, 2, 1, 1, 2, 3, 4]
 
@@ -717,21 +742,22 @@ def test_greedy_takes_the_running_back_over_the_higher_scoring_quarterback():
     """The defect this fixes, from a real run: the simulated user opened
     with Josh Allen, market rank 24, at pick 4. A QB outscores every RB in
     raw points, so a one-ply greedy on raw points always takes one early --
-    the error value over replacement exists to prevent.
+    the error that pricing a candidate against his own position exists to
+    prevent.
 
-    The pool must be at least as deep as `S.replacement_ranks` wants (QB 9,
-    RB 22) or `_replacement_points` clamps to the last player actually
-    present -- which, at exactly one player per position, degenerates to
-    that player's own points and makes every candidate's replacement-
-    adjusted value exactly 0.0. A first version of this test used a
-    2-player pool and hit exactly that: both candidates tied at 0.0, and
-    the assertion only passed because of which candidate the (now-reverted)
-    tie-break preferred -- it was pinning shortlist scan order, not
-    replacement value; deleting `_replacement_points` entirely would not
-    have failed it. 14 QBs and 30 RBs give real, non-clamped replacement
-    levels: QB 340 (9th of 14), RB 195 (22nd of 30) -- so QB1 (380) is
-    worth +40 above replacement and RB1 (300) is worth +105, and RB should
-    win despite scoring 80 fewer raw points.
+    What that price is, is the thing this test pins. It is NOT a static
+    replacement level: that prices a quarterback against the 9th-best QB of
+    the original board however deep the draft has gone, which is right on
+    average and wrong exactly when it matters. It is what I could get at
+    that position when I pick again -- so the fixture is built around the
+    only quantity that can distinguish the two, how fast each position
+    decays over the gap.
+
+    QB declines 2 points a slot and RB declines 40. Both leaders are worth
+    within 80 raw points of each other, both positions are equally deep, and
+    the *static* replacement margins are deliberately set so they would
+    favour the QB. Only the next-turn price separates them: waiting a full
+    turn costs ~8 points at QB and ~160 at RB.
     """
     import numpy as np
     from scoring.draft_sim import SimPool, _greedy_choice, _roster_cap
@@ -741,41 +767,57 @@ def test_greedy_takes_the_running_back_over_the_higher_scoring_quarterback():
         n = n_qb + n_rb
         ids = np.array([f"qb{i}" for i in range(n_qb)] +
                        [f"rb{i}" for i in range(n_rb)])
+        points = np.concatenate([qb_points, rb_points])
+        # Market rank follows raw points across the whole pool, which is what
+        # makes the gap bite: `_next_turn_survivors` removes the top `gap` by
+        # market rank, so the intervening picks take the best players left
+        # regardless of position. The old fixture ranked every QB ahead of
+        # every RB, under which no RB is ever taken by anybody and no gap can
+        # cost anything -- it could not have distinguished the two policies.
         return SimPool(
             player_id=ids, norm=ids,
             position=np.array(["QB"] * n_qb + ["RB"] * n_rb),
             adp_rank=np.arange(1, n + 1, dtype=float),
-            points=np.concatenate([qb_points, rb_points]),
+            points=points,
             availability=np.full(n, 95.0), vor=np.zeros(n),
-            market_rank=np.arange(1, n + 1, dtype=float),
+            market_rank=(-points).argsort().argsort().astype(float) + 1.0,
             age=np.full(n, 25.0), no_track_record=np.full(n, False),
             hype=np.zeros(n), trend=np.zeros(n))
 
     roster = {"counts": {}, "indices": []}
 
-    qb_points = np.linspace(380.0, 315.0, 14)   # replacement (9th) = 340
-    rb_points = np.linspace(300.0, 155.0, 30)   # replacement (22nd) = 195
-    pool = pool_of(qb_points, rb_points)
-    choice = _greedy_choice(pool, np.arange(len(pool.player_id)), roster, S,
-                            _roster_cap(S))
+    # The flat position's leader outscores the steep position's, so raw
+    # points and next-turn price give opposite answers and the test can tell
+    # which one is running. Both 12 deep.
+    flat = np.array([420.0, 416, 412, 408, 404, 400, 396, 392, 388, 384, 380, 376])
+    steep = np.array([401.0, 340, 300, 275, 258, 246, 238, 233, 230, 228, 227, 226])
+
+    pool = pool_of(flat, steep)          # QB flat, RB steep
+    available = np.arange(len(pool.player_id))
+
+    # Seven picks pass before my next turn, which takes the top seven by
+    # market rank: five QBs, the lead RB, and one more QB. What is left is a
+    # 396 quarterback (24 below the one on offer) and a 340 running back
+    # (61 below). The RB is worth more even though he scores 19 fewer raw
+    # points, and a static replacement level cannot see it.
+    choice = _greedy_choice(pool, available, roster, S, _roster_cap(S), gap=7)
     assert pool.position[choice] == "RB"
 
-    # Inverse: swap which position carries the high-value range and which
-    # carries the low one. Both ranges share the same step (5.0) and both
-    # groups are deep enough (22 each, so QB's 9th and RB's 22nd both land
-    # on a real value instead of clamping), so each position's margin above
-    # its own replacement -- QB +40, RB +105 -- is identical to the primary
-    # case above regardless of which raw numbers it's carrying: margin is
-    # step * (rank - 1), independent of which range is attached to which
-    # label. RB must still win. If swapping which position holds the bigger
-    # raw numbers flipped the answer, the policy would be tracking raw
-    # points (or shortlist scan order) after all, not replacement value.
-    high = np.linspace(380.0, 275.0, 22)
-    low = np.linspace(300.0, 195.0, 22)
-    swapped = pool_of(low, high)   # QB now carries the low range, RB the high
-    choice = _greedy_choice(swapped, np.arange(len(swapped.player_id)),
-                            roster, S, _roster_cap(S))
-    assert swapped.position[choice] == "RB"
+    # Same pool, my last pick of the draft. Nothing can be taken from me
+    # after it, so there is no next turn to price against and the honest
+    # comparison is raw roster value -- which the 420-point quarterback
+    # wins. `gap=None` is not `gap=0`, and this is the difference.
+    choice = _greedy_choice(pool, available, roster, S, _roster_cap(S), gap=None)
+    assert pool.position[choice] == "QB"
+
+    # Inverse: hand the QBs the steep curve and the RBs the flat one and the
+    # answer must flip to QB. Depths, gap and both point ranges are
+    # unchanged -- only which position carries which curve. The RBs now hold
+    # the *higher* raw numbers, so a policy tracking raw points or shortlist
+    # scan order would still answer RB here.
+    swapped = pool_of(steep, flat)
+    choice = _greedy_choice(swapped, available, roster, S, _roster_cap(S), gap=7)
+    assert swapped.position[choice] == "QB"
 
 
 def test_rollout_never_drafts_past_a_roster_cap_even_when_the_shortlist_is_all_one_position():
