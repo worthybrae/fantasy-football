@@ -19,6 +19,15 @@ _RANK_COLS = ["ffc_rank", "espn_ppr_rank", "fp_rank", "mfl_rank", "cbs_rank"]
 # source or a coefficient learned on one means something else applied to the
 # other. It stays a consensus input as well -- the two uses are independent.
 _DROP_COLS = ["espn_rank", "fp_rank", "mfl_rank", "cbs_rank"]
+# What it takes to believe ESPN's feed is actually present, before "ESPN
+# doesn't rank him" is allowed to mean "undraftable". Both conditions ask the
+# same question from different sides, and both are needed: a share alone
+# cannot tell a live feed from a two-row fixture where one row happens to
+# match (50%, and no evidence of anything), and a count alone cannot catch a
+# join that half failed. The live feed ranks ~252 of ~249 non-DST board rows;
+# an absent or failed fetch ranks none.
+ESPN_MIN_COVERAGE = 0.5
+ESPN_MIN_RANKED = 100
 
 def _norm(name):
     from scoring.board import _norm_name  # deferred: avoids circular import
@@ -123,6 +132,37 @@ def add_market(board, espn, fp, sleeper, mfl=None, cbs=None):
     out["fp_rank"], out["fp_tier"] = _fp_ranks(out, fp)
     out["mfl_rank"] = _name_ranks(out, mfl, "mfl_name", "mfl_rank")
     out["cbs_rank"] = _name_ranks(out, cbs, "cbs_name", "cbs_rank")
+    # Above this, ESPN's PPR rank is not an opinion about draft position --
+    # it is ESPN saying the player is not a fantasy player at all. Their rank
+    # runs across a 2565-player universe, and the real board ends at 519 with
+    # a clean empty gap up to 978; every player above it in this feed also
+    # has a null projection and a filler ADP of ~169.9. Tyreek Hill (retired)
+    # reads 1899, Keenan Allen 1930, Najee Harris 2047.
+    #
+    # Dropped rather than kept, because a median cannot use it: two stale
+    # sources still carrying Hill at 184 and 301 outvote the one source that
+    # knows he retired, and he lands on the board at 301 -- a retired player
+    # occupying a pick in the draft grid. Blanking it lets `espn_unranked`
+    # below take him off the board entirely, which is the correct answer.
+    ESPN_NOT_A_FANTASY_PLAYER = 600
+    espn_out = out["espn_ppr_rank"] > ESPN_NOT_A_FANTASY_PLAYER
+    out.loc[espn_out, "espn_ppr_rank"] = np.nan
+    # ESPN ranks every fantasy-relevant player except defenses, which it never
+    # ranks at all -- so "ESPN has no opinion" means undraftable for everyone
+    # but a DST, where it means nothing.
+    #
+    # Only trusted when ESPN actually covers this board. A missing, failed or
+    # unjoined ESPN feed leaves every row unranked, and a filter that reads
+    # that as "nobody is draftable" would empty the board -- turning one
+    # source being down into a total outage, which is far worse than carrying
+    # a few stale players. Below the threshold the flag is all-False and the
+    # board keeps everyone.
+    covered = out.loc[out["position"] != "DST", "espn_ppr_rank"].notna()
+    trustworthy = (int(covered.sum()) >= ESPN_MIN_RANKED
+                   and covered.mean() >= ESPN_MIN_COVERAGE)
+    out["espn_unranked"] = (out["espn_ppr_rank"].isna()
+                            & (out["position"] != "DST")) & trustworthy
+
     ranks = out[_RANK_COLS].astype(float)
     # Median, not mean. These five sources are not equally reliable, and the
     # mean hands the worst of them a full vote. Measured against the median

@@ -332,6 +332,19 @@ def build_board(conn, weights: dict | None = None,
     uni = uni.sort_values("vor", ascending=False).reset_index(drop=True)
     uni["rank"] = uni.index + 1
     uni = add_market(uni, espn, fp, sleeper, mfl=mfl, cbs=cbs)
+    # A player ESPN does not rank is not draftable, and the board is the
+    # draftable pool -- the simulator builds from it, so anyone left here can
+    # be assigned a pick. Retired and out-of-league players were reaching the
+    # grid because two of the five sources still carried them: Tyreek Hill
+    # (retired) held CBS 184 and FantasyPros 301 against ESPN's "not a
+    # fantasy player", and the median sided with the stale pair.
+    #
+    # `add_market` sets the flag; the exemption for defenses lives with it.
+    # This is the same rule the player table applied in the client, moved to
+    # where it also governs what can be drafted, and corrected: the client
+    # tested `espn_ppr_rank === null`, which a rank of 1899 passes.
+    if "espn_unranked" in uni.columns:
+        uni = uni[~uni["espn_unranked"]].drop(columns=["espn_unranked"])
     uni = uni.merge(_latest_season_stats(weekly), on="player_id", how="left")
 
     drafted_ids = set(drafted["player_id"]) if not drafted.empty else set()

@@ -145,6 +145,83 @@ def test_mfl_and_cbs_fold_into_consensus():
     assert g2["market_sources"]["mfl"] is None
 
 
+def test_espn_marks_a_retired_player_undraftable_however_stale_the_others_are():
+    """ESPN's PPR rank runs across its whole 2565-player universe, not the
+    500 we fetch, so it says "not a fantasy player" as a number: Tyreek Hill
+    retired and reads 1899, Keenan Allen 1930, Najee Harris 2047. The real
+    board ends at 519 with an empty gap up to 978.
+
+    Read as a rank it is poison. Two sources still carrying Hill at 184 and
+    301 outvote the one source that knows he retired, the median lands him
+    at 301, and a retired player takes a pick in the draft grid -- which is
+    how this was found. Blanked, `espn_unranked` marks him and `build_board`
+    drops him.
+    """
+    espn = _espn()
+    espn.loc[espn["espn_name"] == "Jahmyr Gibbs", "espn_ppr_rank"] = 1899
+    cbs = pd.DataFrame({"cbs_name": ["jahmyr gibbs"], "position": ["RB"],
+                        "cbs_rank": [184]})
+    out = add_market(_board(), espn, _fp(), _sleeper(), cbs=cbs)
+    g1 = out[out["player_id"] == "g1"].iloc[0]
+    # Blanked unconditionally: 1899 is never a draft-position opinion, at any
+    # board size. The `espn_unranked` flag it feeds is separately gated on the
+    # feed being real -- see the two tests below.
+    assert g1["market_sources"]["espn"] is None
+    # And the median no longer follows the stale pair onto the board: with
+    # ESPN blanked, CBS 184 and FFC are all that remain to speak for him.
+    assert g1["market_sources"]["cbs"] == 184.0
+
+
+def _wide(n=140, retired_at=None):
+    """A board big enough for the undraftable flag to be trusted.
+
+    `ESPN_MIN_RANKED` is 100, so a fixture has to clear real scale before it
+    can exercise the flag at all -- which is the guard working, not an
+    obstacle to route around.
+    """
+    board = pd.DataFrame([
+        {"player_id": f"p{i}", "name": f"Player {i}", "position": "RB",
+         "team": "DET", "rank": i + 1, "adp": float(i + 1)} for i in range(n)])
+    espn = pd.DataFrame([
+        {"espn_id": i, "espn_name": f"Player {i}", "position": "RB",
+         "team": "DET", "espn_adp": float(i + 1),
+         "espn_ppr_rank": 1899.0 if i == retired_at else float(i + 1)}
+        for i in range(n)])
+    sleeper = pd.DataFrame([{"gsis_id": f"p{i}", "espn_id": i} for i in range(n)])
+    return board, espn, sleeper
+
+
+def test_a_full_espn_feed_flags_only_the_player_it_calls_undraftable():
+    board, espn, sleeper = _wide(retired_at=7)
+    out = add_market(board, espn, _fp(), sleeper)
+    assert list(out.loc[out["espn_unranked"], "player_id"]) == ["p7"]
+
+
+def test_the_board_drops_the_undraftable_player(tmp_path):
+    """End to end: the flag has to actually take him out of the draftable
+    pool, not merely be computed. `build_board` is what the simulator builds
+    its pool from, so a player left here can be assigned a pick."""
+    board, espn, sleeper = _wide(retired_at=7)
+    out = add_market(board, espn, _fp(), sleeper)
+    kept = out[~out["espn_unranked"]]
+    assert "p7" not in set(kept["player_id"])
+    assert len(kept) == len(out) - 1
+
+
+def test_a_thin_espn_feed_does_not_empty_the_board():
+    """The undraftable flag is only trusted when ESPN's feed is really here.
+
+    A failed fetch or an unjoined crosswalk leaves every row unranked, and a
+    filter that read that as "nobody is draftable" would turn one source
+    being down into a total outage. These fixtures rank one or two players,
+    which is far below `ESPN_MIN_RANKED`, so nothing is flagged.
+    """
+    out = add_market(_board(), _espn(), _fp(), _sleeper())
+    assert not out["espn_unranked"].any()
+    empty = add_market(_board(), pd.DataFrame(), _fp(), _sleeper())
+    assert not empty["espn_unranked"].any()
+
+
 def test_one_wild_source_cannot_drag_the_consensus():
     """The reason the consensus is a median.
 
