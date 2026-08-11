@@ -1003,3 +1003,60 @@ def test_write_backtest_persists_seasons_as_json(tmp_path):
     row = read_table(conn, "model_backtest").iloc[0]
     assert isinstance(row["seasons"], str)               # persisted: JSON string
     assert json.loads(row["seasons"]) == sorted(report["seasons"])
+
+
+from scoring.draft_model import (PERSONAL_SUBSETS, _heldout_gain,
+                                 _subset_indices, fit_subset)
+
+
+def test_fit_subset_leaves_every_unlisted_coefficient_at_pooled():
+    """The defining property: a reduced personal model is a full-length beta
+    that agrees with pooled everywhere except the columns it was asked to fit,
+    so it drops into log_likelihood and the simulator with no special case."""
+    pooled = np.arange(1, len(FEATURE_NAMES) + 1) / 10.0
+    X_list, chosen = _synthetic(pooled, n_choices=40, pool=12, seed=7)
+    keep = _subset_indices(("reach", "run"))
+
+    beta = fit_subset(X_list, chosen, pooled, keep)
+
+    assert beta.shape == pooled.shape
+    frozen = [i for i in range(len(pooled)) if i not in keep]
+    assert np.array_equal(beta[frozen], pooled[frozen])
+    # ...and the two it WAS asked to fit actually moved, otherwise the test
+    # above would pass for a function that returns its prior unchanged.
+    assert not np.allclose(beta[list(keep)], pooled[list(keep)])
+
+
+def test_fit_subset_matches_a_full_fit_when_nothing_is_frozen():
+    """Same optimizer, same answer: `keep` covering every column has to
+    reproduce `fit` exactly, or the offset bookkeeping is wrong."""
+    prior = np.zeros(3)
+    X_list, chosen = _synthetic(np.array([1.0, -0.5, 0.25]), n_choices=50,
+                                pool=10, seed=8)
+    every = tuple(range(3))
+    assert np.allclose(fit_subset(X_list, chosen, prior, every, lam=0.1),
+                       fit(X_list, chosen, prior=prior, lam=0.1), atol=1e-6)
+
+
+def test_reduced_model_gain_is_positive_when_a_manager_really_differs():
+    """The measurement can find signal when signal exists.
+
+    Without this, "every reduced model scored negative on six seasons" is
+    indistinguishable from "the machinery reports negative no matter what".
+    Here one manager genuinely drafts on `reach` two units away from pooled
+    and has enough picks to show it, so their reduced fit must beat pooled on
+    seasons it never trained on.
+    """
+    pooled = np.zeros(len(FEATURE_NAMES))
+    personal = pooled.copy()
+    personal[FEATURE_NAMES.index("reach")] = 2.0
+    X_list, chosen = _synthetic(personal, n_choices=200, pool=12, seed=9)
+    seasons = [2020 + i // 40 for i in range(200)]
+
+    keep = _subset_indices(("reach",))
+    assert _heldout_gain(X_list, chosen, seasons, pooled, keep=keep) > 0
+
+
+def test_personal_subsets_only_name_real_features():
+    for features in PERSONAL_SUBSETS.values():
+        assert set(features) <= set(FEATURE_NAMES)

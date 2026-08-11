@@ -12,6 +12,7 @@ removes per season so a bad join surfaces as a number, not a silent shrug.
 """
 import json
 import warnings
+from itertools import repeat
 from typing import NamedTuple
 
 import numpy as np
@@ -338,16 +339,27 @@ def log_likelihood(beta, X_list, chosen_list) -> float:
     return float(total)
 
 
-def neg_log_likelihood(beta, X_list, chosen_list, prior=None, lam=0.0):
+def neg_log_likelihood(beta, X_list, chosen_list, prior=None, lam=0.0,
+                       offsets=None):
     """Value and gradient of the ridge-penalized negative log-likelihood.
 
     Convex in beta, which is why L-BFGS-B finds the global optimum rather than
     a local one -- the reason this uses scipy instead of a hand-rolled loop.
+
+    `offsets`, when given, is one per choice set and is added to that set's
+    scores without being differentiated. It is how `fit_subset` holds most of
+    a manager's coefficients at their pooled values while fitting a handful:
+    the frozen columns contribute a fixed per-player score and drop out of the
+    gradient entirely, which is a genuinely smaller optimization problem
+    rather than the same one with some coefficients discouraged.
     """
     value = 0.0
     grad = np.zeros_like(beta, dtype=float)
-    for X, k in zip(X_list, chosen_list):
+    for X, k, off in zip(X_list, chosen_list,
+                         repeat(None) if offsets is None else offsets):
         scores = X @ beta
+        if off is not None:
+            scores = scores + off
         exp = _shifted_exp(scores)
         exp_sum = exp.sum()
         probs = exp / exp_sum
@@ -361,13 +373,14 @@ def neg_log_likelihood(beta, X_list, chosen_list, prior=None, lam=0.0):
     return value, grad
 
 
-def fit(X_list, chosen_list, prior=None, lam: float = 0.0) -> np.ndarray:
+def fit(X_list, chosen_list, prior=None, lam: float = 0.0,
+        offsets=None) -> np.ndarray:
     n_features = X_list[0].shape[1] if X_list else len(FEATURE_NAMES)
     start = np.zeros(n_features) if prior is None else np.asarray(prior, dtype=float).copy()
     if not X_list:
         return start
     result = minimize(neg_log_likelihood, start,
-                      args=(X_list, chosen_list, prior, lam),
+                      args=(X_list, chosen_list, prior, lam, offsets),
                       jac=True, method="L-BFGS-B")
     if not result.success:
         warnings.warn(
@@ -376,6 +389,35 @@ def fit(X_list, chosen_list, prior=None, lam: float = 0.0) -> np.ndarray:
             RuntimeWarning,
         )
     return result.x
+
+
+def fit_subset(X_list, chosen_list, pooled, keep, lam: float = 0.0) -> np.ndarray:
+    """Fit only the `keep` coefficients; hold every other one at pooled.
+
+    Fifteen coefficients against ~87 picks is under six observations per
+    parameter, which is not a fit so much as a memorization of one league's
+    six drafts. Two or three might work where fifteen cannot, so this exists
+    to ask: a personal model over a handful of columns that plausibly describe
+    a drafting personality, with the rest of the manager's behavior left to
+    the pooled fit.
+
+    Returns a FULL-length beta -- pooled everywhere, personal on `keep` --
+    rather than the short vector it optimizes. That is what lets the result go
+    straight into `log_likelihood`, `_heldout_gain` and the simulator with no
+    special case anywhere downstream: a reduced personal model is just a beta
+    that happens to agree with pooled on most of its entries.
+    """
+    pooled = np.asarray(pooled, dtype=float)
+    keep = list(keep)
+    rest = [i for i in range(len(pooled)) if i not in set(keep)]
+    Z_list = [X[:, keep] for X in X_list]
+    # The frozen columns' contribution: fixed per player, so it shifts every
+    # score in a choice set without depending on what is being fitted.
+    offsets = [X[:, rest] @ pooled[rest] for X in X_list]
+    gamma = fit(Z_list, chosen_list, prior=pooled[keep], lam=lam, offsets=offsets)
+    beta = pooled.copy()
+    beta[keep] = gamma
+    return beta
 
 
 def prepare(observations, settings):
@@ -398,9 +440,9 @@ def prepare(observations, settings):
 # This grid used to stop at 100. On this league's six seasons four of the eight
 # managers selected that maximum at every fold, which is cross-validation
 # saying "more shrinkage, please" into a wall; extending the grid moved all
-# four sharply toward zero (e.g. -0.0254 -> -0.0001). None of them crossed into
+# four sharply toward zero (e.g. -0.0254 -> -0.0007). None of them crossed into
 # positive, so the truncation was hiding an artifact rather than a signal --
-# but a reported penalty that shrinks 250x when you lengthen a list is not a
+# but a reported penalty that shrinks 36x when you lengthen a list is not a
 # measurement, and the fix is to let the search finish.
 LAMBDA_GRID = [0.01, 0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0, 100000.0]
 MIN_PICKS_FOR_PERSONAL = 20
@@ -451,12 +493,29 @@ _PHRASES = {
 }
 
 
-def select_lambda(X_list, chosen_list, seasons, prior, grid=None) -> float:
+def _fit_maybe_subset(X_list, chosen_list, prior, lam, keep):
+    """`fit` against the full feature set, or `fit_subset` against `keep`.
+
+    One place, so every leave-one-season-out loop below reads the same whether
+    it is measuring a 15-feature personal fit or a 2-feature one -- and so a
+    reduced model is measured by exactly the machinery that judged the full
+    one, which is the only way the two numbers are comparable.
+    """
+    if keep is None:
+        return fit(X_list, chosen_list, prior=prior, lam=lam)
+    return fit_subset(X_list, chosen_list, prior, keep, lam=lam)
+
+
+def select_lambda(X_list, chosen_list, seasons, prior, grid=None,
+                  keep=None) -> float:
     """Leave-one-season-out cross-validation over the ridge strength.
 
     Seasons, not random folds: picks inside one draft are not independent of
     each other, so a random split would leak the same draft across train and
     test and pick a lambda that is too loose.
+
+    `keep` restricts the fit to that subset of feature indices (see
+    `fit_subset`); `prior` is the full-length pooled vector either way.
     """
     grid = grid or LAMBDA_GRID
     unique = sorted(set(seasons))
@@ -470,8 +529,9 @@ def select_lambda(X_list, chosen_list, seasons, prior, grid=None) -> float:
             test = [i for i, s in enumerate(seasons) if s == holdout]
             if not train or not test:
                 continue
-            beta = fit([X_list[i] for i in train], [chosen_list[i] for i in train],
-                       prior=prior, lam=lam)
+            beta = _fit_maybe_subset([X_list[i] for i in train],
+                                     [chosen_list[i] for i in train],
+                                     prior, lam, keep)
             total += log_likelihood(beta, [X_list[i] for i in test],
                                     [chosen_list[i] for i in test])
         if total > best_ll:
@@ -497,12 +557,18 @@ def fit_all(conn, settings=None) -> dict:
     return fits
 
 
-def _heldout_gain(X_list, chosen, seasons, pooled) -> float:
+def _heldout_gain(X_list, chosen, seasons, pooled, keep=None) -> float:
     """Per-pick log-likelihood advantage of a personal fit over pooled.
 
     Positive means the manager's own coefficients predict held-out picks
     better than the league-wide ones. Negative means they do not, and the
     simulator should use pooled for that manager.
+
+    `keep` measures a reduced personal model -- those feature indices fitted
+    personally, everything else held at pooled (see `fit_subset`). Same folds,
+    same lambda search, same yardstick as the full fit, which is the point:
+    "would two coefficients have worked where fifteen didn't" is only a real
+    question if both are asked the same way.
     """
     unique = sorted(set(seasons))
     if len(unique) < 2:
@@ -514,10 +580,11 @@ def _heldout_gain(X_list, chosen, seasons, pooled) -> float:
         test = [i for i, s in enumerate(seasons) if s == holdout]
         if not train or not test:
             continue
-        lam = select_lambda([X_list[i] for i in train], [chosen[i] for i in train],
-                            [seasons[i] for i in train], prior=pooled)
-        beta = fit([X_list[i] for i in train], [chosen[i] for i in train],
-                   prior=pooled, lam=lam)
+        Xtr = [X_list[i] for i in train]
+        ctr = [chosen[i] for i in train]
+        lam = select_lambda(Xtr, ctr, [seasons[i] for i in train],
+                            prior=pooled, keep=keep)
+        beta = _fit_maybe_subset(Xtr, ctr, pooled, lam, keep)
         Xt = [X_list[i] for i in test]
         ct = [chosen[i] for i in test]
         personal_ll += log_likelihood(beta, Xt, ct)
@@ -721,6 +788,160 @@ def ablation(conn, settings=None) -> pd.DataFrame:
         rows.append({"dropped": feature, "top1": cut["top1"],
                      "top5": cut["top5"],
                      "delta_top1": full["top1"] - cut["top1"]})
+    return pd.DataFrame(rows)
+
+
+# Candidate reduced personal models. Every column named here plausibly
+# describes a drafting *personality* rather than a fact about the board: does
+# this person stick to market order or jump it (`reach`, `fall`), what do they
+# favour (the position dummies), do they chase positional runs (`run`).
+# Everything not named stays at its pooled value.
+#
+# The list is short on purpose. Each extra candidate is another chance for one
+# of them to look good on six seasons of noise, and `_nested_subset_gain`
+# below exists precisely because "the best of N subsets, chosen by looking at
+# the held-out seasons" is not a measurement.
+PERSONAL_SUBSETS = {
+    "reach": ("reach",),
+    "reach+fall": ("reach", "fall"),
+    "run": ("run",),
+    "reach+run": ("reach", "run"),
+    "pos_skill": ("pos_RB", "pos_WR", "pos_TE"),
+    "pos": tuple(f"pos_{p}" for p in _POSITION_DUMMIES),
+    "reach+pos_skill": ("reach", "pos_RB", "pos_WR", "pos_TE"),
+}
+
+
+def _subset_indices(names) -> tuple:
+    return tuple(FEATURE_NAMES.index(name) for name in names)
+
+
+def _nested_subset_gain(X_list, chosen, seasons, pooled) -> tuple:
+    """Held-out gain of the whole selection *procedure*, not of one subset.
+
+    Picking each manager's best subset by comparing held-out gains and then
+    reporting that best gain is the oldest mistake in model selection: with
+    seven candidates and eight managers, several will clear zero on noise
+    alone. This instead chooses the subset inside each training fold -- an
+    inner leave-one-season-out over the five training seasons only -- and then
+    scores that choice on the season the choice never saw.
+
+    "Stay pooled" is one of the candidates, so the procedure is allowed to
+    decline, and a manager it always declines for scores exactly 0.0 rather
+    than being forced into a personal fit it did not want. Returns
+    (gain, [chosen candidate per fold]).
+    """
+    unique = sorted(set(seasons))
+    if len(unique) < 2:
+        return -np.inf, []
+    personal_ll = pooled_ll = 0.0
+    n = 0
+    picked = []
+    for holdout in unique:
+        train = [i for i, s in enumerate(seasons) if s != holdout]
+        test = [i for i, s in enumerate(seasons) if s == holdout]
+        if not train or not test:
+            continue
+        inner_seasons = [seasons[i] for i in train]
+        Xtr = [X_list[i] for i in train]
+        ctr = [chosen[i] for i in train]
+        # Inner selection: the pooled fit's own inner-holdout score is the bar
+        # every subset has to clear.
+        best_name, best_ll = None, _inner_ll(Xtr, ctr, inner_seasons, pooled, None)
+        for name, features in PERSONAL_SUBSETS.items():
+            score = _inner_ll(Xtr, ctr, inner_seasons, pooled,
+                              _subset_indices(features))
+            if score > best_ll:
+                best_name, best_ll = name, score
+        picked.append(best_name or "pooled")
+
+        Xt = [X_list[i] for i in test]
+        ct = [chosen[i] for i in test]
+        if best_name is None:
+            personal_ll += log_likelihood(pooled, Xt, ct)
+        else:
+            keep = _subset_indices(PERSONAL_SUBSETS[best_name])
+            lam = select_lambda(Xtr, ctr, inner_seasons, prior=pooled, keep=keep)
+            beta = fit_subset(Xtr, ctr, pooled, keep, lam=lam)
+            personal_ll += log_likelihood(beta, Xt, ct)
+        pooled_ll += log_likelihood(pooled, Xt, ct)
+        n += len(test)
+    return ((personal_ll - pooled_ll) / n if n else -np.inf), picked
+
+
+def _inner_ll(X_list, chosen, seasons, pooled, keep) -> float:
+    """Total held-out log-likelihood of one candidate across an inner
+    leave-one-season-out over `seasons`. `keep=None` scores pooled, which
+    needs no fitting at all -- pooled was fitted on the whole league, so no
+    fold of one manager's seasons changes it."""
+    total = 0.0
+    unique = sorted(set(seasons))
+    for holdout in unique:
+        train = [i for i, s in enumerate(seasons) if s != holdout]
+        test = [i for i, s in enumerate(seasons) if s == holdout]
+        if not train or not test:
+            continue
+        Xt = [X_list[i] for i in test]
+        ct = [chosen[i] for i in test]
+        if keep is None:
+            total += log_likelihood(pooled, Xt, ct)
+            continue
+        Xtr = [X_list[i] for i in train]
+        ctr = [chosen[i] for i in train]
+        lam = select_lambda(Xtr, ctr, [seasons[i] for i in train],
+                            prior=pooled, keep=keep)
+        total += log_likelihood(fit_subset(Xtr, ctr, pooled, keep, lam=lam),
+                                Xt, ct)
+    return total
+
+
+def reduced_model_report(conn, settings=None) -> pd.DataFrame:
+    """Does a SMALLER personal model generalize where the full one doesn't?
+
+    One row per (manager, candidate): `heldout_gain` measured by exactly the
+    machinery `write_profiles` uses, so the numbers sit on the same scale as
+    the `full` row and as `manager_profiles.heldout_gain`. Two rows are not
+    subsets:
+
+    - `full`   -- all 15 features, what ships today.
+    - `nested` -- the honest answer to "let each manager have whichever small
+      model suits them", with the choice made inside each training fold and
+      "stay pooled" among the options. This is the row to read. A per-subset
+      row that clears zero and a `nested` row that doesn't means the subset
+      was chosen with hindsight.
+
+    `n_free` is how many coefficients that row fits personally: 15 on `full`,
+    and -1 on `nested`, where the count is a different number every fold.
+
+    Not wired into `make fit-managers`: it refits every candidate through a
+    nested cross-validation and takes minutes, against a normal run's seconds.
+    Run it when the history grows a season -- `make fit-managers REDUCED=1`.
+    """
+    settings = settings or league_mod.load(conn)
+    observations = build_observations(conn)
+    if not observations:
+        return pd.DataFrame(columns=["manager", "subset", "n_free",
+                                     "heldout_gain", "picked"])
+    X_list, chosen, managers, seasons = prepare(observations, settings)
+    pooled = fit(X_list, chosen)
+    rows = []
+    for manager in sorted(set(managers)):
+        idx = [i for i, m in enumerate(managers) if m == manager]
+        Xm, cm = [X_list[i] for i in idx], [chosen[i] for i in idx]
+        sm = [seasons[i] for i in idx]
+        rows.append({"manager": manager, "subset": "full",
+                     "n_free": len(FEATURE_NAMES),
+                     "heldout_gain": _heldout_gain(Xm, cm, sm, pooled),
+                     "picked": ""})
+        for name, features in PERSONAL_SUBSETS.items():
+            gain = _heldout_gain(Xm, cm, sm, pooled,
+                                 keep=_subset_indices(features))
+            rows.append({"manager": manager, "subset": name,
+                         "n_free": len(features), "heldout_gain": gain,
+                         "picked": ""})
+        gain, picked = _nested_subset_gain(Xm, cm, sm, pooled)
+        rows.append({"manager": manager, "subset": "nested", "n_free": -1,
+                     "heldout_gain": gain, "picked": ",".join(picked)})
     return pd.DataFrame(rows)
 
 
