@@ -211,6 +211,28 @@ export interface ManagerFirstRounder {
 // "not shown" instead of a type error.
 export type ManagerShapeBucket = Record<string, number>
 
+// Measured statistics over a manager's real picks -- counted, never fitted,
+// so every field here stays true whether or not their coefficients
+// generalize (see scoring/draft_model.py's manager_tendencies). `mean_gap` is
+// market_rank - overall_pick: positive means they take players earlier than
+// the board ranks them, negative means they let players slide.
+export interface ManagerTendencies {
+  // Positions they've opened a draft with, most-used first. `drafts` is how
+  // many of `of` drafts started that way.
+  first_pick: { position: string; drafts: number; of: number }[]
+  // Across every pick with a market rank to compare against. Null when none
+  // of their picks matched that season's ADP board.
+  reach: { mean_gap: number; n: number } | null
+  // Same number split by round bucket, always in early -> late order.
+  reach_by_bucket: { bucket: string; mean_gap: number; n: number }[]
+  // Same number split by position, strongest reach first, only for positions
+  // with enough picks behind them to mean anything.
+  reach_by_position: { position: string; mean_gap: number; n: number }[]
+  // Typical round of their first QB/TE/K/DST, earliest first. `drafts` is how
+  // many drafts they took that position at all.
+  first_at_position: { position: string; mean_round: number; drafts: number }[]
+}
+
 export interface ManagerHistory {
   manager: string
   // Distinct seasons this manager appears in draft_teams for -- "how many
@@ -220,6 +242,10 @@ export interface ManagerHistory {
   // Most recent season first.
   first_rounders: ManagerFirstRounder[]
   shape: { early: ManagerShapeBucket; mid: ManagerShapeBucket; late: ManagerShapeBucket }
+  // Null on a database where `make fit-managers` has not written the
+  // manager_tendencies table -- the card omits the block rather than
+  // rendering blanks.
+  tendencies: ManagerTendencies | null
 }
 
 export async function fetchManagerHistory(): Promise<ManagerHistory[]> {

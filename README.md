@@ -290,17 +290,44 @@ league, not a guess the model is making.
 **No manager currently earns a personal model.** A manager needs enough
 picks, and needs their own fit to actually beat the pooled fit on held-out
 seasons; if it doesn't, the simulator falls back to the pooled model for
-that manager, and their card says "league average, not enough signal"
-rather than pretending otherwise. Right now that's every manager: at
-roughly 87 fitted picks each (six seasons, one league), none of the eight
-beats the pooled fit on held-out data. That's expected, not a bug: 87 picks
-isn't enough to fit 15 coefficients on its own, and even with shrinkage
-pulling a thin fit toward the pooled one, none of the eight personal fits
-comes out ahead. It's why the manager cards on `/draft-board`'s "By
-manager" tab show the league-average read next to each manager's actual
-draft history rather than a personalized forecast: right now the real
-history is a better guide to what a specific manager will do than the
-model's coefficients are.
+that manager. Right now that's every manager: at roughly 87 fitted picks
+each (six seasons, one league), none of the eight beats the pooled fit on
+held-out data. `make fit-managers` prints the number that decides it, the
+per-pick log-likelihood gain against the pooled fit, and all eight are
+negative: -0.0001 (Lane Bohman), -0.0002, -0.0013, -0.0215, -0.0276,
+-0.0508, -0.0519, -0.0537 (espn45456832). That's expected, not a bug — 87
+picks isn't enough to fit 15 coefficients, under six observations per
+parameter.
+
+**A smaller personal model doesn't rescue it either.** Fifteen coefficients
+can't work on 87 picks, but two or three might, so that was measured rather
+than assumed: `make fit-managers REDUCED=1` fits a named handful of features
+per manager (`reach`, `fall`, `run`, the position dummies) with everything
+else held at pooled, and scores it on exactly the same leave-one-season-out
+yardstick. Four of the seven candidate subsets clear zero for *some* manager
+— John Titolo reaches +0.0365 on `reach` plus the RB/WR/TE dummies — but
+that is the best of seven subsets picked by looking at the seasons it's
+scored on, which finds winners on noise alone. The `nested` row is the
+honest version: it chooses the subset inside each training fold, with "stay
+pooled" among the options, then scores that choice on a season the choice
+never saw. Under it every manager is negative except MaxMandia at exactly
+0.0000, and that zero is the procedure declining to fit anything personal in
+all six folds. Titolo's +0.0365 becomes -0.0120. Six seasons of one league
+is not enough for a personal model of any size, and the report says so
+rather than shipping the flattering number.
+
+**What the manager cards show instead is measured, not fitted.** Every card
+on `/draft-board`'s "By manager" tab carries statistics counted straight
+from that manager's real picks: what they open a draft with and in how many
+of their drafts, how many picks ahead of or behind the market board they
+take players and which rounds that's strongest in, which positions they jump
+the board hardest for, and the typical round of their first QB, TE, K and
+DST. None of it depends on a coefficient generalizing, so all of it stays
+true while the forecast underneath runs on league-average coefficients —
+which is what the summary line now says, instead of calling a manager with
+six drafts on record "not enough signal". `make fit-managers` precomputes
+this into a `manager_tendencies` table and prints it, and `/api/managers/
+history` serves it.
 
 ### Running a simulation
 

@@ -10,7 +10,7 @@ import sys
 from pipeline.db import get_conn, record_freshness
 from scoring.draft_model import (ablation, positional_bias,
                                  reduced_model_report, write_backtest,
-                                 write_profiles)
+                                 write_profiles, write_tendencies)
 
 
 def main(argv=None) -> int:
@@ -21,6 +21,15 @@ def main(argv=None) -> int:
         print("No draft history found -- run `make espn-import` first.")
         return 1
     record_freshness(conn, "manager_profiles", True, len(profiles))
+
+    # Descriptive per-manager statistics: first pick, reach against the board,
+    # when they take their first QB/TE/K/DST. None of it depends on a
+    # coefficient generalizing, so it is the part of a manager card that stays
+    # informative while every manager falls back to the pooled fit. Persisted
+    # here rather than computed per request because it replays every season's
+    # draft to get a market rank for each pick.
+    tendencies = write_tendencies(conn)
+    record_freshness(conn, "manager_tendencies", True, len(tendencies))
 
     # Persisted, not just printed: the board reads it back through
     # /api/model and says so in the rail when the model loses to ADP.
@@ -48,6 +57,10 @@ def main(argv=None) -> int:
     print(ablation(conn).to_string(index=False))
     print("\nLeague positional bias (positive = drafted ahead of the market):")
     print(positional_bias(conn).to_string(index=False))
+    if not tendencies.empty:
+        print("\nPer-manager measured tendencies (facts from real picks, no "
+              "model involved):")
+        print(tendencies.to_string(index=False))
     if "--reduced" in argv:
         print("\nReduced per-manager models (gain against pooled, same "
               "leave-one-season-out\nyardstick as heldout_gain above). Read "

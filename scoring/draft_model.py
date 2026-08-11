@@ -593,6 +593,19 @@ def _heldout_gain(X_list, chosen, seasons, pooled, keep=None) -> float:
     return (personal_ll - pooled_ll) / n if n else -np.inf
 
 
+# What the summary line says for a manager whose own coefficients don't beat
+# the pooled ones on held-out seasons. It used to read "league average, not
+# enough signal", which is true of the FORECAST and false of the manager: six
+# real drafts is plenty of signal about what someone does, it just isn't
+# enough to fit fifteen coefficients that transfer to a season they haven't
+# drafted yet. The card carries measured tendencies right above this line --
+# what they open with, how far ahead of the board they take players, when they
+# get to a QB -- so the honest sentence points at those rather than declaring
+# the manager unknowable.
+POOLED_SUMMARY = ("forecast uses league-average coefficients; "
+                  "the measured history is this manager's own")
+
+
 def describe(beta, pooled, top: int = 3) -> str:
     diff = np.asarray(beta) - np.asarray(pooled)
     order = np.argsort(-np.abs(diff))
@@ -628,8 +641,7 @@ def write_profiles(conn, settings=None) -> pd.DataFrame:
         gain = _heldout_gain(Xm, cm, sm, pooled)
         uses_personal = bool(len(idx) >= MIN_PICKS_FOR_PERSONAL and gain > 0)
         effective = beta if uses_personal else pooled
-        summary = describe(effective, pooled) if uses_personal else \
-            "league average, not enough signal"
+        summary = describe(effective, pooled) if uses_personal else POOLED_SUMMARY
         for i, name in enumerate(FEATURE_NAMES):
             rows.append({"manager": manager, "feature": name,
                          "value": float(beta[i]), "pooled_value": float(pooled[i]),
@@ -976,6 +988,134 @@ def positional_bias(conn, settings=None) -> pd.DataFrame:
     out = df.groupby(["position", "round_bucket"], as_index=False).agg(
         mean_gap=("gap", "mean"), n=("gap", "size"))
     return out
+
+
+# Positions whose *first* pick is worth reporting on its own. When a manager
+# takes their first QB, TE, K or DST is a decision with a round number
+# attached, and knowing it changes who you can still afford to wait on. RB and
+# WR are left out because everybody takes one early -- "first RB in round 1" is
+# a fact about the format, not about the manager.
+FIRST_AT_POSITIONS = ("QB", "TE", "K", "DST")
+
+# A per-position reach number needs enough picks behind it to be worth
+# printing; below this it is one or two drafts talking.
+MIN_PICKS_FOR_POSITION_REACH = 4
+
+# Long-format `metric` values `manager_tendencies` emits, in the order the card
+# reads them. Exported so the API and its tests name them from one place.
+TENDENCY_METRICS = ("first_pick", "reach_overall", "reach_bucket",
+                    "reach_position", "first_at_position")
+
+
+def manager_tendencies(conn, settings=None) -> pd.DataFrame:
+    """What each manager has actually done, counted rather than fitted.
+
+    Every number here is a descriptive statistic over real picks. None of it
+    comes from the model, none of it depends on a coefficient generalizing,
+    and all of it stays true whether or not a manager earns a personal fit --
+    which, on this league's history, is exactly why it is worth computing:
+    the pooled fallback says nothing specific about anybody, and this does.
+
+    Long/tidy, one row per (manager, metric, key), because the metrics carry
+    different shapes and a wide table would be mostly nulls:
+
+    | metric            | key      | value                              | n                        |
+    |-------------------|----------|------------------------------------|--------------------------|
+    | first_pick        | position | drafts opened with that position   | drafts on record         |
+    | reach_overall     | None     | mean `market_rank - overall_pick`  | picks behind the mean    |
+    | reach_bucket      | bucket   | same, within early/mid/late        | picks behind the mean    |
+    | reach_position    | position | same, within that position         | picks behind the mean    |
+    | first_at_position | position | mean round of their first such pick| drafts they took one in  |
+
+    Sign on the reach metrics matches `positional_bias`: positive means taken
+    earlier than the market ranked them (a player ranked 20 taken at pick 10
+    scores +10), negative means let slide.
+
+    Two different picks tables feed this on purpose. The position facts
+    (`first_pick`, `first_at_position`) count `draft_picks` directly, so they
+    see every pick the manager made. The reach facts read
+    `build_observations`, which drops picks with no ADP row that season --
+    unavoidably, since a reach is undefined without a market rank to reach
+    past. `n` on each row is the count actually behind that number, so the
+    two never silently claim the same denominator.
+    """
+    settings = settings or league_mod.load(conn)
+    cols = ["manager", "metric", "key", "value", "n"]
+    picks = read_table(conn, "draft_picks")
+    teams = read_table(conn, "draft_teams")
+    if picks.empty or teams.empty:
+        return pd.DataFrame(columns=cols)
+    merged = picks.merge(teams[["season", "team_id", "manager"]],
+                         on=["season", "team_id"], how="inner")
+    if merged.empty:
+        return pd.DataFrame(columns=cols)
+    drafts = teams.groupby("manager")["season"].nunique()
+
+    rows = []
+    # The first pick of each of their drafts. Sorting by overall_pick and
+    # keeping the first row per (manager, season) survives a manager holding
+    # two team_ids in one season -- the same guard /api/managers/history
+    # applies to its round-1 list.
+    firsts = (merged.sort_values("overall_pick")
+              .drop_duplicates(["manager", "season"], keep="first")
+              .dropna(subset=["position"]))
+    for (manager, position), grp in firsts.groupby(["manager", "position"]):
+        rows.append({"manager": manager, "metric": "first_pick",
+                     "key": position, "value": float(len(grp)),
+                     "n": int(drafts.get(manager, 0))})
+
+    positioned = merged.dropna(subset=["position"])
+    at_pos = positioned[positioned["position"].isin(FIRST_AT_POSITIONS)]
+    firsts_at = (at_pos.sort_values("overall_pick")
+                 .drop_duplicates(["manager", "season", "position"], keep="first"))
+    for (manager, position), grp in firsts_at.groupby(["manager", "position"]):
+        rows.append({"manager": manager, "metric": "first_at_position",
+                     "key": position, "value": float(grp["round"].mean()),
+                     "n": int(grp["season"].nunique())})
+
+    gaps = pd.DataFrame([
+        {"manager": o.manager,
+         "position": o.pool.iloc[o.chosen]["position"],
+         "bucket": _round_bucket(o.overall_pick, settings.teams),
+         "gap": float(o.pool.iloc[o.chosen]["market_rank"]) - o.overall_pick}
+        for o in build_observations(conn)])
+    if not gaps.empty:
+        for manager, grp in gaps.groupby("manager"):
+            rows.append({"manager": manager, "metric": "reach_overall",
+                         "key": None, "value": float(grp["gap"].mean()),
+                         "n": int(len(grp))})
+            for bucket in _ROUND_BUCKET_ORDER:
+                bucket_grp = grp[grp["bucket"] == bucket]
+                if bucket_grp.empty:
+                    continue
+                rows.append({"manager": manager, "metric": "reach_bucket",
+                             "key": bucket, "value": float(bucket_grp["gap"].mean()),
+                             "n": int(len(bucket_grp))})
+            for position, pos_grp in grp.groupby("position"):
+                if len(pos_grp) < MIN_PICKS_FOR_POSITION_REACH:
+                    continue
+                rows.append({"manager": manager, "metric": "reach_position",
+                             "key": position, "value": float(pos_grp["gap"].mean()),
+                             "n": int(len(pos_grp))})
+
+    out = pd.DataFrame(rows, columns=cols)
+    # `key` is null on the reach_overall rows; keep the column object-typed so
+    # DuckDB stores it as VARCHAR rather than inferring a type from a frame
+    # that happens to contain only nulls.
+    out["key"] = out["key"].astype(object)
+    return out
+
+
+def write_tendencies(conn, settings=None) -> pd.DataFrame:
+    """Persist `manager_tendencies` as the table of the same name.
+
+    Computed at fit time, not per request: it replays every season's draft
+    through `build_observations` to get a market rank for each pick, which is
+    far too much work to repeat on every page load of the forecast tab.
+    """
+    tendencies = manager_tendencies(conn, settings)
+    write_table(conn, "manager_tendencies", tendencies)
+    return tendencies
 
 
 def write_backtest(conn, settings=None) -> dict:

@@ -1005,8 +1005,9 @@ def test_write_backtest_persists_seasons_as_json(tmp_path):
     assert json.loads(row["seasons"]) == sorted(report["seasons"])
 
 
-from scoring.draft_model import (PERSONAL_SUBSETS, _heldout_gain,
-                                 _subset_indices, fit_subset)
+from scoring.draft_model import (FIRST_AT_POSITIONS, PERSONAL_SUBSETS,
+                                 _heldout_gain, _subset_indices, fit_subset,
+                                 manager_tendencies, write_tendencies)
 
 
 def test_fit_subset_leaves_every_unlisted_coefficient_at_pooled():
@@ -1060,3 +1061,117 @@ def test_reduced_model_gain_is_positive_when_a_manager_really_differs():
 def test_personal_subsets_only_name_real_features():
     for features in PERSONAL_SUBSETS.values():
         assert set(features) <= set(FEATURE_NAMES)
+
+
+def _seed_tendencies(tmp_path):
+    """Two managers, two seasons, four rounds, in a two-team league.
+
+    `worthy` opens RB both years and takes his QB in round 2; `dan` opens WR
+    then RB and waits until round 4 for a QB. Every pick has an ADP row, and
+    the ADP order is fixed so each pick's reach against the board is
+    hand-checkable.
+    """
+    conn = get_conn(str(tmp_path / "tend.duckdb"))
+    # ADP rank == the number in the name, both seasons.
+    roster = [("Player 1", "RB"), ("Player 2", "WR"), ("Player 3", "RB"),
+              ("Player 4", "WR"), ("Player 5", "QB"), ("Player 6", "TE"),
+              ("Player 7", "QB"), ("Player 8", "K")]
+    picks, adp = [], []
+    # (overall_pick, team_id, player index) -- a snake over two teams.
+    order = [(1, 1, 0), (2, 2, 1), (3, 2, 2), (4, 1, 4),
+             (5, 1, 5), (6, 2, 3), (7, 2, 6), (8, 1, 7)]
+    for season in (2024, 2025):
+        for i, (name, pos) in enumerate(roster, start=1):
+            adp.append({"season": season, "adp_name": name, "position": pos,
+                        "adp_rank": i})
+        for overall, team_id, who in order:
+            name, pos = roster[who]
+            picks.append({"season": season, "overall_pick": overall,
+                          "round": (overall - 1) // 2 + 1,
+                          "round_pick": (overall - 1) % 2 + 1,
+                          "team_id": team_id, "espn_player_id": overall,
+                          "player_name": name, "position": pos,
+                          "nfl_team": "DET", "keeper": False})
+    write_table(conn, "draft_picks", pd.DataFrame(picks))
+    write_table(conn, "draft_teams", pd.DataFrame(
+        [{"season": s, "team_id": t, "manager": m, "slot": t}
+         for s in (2024, 2025) for t, m in ((1, "worthy"), (2, "dan"))]))
+    write_table(conn, "historic_adp", pd.DataFrame(adp))
+    return conn
+
+
+def _tendency(frame, manager, metric, key=None):
+    rows = frame[(frame["manager"] == manager) & (frame["metric"] == metric)]
+    if key is not None:
+        rows = rows[rows["key"] == key]
+    return rows
+
+
+def test_manager_tendencies_counts_what_each_manager_opens_with(tmp_path):
+    tendencies = manager_tendencies(_seed_tendencies(tmp_path))
+    worthy = _tendency(tendencies, "worthy", "first_pick")
+    assert list(worthy["key"]) == ["RB"]
+    assert float(worthy.iloc[0]["value"]) == 2.0     # both drafts
+    assert int(worthy.iloc[0]["n"]) == 2             # out of both drafts
+    # `dan` opens WR in each of his two drafts (pick 2 both years).
+    dan = _tendency(tendencies, "dan", "first_pick")
+    assert list(dan["key"]) == ["WR"]
+    assert float(dan.iloc[0]["value"]) == 2.0
+
+
+def test_manager_tendencies_reports_the_round_of_a_first_qb(tmp_path):
+    """The actionable one: when this person stops waiting on a position."""
+    tendencies = manager_tendencies(_seed_tendencies(tmp_path))
+    worthy_qb = _tendency(tendencies, "worthy", "first_at_position", "QB")
+    dan_qb = _tendency(tendencies, "dan", "first_at_position", "QB")
+    assert float(worthy_qb.iloc[0]["value"]) == 2.0   # overall pick 4 -> round 2
+    assert float(dan_qb.iloc[0]["value"]) == 4.0      # overall pick 7 -> round 4
+    assert int(worthy_qb.iloc[0]["n"]) == 2           # in both drafts
+    # RB and WR are deliberately absent: "first RB in round 1" is a fact about
+    # the format, not about the manager.
+    keys = set(_tendency(tendencies, "worthy", "first_at_position")["key"])
+    assert keys <= set(FIRST_AT_POSITIONS)
+    assert "RB" not in keys and "WR" not in keys
+
+
+def test_manager_tendencies_measures_reach_against_the_board(tmp_path):
+    """`market_rank - overall_pick`, positive = taken ahead of the board.
+
+    worthy's four picks each season are ranks 1, 5, 6, 8 at overall picks
+    1, 4, 5, 8: gaps 0, +1, +1, 0, so +0.5 per pick over eight picks across
+    two identical seasons.
+    """
+    tendencies = manager_tendencies(_seed_tendencies(tmp_path))
+    overall = _tendency(tendencies, "worthy", "reach_overall")
+    assert float(overall.iloc[0]["value"]) == pytest.approx(0.5)
+    assert int(overall.iloc[0]["n"]) == 8
+    # dan takes ranks 2, 3, 4, 7 at overall picks 2, 3, 6, 7: gaps 0, 0, -2, 0.
+    dan = _tendency(tendencies, "dan", "reach_overall")
+    assert float(dan.iloc[0]["value"]) == pytest.approx(-0.5)
+
+
+def test_manager_tendencies_splits_reach_by_round_bucket(tmp_path):
+    """Which rounds the reaching happens in, on the same early/mid/late
+    cutoffs the model and the history endpoint use."""
+    conn = _seed_tendencies(tmp_path)
+    tendencies = manager_tendencies(conn, league.default_settings())
+    buckets = _tendency(tendencies, "worthy", "reach_bucket")
+    assert set(buckets["key"]) <= {"early", "mid", "late"}
+    assert int(buckets["n"].sum()) == 8
+
+
+def test_manager_tendencies_is_empty_without_an_import(tmp_path):
+    conn = get_conn(str(tmp_path / "bare.duckdb"))
+    tendencies = manager_tendencies(conn)
+    assert tendencies.empty
+    assert list(tendencies.columns) == ["manager", "metric", "key", "value", "n"]
+
+
+def test_write_tendencies_persists_the_table(tmp_path):
+    from pipeline.db import read_table
+    conn = _seed_tendencies(tmp_path)
+    written = write_tendencies(conn)
+    stored = read_table(conn, "manager_tendencies")
+    assert not stored.empty
+    assert len(stored) == len(written)
+    assert set(stored["metric"]) == set(written["metric"])

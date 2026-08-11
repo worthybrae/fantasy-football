@@ -54,6 +54,58 @@ def _seasons_or_none(value):
 _HISTORY_POSITIONS = ("QB", "RB", "WR", "TE", "K", "DST")
 
 
+def _tendency_payload(rows: pd.DataFrame) -> dict | None:
+    """Reshape one manager's slice of the long `manager_tendencies` table
+    (see scoring.draft_model.manager_tendencies for what each metric means)
+    into the nested object the card reads.
+
+    None -- not an object of empty lists -- when the manager has no rows at
+    all, which is what a database predating `make fit-managers` writing this
+    table looks like. The card then renders exactly what it rendered before
+    the table existed, rather than a row of blanks.
+    """
+    if rows.empty:
+        return None
+
+    def sorted_rows(metric: str, by_value_desc: bool):
+        sub = rows[rows["metric"] == metric]
+        return sub.sort_values("value", ascending=not by_value_desc)
+
+    first_pick = [{"position": r["key"], "drafts": int(r["value"]),
+                   "of": int(r["n"])}
+                  for _, r in sorted_rows("first_pick", True).iterrows()]
+    overall = rows[rows["metric"] == "reach_overall"]
+    by_bucket = {r["key"]: r for _, r in rows[rows["metric"] == "reach_bucket"].iterrows()}
+    # Fixed early/mid/late order, not whatever order the table came back in:
+    # the card prints these as a sequence of rounds and a shuffled one reads
+    # as nonsense.
+    reach_by_bucket = [
+        {"bucket": b, "mean_gap": float(by_bucket[b]["value"]),
+         "n": int(by_bucket[b]["n"])}
+        for b in ("early", "mid", "late") if b in by_bucket]
+    # Strongest reach first (most positive mean_gap) -- the position they
+    # jump the board for is the actionable one.
+    reach_by_position = [
+        {"position": r["key"], "mean_gap": float(r["value"]), "n": int(r["n"])}
+        for _, r in sorted_rows("reach_position", True).iterrows()]
+    # Earliest first, so "takes a QB in round 4" leads and "gets round to a
+    # kicker in round 15" trails.
+    first_at_position = [
+        {"position": r["key"], "mean_round": float(r["value"]),
+         "drafts": int(r["n"])}
+        for _, r in sorted_rows("first_at_position", False).iterrows()]
+
+    return {
+        "first_pick": first_pick,
+        "reach": None if overall.empty else {
+            "mean_gap": float(overall.iloc[0]["value"]),
+            "n": int(overall.iloc[0]["n"])},
+        "reach_by_bucket": reach_by_bucket,
+        "reach_by_position": reach_by_position,
+        "first_at_position": first_at_position,
+    }
+
+
 def _history_round_bucket(round_no: int) -> str:
     """Same "early" cutoff (round <= 3) scoring.draft_model.EARLY_ROUNDS
     trains against, and the same mid/late split _round_bucket there uses --
@@ -220,11 +272,18 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
         history is genuinely more informative about a specific manager than
         the fitted coefficients are. One read of each table plus a pandas
         groupby -- not a query per manager.
+
+        `tendencies` carries the measured statistics `make fit-managers`
+        precomputes into `manager_tendencies`: what they open with, how far
+        ahead of the board they take players and in which rounds, and when
+        they get to their first QB/TE/K/DST. Null for any manager the table
+        doesn't cover, including every manager if it was never written.
         """
         cur = conn.cursor()
         try:
             picks = read_table(cur, "draft_picks")
             teams = read_table(cur, "draft_teams")
+            tendencies = read_table(cur, "manager_tendencies")
             if picks.empty or teams.empty:
                 return {"managers": []}
             merged = picks.merge(
@@ -273,12 +332,17 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
                              for p in _HISTORY_POSITIONS}
                          for b in ("early", "mid", "late")}
 
+                mine = (tendencies[tendencies["manager"] == manager]
+                        if not tendencies.empty and "manager" in tendencies.columns
+                        else pd.DataFrame())
+
                 out.append({
                     "manager": manager,
                     "seasons": n_seasons,
                     "total_picks": int(len(grp)),
                     "first_rounders": first_rounders,
                     "shape": shape,
+                    "tendencies": _tendency_payload(mine),
                 })
             return {"managers": out}
         finally:

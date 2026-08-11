@@ -379,6 +379,75 @@ def test_managers_history_endpoint_shapes_real_picks(tmp_path):
     assert dan["first_rounders"] == [
         {"season": 2024, "player_name": None, "position": None,
          "nfl_team": None, "keeper": False}]
+    # No manager_tendencies table written -- the block is omitted rather than
+    # rendered as a row of blanks. See _tendency_payload.
+    assert worthy["tendencies"] is None
+    assert dan["tendencies"] is None
+
+
+def _seed_tendencies_table(path):
+    """A manager_tendencies table in the long shape draft_model writes."""
+    conn = get_conn(path)
+    write_table(conn, "manager_tendencies", pd.DataFrame([
+        {"manager": "worthy", "metric": "first_pick", "key": "WR",
+         "value": 1.0, "n": 2},
+        {"manager": "worthy", "metric": "first_pick", "key": "RB",
+         "value": 4.0, "n": 2},
+        {"manager": "worthy", "metric": "reach_overall", "key": None,
+         "value": 4.25, "n": 88},
+        {"manager": "worthy", "metric": "reach_bucket", "key": "late",
+         "value": -3.5, "n": 30},
+        {"manager": "worthy", "metric": "reach_bucket", "key": "early",
+         "value": 9.0, "n": 18},
+        {"manager": "worthy", "metric": "reach_bucket", "key": "mid",
+         "value": 2.0, "n": 40},
+        {"manager": "worthy", "metric": "reach_position", "key": "TE",
+         "value": 14.0, "n": 9},
+        {"manager": "worthy", "metric": "reach_position", "key": "K",
+         "value": 58.0, "n": 6},
+        {"manager": "worthy", "metric": "first_at_position", "key": "K",
+         "value": 14.5, "n": 6},
+        {"manager": "worthy", "metric": "first_at_position", "key": "QB",
+         "value": 6.0, "n": 6},
+    ]))
+    conn.close()
+
+
+def test_managers_history_endpoint_serves_measured_tendencies(tmp_path):
+    """The facts the card leads with. Ordering is the endpoint's job, not the
+    client's: openers most-used first, reach buckets in early->late draft
+    order rather than table order, reach positions strongest first, and the
+    first-at-position list earliest round first."""
+    path = str(tmp_path / "t.duckdb")
+    _seed(path)
+    conn = get_conn(path)
+    write_table(conn, "draft_teams", pd.DataFrame([
+        {"season": 2024, "team_id": 1, "manager": "worthy", "slot": 1},
+        {"season": 2025, "team_id": 1, "manager": "worthy", "slot": 1},
+    ]))
+    write_table(conn, "draft_picks", pd.DataFrame([
+        {"season": 2024, "overall_pick": 1, "round": 1, "round_pick": 1,
+         "team_id": 1, "espn_player_id": 11, "player_name": "Bijan Robinson",
+         "position": "RB", "nfl_team": "ATL", "keeper": False},
+        {"season": 2025, "overall_pick": 1, "round": 1, "round_pick": 1,
+         "team_id": 1, "espn_player_id": 14, "player_name": "Ja'Marr Chase",
+         "position": "WR", "nfl_team": "CIN", "keeper": False},
+    ]))
+    conn.close()
+    _seed_tendencies_table(path)
+
+    body = TestClient(create_app(path)).get("/api/managers/history").json()
+    t = body["managers"][0]["tendencies"]
+
+    assert t["first_pick"] == [{"position": "RB", "drafts": 4, "of": 2},
+                               {"position": "WR", "drafts": 1, "of": 2}]
+    assert t["reach"] == {"mean_gap": 4.25, "n": 88}
+    assert [b["bucket"] for b in t["reach_by_bucket"]] == ["early", "mid", "late"]
+    assert t["reach_by_bucket"][2]["mean_gap"] == -3.5
+    assert [p["position"] for p in t["reach_by_position"]] == ["K", "TE"]
+    assert [f["position"] for f in t["first_at_position"]] == ["QB", "K"]
+    assert t["first_at_position"][0] == {"position": "QB", "mean_round": 6.0,
+                                         "drafts": 6}
 
 
 def test_draft_order_round_trip(tmp_path):

@@ -1,4 +1,4 @@
-import type { Manager, ManagerHistory, SimBoard, SimBoardCell } from '../api'
+import type { Manager, ManagerHistory, ManagerTendencies, SimBoard, SimBoardCell } from '../api'
 
 interface ManagerForecastProps {
   board: SimBoard
@@ -26,6 +26,32 @@ const SHAPE_POSITIONS = ['QB', 'RB', 'WR', 'TE', 'K', 'DST'] as const
 // live in a manager's hands on draft night; rounds 5+ are what the
 // positional shape row is for instead of a longer list nobody reads.
 const NEXT_PICKS_SHOWN = 4
+
+// A card is 260px wide at its narrowest, so the tendency rows show the head
+// of each ranked list rather than all of it: the position someone opens with
+// is a fact, the position they opened with once in six years is trivia.
+const OPENERS_SHOWN = 2
+const REACH_POSITIONS_SHOWN = 2
+
+// Bucket key -> the label the shape rows already print for it, so the reach
+// split and the positional shape read as the same three rounds of the draft.
+const BUCKET_LABEL = new Map(HISTORY_BUCKETS.map((b) => [b.key as string, b.label]))
+
+// "+4.2" / "-3.4". The sign carries the whole meaning of every gap number on
+// the card (earlier than the board vs later), so it is never dropped, and a
+// value that rounds to zero still shows which side of zero it came from.
+function signed(value: number, digits = 1): string {
+  return `${value < 0 ? '-' : '+'}${Math.abs(value).toFixed(digits)}`
+}
+
+// "RB in 5 of 6 drafts" -- and a second opener when they have one, since
+// "RB in 4, WR in 2" is a different manager from "RB in 4" alone.
+function opensText(t: ManagerTendencies): string | null {
+  const top = t.first_pick.slice(0, OPENERS_SHOWN)
+  if (top.length === 0) return null
+  const rest = top.slice(1).map((f) => `${f.position} in ${f.drafts}`)
+  return [`${top[0].position} in ${top[0].drafts} of ${top[0].of} drafts`, ...rest].join(', ')
+}
 
 // The board's primary (alt_rank 0) prediction for every pick, grouped by
 // slot and sorted round-first -- same "one predicted player per cell" the
@@ -87,6 +113,9 @@ export default function ManagerForecast({ board, managers, history, onSelectPlay
         const counts = shapeCounts(picks)
         const m = byName.get(entry.manager)
         const h = historyByName.get(entry.manager)
+        const t = h?.tendencies ?? null
+        const opens = t ? opensText(t) : null
+        const reaches = (t?.reach_by_position ?? []).filter((p) => p.mean_gap > 0)
         const isMe = entry.slot === mySlot
 
         return (
@@ -130,6 +159,81 @@ export default function ManagerForecast({ board, managers, history, onSelectPlay
                     {h.seasons} draft{h.seasons === 1 ? '' : 's'} &middot; {h.total_picks} picks
                   </span>
                 </div>
+
+                {/* Measured tendencies -- counted from this manager's real
+                    picks, so they say something specific about them even
+                    while the forecast below runs on league-average
+                    coefficients. Every row is omitted rather than zero-filled
+                    when the data behind it is missing. */}
+                {t && (
+                  <dl className="forecast-tendency">
+                    {opens && (
+                      <div className="forecast-tendency-row">
+                        <dt className="forecast-tendency-label">Opens</dt>
+                        <dd className="forecast-tendency-value">{opens}</dd>
+                      </div>
+                    )}
+
+                    {t.reach && (
+                      <div
+                        className="forecast-tendency-row"
+                        title="Picks earlier (+) or later (-) than the market board ranked the player, averaged over every pick with a board rank"
+                      >
+                        <dt className="forecast-tendency-label">Board</dt>
+                        <dd className="forecast-tendency-value">
+                          <span className="mono">{signed(t.reach.mean_gap)}</span>
+                          <span className="forecast-tendency-note">
+                            over {t.reach.n} picks
+                          </span>
+                          {t.reach_by_bucket.map((b) => (
+                            <span key={b.bucket} className="hist-badge">
+                              {BUCKET_LABEL.get(b.bucket) ?? b.bucket} {signed(b.mean_gap)}
+                            </span>
+                          ))}
+                        </dd>
+                      </div>
+                    )}
+
+                    {/* Only positions they take AHEAD of the board: a
+                        negative gap here means "waits on it", which the
+                        Board row above already covers in aggregate. */}
+                    {reaches.length > 0 && (
+                      <div
+                        className="forecast-tendency-row"
+                        title="Positions this manager jumps the board hardest for"
+                      >
+                        <dt className="forecast-tendency-label">Reaches</dt>
+                        <dd className="forecast-tendency-value">
+                          {reaches.slice(0, REACH_POSITIONS_SHOWN).map((p) => (
+                            <span key={p.position} className="hist-badge" title={`${p.n} picks`}>
+                              {p.position} {signed(p.mean_gap)}
+                            </span>
+                          ))}
+                        </dd>
+                      </div>
+                    )}
+
+                    {t.first_at_position.length > 0 && (
+                      <div
+                        className="forecast-tendency-row"
+                        title="Average round of their first pick at each position, and how many drafts they took one at all"
+                      >
+                        <dt className="forecast-tendency-label">First</dt>
+                        <dd className="forecast-tendency-value">
+                          {t.first_at_position.map((f) => (
+                            <span
+                              key={f.position}
+                              className="hist-badge"
+                              title={`${f.drafts} of ${h.seasons} drafts`}
+                            >
+                              {f.position} R{f.mean_round.toFixed(1)}
+                            </span>
+                          ))}
+                        </dd>
+                      </div>
+                    )}
+                  </dl>
+                )}
 
                 {h.first_rounders.length > 0 && (
                   <ol className="forecast-history-firsts">

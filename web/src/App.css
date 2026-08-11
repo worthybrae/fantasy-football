@@ -1531,11 +1531,40 @@ td:first-child {
   letter-spacing: 0.03em;
 }
 
+/* Measured tendencies -- counted from real picks, never fitted, so they sit
+   inside the history panel and inherit its register: monochrome, no accent,
+   no position tinting. Same label-column geometry as the shape rows below so
+   the whole panel reads as one list of facts rather than two stacked widgets. */
+.forecast-tendency { display: flex; flex-direction: column; gap: 3px; margin: 0; }
+.forecast-tendency-row { display: flex; align-items: baseline; gap: 6px; }
+.forecast-tendency-label {
+  flex: 0 0 auto;
+  width: 44px;
+  color: var(--text-3);
+  font-size: var(--text-xs);
+}
+.forecast-tendency-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px;
+  color: var(--text-2);
+  font-size: var(--text-xs);
+}
+/* The denominator behind a number, one step quieter than the number itself. */
+.forecast-tendency-note { color: var(--text-3); }
+
 .forecast-history-shape { display: flex; flex-direction: column; gap: 3px; }
 .forecast-history-bucket { display: flex; align-items: center; gap: 6px; }
 .forecast-history-bucket-label {
   flex: 0 0 auto;
-  width: 32px;
+  /* Matches .forecast-tendency-label so every row in the history panel shares
+     one label column -- "Opens"/"Board" don't fit the 32px the three bucket
+     labels used to have to themselves. */
+  width: 44px;
   color: var(--text-3);
   font-size: var(--text-xs);
 }
