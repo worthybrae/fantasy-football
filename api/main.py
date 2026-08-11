@@ -490,7 +490,13 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
             # missing `team` reaches here as np.nan (json.dumps rejects it,
             # HTTP 500) or pd.NA (encoded as `{}`, which React refuses to
             # render as a child), and SimBoardCell.team is `string | null`.
-            names = board[["player_id", "name", "position", "team"]] \
+            # `market_spread` rides along so the grid can mark a placement
+            # the sources fight about. A cell shows one player at one pick and
+            # reads as a flat claim; when ESPN has a player 21st and FFC 13th
+            # and CBS 9th, the claim is a good deal softer than it looks, and
+            # the number that says so is already computed here.
+            names = board[["player_id", "name", "position", "team",
+                           "market_spread"]] \
                 .drop_duplicates("player_id").set_index("player_id")
             names = names.astype(object).where(names.notna(), None)
             out = []
@@ -502,8 +508,9 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
                 if pid in names.index:
                     row = names.loc[pid]
                     name, position, team = row["name"], row["position"], row["team"]
+                    spread = row["market_spread"]
                 else:
-                    name, position, team = pid, None, None
+                    name, position, team, spread = pid, None, None, None
                 out.append({"overall_pick": int(c["overall_pick"]),
                             "round": int(c["round"]),
                             "round_pick": int(c["round_pick"]),
@@ -512,6 +519,7 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
                             "player_id": pid, "name": name,
                             "position": position, "team": team,
                             "prob": float(c["prob"]),
+                            "market_spread": None if spread is None else float(spread),
                             "certain": bool(c["certain"])})
             return {"run": run, "teams": settings.teams,
                     "rounds": settings.rounds, "order": order, "cells": out}

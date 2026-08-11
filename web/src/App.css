@@ -1310,6 +1310,9 @@ td:first-child {
 .grid-name { display: block; }
 .grid-meta { display: block; color: var(--text-3); font-size: 0.72rem; }
 .grid-prob { margin-left: 6px; }
+/* Dimmer than the probability beside it: the spread qualifies the cell, it
+   is not a second reading of it. */
+.grid-spread { opacity: 0.55; }
 .grid-alts {
   position: absolute;
   z-index: 5;

@@ -750,11 +750,19 @@ def test_sim_board_serves_cells_with_player_details(tmp_path):
     assert primary["name"] == "A Star"
     assert primary["position"] == "WR"
     assert primary["prob"] == 0.42
+    # `market_spread` rides along so the grid can mark a contested placement.
+    # Present on every cell, null included -- the client tests it against a
+    # threshold, and a missing key would read as 0 (agreement) rather than
+    # "unknown", which is the wrong way for that mistake to fail.
+    assert "market_spread" in primary
     # A cell naming a player the board no longer carries still renders,
-    # with the id standing in for the name rather than vanishing.
+    # with the id standing in for the name rather than vanishing. It has no
+    # board row to take a spread from, so it reports none rather than
+    # inheriting the previous row's.
     alt = [c for c in body["cells"] if c["alt_rank"] == 1][0]
     assert alt["name"] == "nope"
     assert alt["position"] is None
+    assert alt["market_spread"] is None
 
 
 def _sim_board_cells(run_id="r1"):

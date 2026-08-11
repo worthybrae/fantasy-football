@@ -95,6 +95,23 @@ export default function DraftGrid({ board, onSelectPlayer }: DraftGridProps) {
                         {!primary.certain && !mine && (
                           <span className="grid-prob">{Math.round(primary.prob * 100)}%</span>
                         )}
+                        {/* The sources disagree about where this player goes,
+                            so the single name in this cell is softer than it
+                            looks. Same >= 12 threshold and +/- half-spread
+                            form the player table already uses, so the two
+                            never say different things about one player. */}
+                        {primary.market_spread !== null &&
+                          primary.market_spread >= 12 && (
+                            <span
+                              className="grid-spread"
+                              title={`Sources disagree by ${Math.round(
+                                primary.market_spread,
+                              )} ranks on ${primary.name} \u2014 this placement is contested`}
+                            >
+                              {' \u00b1'}
+                              {Math.round(primary.market_spread / 2)}
+                            </span>
+                          )}
                       </span>
                     </button>
                     {hovered === key && alts.length > 0 && (

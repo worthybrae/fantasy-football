@@ -359,6 +359,7 @@ export interface SimBoardCell {
   position: string | null
   team: string | null
   prob: number
+  market_spread: number | null
   certain: boolean
 }
 
