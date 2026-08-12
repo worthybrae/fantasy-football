@@ -449,13 +449,16 @@ export interface ConnectResult {
   my_slot: number | null
 }
 
-// `mySlot` is only the fallback for a URL without a teamId -- send null to
-// let the backend resolve it from the URL instead of forcing a guess.
-export async function connectDraft(url: string, mySlot: number | null): Promise<ConnectResult> {
+// No slot argument: the draft slot is not something a human should have to
+// know. ESPN's socket announces the team on connect, and the backend
+// translates it through draft_order. Until it does, `my_slot` is null --
+// which is honest, and better than a guess that would attribute picks to
+// the wrong manager.
+export async function connectDraft(url: string): Promise<ConnectResult> {
   const res = await fetch('/api/live/connect', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url, my_slot: mySlot }),
+    body: JSON.stringify({ url }),
   })
   if (!res.ok) {
     // The backend writes this detail for a human to read, verbatim -- no

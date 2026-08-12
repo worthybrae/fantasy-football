@@ -12,7 +12,6 @@ type Phase = 'form' | 'connecting' | 'connected'
 // steer anyone toward one ESPN page over another.
 export default function Connect() {
   const [url, setUrl] = useState('')
-  const [slotInput, setSlotInput] = useState('')
   const [phase, setPhase] = useState<Phase>('form')
   const [error, setError] = useState<string | null>(null)
   const [leagueId, setLeagueId] = useState<string | null>(null)
@@ -28,9 +27,8 @@ export default function Connect() {
     if (!trimmed || busy) return
     setError(null)
     setPhase('connecting')
-    const slot = slotInput.trim() ? Number(slotInput) : null
     try {
-      const result = await connectDraft(trimmed, slot)
+      const result = await connectDraft(trimmed)
       setLeagueId(result.league_id)
       // Shown back for a human to sanity-check. The slot is resolved from
       // the URL's teamId through draft_teams using the most recent completed
@@ -106,20 +104,6 @@ export default function Connect() {
             inputMode="url"
             onChange={(e) => setUrl(e.target.value)}
             placeholder="https://fantasy.espn.com/football/draft?leagueId=…"
-            disabled={busy}
-          />
-          <label htmlFor="slot" className="connect-slot-label">
-            Draft slot <span className="connect-optional">(only needed if the URL has no teamId)</span>
-          </label>
-          <input
-            id="slot"
-            className="connect-slot-input"
-            type="number"
-            min={1}
-            max={20}
-            value={slotInput}
-            onChange={(e) => setSlotInput(e.target.value)}
-            placeholder="auto"
             disabled={busy}
           />
           <button type="submit" className="connect-submit" disabled={busy || !url.trim()}>

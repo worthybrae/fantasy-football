@@ -1996,20 +1996,8 @@ td:first-child {
 /* The slot field is a fallback (only needed when the URL carries no
    teamId), so it stays visually quieter and narrower than the URL field it
    sits under -- not required, not the same weight. */
-.connect-slot-label {
-  margin-top: var(--space-2);
-}
 
-.connect-optional {
-  text-transform: none;
-  letter-spacing: 0;
-  color: var(--text-3);
-  font-weight: 400;
-}
 
-.connect-slot-input {
-  width: 100px;
-}
 
 .connect-submit {
   margin-top: var(--space-3);

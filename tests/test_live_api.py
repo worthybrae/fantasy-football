@@ -525,7 +525,10 @@ def test_connect_falls_back_to_the_team_id_when_the_slot_is_unresolvable(tmp_pat
         json={"url": "https://fantasy.espn.com/football/draft?leagueId=1"
                      "&teamId=999&memberId={X}"})
     assert resp.status_code == 200
-    assert resp.json()["my_slot"] == 999
+    # Connecting succeeds; the slot is simply unknown. Turn detection does
+    # not need it -- the socket says `SELECTING <teamId>` outright -- and
+    # inventing one would attribute picks to the wrong manager.
+    assert resp.json()["my_slot"] is None
     client.post("/api/live/stop")
 
 def test_a_rejected_connect_does_not_tear_down_the_running_listener(
@@ -579,7 +582,10 @@ def test_connect_still_works_when_no_slot_can_be_resolved(tmp_path, monkeypatch)
     resp = client.post("/api/live/connect", json={
         "url": "https://fantasy.espn.com/football/draft?leagueId=1&teamId=6"})
     assert resp.status_code == 200
-    assert resp.json()["my_slot"] == 6          # the team id, echoed back
+    # None, not a guess. The team id is not a slot, and the socket names the
+    # team itself once it connects -- so "not known yet" is the honest answer
+    # rather than echoing the team id back as though it were a slot.
+    assert resp.json()["my_slot"] is None
     client.post("/api/live/stop")
 
 
