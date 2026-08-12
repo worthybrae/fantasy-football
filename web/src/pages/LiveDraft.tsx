@@ -239,7 +239,7 @@ export default function LiveDraft() {
         <>
           {state.stale && (
             <p className="live-banner live-banner-stale" role="status">
-              The board may be behind -- no successful update in the last 15 seconds. Numbers below are not current.
+              The board may be behind -- no successful update in the last 5 seconds. Numbers below are not current.
             </p>
           )}
           {isRecomputing && (

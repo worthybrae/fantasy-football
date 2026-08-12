@@ -164,5 +164,19 @@ def run_listener(listener, url: str, state_path: str, on_change=None,
         except BaseException:      # noqa: BLE001 -- KeyboardInterrupt is not Exception
             pass
         finally:
-            context.close()
-            browser.close()
+            # Persist cookies before tearing down. Without this every connect
+            # starts logged out and makes the user sign in again -- the state
+            # file was only ever written by EspnClient's own login flow, which
+            # this path never touches. Best effort: a browser the user closed
+            # first cannot be read, and failing to save is not worth losing
+            # the picks already collected over.
+            try:
+                Path(state_path).parent.mkdir(parents=True, exist_ok=True)
+                context.storage_state(path=str(state_path))
+            except Exception:                              # noqa: BLE001
+                pass
+            try:
+                context.close()
+                browser.close()
+            except Exception:                              # noqa: BLE001
+                pass

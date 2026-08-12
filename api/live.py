@@ -179,7 +179,12 @@ def _slot_for_team(cur, team_id: int):
     return int(mine.iloc[0]["slot"])
 
 
-STALE_AFTER_SECONDS = 15
+# Picks arrive pushed, not polled, so any real gap means the socket is
+# wedged rather than merely quiet. Five seconds is long enough to survive a
+# slow frame and short enough that a dead listener is obvious while there is
+# still time to do something about it -- which, on a 30-second clock, is the
+# only window that matters.
+STALE_AFTER_SECONDS = 5
 # Measured on the live board: 25 -> 4.7s, 100 -> 19.5s, 200 -> 35.2s.
 # Picks arrive every ~20-30s; the clock is ~90s.
 ROLLOUTS_FAR, ROLLOUTS_NEAR, ROLLOUTS_NOW = 25, 100, 200
