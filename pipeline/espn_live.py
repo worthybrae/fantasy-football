@@ -8,7 +8,6 @@ from typing import NamedTuple
 
 import pandas as pd
 
-from pipeline.db import read_table
 from pipeline.espn_league import _is_real_pick
 
 COLUMNS = ["player_id", "pick_no"]
@@ -19,19 +18,29 @@ class LivePicks(NamedTuple):
     unmapped: list              # [{"espn_player_id": int, "overall_pick": int}]
 
 
-def build_crosswalk(conn) -> dict:
-    """ESPN player id -> board player_id.
+def build_crosswalk(board) -> dict:
+    """ESPN player id -> board player_id, as an exact lookup.
 
-    `sleeper_ids.gsis_id` IS the board's player_id -- `scoring.market` joins
-    ESPN to the board through exactly this column. Rows without a gsis_id
-    cannot reach the board at all, so they are left out rather than mapped to
-    something invented.
+    Reads `board["espn_id"]`, which `scoring.market._espn_ranks` resolves at
+    board-build time along the same two paths it uses for ESPN's ranks. The
+    name matching happens once, there, where there is no clock running.
+
+    This replaced a `sleeper_ids.gsis_id` join, and the reason is measured
+    rather than stylistic. Against a real ESPN mock draft, sleeper_ids
+    resolved **13 of ESPN's top 100** and 2 of the first 9 actual picks --
+    Bijan Robinson, Puka Nacua, Ja'Marr Chase, Jonathan Taylor, Jaxon
+    Smith-Njigba, Christian McCaffrey and Amon-Ra St. Brown all failed. Its
+    ESPN mappings are stale in exactly the place it matters, on the young
+    players who go early. Through the board's own espn_id the same picks
+    resolve 9 of 9, and 100 of ESPN's top 100.
+
+    No unit test could have caught that: the fixture ids were invented, so
+    they mapped by construction. Only a live draft exposed it.
     """
-    ids = read_table(conn, "sleeper_ids")
-    if ids.empty or "espn_id" not in ids.columns:
+    if board is None or "espn_id" not in getattr(board, "columns", []):
         return {}
-    usable = ids.dropna(subset=["espn_id", "gsis_id"])
-    return {int(e): str(g) for e, g in zip(usable["espn_id"], usable["gsis_id"])}
+    pairs = board[["espn_id", "player_id"]].dropna()
+    return {int(e): str(p) for e, p in zip(pairs["espn_id"], pairs["player_id"])}
 
 
 def translate(payload: dict, crosswalk: dict) -> LivePicks:

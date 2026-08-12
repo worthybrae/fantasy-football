@@ -47,8 +47,12 @@ def _seed_minimal_live_db(path):
         columns=["gsis_id", "depth_team", "formation", "week", "position"]))
     write_table(conn, "snap_counts", pd.DataFrame(
         columns=["player", "team", "season", "offense_pct"]))
-    write_table(conn, "espn_adp", pd.DataFrame(
-        columns=["espn_id", "espn_name", "position", "espn_adp", "espn_ppr_rank"]))
+    # A real row, not an empty frame: espn_id has to reach the board for the
+    # live crosswalk to resolve a pick, and an empty espn_adp silently yields
+    # an empty crosswalk that no other assertion here would notice.
+    write_table(conn, "espn_adp", pd.DataFrame([
+        {"espn_id": 4429795, "espn_name": "A Star", "position": "WR",
+         "team": "DET", "espn_adp": 5.0, "espn_ppr_rank": 5, "espn_proj": 210.0}]))
     write_table(conn, "fp_ecr", pd.DataFrame(
         columns=["fp_name", "team", "position", "rank_ecr", "rank_ave", "rank_std", "fp_tier"]))
     write_table(conn, "sleeper_ids", pd.DataFrame(
@@ -123,6 +127,25 @@ def test_session_pins_a_seed_that_does_not_move(tmp_path, monkeypatch):
     assert s.seed == 4242
     # Two reads, same value -- not a property, not derived from a clock.
     assert s.seed == 4242
+
+
+def test_build_session_builds_a_usable_crosswalk(tmp_path):
+    """Guards a silent failure that a green suite hid once already.
+
+    `build_crosswalk` used to take a connection and was still being called
+    with one after its signature changed to take the board. A connection has
+    no `.columns`, so it returned an empty dict -- no exception, no failing
+    test, and every live pick unmapped. Assert the crosswalk is actually
+    populated, not merely that build_session returns.
+    """
+    path = str(tmp_path / "crosswalk.duckdb")
+    _seed_minimal_live_db(path)
+    session = build_session(get_conn(path), my_slot=1)
+    assert isinstance(session.crosswalk, dict)
+    assert session.crosswalk, "crosswalk is empty -- espn_id never reached the board"
+    for espn_id, player_id in session.crosswalk.items():
+        assert isinstance(espn_id, int)
+        assert isinstance(player_id, str)
 
 
 def test_build_session_default_seed_is_pinned(tmp_path):

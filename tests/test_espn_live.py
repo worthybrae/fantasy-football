@@ -62,16 +62,50 @@ def test_translate_handles_an_empty_draft():
     assert out.unmapped == []
 
 
-def test_build_crosswalk_reads_sleeper_ids(tmp_path):
-    conn = get_conn(str(tmp_path / "x.duckdb"))
-    write_table(conn, "sleeper_ids", pd.DataFrame([
-        {"gsis_id": "g1", "espn_id": 111, "sleeper_name": "A", "position": "RB", "team": "DET"},
-        {"gsis_id": "g2", "espn_id": 222, "sleeper_name": "B", "position": "WR", "team": "GB"},
-        {"gsis_id": None, "espn_id": 333, "sleeper_name": "C", "position": "TE", "team": "SF"},
-    ]))
-    x = build_crosswalk(conn)
-    assert x[111] == "g1" and x[222] == "g2"
-    assert 333 not in x        # no gsis_id means no board player_id
+def test_build_crosswalk_maps_espn_ids_off_the_board():
+    board = pd.DataFrame([
+        {"player_id": "g1", "espn_id": 4429795.0},
+        {"player_id": "g2", "espn_id": 4430807.0},
+        {"player_id": "g3", "espn_id": None},      # no ESPN row for this player
+    ])
+    x = build_crosswalk(board)
+    assert x == {4429795: "g1", 4430807: "g2"}
+
+
+def test_build_crosswalk_survives_a_board_without_the_column():
+    """A board built before espn_id existed, or by a fixture that omits it.
+    An empty crosswalk makes every pick unmapped and loudly visible, which
+    is the right failure -- a KeyError here would take the API down."""
+    assert build_crosswalk(pd.DataFrame([{"player_id": "g1"}])) == {}
+    assert build_crosswalk(None) == {}
+
+
+SOCKET_FIXTURE = Path("tests/fixtures/espn_draft_socket.jsonl")
+
+
+@pytest.mark.skipif(not SOCKET_FIXTURE.exists(), reason="no draft capture")
+def test_the_real_captured_picks_are_all_espn_ids_we_could_map():
+    """Recorded from a live ESPN mock draft. The protocol is plain text:
+
+        SELECTING <team> <msRemaining>
+        SELECTED  <team> <espnPlayerId> <lineupSlotId> [<managerSWID>]
+
+    This pins the shape the live consumer parses. It is the evidence that
+    replaced a guess -- ESPN's REST API serves no real playerId at all while
+    a draft runs, so this socket is the only live source.
+    """
+    frames = [json.loads(l) for l in SOCKET_FIXTURE.read_text().splitlines() if l]
+    picks = [str(f.get("payload", "")).split() for f in frames
+             if str(f.get("payload", "")).startswith("SELECTED ")]
+    assert len(picks) >= 9, "capture should carry a round's worth of picks"
+    for parts in picks:
+        assert parts[0] == "SELECTED"
+        assert parts[1].isdigit()                    # team id
+        assert parts[2].isdigit()                    # espn player id
+        assert parts[3].isdigit()                    # lineup slot id
+    # Every id is a plausible ESPN player id, not a placeholder like the -1
+    # the REST board is full of.
+    assert all(int(p[2]) > 0 for p in picks)
 
 
 @pytest.mark.skipif(not FIXTURE.exists(), reason="run Task 1's recorder first")

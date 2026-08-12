@@ -73,7 +73,7 @@ def build_session(conn, my_slot: int, seed: int = DEFAULT_SEED) -> DraftSession:
     return DraftSession(
         my_slot=my_slot, league_id=league_id, slot_managers=slot_managers,
         settings=settings, pool=pool, betas=betas,
-        crosswalk=build_crosswalk(conn),
+        crosswalk=build_crosswalk(board),
         board_fingerprint=board_fingerprint(board), seed=seed,
         started_at=datetime.now(timezone.utc))
 
