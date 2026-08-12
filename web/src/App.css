@@ -788,6 +788,7 @@ td:first-child {
 @media (prefers-reduced-motion: reduce) {
   .skeleton { animation: none; }
   .player-page { animation: none; }
+  .connect-card { animation: none; }
 }
 
 .board-skeleton {
@@ -1883,4 +1884,244 @@ td:first-child {
   font-size: var(--text-xs);
   color: var(--text-2);
   background: var(--bg-2);
+}
+
+/* -- connect screen (/) -- */
+
+/* The first thing anyone sees, so it gets the whole viewport to itself
+   rather than living inside .app's board layout -- same top-level pattern
+   as .live-page and .player-page (both set their own min-height: 100svh
+   rather than relying on .app's flex chain, since neither mounts inside
+   .app either). */
+.connect {
+  width: 100%;
+  min-height: 100svh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-0);
+  padding: var(--space-5);
+}
+
+@keyframes connect-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+.connect-card {
+  width: 100%;
+  max-width: 440px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-5);
+  animation: connect-fade-in 0.18s ease-out;
+}
+
+.connect-eyebrow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+/* Same brand mark as .topbar-dot -- the one visual thread tying this screen
+   to the app it hands off to. */
+.connect-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-bg);
+  flex-shrink: 0;
+}
+
+.connect-card h1 {
+  font-size: 24px;
+  letter-spacing: -0.01em;
+  margin-bottom: var(--space-2);
+}
+
+.connect-lede {
+  color: var(--text-2);
+  font-size: var(--text-md);
+  line-height: 1.5;
+  margin-bottom: var(--space-4);
+}
+
+.connect-card form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.connect-card label {
+  font-size: var(--text-sm);
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.connect-card input {
+  width: 100%;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-1);
+  font-size: var(--text-base);
+  padding: 10px 12px;
+  outline: none;
+  margin-bottom: var(--space-1);
+}
+
+.connect-card input::placeholder {
+  color: var(--text-3);
+}
+
+.connect-card input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-bg);
+}
+
+.connect-card input:disabled {
+  opacity: 0.6;
+}
+
+/* The slot field is a fallback (only needed when the URL carries no
+   teamId), so it stays visually quieter and narrower than the URL field it
+   sits under -- not required, not the same weight. */
+.connect-slot-label {
+  margin-top: var(--space-2);
+}
+
+.connect-optional {
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text-3);
+  font-weight: 400;
+}
+
+.connect-slot-input {
+  width: 100px;
+}
+
+.connect-submit {
+  margin-top: var(--space-3);
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-border);
+  color: var(--text-1);
+  border-radius: var(--radius);
+  padding: 10px 16px;
+  font-size: var(--text-base);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.connect-submit:hover:not(:disabled) {
+  background: var(--accent-border);
+}
+
+.connect-submit:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.connect-secondary {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-2);
+  border-radius: var(--radius);
+  padding: 10px 16px;
+  font-size: var(--text-base);
+  cursor: pointer;
+}
+
+.connect-secondary:hover {
+  border-color: var(--accent-border);
+  color: var(--text-1);
+}
+
+.connect-card input:focus-visible,
+.connect-submit:focus-visible,
+.connect-secondary:focus-visible,
+.connect-legacy a:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 2px;
+}
+
+.connect-error {
+  margin-top: var(--space-4);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--fail);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--fail) 10%, var(--bg-1));
+  color: var(--text-1);
+  font-size: var(--text-sm);
+}
+
+.connect-legacy {
+  margin-top: var(--space-5);
+  text-align: center;
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+
+.connect-legacy a {
+  color: var(--text-2);
+}
+
+.connect-legacy a:hover {
+  color: var(--accent);
+}
+
+/* -- connect screen: post-connect confirmation -- */
+
+/* The one number this whole screen exists to surface: the resolved draft
+   slot, sized and colored like nothing else on the card so it can't be
+   skimmed past. A team id -> slot mapping is derived from last season's
+   draft_teams and a league that re-randomized its order this year would get
+   it silently wrong -- this is the only place a human can catch that before
+   the draft starts. */
+.connect-slot-line {
+  font-size: var(--text-lg);
+  color: var(--text-1);
+  margin-bottom: var(--space-3);
+}
+
+.connect-slot-value {
+  font-size: 40px;
+  font-weight: 700;
+  color: var(--accent);
+  line-height: 1;
+  margin: 0 2px;
+}
+
+.connect-slot-unknown {
+  font-size: var(--text-md);
+  color: var(--text-1);
+  margin-bottom: var(--space-3);
+}
+
+.connect-slot-hint {
+  font-size: var(--text-sm);
+  color: var(--text-3);
+  line-height: 1.5;
+  margin-bottom: var(--space-4);
+}
+
+.connect-actions {
+  display: flex;
+  gap: var(--space-3);
+}
+
+.connect-actions .connect-submit,
+.connect-actions .connect-secondary {
+  margin-top: 0;
+  flex: 1;
 }

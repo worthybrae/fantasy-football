@@ -5,6 +5,7 @@ import PlayerTable, { RANK_SOURCES, type RankSourceId } from './components/Playe
 import PlayerPage from './components/PlayerPage'
 import DraftBoardPage from './components/DraftBoardPage'
 import LiveDraft from './pages/LiveDraft'
+import Connect from './pages/Connect'
 import { BoardSkeleton } from './components/PageSkeleton'
 import PositionTabs from './components/PositionTabs'
 import FreshnessBadge from './components/FreshnessBadge'
@@ -17,10 +18,13 @@ const FLEX_POSITIONS = new Set(['RB', 'WR', 'TE'])
 function App() {
   return (
     <Routes>
-      <Route path="/" element={<Board />} />
-      <Route path="/players/:slug" element={<PlayerPage />} />
-      <Route path="/draft-board" element={<DraftBoardPage />} />
+      <Route path="/" element={<Connect />} />
       <Route path="/draft" element={<LiveDraft />} />
+      {/* The research tool, re-parented unchanged. Same components, same
+          behaviour -- only the paths moved under /legacy. */}
+      <Route path="/legacy" element={<Board />} />
+      <Route path="/legacy/players/:slug" element={<PlayerPage />} />
+      <Route path="/legacy/draft-board" element={<DraftBoardPage />} />
     </Routes>
   )
 }
@@ -91,7 +95,7 @@ function Board() {
 
   // Opening a player (row click or keyboard Enter) navigates to their page.
   const handleSelectPlayer = useCallback(
-    (p: Player) => navigate(`/players/${playerSlug(p.name)}`),
+    (p: Player) => navigate(`/legacy/players/${playerSlug(p.name)}`),
     [navigate]
   )
 
@@ -178,7 +182,7 @@ function Board() {
         if (selectedIndex === null) return
         const id = visibleIds[selectedIndex]
         const player = players.find((p) => p.player_id === id)
-        if (player) navigate(`/players/${playerSlug(player.name)}`)
+        if (player) navigate(`/legacy/players/${playerSlug(player.name)}`)
         return
       }
 

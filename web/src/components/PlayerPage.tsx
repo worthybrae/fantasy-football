@@ -23,7 +23,7 @@ export default function PlayerPage() {
     return (
       <div className="player-page">
         <p className="error">{error}</p>
-        <Link to="/">← Back to board</Link>
+        <Link to="/legacy">← Back to board</Link>
       </div>
     )
   }
@@ -36,7 +36,7 @@ export default function PlayerPage() {
     return (
       <div className="player-page">
         <p>No player found for “{slug}”.</p>
-        <Link to="/">← Back to board</Link>
+        <Link to="/legacy">← Back to board</Link>
       </div>
     )
   }
@@ -44,13 +44,13 @@ export default function PlayerPage() {
   return (
     <PlayerProfile
       playerId={player.player_id}
-      onClose={() => navigate('/')}
+      onClose={() => navigate('/legacy')}
       onToggleDrafted={async (p) => {
         await setDrafted(p.player_id, !p.drafted)
       }}
       onSelectPlayer={(id) => {
         const target = players.find((p) => p.player_id === id)
-        if (target) navigate(`/players/${playerSlug(target.name)}`)
+        if (target) navigate(`/legacy/players/${playerSlug(target.name)}`)
       }}
     />
   )

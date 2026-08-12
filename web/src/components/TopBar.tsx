@@ -83,8 +83,8 @@ export default function TopBar({ search, onSearch, meta, searchShortcutDisabled 
         )}
       </div>
       <nav className="top-nav">
-        <NavLink to="/" end>Board</NavLink>
-        <NavLink to="/draft-board">Grid</NavLink>
+        <NavLink to="/legacy" end>Board</NavLink>
+        <NavLink to="/legacy/draft-board">Grid</NavLink>
       </nav>
       <div className="topbar-meta">{meta}</div>
     </header>

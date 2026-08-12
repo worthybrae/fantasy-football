@@ -433,3 +433,30 @@ export async function fetchLiveState(): Promise<LiveState> {
   }
   return res.json()
 }
+
+// The connect screen's only call. `board_fingerprint` identifies the pool
+// build the session locked in, not shown to the user -- what the connect
+// screen actually shows is a slot number, but that comes from a follow-up
+// GET /api/live/state, not from this response: the resolved my_slot lives
+// on the session state, not the connect endpoint's own return value.
+export interface ConnectResult {
+  connected: boolean
+  league_id: string
+  board_fingerprint: string
+}
+
+// `mySlot` is only the fallback for a URL without a teamId -- send null to
+// let the backend resolve it from the URL instead of forcing a guess.
+export async function connectDraft(url: string, mySlot: number | null): Promise<ConnectResult> {
+  const res = await fetch('/api/live/connect', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url, my_slot: mySlot }),
+  })
+  if (!res.ok) {
+    // The backend writes this detail for a human to read, verbatim -- no
+    // prefix, no re-wording (see detailText).
+    throw new Error(await detailText(res))
+  }
+  return res.json()
+}

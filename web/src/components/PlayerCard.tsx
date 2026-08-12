@@ -386,7 +386,7 @@ export default function PlayerCard({ playerId, onClose, avail_pct = null, evDelt
               >
                 {drafted ? 'Undo draft' : 'Mark drafted'}
               </button>
-              <Link to={`/players/${playerSlug(player.name)}`} className="card-full">
+              <Link to={`/legacy/players/${playerSlug(player.name)}`} className="card-full">
                 Full profile →
               </Link>
             </div>
