@@ -414,37 +414,50 @@ def test_team_id_from_url_reads_teamid_when_present():
     assert _team_id_from_url("") is None
 
 
-def test_slot_for_team_translates_team_id_through_draft_teams(tmp_path):
+def test_slot_for_team_translates_team_id_through_the_manager(tmp_path):
     """A team id is not a draft slot -- team 4 is not necessarily drafting
-    4th. draft_teams (season, team_id, manager, slot) is the only record of
-    that mapping, and the most recent season on file wins when a team id
-    appears in more than one."""
+    4th -- and the obvious one-hop route does not exist. `draft_teams` has a
+    `slot` column and every row of it is null on the real database, all 48
+    across six seasons; it was never populated, and reading it directly
+    crashed on int(NAType) the first time a live league hit it.
+
+    So the translation goes through the manager: draft_teams maps team id to
+    manager, draft_order maps manager to slot. The most recent season wins
+    when a team id appears in more than one."""
     from api.live import _slot_for_team
-    path = str(tmp_path / "slots.duckdb")
-    conn = get_conn(path)
+    conn = get_conn(str(tmp_path / "slots.duckdb"))
     write_table(conn, "draft_teams", pd.DataFrame([
-        {"season": 2024, "team_id": 4, "manager": "m4", "slot": 8},
-        {"season": 2025, "team_id": 4, "manager": "m4", "slot": 2},
-        {"season": 2025, "team_id": 9, "manager": "m9", "slot": 6},
+        {"season": 2024, "team_id": 4, "manager": "old_owner", "slot": None},
+        {"season": 2025, "team_id": 4, "manager": "m4", "slot": None},
+        {"season": 2025, "team_id": 9, "manager": "m9", "slot": None},
     ]))
-    assert _slot_for_team(conn, 4) == 2       # 2025 row wins over 2024's
+    write_table(conn, "draft_order", pd.DataFrame([
+        {"slot": 2, "manager": "m4", "is_me": True},
+        {"slot": 6, "manager": "m9", "is_me": False},
+        {"slot": 8, "manager": "old_owner", "is_me": False},
+    ]))
+    # 2025's manager wins over 2024's, so slot 2 rather than 8.
+    assert _slot_for_team(conn, 4) == 2
     assert _slot_for_team(conn, 9) == 6
     conn.close()
 
 
-def test_slot_for_team_fails_loudly_for_an_unknown_team_id(tmp_path):
-    """A wrong team-id/slot mapping attributes every pick to the wrong
-    manager for the whole draft, and nothing downstream can detect it --
-    so an unknown team id must raise, never silently default to some slot."""
-    from fastapi import HTTPException
+def test_slot_for_team_returns_none_when_the_chain_breaks(tmp_path):
+    """None, not a raise and not a guess.
+
+    A mock draft's managers appear in neither table, which is the normal
+    case rather than an error -- and turn detection does not need a slot at
+    all, because the socket says `SELECTING <teamId>` outright. Returning a
+    fabricated number would be the unforgivable version: a wrong slot
+    attributes every pick to the wrong manager and nothing downstream can
+    detect that it happened."""
     from api.live import _slot_for_team
-    path = str(tmp_path / "slots.duckdb")
-    conn = get_conn(path)
+    conn = get_conn(str(tmp_path / "slots.duckdb"))
     write_table(conn, "draft_teams", pd.DataFrame([
-        {"season": 2025, "team_id": 4, "manager": "m4", "slot": 2}]))
-    with pytest.raises(HTTPException) as exc_info:
-        _slot_for_team(conn, 99)
-    assert exc_info.value.status_code == 422
+        {"season": 2025, "team_id": 4, "manager": "m4", "slot": None}]))
+    write_table(conn, "draft_order", pd.DataFrame([
+        {"slot": 2, "manager": "m4", "is_me": True}]))
+    assert _slot_for_team(conn, 99) is None      # team id nobody has seen
     conn.close()
 
 
@@ -458,9 +471,14 @@ def test_connect_resolves_my_slot_from_a_teamid_in_the_url(tmp_path, monkeypatch
     conn = get_conn(path)
     # Team id 2 drafts from slot 7 -- deliberately NOT slot 2, so a bug that
     # used the team id itself as the slot would be caught.
+    # slot is null in draft_teams on the real database -- always. The hop
+    # that actually resolves a slot is draft_order, keyed by manager.
     write_table(conn, "draft_teams", pd.DataFrame([
-        {"season": 2025, "team_id": 1, "manager": "m1", "slot": 1},
-        {"season": 2025, "team_id": 2, "manager": "m2", "slot": 7}]))
+        {"season": 2025, "team_id": 1, "manager": "m1", "slot": None},
+        {"season": 2025, "team_id": 2, "manager": "m2", "slot": None}]))
+    write_table(conn, "draft_order", pd.DataFrame([
+        {"slot": 1, "manager": "m1", "is_me": False},
+        {"slot": 7, "manager": "m2", "is_me": True}]))
     conn.close()
 
     monkeypatch.setattr("api.live.run_listener", lambda *a, **k: None)
@@ -484,11 +502,19 @@ def test_connect_resolves_my_slot_from_a_teamid_in_the_url(tmp_path, monkeypatch
     client.post("/api/live/stop")
 
 
-def test_connect_fails_loudly_when_teamid_is_unknown_to_draft_teams(tmp_path):
-    """Correction B's other half: draft_teams has no row for this team id --
-    refuse rather than silently drafting under the wrong slot."""
+def test_connect_falls_back_to_the_team_id_when_the_slot_is_unresolvable(tmp_path, monkeypatch):
+    """The mock-draft case, and the reason this is not an error.
+
+    A mock's managers appear in neither draft_teams nor draft_order, so no
+    slot can be named -- but the socket reports whose turn it is directly
+    (`SELECTING <teamId>`), so the draft is perfectly followable without one.
+    The team id stands in, and is echoed back so a human can see what was
+    assumed rather than discovering it when the board names the wrong
+    manager on the clock.
+    """
     path = str(tmp_path / "live.duckdb")
     _seed_minimal_live_db(path)
+    monkeypatch.setattr("api.live.run_listener", lambda *a, **k: None)
 
     from fastapi.testclient import TestClient
     from api.main import create_app
@@ -498,8 +524,9 @@ def test_connect_fails_loudly_when_teamid_is_unknown_to_draft_teams(tmp_path):
         "/api/live/connect",
         json={"url": "https://fantasy.espn.com/football/draft?leagueId=1"
                      "&teamId=999&memberId={X}"})
-    assert resp.status_code == 422
-
+    assert resp.status_code == 200
+    assert resp.json()["my_slot"] == 999
+    client.post("/api/live/stop")
 
 def test_a_rejected_connect_does_not_tear_down_the_running_listener(
         tmp_path, monkeypatch):
@@ -526,32 +553,34 @@ def test_a_rejected_connect_does_not_tear_down_the_running_listener(
     assert _wait_until(
         lambda: client.get("/api/live/state").json()["listener_alive"])
 
-    # No teamId in the URL and no my_slot in the body -- must be rejected
-    # without touching the still-good first listener.
+    # A URL with no league id at all -- must be rejected without touching
+    # the still-good first listener. (A missing slot is no longer an error:
+    # a mock draft resolves to none and connects fine.)
     bad = client.post(
         "/api/live/connect",
-        json={"url": "https://fantasy.espn.com/football/draft?leagueId=2"})
+        json={"url": "https://fantasy.espn.com/football/mockdraftlobby"})
     assert bad.status_code == 422
 
     assert client.get("/api/live/state").json()["listener_alive"] is True
     client.post("/api/live/stop")
 
 
-def test_connect_requires_my_slot_when_the_url_has_no_teamid(tmp_path):
-    """my_slot is only a fallback for a URL without teamId -- if neither is
-    given there is nothing to build a session with, and that must be a
-    clear error, not a crash or a silent default."""
+def test_connect_still_works_when_no_slot_can_be_resolved(tmp_path, monkeypatch):
+    """A mock draft resolves to no slot at all, and that must not block the
+    connection -- the socket reports whose turn it is directly. The team id
+    stands in as a default and is echoed back for the human to check."""
     path = str(tmp_path / "live.duckdb")
     _seed_minimal_live_db(path)
+    monkeypatch.setattr("api.live.run_listener", lambda *a, **k: None)
 
     from fastapi.testclient import TestClient
     from api.main import create_app
     client = TestClient(create_app(path))
-
-    resp = client.post(
-        "/api/live/connect",
-        json={"url": "https://fantasy.espn.com/football/draft?leagueId=1"})
-    assert resp.status_code == 422
+    resp = client.post("/api/live/connect", json={
+        "url": "https://fantasy.espn.com/football/draft?leagueId=1&teamId=6"})
+    assert resp.status_code == 200
+    assert resp.json()["my_slot"] == 6          # the team id, echoed back
+    client.post("/api/live/stop")
 
 
 import json

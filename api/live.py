@@ -5,6 +5,7 @@
 coefficients come from history, the board and pool are static -- so the
 session builds them once and every refresh costs only `search_pick`.
 """
+import dataclasses
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -25,7 +26,12 @@ DEFAULT_SEED = 20260811
 
 @dataclass(frozen=True)
 class DraftSession:
-    my_slot: int
+    # None until the socket names our team (see live_connect's on_change) --
+    # build_session runs before the socket ever connects, so at construction
+    # time this is genuinely unknown whenever the pasted URL carried no
+    # teamId=. Frozen, so learning it later means dataclasses.replace-ing the
+    # whole session, never mutating this field in place.
+    my_slot: int | None
     # The ESPN league being polled. Task 6's poller builds its URL from this;
     # it lives on the session because a session is tied to one draft.
     league_id: str
@@ -55,7 +61,7 @@ def board_fingerprint(board: pd.DataFrame) -> str:
     return hashlib.sha256("\n".join(ids).encode()).hexdigest()[:16]
 
 
-def build_session(conn, my_slot: int, seed: int = DEFAULT_SEED) -> DraftSession:
+def build_session(conn, my_slot: int | None, seed: int = DEFAULT_SEED) -> DraftSession:
     """Everything expensive, once. Roughly 17s against a real database."""
     settings = league_mod.load(conn)
     board = build_board(conn, settings=settings)
@@ -91,11 +97,12 @@ from scoring.draft_sim import _drafted_state, search_pick, snake_slots
 
 
 class ConnectBody(BaseModel):
+    # No my_slot field. A URL carrying teamId= resolves it immediately (see
+    # _team_id_from_url / _slot_for_team); one that doesn't (the natural
+    # waiting-room URL to paste) leaves it None until the socket's TOKEN
+    # frame names our team (see live_connect's on_change) -- there is no
+    # third case left for a human to fill in by hand.
     url: str
-    # Optional: a URL carrying teamId= resolves my_slot through draft_teams
-    # (see _team_id_from_url / _slot_for_team) and does not need this. It is
-    # the fallback for a URL that does not carry teamId.
-    my_slot: int | None = None
 
 
 def _resolve_league_id(url: str) -> str:
@@ -127,26 +134,43 @@ def _team_id_from_url(url: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def _slot_for_team(cur, team_id: int) -> int:
-    """Translate an ESPN team id to a draft slot via draft_teams.
+def _slot_for_team(cur, team_id: int):
+    """Translate an ESPN team id to a draft slot, or None if it cannot be.
 
-    A team id is not a draft slot: team 4 is not necessarily drafting 4th.
-    `draft_teams` (season, team_id, manager, slot) is the only record of
-    that mapping on hand. ESPN team ids are stable across seasons within a
-    league, so the most recent season on file is used. A team id
-    `draft_teams` has never seen fails loudly rather than silently
-    defaulting to some slot -- a wrong mapping attributes every pick to the
-    wrong manager for the entire draft, and nothing downstream can detect
-    that it happened.
+    A team id is not a draft slot -- team 4 is not necessarily drafting 4th.
+    The translation goes through the manager in two hops, and it has to,
+    because the obvious one-hop route does not exist: `draft_teams` has a
+    `slot` column and **every row of it is null**, all 48 across six seasons.
+    It was never populated. An earlier version of this function read it
+    directly and crashed on `int(NAType)` the first time a real league hit it.
+
+    So: `draft_teams` maps team id to manager, and `draft_order` -- which the
+    user sets for the upcoming draft -- maps manager to slot.
+
+    Returns None rather than raising when the chain breaks, which is the
+    normal case for a mock draft: its managers are strangers who appear in
+    neither table. Turn detection does not actually need a slot, because the
+    socket says `SELECTING <teamId>` outright; the slot is only wanted for
+    the simulator's snake ordering. A caller that needs one should say so and
+    handle its absence, not receive a fabricated number -- a wrong slot
+    attributes every pick to the wrong manager and nothing downstream can
+    detect that it happened.
     """
     teams = read_table(cur, "draft_teams")
-    rows = teams[teams["team_id"] == team_id] if not teams.empty else teams
+    if teams.empty or "manager" not in teams.columns:
+        return None
+    rows = teams[teams["team_id"] == team_id]
     if rows.empty:
-        raise HTTPException(
-            status_code=422,
-            detail=f"no draft_teams row for ESPN team id {team_id} -- "
-                   "pass my_slot explicitly in the request body instead.")
-    return int(rows.sort_values("season").iloc[-1]["slot"])
+        return None
+    manager = rows.sort_values("season").iloc[-1]["manager"]
+
+    order = read_table(cur, "draft_order")
+    if order.empty or "manager" not in order.columns:
+        return None
+    mine = order[order["manager"] == manager]
+    if mine.empty or pd.isna(mine.iloc[0]["slot"]):
+        return None
+    return int(mine.iloc[0]["slot"])
 
 
 STALE_AFTER_SECONDS = 15
@@ -266,7 +290,16 @@ def register_live_routes(app, conn):
         the pick count and the session generation are both captured before
         the search and re-checked after: if either moved, this result is
         discarded rather than served.
+
+        `session.my_slot` can still be None here -- the socket hasn't named
+        our team yet -- and `search_pick` needs a real slot to index into
+        (rosters, snake order, ...), not something to guess at. Skip the
+        search rather than pass it a fabricated one; candidates stay empty
+        until my_slot resolves, which /api/live/state already reports
+        honestly via session.my_slot being null.
         """
+        if session.my_slot is None:
+            return
         with lock:
             generation = state["generation"]
         cur = conn.cursor()
@@ -368,21 +401,17 @@ def register_live_routes(app, conn):
         cur = conn.cursor()
         try:
             # The socket speaks team ids, not slots (see _slot_for_team's
-            # docstring) -- a teamId on the URL takes priority, and
-            # body.my_slot is only the fallback for a URL that lacks one.
-            # Resolved before anything is stopped below: a request that
-            # turns out to be invalid must never tear down a listener that
-            # was working.
+            # docstring). A teamId on the URL -- present on a draft-room URL,
+            # absent on the waiting-room one ESPN redirects there from --
+            # resolves my_slot immediately, an instant answer the connect
+            # screen can show right away. Otherwise my_slot stays None: the
+            # socket's own TOKEN frame will name our team once it connects
+            # (see on_change below), and that -- not a guess -- is what fills
+            # it in. Resolved before anything is stopped below: a request
+            # that turns out to be invalid must never tear down a listener
+            # that was working.
             team_id = _team_id_from_url(body.url)
-            if team_id is not None:
-                my_slot = _slot_for_team(cur, team_id)
-            elif body.my_slot is not None:
-                my_slot = body.my_slot
-            else:
-                raise HTTPException(
-                    status_code=422,
-                    detail="no teamId in that URL and no my_slot given -- "
-                           "include one.")
+            my_slot = _slot_for_team(cur, team_id) if team_id is not None else None
 
             # Exactly one listener may run at a time: the draft socket's URL
             # carries a token with no known derivation, so we can only ever
@@ -413,6 +442,7 @@ def register_live_routes(app, conn):
             definition of pick numbering.
             """
             def on_change():
+                nonlocal session
                 with lock:
                     # `stop_event` only asks run_listener's poll loop to
                     # exit -- it does not gate an in-flight websocket
@@ -426,6 +456,27 @@ def register_live_routes(app, conn):
                         return
                 c2 = conn.cursor()
                 try:
+                    # my_slot is still unknown exactly when the URL carried
+                    # no teamId -- the case DraftListener.on_frame's
+                    # "newly learned team" signal exists for, so this check
+                    # runs on the very first on_change, potentially before
+                    # any pick has landed. DraftSession is frozen, so the
+                    # resolved session replaces `session` (closed over by
+                    # this function, one-to-one with `listener`) rather than
+                    # mutating it; the replacement is mirrored into
+                    # state["session"] under the same identity guard as
+                    # every other write here, so /api/live/state picks up
+                    # the real my_slot on its very next read. If
+                    # _slot_for_team still can't resolve it (a mock draft's
+                    # opponents, say), my_slot just stays None -- this retries
+                    # every future on_change rather than giving up once.
+                    if session.my_slot is None and listener.my_team_id is not None:
+                        resolved = _slot_for_team(c2, listener.my_team_id)
+                        if resolved is not None:
+                            session = dataclasses.replace(session, my_slot=resolved)
+                            with lock:
+                                if state["listener"] is listener:
+                                    state["session"] = session
                     apply_picks(c2, listener.picks())
                     made = c2.execute("SELECT count(*) FROM drafted").fetchone()[0]
                 finally:
@@ -455,14 +506,16 @@ def register_live_routes(app, conn):
                           "unmapped": [], "last_poll_at": None})
             state["generation"] = state.get("generation", 0) + 1
         thread.start()
-        # `my_slot` is echoed back deliberately. It is resolved from the
-        # URL's teamId through `draft_teams`, using the most recent completed
-        # season -- and a league that re-randomised its draft order since then
-        # would get a silently wrong answer that no data source here can
-        # detect. A human glancing at "you're drafting from slot 4" catches
-        # that in a second; nothing else catches it at all. So it is returned
-        # for the connect screen to show, not left to be discovered when the
-        # board starts naming the wrong manager on the clock.
+        # `my_slot` is echoed back deliberately -- None here means genuinely
+        # undetected yet, not a default of some kind. When it IS resolved
+        # (from the URL's teamId now, or the socket's TOKEN shortly after),
+        # it went through draft_teams -> draft_order by manager, and a
+        # league that re-randomised its draft order since draft_order was
+        # last set would get a silently wrong answer that no data source
+        # here can detect. A human glancing at "you're drafting from slot 4"
+        # catches that in a second; nothing else catches it at all. So the
+        # real value (or its absence) is returned for the connect screen to
+        # show, never a guess standing in for either.
         return {"connected": True, "league_id": league_id,
                 "board_fingerprint": session.board_fingerprint,
                 "my_slot": session.my_slot}
