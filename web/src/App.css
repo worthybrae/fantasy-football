@@ -1534,6 +1534,303 @@ td:first-child {
   letter-spacing: 0.03em;
 }
 
+/* -- live draft room (/draft) -- */
+
+.live-page {
+  width: 100%;
+  min-height: 100svh;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: var(--bg-0);
+  color: var(--text-2);
+  text-align: left;
+}
+
+/* Status strip: the topbar's job on this page, but built for a 30-second
+   decision loop rather than search/nav -- whose turn, pick number, and how
+   fresh the numbers below it are. */
+.live-strip {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border);
+}
+
+.live-strip-turn {
+  font-size: var(--text-lg, 18px);
+  font-weight: 700;
+  color: var(--text-1);
+}
+
+/* The one state this whole page exists to make unmissable: it's your pick.
+   Same accent language as everywhere else "you" is drawn (DraftGrid's
+   .grid-mine, .forecast-card-me), turned up to a filled treatment since this
+   is the highest-stakes moment on the page. */
+.live-strip-you {
+  background: var(--accent-bg);
+  border-bottom-color: var(--accent-border);
+}
+
+.live-strip-you .live-strip-turn {
+  color: var(--accent);
+  animation: live-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-strip-you .live-strip-turn { animation: none; }
+}
+
+.live-strip-meta {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-4);
+  font-size: var(--text-sm);
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+/* Banners: staleness, recompute-in-flight, and unmapped picks. Each reads as
+   its own kind of warning rather than three shades of the same gray -- see
+   the task brief's "must never blur together." */
+.live-banner {
+  margin: var(--space-3) var(--space-4) 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius);
+  font-size: var(--text-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-1);
+  color: var(--text-2);
+}
+
+.live-banner-stale {
+  border-color: var(--fail);
+  color: var(--text-1);
+}
+
+.live-banner-recompute {
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+  color: var(--text-1);
+}
+
+.live-banner-unmapped {
+  border-color: var(--fail);
+  background: color-mix(in srgb, var(--fail) 10%, var(--bg-1));
+  color: var(--text-1);
+}
+
+.live-unmapped-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  font-size: var(--text-xs);
+  color: var(--text-2);
+}
+
+.live-body {
+  display: grid;
+  grid-template-columns: 1fr 300px;
+  gap: var(--space-5);
+  padding: var(--space-4);
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .live-body { grid-template-columns: 1fr; }
+}
+
+/* Recomputing or stale: the numbers are real but not current -- dimmed
+   rather than hidden (see .table-wrap.is-loading for the same convention
+   elsewhere), with the banner above carrying the actual explanation. */
+.live-decision.is-uncertain {
+  opacity: 0.6;
+}
+
+.live-call {
+  padding: var(--space-4) 0 var(--space-5);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: var(--space-4);
+}
+
+/* The call: the single largest thing on the page, per the brief. */
+.live-call-name {
+  display: block;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0 0 6px;
+  font: inherit;
+  font-size: 40px;
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--text-1);
+  text-align: left;
+  cursor: pointer;
+}
+
+.live-call-name:hover {
+  color: var(--accent);
+}
+
+.live-call-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: var(--space-3);
+  color: var(--text-2);
+  font-size: var(--text-md);
+}
+
+.live-call-reason {
+  max-width: 62ch;
+  font-size: var(--text-md);
+  color: var(--text-1);
+  line-height: 1.5;
+}
+
+.live-alts h2,
+.live-offboard h2 {
+  font-size: var(--text-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-3);
+  margin: 0 0 var(--space-3);
+}
+
+.live-alts-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.live-alt {
+  display: grid;
+  grid-template-columns: 1fr 52px 90px 40px;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 6px 4px;
+  border-radius: var(--radius);
+}
+
+.live-alt:hover {
+  background: var(--bg-2);
+}
+
+.live-alt-btn {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--text-1);
+  text-align: left;
+  cursor: pointer;
+}
+
+.live-alt-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.live-alt-team {
+  flex-shrink: 0;
+  color: var(--text-3);
+  font-size: var(--text-sm);
+}
+
+.live-alt-cost {
+  color: var(--text-2);
+  text-align: right;
+}
+
+/* The point: a long bar means you can wait on him. Same track/fill geometry
+   as .rankings-row-bar so a percentage-bar always reads the same way across
+   the app. */
+.live-alt-bar-track {
+  display: block;
+  height: 8px;
+  background: var(--bg-2);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.live-alt-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  background: var(--accent);
+}
+
+.live-alt-pct {
+  text-align: right;
+  color: var(--text-1);
+}
+
+.live-offboard-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.live-offboard-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: var(--radius);
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  font-size: var(--text-sm);
+  color: var(--text-2);
+  /* Off the board reads as the visual opposite of the call/alternatives --
+     muted, no accent, same register .forecast-history uses for "what
+     happened" vs. "what's predicted." */
+  opacity: 0.85;
+}
+
+.live-offboard-name {
+  color: var(--text-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.live-offboard-team {
+  margin-left: auto;
+  color: var(--text-3);
+  font-size: var(--text-xs);
+}
+
+.live-call-name:focus-visible,
+.live-alt-btn:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 2px;
+}
+
 /* Measured tendencies -- counted from real picks, never fitted, so they sit
    inside the history panel and inherit its register: monochrome, no accent,
    no position tinting. Same label-column geometry as the shape rows below so

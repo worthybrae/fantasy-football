@@ -380,3 +380,56 @@ export async function fetchSimBoard(): Promise<SimBoard> {
   if (!res.ok) throw new Error('Failed to load the predicted board')
   return res.json()
 }
+
+// -- live draft mode --
+
+// One recommendation from the running search. Sorted by `ev` descending on
+// arrival -- `candidates[0]` is the call. No name/position/team here: the
+// live loop is cheap by design (see api/live.py's DraftSession docstring)
+// and joining against the full board is the caller's job, via `player_id`
+// against `fetchPlayers()`'s one-time-fetched list.
+export interface LiveCandidate {
+  player_id: string
+  ev: number
+  se: number
+  applied_pct: number
+  rank: number
+}
+
+// A pick the socket reported but the crosswalk could not resolve to a
+// `player_id` -- so it is still sitting on the board as "available" even
+// though it was actually taken. `espn_player_id` is the raw id from ESPN's
+// event, not a board id, since resolving it is exactly what failed.
+export interface UnmappedPick {
+  espn_player_id: number
+  overall_pick: number
+}
+
+export interface LiveState {
+  active: boolean
+  picks_made: number
+  on_the_clock: number | null
+  // Absent (not merely null) on the `active: false` response -- see
+  // api/live.py's `live_state`, whose no-session branch omits the key
+  // entirely. Typed nullable rather than optional since every read site
+  // already treats "no slot" and "not this slot" the same way.
+  my_slot: number | null
+  candidates: LiveCandidate[]
+  // The pick count `candidates` was computed against. Compare against
+  // `picks_made` to tell a current list from one a newer pick has already
+  // outrun -- see `isRecomputing` in LiveDraft.tsx.
+  candidates_as_of_pick: number | null
+  last_poll_at: string | null
+  // True whenever the listener hasn't successfully polled in the last 15s
+  // (api/live.py's STALE_AFTER_SECONDS) -- including "never polled."
+  stale: boolean
+  unmapped_picks: UnmappedPick[]
+}
+
+export async function fetchLiveState(): Promise<LiveState> {
+  const res = await fetch('/api/live/state')
+  if (!res.ok) {
+    throw new Error(`Failed to load live state (${res.status}): ${await detailText(res)}`)
+  }
+  return res.json()
+}
