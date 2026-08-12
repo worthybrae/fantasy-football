@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 
 from pipeline.db import get_conn, write_table
-from pipeline.espn_live import LivePicks, build_crosswalk, translate
+from pipeline.espn_live import COLUMNS, LivePicks, apply_picks, build_crosswalk, translate
 
 FIXTURE = Path("tests/fixtures/espn_live_draft.json")
 
@@ -85,3 +85,53 @@ def test_translate_handles_the_real_recorded_payload():
     assert out.rows.empty
     # And every unmapped entry names both fields the UI needs.
     assert all({"espn_player_id", "overall_pick"} == set(u) for u in out.unmapped)
+
+
+def _conn_with_drafted(tmp_path, rows):
+    conn = get_conn(str(tmp_path / "d.duckdb"))
+    for player_id, pick_no in rows:
+        conn.execute("INSERT INTO drafted VALUES (?, ?)", [player_id, pick_no])
+    return conn
+
+
+def test_apply_picks_replaces_rather_than_appends(tmp_path):
+    """The constraint is the whole point: never patch incrementally.
+
+    If ESPN's list and ours disagree, appending the difference produces a
+    drafted table that is neither -- and every roster, need and cap
+    downstream is computed against it. Replacing wholesale means the table
+    always equals ESPN's list exactly.
+    """
+    conn = _conn_with_drafted(tmp_path, [("stale", 1), ("alsostale", 2)])
+    live = LivePicks(pd.DataFrame([{"player_id": "g1", "pick_no": 1},
+                                   {"player_id": "g2", "pick_no": 2}]),
+                     [])
+    assert apply_picks(conn, live) == 2
+    got = conn.execute("SELECT player_id, pick_no FROM drafted ORDER BY pick_no").fetchall()
+    assert got == [("g1", 1), ("g2", 2)]
+
+
+def test_apply_picks_overwrites_a_manual_mark_espn_contradicts(tmp_path):
+    """Reconciliation rule, stated once in the spec: ESPN wins."""
+    conn = _conn_with_drafted(tmp_path, [("guessed_wrong", 1)])
+    live = LivePicks(pd.DataFrame([{"player_id": "actual", "pick_no": 1}]), [])
+    apply_picks(conn, live)
+    got = conn.execute("SELECT player_id FROM drafted").fetchall()
+    assert got == [("actual",)]
+
+
+def test_apply_picks_clears_the_table_when_espn_reports_no_picks(tmp_path):
+    """A draft that was reset, or a session pointed at the wrong league. The
+    table must follow ESPN rather than keep whatever it had."""
+    conn = _conn_with_drafted(tmp_path, [("g1", 1)])
+    assert apply_picks(conn, LivePicks(pd.DataFrame(columns=COLUMNS), [])) == 0
+    assert conn.execute("SELECT count(*) FROM drafted").fetchone()[0] == 0
+
+
+def test_apply_picks_never_writes_a_null_pick_no(tmp_path):
+    """_drafted_state raises on a null pick_no rather than misattributing.
+    Guarding here means that path is unreachable from the poller."""
+    conn = get_conn(str(tmp_path / "n.duckdb"))
+    live = LivePicks(pd.DataFrame([{"player_id": "g1", "pick_no": None}]), [])
+    with pytest.raises(ValueError, match="null pick_no"):
+        apply_picks(conn, live)

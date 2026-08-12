@@ -60,3 +60,25 @@ def translate(payload: dict, crosswalk: dict) -> LivePicks:
             continue
         rows.append({"player_id": player_id, "pick_no": int(overall)})
     return LivePicks(pd.DataFrame(rows, columns=COLUMNS), unmapped)
+
+
+def apply_picks(conn, live: LivePicks) -> int:
+    """Make `drafted` equal ESPN's pick list exactly. Returns rows written.
+
+    Wholesale replacement, never a patch. If our table and ESPN's list
+    disagree -- a pick we missed, a manual mark that guessed wrong, a draft
+    that was reset -- appending the difference produces a table that matches
+    neither, and every roster, need and cap downstream is computed from it.
+    Replacing means the table is always exactly what ESPN says.
+
+    That is also the reconciliation rule for the manual `D` hotkey: ESPN wins.
+    """
+    if not live.rows.empty and live.rows["pick_no"].isna().any():
+        raise ValueError(
+            "refusing to write a null pick_no: draft_sim._drafted_state "
+            "cannot attribute such a pick to a team and would raise")
+    conn.execute("DELETE FROM drafted")
+    for row in live.rows.itertuples(index=False):
+        conn.execute("INSERT INTO drafted VALUES (?, ?)",
+                     [str(row.player_id), int(row.pick_no)])
+    return len(live.rows)
