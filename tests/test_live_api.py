@@ -23,26 +23,39 @@ def _fake_session(seed=20260811):
         started_at=datetime(2026, 8, 11, tzinfo=timezone.utc))
 
 
-def _seed_minimal_live_db(path):
+def _seed_minimal_live_db(path, extra_players=None):
     """Minimal database for testing build_session.
 
     Includes all tables required by build_session: base NFL data (weekly,
     schedules, adp, etc.), draft history for fit_all, league settings, and
     draft_order for the current session.
+
+    `extra_players` (optional): a list of {"player_id", "name", "position",
+    "team", "espn_id"} dicts, seeded the same way as the default "A Star" --
+    weekly stats, an adp row, and an espn_adp row -- so a test can pin real
+    ESPN ids (e.g. from tests/fixtures/espn_draft_socket.jsonl) to known,
+    predictable board player_ids and exercise the crosswalk against more
+    than one player.
     """
     conn = get_conn(path)
 
+    players = [{"player_id": "p1", "name": "A Star", "position": "WR",
+               "team": "DET", "espn_id": 4429795}] + list(extra_players or [])
+
     # Base NFL data
     write_table(conn, "weekly", pd.DataFrame([
-        {"player_id": "p1", "player_display_name": "A Star", "position": "WR",
-         "recent_team": "DET", "opponent_team": "GB", "season": 2025, "week": w,
+        {"player_id": p["player_id"], "player_display_name": p["name"],
+         "position": p["position"], "recent_team": p["team"],
+         "opponent_team": "GB", "season": 2025, "week": w,
          "receptions": 8, "receiving_yards": 90, "targets": 10, "carries": 0}
-        for w in range(1, 18)]))
+        for p in players for w in range(1, 18)]))
     write_table(conn, "schedules", pd.DataFrame([
         {"home_team": "DET", "away_team": "GB", "week": 1,
          "total_line": 51.0, "spread_line": 3.0}]))
     write_table(conn, "adp", pd.DataFrame([
-        {"adp_name": "A Star", "position": "WR", "team": "DET", "adp": 5.1}]))
+        {"adp_name": p["name"], "position": p["position"], "team": p["team"],
+         "adp": 5.1 + i}
+        for i, p in enumerate(players)]))
     write_table(conn, "depth_charts", pd.DataFrame(
         columns=["gsis_id", "depth_team", "formation", "week", "position"]))
     write_table(conn, "snap_counts", pd.DataFrame(
@@ -51,8 +64,10 @@ def _seed_minimal_live_db(path):
     # live crosswalk to resolve a pick, and an empty espn_adp silently yields
     # an empty crosswalk that no other assertion here would notice.
     write_table(conn, "espn_adp", pd.DataFrame([
-        {"espn_id": 4429795, "espn_name": "A Star", "position": "WR",
-         "team": "DET", "espn_adp": 5.0, "espn_ppr_rank": 5, "espn_proj": 210.0}]))
+        {"espn_id": p["espn_id"], "espn_name": p["name"], "position": p["position"],
+         "team": p["team"], "espn_adp": 5.0 + i, "espn_ppr_rank": 5 + i,
+         "espn_proj": 210.0 - i}
+        for i, p in enumerate(players)]))
     write_table(conn, "fp_ecr", pd.DataFrame(
         columns=["fp_name", "team", "position", "rank_ecr", "rank_ave", "rank_std", "fp_tier"]))
     write_table(conn, "sleeper_ids", pd.DataFrame(
@@ -393,3 +408,123 @@ def test_connect_warns_on_a_waiting_room_url(tmp_path):
     from api.live import _is_waiting_room
     assert _is_waiting_room("https://fantasy.espn.com/football/waitingroom?leagueId=1")
     assert not _is_waiting_room("https://fantasy.espn.com/football/draft?leagueId=1")
+
+
+import json
+from pathlib import Path
+
+_SOCKET_FIXTURE = Path("tests/fixtures/espn_draft_socket.jsonl")
+
+
+def _first_n_selected_frames(n):
+    """A prefix of the real captured frames, cut right after the n-th
+    SELECTED. Exercises the listener against text ESPN actually sent over
+    the socket -- STATE, CLOCK, PING/PONG and all -- rather than an invented
+    protocol string, the same discipline test_draft_listener.py and
+    test_espn_live.py already hold their own fixture-driven tests to."""
+    rows = [json.loads(l) for l in _SOCKET_FIXTURE.read_text().splitlines() if l]
+    payloads = [str(r.get("payload") or "") for r in rows if r["kind"] == "ws-recv"]
+    out, seen = [], 0
+    for p in payloads:
+        out.append(p)
+        if p.strip().startswith("SELECTED "):
+            seen += 1
+            if seen == n:
+                break
+    return out
+
+
+@pytest.mark.skipif(not _SOCKET_FIXTURE.exists(), reason="no draft capture")
+def test_connect_wires_the_listener_to_apply_picks_and_recompute(tmp_path, monkeypatch):
+    """No test exercised connect's success path before this one -- nothing
+    verified that it actually wires DraftListener to apply_picks and
+    _recompute rather than just returning a 200.
+
+    Only `run_listener` is faked, because that is the one piece that needs a
+    real browser; the fake replays real frames from the captured mock draft
+    through the exact same DraftListener/on_change shape run_listener uses
+    (see pipeline/draft_listener.py). Everything downstream is the real
+    code: build_session against a real (tiny) database, apply_picks writing
+    real rows to `drafted`, and _recompute. search_pick is stubbed only for
+    speed/determinism, the same way the other _recompute tests in this file
+    already do it -- the thing under test is the wiring, not the search.
+    """
+    import threading
+
+    path = str(tmp_path / "live.duckdb")
+    # Pin three real ESPN ids from the fixture's first three SELECTED frames
+    # (picks: team 1 -> 4430807, team 2 -> 4429795, team 3 -> 4426515) to
+    # known board player_ids, so drafted rows can be checked exactly rather
+    # than merely for count.
+    _seed_minimal_live_db(path, extra_players=[
+        {"player_id": "p2", "name": "B Runner", "position": "RB",
+         "team": "DET", "espn_id": 4430807},
+        {"player_id": "p3", "name": "C Slot", "position": "WR",
+         "team": "GB", "espn_id": 4426515},
+    ])
+
+    # Learn the crosswalk build_session will actually compute, rather than
+    # assuming the market-matching internals -- same real code path connect
+    # uses, just called once up front to read off its result.
+    setup_conn = get_conn(path)
+    crosswalk = build_session(setup_conn, my_slot=1).crosswalk
+    setup_conn.close()
+    for espn_id in (4430807, 4429795, 4426515):
+        assert espn_id in crosswalk, f"fixture espn id {espn_id} did not cross-walk"
+
+    recompute_calls = []
+    monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
+    monkeypatch.setattr(
+        "api.live.search_pick",
+        lambda *a, **k: recompute_calls.append(k) or _fake_candidates_frame("winner"))
+
+    done = threading.Event()
+
+    def fake_run_listener(listener, url, state_path, on_change=None, headless=False):
+        """Stands in for the real, browser-driving run_listener. Replays
+        real frames and fires on_change exactly when the real one would --
+        after any frame that changes the pick count -- so the wiring under
+        test sees the same call shape it would against a live socket."""
+        seen = 0
+        for frame in _first_n_selected_frames(3):
+            listener.on_frame(frame)
+            count = len(listener.picks().rows)
+            if count != seen:
+                seen = count
+                if on_change is not None:
+                    on_change()
+        done.set()
+
+    monkeypatch.setattr("api.live.run_listener", fake_run_listener)
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    client = TestClient(create_app(path))
+
+    resp = client.post("/api/live/connect",
+                       json={"url": "https://fantasy.espn.com/football/draft?leagueId=1",
+                             "my_slot": 1})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["connected"] is True
+    assert body["league_id"] == "1"
+
+    assert done.wait(timeout=5), "fake listener thread never finished"
+
+    # apply_picks must have written the RIGHT player at the RIGHT pick_no,
+    # in the socket's order -- not merely three rows.
+    conn = get_conn(path)
+    rows = conn.execute(
+        "SELECT player_id, pick_no FROM drafted ORDER BY pick_no").fetchall()
+    conn.close()
+    expected = [(crosswalk[4430807], 1), (crosswalk[4429795], 2),
+               (crosswalk[4426515], 3)]
+    assert rows == expected
+
+    # And a recompute really ran off the resulting pick count -- not just
+    # that drafted got written.
+    assert len(recompute_calls) >= 1
+    state = client.get("/api/live/state").json()
+    assert state["candidates_as_of_pick"] == 3
+    assert state["candidates"] == [{"player_id": "winner", "ev": 1.0, "se": 0.1,
+                                    "applied_pct": 1.0, "rank": 1}]

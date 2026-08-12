@@ -58,15 +58,22 @@ def _as_int(value, fallback):
         return fallback
 
 
-def run_listener(listener, url: str, state_path: str, on_change=None) -> None:
+def run_listener(listener, url: str, state_path: str, on_change=None,
+                 headless: bool = False) -> None:
     """Drive a browser to `url` and feed the draft socket into `listener`.
 
     Blocking -- the caller runs it on a thread. `on_change` fires after any
     frame that changed the pick count, which is the signal to recompute.
 
-    Headless is deliberate: the page authenticates from the saved storage
-    state and needs no interaction. The human drafts in their own browser;
-    this one only listens.
+    Visible by default, and that is load-bearing, not cosmetic. The draft
+    socket's URL carries a token with no known derivation, so we cannot open
+    a second connection of our own -- we can only observe the one connection
+    a real, authenticated browser holds. That means this window has to be
+    where the human actually drafts: if they picked in a separate browser of
+    their own instead, this one would be a second session for the same
+    team, untested and liable to get one of the two kicked. `headless=True`
+    stays available as a parameter for a test, or a future use that only
+    observes and never needs a human at the keyboard.
     """
     from pathlib import Path
 
@@ -83,7 +90,7 @@ def run_listener(listener, url: str, state_path: str, on_change=None) -> None:
                 on_change()
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
+        browser = pw.chromium.launch(headless=headless)
         state = Path(state_path)
         context = browser.new_context(
             **({"storage_state": str(state)} if state.exists() else {}))
