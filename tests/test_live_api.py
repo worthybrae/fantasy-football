@@ -206,3 +206,136 @@ def test_state_is_inactive_before_start(tmp_path):
     assert body["active"] is False
     assert body["candidates"] == []
     assert body["candidates_as_of_pick"] is None
+
+
+import dataclasses
+
+from api.live import register_live_routes
+
+
+def _live_routes_with_conn(tmp_path):
+    """A (state, _recompute) pair wired to a throwaway DuckDB file, for
+    exercising _recompute directly without going through the FastAPI app."""
+    from fastapi import FastAPI
+    from pipeline.db import get_conn
+    conn = get_conn(str(tmp_path / "live.duckdb"))
+    return register_live_routes(FastAPI(), conn)
+
+
+def _live_session(seed=DEFAULT_SEED):
+    """A DraftSession usable with the real _recompute -- unlike
+    _fake_session, `settings` must carry real teams/rounds because
+    _recompute calls picks_until_turn(session.settings, ...), which calls
+    snake_slots(settings.teams, settings.rounds)."""
+    settings = type("S", (), {"teams": 8, "rounds": 15})()
+    return dataclasses.replace(_fake_session(seed=seed), settings=settings)
+
+
+def _fake_candidates_frame(player_id):
+    return pd.DataFrame({"player_id": [player_id], "ev": [1.0], "se": [0.1],
+                          "applied_pct": [1.0], "rank": [1]})
+
+
+def test_recompute_discards_a_result_the_pick_count_has_moved_past(tmp_path, monkeypatch):
+    """The pick-count guard: a search captured at picks_made=3 must not
+    overwrite a poll that already recorded picks_made=5 by the time the
+    search finishes -- a stale recommendation is worse than none."""
+    state, _recompute = _live_routes_with_conn(tmp_path)
+    session = _live_session()
+    monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
+    monkeypatch.setattr("api.live.search_pick",
+                         lambda *a, **k: _fake_candidates_frame("stale"))
+
+    # A newer poll landed and recorded picks_made=5 while this computation,
+    # captured at picks_made=3, was still running.
+    state["as_of_pick"] = 5
+    state["candidates"] = [{"player_id": "fresh"}]
+
+    _recompute(session, picks_made=3)
+
+    assert state["as_of_pick"] == 5
+    assert state["candidates"] == [{"player_id": "fresh"}]
+
+
+def test_recompute_stores_its_result_when_nothing_superseded_it(tmp_path, monkeypatch):
+    """The guard's other branch: an un-superseded result is served, not
+    swallowed by an overzealous check."""
+    state, _recompute = _live_routes_with_conn(tmp_path)
+    session = _live_session()
+    monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
+    monkeypatch.setattr("api.live.search_pick",
+                         lambda *a, **k: _fake_candidates_frame("winner"))
+
+    _recompute(session, picks_made=3)
+
+    assert state["as_of_pick"] == 3
+    assert state["candidates"] == [{"player_id": "winner", "ev": 1.0, "se": 0.1,
+                                     "applied_pct": 1.0, "rank": 1}]
+
+
+def test_recompute_discards_a_result_from_a_stopped_and_restarted_session(tmp_path, monkeypatch):
+    """The generation guard. live_stop then live_start resets as_of_pick to
+    None, which blinds the pick-count guard alone (`state["as_of_pick"] is
+    not None` is False right after a restart). A _recompute launched under
+    the session that got stopped must still be discarded, not silently
+    overwrite the new session's state with results computed against a
+    different my_slot/pool."""
+    state, _recompute = _live_routes_with_conn(tmp_path)
+    old_session = _live_session()
+    monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
+
+    def fake_search_pick(*a, **k):
+        # Simulate live_stop() followed by live_start() landing while this
+        # search is in flight -- exactly what those handlers do to `state`
+        # under the lock: bump the generation and reset as_of_pick.
+        state["generation"] += 1
+        state["as_of_pick"] = None
+        state["candidates"] = [{"player_id": "fresh-session"}]
+        return _fake_candidates_frame("stale-session")
+
+    monkeypatch.setattr("api.live.search_pick", fake_search_pick)
+
+    _recompute(old_session, picks_made=0)
+
+    assert state["candidates"] == [{"player_id": "fresh-session"}]
+    assert state["as_of_pick"] is None
+
+
+def test_recompute_passes_the_session_seed_to_search_pick(tmp_path, monkeypatch):
+    """The seed is pinned for the session's lifetime -- _recompute must hand
+    search_pick session.seed, never a freshly generated value."""
+    state, _recompute = _live_routes_with_conn(tmp_path)
+    session = _live_session(seed=773311)
+    monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
+    captured = {}
+
+    def fake_search_pick(*a, **k):
+        captured.update(k)
+        return _fake_candidates_frame("p1")
+
+    monkeypatch.setattr("api.live.search_pick", fake_search_pick)
+
+    _recompute(session, picks_made=0)
+
+    assert captured["seed"] == 773311
+
+
+def test_live_start_success_path_builds_and_stores_a_session(tmp_path):
+    """live_start's non-reused path: build_session runs against a real
+    database, the response carries the pinned seed and a real board
+    fingerprint, and a second call reuses the stored session rather than
+    rebuilding it."""
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+
+    client = TestClient(create_app(path))
+    body = client.post("/api/live/start", params={"my_slot": 1}).json()
+    assert body["active"] is True
+    assert body["reused"] is False
+    assert body["seed"] == DEFAULT_SEED
+    assert isinstance(body["board_fingerprint"], str) and body["board_fingerprint"]
+
+    reused = client.post("/api/live/start", params={"my_slot": 1}).json()
+    assert reused == {"active": True, "reused": True}

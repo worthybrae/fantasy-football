@@ -130,17 +130,28 @@ def register_live_routes(app, conn):
     `create_app`'s connection -- a restart mid-draft means starting again,
     which is correct: the cached pool would be stale anyway."""
     state = {"session": None, "last_poll_at": None, "unmapped": [],
-             "candidates": [], "as_of_pick": None, "computing_for": None}
+             "candidates": [], "as_of_pick": None, "computing_for": None,
+             # Bumped by live_start and live_stop. A stop/start cycle resets
+             # as_of_pick to None, which blinds the pick-count guard below --
+             # a stale _recompute launched under the old session would see
+             # `state["as_of_pick"] is not None` as False and sail through.
+             # The generation is the guard that catches session identity
+             # rather than pick count; the two check different things and
+             # dropping either leaves a hole.
+             "generation": 0}
     lock = threading.Lock()
 
     def _recompute(session, picks_made):
-        """Run one search and store it, unless a newer pick landed first.
+        """Run one search and store it, unless superseded meanwhile.
 
         A result computed against a board that has since changed is worse
         than no result -- it recommends a player who may already be gone. So
-        the pick count is captured before the search and re-checked after;
-        if it moved, this result is discarded rather than served.
+        the pick count and the session generation are both captured before
+        the search and re-checked after: if either moved, this result is
+        discarded rather than served.
         """
+        with lock:
+            generation = state["generation"]
         cur = conn.cursor()
         try:
             taken, taken_order = _drafted_state(cur, session.pool)
@@ -153,6 +164,8 @@ def register_live_routes(app, conn):
         finally:
             cur.close()
         with lock:
+            if state["generation"] != generation:
+                return          # session stopped/restarted while computing
             if state["as_of_pick"] is not None and state["as_of_pick"] > picks_made:
                 return          # superseded while we were computing
             state["candidates"] = frame.to_dict(orient="records")
@@ -169,6 +182,7 @@ def register_live_routes(app, conn):
         finally:
             cur.close()
         with lock:
+            state["generation"] += 1
             state.update({"session": session, "candidates": [],
                           "as_of_pick": None, "unmapped": [],
                           "last_poll_at": None})
@@ -210,6 +224,7 @@ def register_live_routes(app, conn):
     @app.post("/api/live/stop")
     def live_stop():
         with lock:
+            state["generation"] += 1
             state.update({"session": None, "candidates": [],
                           "as_of_pick": None, "unmapped": [],
                           "last_poll_at": None})
