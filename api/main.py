@@ -563,6 +563,9 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
             raise HTTPException(status_code=404, detail="unknown run_id")
         return state
 
+    from api.live import register_live_routes
+    register_live_routes(app, conn)
+
     return app
 
 app = create_app()

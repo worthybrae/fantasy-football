@@ -148,3 +148,61 @@ def test_build_session_default_seed_is_pinned(tmp_path):
 
     # The default must equal DEFAULT_SEED, not a clock-derived value.
     assert session.seed == DEFAULT_SEED
+
+
+from api.live import STALE_AFTER_SECONDS, picks_until_turn, rollouts_for
+
+
+def test_rollouts_scale_with_how_close_my_turn_is():
+    """One code path, N as a parameter. Measured costs: 25 -> 4.7s,
+    100 -> 19.5s, 200 -> 35.2s. Picks arrive every ~20-30s and the clock is
+    ~90s, so each tier has to fit the window it is chosen for."""
+    assert rollouts_for(7) == 25
+    assert rollouts_for(3) == 25
+    assert rollouts_for(2) == 100
+    assert rollouts_for(1) == 100
+    assert rollouts_for(0) == 200
+
+
+def test_rollouts_never_returns_zero_or_negative():
+    """A negative distance means the pick count ran past my turn -- a desync.
+    It must still produce a usable budget rather than an empty search."""
+    assert rollouts_for(-1) == 200
+
+
+def test_picks_until_turn_counts_the_snake_correctly():
+    """8 teams, slot 4 picks at overall 4, 13, 20. With 8 picks made the next
+    pick is #9, and mine is #13, so 4 others go first."""
+    settings = type("S", (), {"teams": 8, "rounds": 15})()
+    assert picks_until_turn(settings, my_slot=4, picks_made=0) == 3
+    assert picks_until_turn(settings, my_slot=4, picks_made=3) == 0
+    assert picks_until_turn(settings, my_slot=4, picks_made=8) == 4
+    assert picks_until_turn(settings, my_slot=4, picks_made=12) == 0
+
+
+def test_picks_until_turn_at_the_snake_turn_is_zero_twice_running():
+    """Slot 1 picks at overall 1, then 16 and 17 back to back."""
+    settings = type("S", (), {"teams": 8, "rounds": 15})()
+    assert picks_until_turn(settings, my_slot=1, picks_made=15) == 0
+    assert picks_until_turn(settings, my_slot=1, picks_made=16) == 0
+
+
+def test_state_reports_stale_when_the_poll_is_old(tmp_path):
+    """A frozen board that looks live is worse than one that admits it. The
+    threshold is the spec's 15s."""
+    from datetime import datetime, timedelta, timezone
+    from api.live import _is_stale
+    now = datetime.now(timezone.utc)
+    assert not _is_stale(now, now)
+    assert not _is_stale(now - timedelta(seconds=STALE_AFTER_SECONDS - 1), now)
+    assert _is_stale(now - timedelta(seconds=STALE_AFTER_SECONDS + 1), now)
+    assert _is_stale(None, now)          # never polled at all
+
+
+def test_state_is_inactive_before_start(tmp_path):
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    body = TestClient(create_app(str(tmp_path / "t.duckdb"))).get("/api/live/state").json()
+    assert body["active"] is False
+    assert body["candidates"] == []
+    assert body["candidates_as_of_pick"] is None
