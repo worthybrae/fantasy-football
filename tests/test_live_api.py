@@ -362,3 +362,34 @@ def test_live_start_success_path_builds_and_stores_a_session(tmp_path):
 
     reused = client.post("/api/live/start", params={"my_slot": 1}).json()
     assert reused == {"active": True, "reused": True}
+
+
+def test_connect_rejects_a_url_with_no_league_id(tmp_path):
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    c = TestClient(create_app(str(tmp_path / "t.duckdb")))
+    r = c.post("/api/live/connect",
+               json={"url": "https://fantasy.espn.com/football/mockdraftlobby",
+                     "my_slot": 4})
+    assert r.status_code == 422
+    assert "league id" in r.json()["detail"].lower()
+
+
+def test_connect_accepts_a_real_draft_url_and_a_mock_url(tmp_path, monkeypatch):
+    """Both forms carry leagueId and resolve identically -- a mock draft is
+    not a special case, which is what makes mocks usable as a rehearsal."""
+    from api.live import _resolve_league_id
+    assert _resolve_league_id(
+        "https://fantasy.espn.com/football/draft?leagueId=53929318") == "53929318"
+    assert _resolve_league_id(
+        "https://fantasy.espn.com/football/draft?leagueId=539649131&seasonId=2026"
+    ) == "539649131"
+    assert _resolve_league_id("539649131") == "539649131"
+
+
+def test_connect_warns_on_a_waiting_room_url(tmp_path):
+    """A waiting-room URL resolves to the same league, but the socket carries
+    no picks until the draft starts. Saying so beats sitting silently idle."""
+    from api.live import _is_waiting_room
+    assert _is_waiting_room("https://fantasy.espn.com/football/waitingroom?leagueId=1")
+    assert not _is_waiting_room("https://fantasy.espn.com/football/draft?leagueId=1")

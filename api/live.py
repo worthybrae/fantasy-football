@@ -80,7 +80,40 @@ def build_session(conn, my_slot: int, seed: int = DEFAULT_SEED) -> DraftSession:
 
 import threading
 
+from fastapi import HTTPException
+from pydantic import BaseModel
+
+from pipeline.draft_listener import DraftListener, run_listener
+from pipeline.espn_league import STATE_PATH, parse_league_id
+from pipeline.espn_live import apply_picks
 from scoring.draft_sim import _drafted_state, search_pick, snake_slots
+
+
+class ConnectBody(BaseModel):
+    url: str
+    my_slot: int
+
+
+def _resolve_league_id(url: str) -> str:
+    """League id from anything ESPN shows you.
+
+    A real league's draft URL, a mock's, or a bare id all carry the same
+    thing. Treating a mock as an ordinary league is deliberate: it is what
+    lets a mock draft rehearse the whole system without a special path
+    through it that would then be the untested one on draft night.
+    """
+    try:
+        return parse_league_id(url)
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail="No league id in that URL. Open your draft room and copy "
+                   "the address bar -- it should contain leagueId=.")
+
+
+def _is_waiting_room(url: str) -> bool:
+    return "waitingroom" in (url or "").lower()
+
 
 STALE_AFTER_SECONDS = 15
 # Measured on the live board: 25 -> 4.7s, 100 -> 19.5s, 200 -> 35.2s.
@@ -229,5 +262,44 @@ def register_live_routes(app, conn):
                           "as_of_pick": None, "unmapped": [],
                           "last_poll_at": None})
         return {"active": False}
+
+    @app.post("/api/live/connect")
+    def live_connect(body: ConnectBody):
+        league_id = _resolve_league_id(body.url)
+        cur = conn.cursor()
+        try:
+            session = build_session(cur, body.my_slot)
+        finally:
+            cur.close()
+        listener = DraftListener(session.crosswalk)
+
+        def pump():
+            """Write every pick the socket reports, then recompute.
+
+            `apply_picks` replaces the table wholesale, so re-folding the
+            whole event stream on each change is correct rather than
+            wasteful -- and it keeps `picks_from_events` the single
+            definition of pick numbering.
+            """
+            def on_change():
+                c2 = conn.cursor()
+                try:
+                    apply_picks(c2, listener.picks())
+                    made = c2.execute("SELECT count(*) FROM drafted").fetchone()[0]
+                finally:
+                    c2.close()
+                _recompute(session, made)
+
+            run_listener(listener, body.url, STATE_PATH, on_change=on_change)
+
+        with lock:
+            state.update({"session": session, "listener": listener,
+                          "candidates": [], "as_of_pick": None,
+                          "unmapped": [], "last_poll_at": None})
+            state["generation"] = state.get("generation", 0) + 1
+        threading.Thread(target=pump, daemon=True).start()
+        return {"connected": True, "league_id": league_id,
+                "board_fingerprint": session.board_fingerprint,
+                "waiting_room": _is_waiting_room(body.url)}
 
     return state, _recompute
