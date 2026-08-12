@@ -82,7 +82,11 @@ def test_board_column_contract(tmp_path):
     expected = ["player_id", "name", "position", "team", "bye", "production",
                 "durability", "role", "environment", "schedule", "composite",
                 "vor", "tier", "market_rank", "market_spread", "market_sources",
-                "espn_ppr_rank", "ffc_rank", "edge", "rookie", "drafted", "rank",
+                # espn_id rides onto the board so a live draft pick, which
+                # arrives as an ESPN player id and nothing else, resolves by
+                # exact lookup instead of a name match under a 30s clock.
+                "espn_ppr_rank", "espn_id", "ffc_rank", "edge", "rookie",
+                "drafted", "rank",
                 "stats", "avail_pct", "ev", "ev_se"]
     assert list(board.columns) == expected
     assert board["rank"].tolist() == list(range(1, len(board) + 1))

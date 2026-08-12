@@ -210,8 +210,47 @@ which exists precisely because ESPN serves a full placeholder board for
 *upcoming* drafts, implying the structure is live before completion. That is
 suggestive, not proof.
 
-This must be verified in an ESPN mock draft as the first implementation task.
-If picks do not appear until the draft ends, polling is dead and ingest falls
-back to the manual `D` hotkey with the rest of the design unchanged — the
-session, the pinned seed, the recompute policy and the on-the-clock view all
-still stand.
+**RESOLVED 2026-08-11, and the answer is no.** Measured in a live 8-team
+ESPN mock: fifteen minutes into a draft with a 30-second clock,
+`draftDetail.inProgress` read true, `draftDetail.picks` carried all 128 board
+slots, and every single `playerId` was still `-1`. ESPN's league REST API
+does not serve selections while a draft runs. Mock leagues also 404 the
+moment they finish, so there is no post-draft window for them either.
+
+**But the fallback was not needed, because the room has a better feed.**
+Tracing the draft room's own traffic found a dedicated websocket:
+
+    wss://fantasydraft.espn.com/game-1/league-{league_id}/JOIN
+
+It speaks a plain-text line protocol, pushed as events happen:
+
+    STATE     1                                    draft started
+    SELECTING <teamId> <msRemaining>               who is on the clock
+    SELECTED  <teamId> <espnPlayerId> <slotId> [<swid>]
+    AUTOSUGGEST <espnPlayerId>                     ESPN's own suggestion
+    CLOCK     <n> <msRemaining>                    countdown, streamed
+    PING / PONG                                    heartbeat
+
+`slotId` is ESPN's lineup slot (0=QB, 2=RB, 4=WR, 6=TE, 16=DST, 17=K), so
+every pick arrives position-tagged. The optional trailing SWID identifies a
+human picker; bots have none. The snake is directly observable -- the capture
+shows `SELECTING 8` twice in a row at the turn, then `SELECTING 7`.
+
+This is strictly better than the polling this document assumed. Picks arrive
+pushed rather than on a 2-3s poll, there is no staleness window to manage,
+and `SELECTING` hands us the remaining clock for free.
+
+161 real frames are recorded at `tests/fixtures/espn_draft_socket.jsonl`.
+
+**Consequences.** The session, the pinned seed, the recompute policy and the
+on-the-clock view are unaffected -- they never depended on how picks arrive.
+`translate` and `apply_picks` keep their contracts. What changes is ingest: a
+websocket consumer of a line protocol rather than a REST poller, which is
+less code than was planned. The manual `D` hotkey stays as the escape hatch,
+same rule: ESPN wins.
+
+**One defect this exposed.** `build_crosswalk` resolved ESPN ids through
+`sleeper_ids.gsis_id`, which maps 13 of ESPN's top 100 and resolved 2 of the
+first 9 real picks. `espn_id` now rides onto the board via
+`market._espn_ranks`, and the same 9 picks resolve 9 of 9. No unit test could
+have caught this: the fixtures used invented ids that mapped by construction.

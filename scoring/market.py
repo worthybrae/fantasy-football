@@ -37,10 +37,21 @@ def _norm(name):
     return _norm_name(name)
 
 def _espn_ranks(board, espn, sleeper):
+    """ESPN's ADP rank, PPR rank and player id, per board row.
+
+    `espn_id` rides out on exactly the paths that already resolve an ESPN row
+    to a board row -- the gsis crosswalk first, the name fallback second. It
+    is not a third matching strategy, it is the same two, carrying one more
+    column. That matters because it makes the id available on the board
+    itself, so a live draft pick (which arrives as an ESPN player id and
+    nothing else) becomes an exact dictionary lookup instead of a name match
+    performed under a 30-second clock.
+    """
     out = pd.Series(np.nan, index=board.index)
     ppr = pd.Series(np.nan, index=board.index)
+    ids = pd.Series(np.nan, index=board.index)
     if espn is None or espn.empty:
-        return out, ppr
+        return out, ppr, ids
     e = espn.dropna(subset=["espn_adp"]).copy()
     e["espn_rank"] = e["espn_adp"].rank(method="first")
     # Dedupe by espn_id, keeping lowest rank (best)
@@ -64,6 +75,8 @@ def _espn_ranks(board, espn, sleeper):
     mapped = board["player_id"].map(by_id)
     by_id_ppr = has_id.set_index("gsis_id")["espn_ppr_rank"]
     mapped_ppr = board["player_id"].map(by_id_ppr)
+    by_id_espn = has_id.set_index("gsis_id")["espn_id"]
+    mapped_ids = board["player_id"].map(by_id_espn)
     # name+position fallback for espn rows without a crosswalk hit (never DST)
     rest = e[e["gsis_id"].isna() & (e["position"] != "DST")].copy()
     if not rest.empty:
@@ -72,12 +85,15 @@ def _espn_ranks(board, espn, sleeper):
         rest = rest.sort_values("espn_rank").drop_duplicates(["norm", "position"], keep="first")
         by_name = rest.set_index(["norm", "position"])["espn_rank"]
         by_name_ppr = rest.set_index(["norm", "position"])["espn_ppr_rank"]
+        by_name_espn = rest.set_index(["norm", "position"])["espn_id"]
         key = pd.MultiIndex.from_arrays([board["name"].map(_norm), board["position"]])
         fallback = pd.Series(by_name.reindex(key).to_numpy(), index=board.index)
         fallback_ppr = pd.Series(by_name_ppr.reindex(key).to_numpy(), index=board.index)
+        fallback_ids = pd.Series(by_name_espn.reindex(key).to_numpy(), index=board.index)
         mapped = mapped.fillna(fallback)
         mapped_ppr = mapped_ppr.fillna(fallback_ppr)
-    return mapped, mapped_ppr
+        mapped_ids = mapped_ids.fillna(fallback_ids)
+    return mapped, mapped_ppr, mapped_ids
 
 def _name_ranks(board, df, name_col, rank_col):
     """Generic (name, position) rank joiner for sources without an id
@@ -131,7 +147,8 @@ def _fp_ranks(board, fp):
 def add_market(board, espn, fp, sleeper, mfl=None, cbs=None):
     out = board.copy()
     out["ffc_rank"] = out["adp"].rank(method="first")
-    out["espn_rank"], out["espn_ppr_rank"] = _espn_ranks(out, espn, sleeper)
+    out["espn_rank"], out["espn_ppr_rank"], out["espn_id"] = _espn_ranks(
+        out, espn, sleeper)
     out["fp_rank"], out["fp_tier"] = _fp_ranks(out, fp)
     out["mfl_rank"] = _name_ranks(out, mfl, "mfl_name", "mfl_rank")
     out["cbs_rank"] = _name_ranks(out, cbs, "cbs_name", "cbs_rank")
