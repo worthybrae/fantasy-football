@@ -130,8 +130,27 @@ def test_apply_picks_clears_the_table_when_espn_reports_no_picks(tmp_path):
 
 def test_apply_picks_never_writes_a_null_pick_no(tmp_path):
     """_drafted_state raises on a null pick_no rather than misattributing.
-    Guarding here means that path is unreachable from the poller."""
-    conn = get_conn(str(tmp_path / "n.duckdb"))
+    Guarding here means that path is unreachable from the poller.
+    The table must survive a validation failure -- guard runs before DELETE."""
+    conn = _conn_with_drafted(tmp_path, [("safe", 1)])
     live = LivePicks(pd.DataFrame([{"player_id": "g1", "pick_no": None}]), [])
     with pytest.raises(ValueError, match="null pick_no"):
         apply_picks(conn, live)
+    # Verify the table was not touched by the failed attempt
+    got = conn.execute("SELECT player_id FROM drafted").fetchall()
+    assert got == [("safe",)]
+
+
+def test_apply_picks_raises_on_duplicate_player_id_within_batch(tmp_path):
+    """A duplicate player_id in a single batch indicates a crosswalk data-quality
+    issue (two ESPN ids mapped to the same gsis_id). Raising surfaces the problem
+    rather than silently deduplicating or overwriting. The table must survive."""
+    conn = _conn_with_drafted(tmp_path, [("old", 1)])
+    # Both ESPN ids (via different overall picks) map to the same board player_id
+    live = LivePicks(pd.DataFrame([{"player_id": "same", "pick_no": 1},
+                                   {"player_id": "same", "pick_no": 2}]), [])
+    with pytest.raises(Exception):  # DuckDB raises on PRIMARY KEY violation
+        apply_picks(conn, live)
+    # Verify the table survived: DELETE succeeded, but the transaction rolled back
+    got = conn.execute("SELECT player_id FROM drafted").fetchall()
+    assert got == [("old",)]

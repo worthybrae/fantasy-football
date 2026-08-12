@@ -72,13 +72,25 @@ def apply_picks(conn, live: LivePicks) -> int:
     Replacing means the table is always exactly what ESPN says.
 
     That is also the reconciliation rule for the manual `D` hotkey: ESPN wins.
+
+    Validation (null pick_no) runs before any mutation. DELETE and INSERTs are
+    wrapped in an explicit transaction so the table either fully becomes ESPN's
+    list or is left entirely alone. A duplicate player_id within a batch raises
+    rather than silently deduplicating, surfacing a crosswalk data-quality issue
+    that should not be masked.
     """
     if not live.rows.empty and live.rows["pick_no"].isna().any():
         raise ValueError(
             "refusing to write a null pick_no: draft_sim._drafted_state "
             "cannot attribute such a pick to a team and would raise")
-    conn.execute("DELETE FROM drafted")
-    for row in live.rows.itertuples(index=False):
-        conn.execute("INSERT INTO drafted VALUES (?, ?)",
-                     [str(row.player_id), int(row.pick_no)])
+    try:
+        conn.execute("BEGIN TRANSACTION")
+        conn.execute("DELETE FROM drafted")
+        for row in live.rows.itertuples(index=False):
+            conn.execute("INSERT INTO drafted VALUES (?, ?)",
+                         [str(row.player_id), int(row.pick_no)])
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
     return len(live.rows)
