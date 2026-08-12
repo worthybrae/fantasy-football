@@ -61,8 +61,17 @@ def board_fingerprint(board: pd.DataFrame) -> str:
     return hashlib.sha256("\n".join(ids).encode()).hexdigest()[:16]
 
 
-def build_session(conn, my_slot: int | None, seed: int = DEFAULT_SEED) -> DraftSession:
-    """Everything expensive, once. Roughly 17s against a real database."""
+def build_session(conn, my_slot: int | None, seed: int = DEFAULT_SEED,
+                  league_id: str = "") -> DraftSession:
+    """Everything expensive, once. Roughly 17s against a real database.
+
+    `league_id` is passed in rather than looked up, because the database has
+    no record of it: the `league` table is `(season, settings_json)` and no
+    table anywhere carries a league id. An earlier version read
+    `league["league_id"]` and raised KeyError the first time a real connect
+    ran. The caller already has it -- parsed from the URL the user pasted,
+    which is the only place it exists.
+    """
     settings = league_mod.load(conn)
     board = build_board(conn, settings=settings)
     pool = build_pool(conn, board, settings)
@@ -73,9 +82,6 @@ def build_session(conn, my_slot: int | None, seed: int = DEFAULT_SEED) -> DraftS
     draft_order = read_table(conn, "draft_order")
     slot_managers = dict(zip(draft_order["slot"].astype(int),
                              draft_order["manager"]))
-    league_row = read_table(conn, "league")
-    league_id = (str(league_row["league_id"].iloc[0])
-                 if not league_row.empty else "")
     return DraftSession(
         my_slot=my_slot, league_id=league_id, slot_managers=slot_managers,
         settings=settings, pool=pool, betas=betas,
@@ -427,7 +433,7 @@ def register_live_routes(app, conn):
                     status_code=503,
                     detail="the previous listener did not stop in time -- try again")
 
-            session = build_session(cur, my_slot)
+            session = build_session(cur, my_slot, league_id=league_id)
         finally:
             cur.close()
         listener = DraftListener(session.crosswalk)
