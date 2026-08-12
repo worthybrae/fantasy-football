@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from api.live import DraftSession, board_fingerprint, build_session
+from api.live import DEFAULT_SEED, DraftSession, board_fingerprint, build_session
 from pipeline.db import get_conn, write_table
 from scoring import league as league_mod
 
@@ -125,24 +125,26 @@ def test_session_pins_a_seed_that_does_not_move(tmp_path, monkeypatch):
     assert s.seed == 4242
 
 
-def test_build_session_returns_consistent_seed_across_calls(tmp_path):
-    """The seed must not be derived from a clock or counter. Calling
-    build_session twice with identical arguments must produce the same seed,
-    not a different one for each call. This would be violated by code like
-    `seed = seed or int(time.time())` which would silently make the seed
-    clock-derived, causing recommendations to reshuffle even when the board
-    is unchanged."""
+def test_build_session_default_seed_is_pinned(tmp_path):
+    """The default seed must be pinned to a constant, not derived from a clock.
+
+    The seed is a Global Constraint: it pins recommendations across the draft's
+    lifetime. Roster EV carries ±16.8 at the 25 rollouts a live refresh
+    affords, against a 9.3-point gap between adjacent candidates -- a
+    clock-derived seed makes the tool reshuffle advice while the board sits
+    still, silently.
+
+    This test exercises the default parameter path by omitting the seed
+    argument. If the default is changed to `seed = seed or int(time.time())`,
+    the result would be a clock value, not DEFAULT_SEED, and this test fails
+    immediately without mocking clocks or delays."""
     path = str(tmp_path / "live.duckdb")
     _seed_minimal_live_db(path)
 
-    conn1 = get_conn(path)
-    session1 = build_session(conn1, my_slot=1, seed=20260811)
-    conn1.close()
+    conn = get_conn(path)
+    # Call with seed argument omitted; should use DEFAULT_SEED default.
+    session = build_session(conn, my_slot=1)
+    conn.close()
 
-    conn2 = get_conn(path)
-    session2 = build_session(conn2, my_slot=1, seed=20260811)
-    conn2.close()
-
-    # Same arguments must produce the same seed -- not a different sample
-    # from randomness, not derived from the current time.
-    assert session1.seed == session2.seed == 20260811
+    # The default must equal DEFAULT_SEED, not a clock-derived value.
+    assert session.seed == DEFAULT_SEED
