@@ -443,6 +443,10 @@ export interface ConnectResult {
   connected: boolean
   league_id: string
   board_fingerprint: string
+  // Resolved server-side from the URL's teamId. Echoed back so the connect
+  // screen can show it for a sanity check -- a league that re-randomised its
+  // draft order would make this silently wrong and nothing else would catch it.
+  my_slot: number | null
 }
 
 // `mySlot` is only the fallback for a URL without a teamId -- send null to

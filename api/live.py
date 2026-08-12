@@ -455,7 +455,16 @@ def register_live_routes(app, conn):
                           "unmapped": [], "last_poll_at": None})
             state["generation"] = state.get("generation", 0) + 1
         thread.start()
+        # `my_slot` is echoed back deliberately. It is resolved from the
+        # URL's teamId through `draft_teams`, using the most recent completed
+        # season -- and a league that re-randomised its draft order since then
+        # would get a silently wrong answer that no data source here can
+        # detect. A human glancing at "you're drafting from slot 4" catches
+        # that in a second; nothing else catches it at all. So it is returned
+        # for the connect screen to show, not left to be discovered when the
+        # board starts naming the wrong manager on the clock.
         return {"connected": True, "league_id": league_id,
-                "board_fingerprint": session.board_fingerprint}
+                "board_fingerprint": session.board_fingerprint,
+                "my_slot": session.my_slot}
 
     return state, _recompute

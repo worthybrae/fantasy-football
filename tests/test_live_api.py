@@ -474,6 +474,10 @@ def test_connect_resolves_my_slot_from_a_teamid_in_the_url(tmp_path, monkeypatch
         json={"url": "https://fantasy.espn.com/football/draft?leagueId=1"
                      "&seasonId=2026&teamId=2&memberId={X}"})
     assert resp.status_code == 200
+    # Echoed straight back on connect, so the screen can show it for a human
+    # sanity check before the draft starts -- a re-randomised draft order
+    # would make this silently wrong and nothing else would notice.
+    assert resp.json()["my_slot"] == 7
 
     state = client.get("/api/live/state").json()
     assert state["my_slot"] == 7

@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { connectDraft, fetchLiveState } from '../api'
+import { connectDraft } from '../api'
 
 type Phase = 'form' | 'connecting' | 'connected'
 
@@ -32,20 +32,13 @@ export default function Connect() {
     try {
       const result = await connectDraft(trimmed, slot)
       setLeagueId(result.league_id)
-      // POST /api/live/connect resolves my_slot server-side but does not
-      // hand it back -- it's only on GET /api/live/state, which is safe to
-      // read immediately after because the session is stored before connect
-      // responds. This is the one number a re-randomized draft order could
-      // get silently wrong (see task-2 dispatch), so it's worth a second
-      // round trip to show it rather than skip straight to the draft room.
-      try {
-        const state = await fetchLiveState()
-        setMySlot(state.my_slot)
-        setSlotUnknown(state.my_slot === null)
-      } catch {
-        setMySlot(null)
-        setSlotUnknown(true)
-      }
+      // Shown back for a human to sanity-check. The slot is resolved from
+      // the URL's teamId through draft_teams using the most recent completed
+      // season, so a league that re-randomised its draft order since then
+      // gets a silently wrong answer no data source here can detect. One
+      // glance catches it; nothing else does.
+      setMySlot(result.my_slot ?? null)
+      setSlotUnknown(result.my_slot == null)
       setPhase('connected')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not connect to that draft')
