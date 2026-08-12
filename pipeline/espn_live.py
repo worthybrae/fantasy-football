@@ -103,3 +103,73 @@ def apply_picks(conn, live: LivePicks) -> int:
         conn.execute("ROLLBACK")
         raise
     return len(live.rows)
+
+
+SOCKET_HOST = "wss://fantasydraft.espn.com"
+# ESPN's lineup slot ids, carried on every SELECTED frame. Kept for the
+# consumer's benefit -- the board already knows each player's position, so
+# nothing here needs to trust ESPN's slot to place a pick.
+LINEUP_SLOTS = {0: "QB", 2: "RB", 4: "WR", 6: "TE", 16: "DST", 17: "K"}
+
+
+class DraftEvent(NamedTuple):
+    verb: str
+    args: list
+
+
+def parse_frame(payload: str) -> "DraftEvent | None":
+    """One websocket frame -> one event, or None if it carries no event.
+
+    Deliberately does not validate arity or interpret arguments. The protocol
+    carries verbs this module has no interest in (CLOCK, PING, AUTOSUGGEST)
+    and one, INIT, whose argument is a base64 binary blob -- raising on any
+    of them would kill the consumer on the first frame of a real draft.
+    Interpretation belongs to `picks_from_events`, which reads only what it
+    understands.
+    """
+    text = (payload or "").strip()
+    if not text:
+        return None
+    parts = text.split()
+    return DraftEvent(parts[0], parts[1:])
+
+
+def picks_from_events(events, crosswalk: dict) -> LivePicks:
+    """Fold a draft event stream into the same shape `apply_picks` takes.
+
+    `pick_no` is the 1-based position of each SELECTED event in the stream,
+    because the protocol does not carry a pick number. `_drafted_state`
+    attributes pick k to whoever was on the clock for pick k, so this
+    ordering decides every roster downstream.
+
+    An unmapped pick still consumes its number. Skipping it would shift every
+    later pick up one and hand real players to the wrong teams -- silently,
+    which is the failure mode this whole module is arranged to prevent.
+    """
+    rows, unmapped, pick_no = [], [], 0
+    for event in events:
+        if event is None or event.verb != "SELECTED" or len(event.args) < 2:
+            continue
+        pick_no += 1
+        try:
+            espn_id = int(event.args[1])
+        except (TypeError, ValueError):
+            continue
+        player_id = crosswalk.get(espn_id)
+        if player_id is None:
+            unmapped.append({"espn_player_id": espn_id, "overall_pick": pick_no})
+            continue
+        rows.append({"player_id": player_id, "pick_no": pick_no})
+    return LivePicks(pd.DataFrame(rows, columns=COLUMNS), unmapped)
+
+
+def socket_url(league_id: str, swid: str, token: str) -> str:
+    """The URL ESPN's own draft room opens.
+
+    Query parameters are positional-ish and undocumented; these are the names
+    and order observed in a real capture. `token` is the value the server
+    sends back on its own TOKEN frame in a prior session.
+    """
+    return (f"{SOCKET_HOST}/game-1/league-{league_id}/JOIN"
+            f"?1=1&2={league_id}&3=2&4={swid}&5={token}"
+            f"&6=false&7=false&8=KONA")

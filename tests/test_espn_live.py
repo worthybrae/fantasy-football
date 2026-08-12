@@ -5,7 +5,9 @@ import pandas as pd
 import pytest
 
 from pipeline.db import get_conn, write_table
-from pipeline.espn_live import COLUMNS, LivePicks, apply_picks, build_crosswalk, translate
+from pipeline.espn_live import (COLUMNS, DraftEvent, LivePicks, apply_picks,
+                                build_crosswalk, parse_frame,
+                                picks_from_events, socket_url, translate)
 
 FIXTURE = Path("tests/fixtures/espn_live_draft.json")
 
@@ -188,3 +190,105 @@ def test_apply_picks_raises_on_duplicate_player_id_within_batch(tmp_path):
     # Verify the table survived: DELETE succeeded, but the transaction rolled back
     got = conn.execute("SELECT player_id FROM drafted").fetchall()
     assert got == [("old",)]
+
+
+def _frames():
+    rows = [json.loads(l) for l in SOCKET_FIXTURE.read_text().splitlines() if l]
+    return [str(r.get("payload") or "") for r in rows if r["kind"] == "ws-recv"]
+
+
+def test_parse_frame_reads_a_pick():
+    e = parse_frame("SELECTED 1 4430807 2")
+    assert e == DraftEvent("SELECTED", ["1", "4430807", "2"])
+
+
+def test_parse_frame_keeps_the_optional_manager_swid():
+    """A human pick carries a trailing SWID, a bot pick does not. Parsing
+    must not depend on the argument count."""
+    e = parse_frame("SELECTED 2 4429795 2 {8491403C-A53F-4257-8D52-F8AE32CED897}")
+    assert e.verb == "SELECTED"
+    assert e.args[:3] == ["2", "4429795", "2"]
+    assert e.args[3].startswith("{")
+
+
+def test_parse_frame_ignores_blank_and_malformed_frames():
+    assert parse_frame("") is None
+    assert parse_frame("   ") is None
+
+
+def test_parse_frame_does_not_choke_on_the_binary_init_blob():
+    """INIT carries base64 of a binary structure. It must parse as an event
+    like any other and simply not be interpreted -- raising here would kill
+    the consumer on the first frame of every draft."""
+    e = parse_frame("INIT AAAAAQAAAAELvB3TAAAAAgAAAAE=")
+    assert e.verb == "INIT"
+
+
+def test_picks_from_events_numbers_picks_by_stream_order():
+    """`pick_no` is not in the protocol -- it is the position of the
+    SELECTED event. `_drafted_state` attributes rosters by it, so an
+    off-by-one here misassigns every roster silently."""
+    events = [parse_frame(p) for p in [
+        "STATE 1",
+        "SELECTING 1 30000",
+        "SELECTED 1 111 2",
+        "AUTOSUGGEST 999",
+        "SELECTING 2 30000",
+        "SELECTED 2 222 4",
+    ]]
+    out = picks_from_events(events, {111: "g1", 222: "g2"})
+    assert list(out.rows["player_id"]) == ["g1", "g2"]
+    assert list(out.rows["pick_no"]) == [1, 2]
+    assert out.unmapped == []
+
+
+def test_picks_from_events_reports_an_unmapped_pick_without_shifting_pick_no():
+    """An unmapped pick still consumed a pick slot. If it were skipped
+    entirely the following picks would all shift up one and be attributed to
+    the wrong teams."""
+    events = [parse_frame(p) for p in
+              ["SELECTED 1 111 2", "SELECTED 2 999 4", "SELECTED 3 333 2"]]
+    out = picks_from_events(events, {111: "g1", 333: "g3"})
+    assert list(out.rows["player_id"]) == ["g1", "g3"]
+    assert list(out.rows["pick_no"]) == [1, 3]
+    assert out.unmapped == [{"espn_player_id": 999, "overall_pick": 2}]
+
+
+def test_picks_from_events_ignores_every_non_pick_verb():
+    events = [parse_frame(p) for p in
+              ["STATE 1", "CLOCK 0 63696", "PING x", "PONG x",
+               "AUTOSUGGEST 4429795", "JOINED 2 {A}", "TOKEN 1:2:3",
+               "AUTODRAFT 2 false", "SELECTING 1 30000"]]
+    out = picks_from_events(events, {})
+    assert out.rows.empty
+    assert out.unmapped == []
+
+
+def test_socket_url_is_the_shape_espn_actually_opened():
+    url = socket_url("196877779", "{8491403C-A53F-4257-8D52-F8AE32CED897}",
+                     "1:196877779:2:{8491403C-A53F-4257-8D52-F8AE32CED897}:-1781796296")
+    assert url.startswith("wss://fantasydraft.espn.com/game-1/league-196877779/JOIN")
+    assert "196877779" in url
+
+
+@pytest.mark.skipif(not SOCKET_FIXTURE.exists(), reason="no draft capture")
+def test_the_real_capture_folds_into_picks():
+    """End to end against 161 frames recorded from a live ESPN mock draft.
+
+    Every SELECTED in the capture must become either a row or an unmapped
+    entry -- none may vanish -- and pick numbers must be dense and ordered.
+    """
+    frames = _frames()
+    events = [e for e in (parse_frame(p) for p in frames) if e]
+    selected = [e for e in events if e.verb == "SELECTED"]
+    assert len(selected) >= 9
+
+    ids = {int(e.args[1]): f"p{e.args[1]}" for e in selected}
+    out = picks_from_events(events, ids)
+    assert len(out.rows) == len(selected)
+    assert out.unmapped == []
+    assert list(out.rows["pick_no"]) == list(range(1, len(selected) + 1))
+
+    half = dict(list(ids.items())[: len(ids) // 2])
+    partial = picks_from_events(events, half)
+    assert len(partial.rows) + len(partial.unmapped) == len(selected)
