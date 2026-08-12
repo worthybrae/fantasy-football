@@ -264,6 +264,35 @@ def test_picks_from_events_ignores_every_non_pick_verb():
     assert out.unmapped == []
 
 
+def test_picks_from_events_reports_a_non_integer_player_id_instead_of_dropping_it():
+    """A SELECTED frame whose id argument doesn't parse as int must still
+    consume its pick number and land in `unmapped`. The bug this guards
+    against incremented pick_no first but then `continue`d past both `rows`
+    and `unmapped` on the failed int(), so the pick vanished entirely and
+    that player stayed recommendable as if still on the board."""
+    events = [parse_frame(p) for p in
+              ["SELECTED 1 111 2", "SELECTED 2 abc 4", "SELECTED 3 333 2"]]
+    out = picks_from_events(events, {111: "g1", 333: "g3"})
+    assert list(out.rows["player_id"]) == ["g1", "g3"]
+    assert list(out.rows["pick_no"]) == [1, 3]
+    assert out.unmapped == [{"espn_player_id": None, "overall_pick": 2}]
+
+
+def test_picks_from_events_a_short_selected_frame_still_consumes_a_pick_number():
+    """A SELECTED frame missing its id argument entirely must not be skipped
+    without incrementing pick_no. The bug this guards against shared one
+    `continue` branch between the verb check and the arity check, ahead of
+    the increment, so a short frame consumed no pick number at all and every
+    later pick_no shifted down by one -- handing a real player to whoever
+    was on the clock for the wrong pick."""
+    events = [parse_frame(p) for p in
+              ["SELECTED 1 111 2", "SELECTED 2", "SELECTED 3 333 2"]]
+    out = picks_from_events(events, {111: "g1", 333: "g3"})
+    assert list(out.rows["player_id"]) == ["g1", "g3"]
+    assert list(out.rows["pick_no"]) == [1, 3]
+    assert out.unmapped == [{"espn_player_id": None, "overall_pick": 2}]
+
+
 def test_socket_url_is_the_shape_espn_actually_opened():
     url = socket_url("196877779", "{8491403C-A53F-4257-8D52-F8AE32CED897}",
                      "1:196877779:2:{8491403C-A53F-4257-8D52-F8AE32CED897}:-1781796296")

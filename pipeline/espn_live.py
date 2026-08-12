@@ -15,7 +15,9 @@ COLUMNS = ["player_id", "pick_no"]
 
 class LivePicks(NamedTuple):
     rows: pd.DataFrame          # columns COLUMNS, sorted by pick_no
-    unmapped: list              # [{"espn_player_id": int, "overall_pick": int}]
+    unmapped: list              # [{"espn_player_id": int | None, "overall_pick": int}]
+                                 # espn_player_id is None when the frame carried
+                                 # no parseable id (see picks_from_events)
 
 
 def build_crosswalk(board) -> dict:
@@ -142,18 +144,33 @@ def picks_from_events(events, crosswalk: dict) -> LivePicks:
     attributes pick k to whoever was on the clock for pick k, so this
     ordering decides every roster downstream.
 
-    An unmapped pick still consumes its number. Skipping it would shift every
-    later pick up one and hand real players to the wrong teams -- silently,
-    which is the failure mode this whole module is arranged to prevent.
+    Every SELECTED frame consumes a pick number and lands in exactly one of
+    `rows` or `unmapped` -- never neither, and never counted twice. `pick_no`
+    increments as soon as the verb is confirmed to be SELECTED, before any
+    attempt to read or resolve an id. A frame that is missing its id
+    argument, carries a non-numeric one, or names a player the crosswalk
+    doesn't know is still *that* pick number. Two failure modes this guards
+    against, both silent: dropping the frame entirely leaves a drafted
+    player on the board for the tool to recommend as if still available;
+    consuming a number only on success shifts every later pick_no down by
+    one and hands a real player to the wrong team's roster.
+
+    An `unmapped` entry's `espn_player_id` is `None` when the frame carried
+    no parseable id at all (missing argument or non-numeric), rather than an
+    invented number. -1 in particular is already ESPN's own sentinel for "no
+    player yet" elsewhere in this codebase (see `translate`), so reusing it
+    here for a different meaning would be actively misleading.
     """
     rows, unmapped, pick_no = [], [], 0
     for event in events:
-        if event is None or event.verb != "SELECTED" or len(event.args) < 2:
+        if event is None or event.verb != "SELECTED":
             continue
         pick_no += 1
+        raw_id = event.args[1] if len(event.args) >= 2 else None
         try:
-            espn_id = int(event.args[1])
+            espn_id = int(raw_id)
         except (TypeError, ValueError):
+            unmapped.append({"espn_player_id": None, "overall_pick": pick_no})
             continue
         player_id = crosswalk.get(espn_id)
         if player_id is None:
