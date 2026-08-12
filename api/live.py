@@ -78,6 +78,7 @@ def build_session(conn, my_slot: int, seed: int = DEFAULT_SEED) -> DraftSession:
         started_at=datetime.now(timezone.utc))
 
 
+import re
 import threading
 
 from fastapi import HTTPException
@@ -91,7 +92,10 @@ from scoring.draft_sim import _drafted_state, search_pick, snake_slots
 
 class ConnectBody(BaseModel):
     url: str
-    my_slot: int
+    # Optional: a URL carrying teamId= resolves my_slot through draft_teams
+    # (see _team_id_from_url / _slot_for_team) and does not need this. It is
+    # the fallback for a URL that does not carry teamId.
+    my_slot: int | None = None
 
 
 def _resolve_league_id(url: str) -> str:
@@ -111,14 +115,51 @@ def _resolve_league_id(url: str) -> str:
                    "the address bar -- it should contain leagueId=.")
 
 
-def _is_waiting_room(url: str) -> bool:
-    return "waitingroom" in (url or "").lower()
+def _team_id_from_url(url: str) -> int | None:
+    """ESPN team id from a pasted URL, if present.
+
+    The draft socket speaks team ids -- `SELECTING 2 30000` and `SELECTED 2
+    4429795 2` are both keyed by teamId, never by draft slot -- so reading
+    it off the URL when ESPN put it there beats asking the drafter to state
+    their own slot number by hand.
+    """
+    m = re.search(r"teamId=(\d+)", url or "")
+    return int(m.group(1)) if m else None
+
+
+def _slot_for_team(cur, team_id: int) -> int:
+    """Translate an ESPN team id to a draft slot via draft_teams.
+
+    A team id is not a draft slot: team 4 is not necessarily drafting 4th.
+    `draft_teams` (season, team_id, manager, slot) is the only record of
+    that mapping on hand. ESPN team ids are stable across seasons within a
+    league, so the most recent season on file is used. A team id
+    `draft_teams` has never seen fails loudly rather than silently
+    defaulting to some slot -- a wrong mapping attributes every pick to the
+    wrong manager for the entire draft, and nothing downstream can detect
+    that it happened.
+    """
+    teams = read_table(cur, "draft_teams")
+    rows = teams[teams["team_id"] == team_id] if not teams.empty else teams
+    if rows.empty:
+        raise HTTPException(
+            status_code=422,
+            detail=f"no draft_teams row for ESPN team id {team_id} -- "
+                   "pass my_slot explicitly in the request body instead.")
+    return int(rows.sort_values("season").iloc[-1]["slot"])
 
 
 STALE_AFTER_SECONDS = 15
 # Measured on the live board: 25 -> 4.7s, 100 -> 19.5s, 200 -> 35.2s.
 # Picks arrive every ~20-30s; the clock is ~90s.
 ROLLOUTS_FAR, ROLLOUTS_NEAR, ROLLOUTS_NOW = 25, 100, 200
+
+# How long _stop_listener waits for the previous listener thread to notice
+# stop_event and exit (browser close included) before refusing a reconnect
+# rather than risking two sockets for the same team. A module constant, not
+# a literal default, so a test can shrink it and exercise the refusal path
+# without a real ten-second wait.
+LISTENER_STOP_TIMEOUT = 10.0
 
 
 def rollouts_for(picks_until: int) -> int:
@@ -171,8 +212,51 @@ def register_live_routes(app, conn):
              # The generation is the guard that catches session identity
              # rather than pick count; the two check different things and
              # dropping either leaves a hole.
-             "generation": 0}
+             "generation": 0,
+             # The socket listener's own lifecycle, set only by live_connect
+             # and cleared only by _stop_listener. `listener` is the live
+             # DraftListener instance -- checked by identity (`is`), not by
+             # generation number, so a superseded listener's own in-flight
+             # websocket callback (which is not gated by `listener_stop`;
+             # see run_listener) can still recognise it is no longer the
+             # active one and skip writing. `listener_thread` is what
+             # _stop_listener joins on. `listener_error` carries the text of
+             # any exception that killed the thread, so a dead listener is
+             # visible on /api/live/state instead of failing silently.
+             "listener": None, "listener_thread": None,
+             "listener_stop": None, "listener_error": None}
     lock = threading.Lock()
+
+    def _stop_listener(timeout: float = LISTENER_STOP_TIMEOUT) -> bool:
+        """Signal the active listener thread to stop and wait for it to exit.
+
+        Not called with `lock` held: joining a thread while holding it would
+        block anyone else who needs `state` -- including, briefly, the very
+        thread being joined, whose `on_change` callback takes the lock for
+        its identity check (see live_connect). There is nothing under the
+        lock this function needs atomically; it reads the two handles it
+        needs, then does its blocking work outside it.
+
+        Returns True once the thread is confirmed stopped (or none was
+        running) and clears its state. Returns False if it did not exit
+        within `timeout` -- callers must treat that as "a second listener
+        may still be alive" and refuse to start a new one rather than risk
+        two sockets for the same team.
+        """
+        with lock:
+            stop_event = state["listener_stop"]
+            thread = state["listener_thread"]
+        if stop_event is not None:
+            stop_event.set()
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=timeout)
+            if thread.is_alive():
+                return False
+        with lock:
+            state["listener"] = None
+            state["listener_thread"] = None
+            state["listener_stop"] = None
+        return True
 
     def _recompute(session, picks_made):
         """Run one search and store it, unless superseded meanwhile.
@@ -232,7 +316,8 @@ def register_live_routes(app, conn):
                 return {"active": False, "picks_made": 0, "on_the_clock": None,
                         "candidates": [], "candidates_as_of_pick": None,
                         "last_poll_at": None, "stale": True,
-                        "unmapped_picks": []}
+                        "unmapped_picks": [], "listener_error": None,
+                        "listener_alive": False}
             snapshot = dict(state)
         cur = conn.cursor()
         try:
@@ -241,6 +326,7 @@ def register_live_routes(app, conn):
             cur.close()
         slots = snake_slots(session.settings.teams, session.settings.rounds)
         on_clock = slots[picks_made] if picks_made < len(slots) else None
+        thread = snapshot["listener_thread"]
         return {
             "active": True,
             "picks_made": int(picks_made),
@@ -252,26 +338,71 @@ def register_live_routes(app, conn):
                              if snapshot["last_poll_at"] else None),
             "stale": _is_stale(snapshot["last_poll_at"], now),
             "unmapped_picks": snapshot["unmapped"],
+            # A dead listener is the worst failure mode this system has --
+            # the board looks current and simply stops updating. Silence is
+            # not an option: listener_error carries the exception that
+            # killed the thread (None if it never had one, e.g. a session
+            # built via /api/live/start with no socket at all), and
+            # listener_alive is the thread's live status, so a hang with no
+            # exception is still visible even though it sets no error.
+            "listener_error": snapshot["listener_error"],
+            "listener_alive": thread.is_alive() if thread is not None else False,
         }
 
     @app.post("/api/live/stop")
     def live_stop():
+        stopped = _stop_listener()
         with lock:
             state["generation"] += 1
             state.update({"session": None, "candidates": [],
                           "as_of_pick": None, "unmapped": [],
-                          "last_poll_at": None})
-        return {"active": False}
+                          "last_poll_at": None, "listener": None,
+                          "listener_thread": None, "listener_stop": None,
+                          "listener_error": None})
+        return {"active": False, "listener_stopped": stopped}
 
     @app.post("/api/live/connect")
     def live_connect(body: ConnectBody):
         league_id = _resolve_league_id(body.url)
+
         cur = conn.cursor()
         try:
-            session = build_session(cur, body.my_slot)
+            # The socket speaks team ids, not slots (see _slot_for_team's
+            # docstring) -- a teamId on the URL takes priority, and
+            # body.my_slot is only the fallback for a URL that lacks one.
+            # Resolved before anything is stopped below: a request that
+            # turns out to be invalid must never tear down a listener that
+            # was working.
+            team_id = _team_id_from_url(body.url)
+            if team_id is not None:
+                my_slot = _slot_for_team(cur, team_id)
+            elif body.my_slot is not None:
+                my_slot = body.my_slot
+            else:
+                raise HTTPException(
+                    status_code=422,
+                    detail="no teamId in that URL and no my_slot given -- "
+                           "include one.")
+
+            # Exactly one listener may run at a time: the draft socket's URL
+            # carries a token with no known derivation, so we can only ever
+            # observe the one connection a real browser holds, never open a
+            # second. Rather than refuse a reconnect outright -- which would
+            # trap a caller recovering from a dead listener (listener_error
+            # set) behind a separate, easy-to-forget /api/live/stop call --
+            # the old listener is always stopped and joined FIRST, so the
+            # two can never overlap. If it will not stop in time, refuse
+            # instead of racing it.
+            if not _stop_listener():
+                raise HTTPException(
+                    status_code=503,
+                    detail="the previous listener did not stop in time -- try again")
+
+            session = build_session(cur, my_slot)
         finally:
             cur.close()
         listener = DraftListener(session.crosswalk)
+        stop_event = threading.Event()
 
         def pump():
             """Write every pick the socket reports, then recompute.
@@ -282,6 +413,17 @@ def register_live_routes(app, conn):
             definition of pick numbering.
             """
             def on_change():
+                with lock:
+                    # `stop_event` only asks run_listener's poll loop to
+                    # exit -- it does not gate an in-flight websocket
+                    # callback Playwright may already be running when a
+                    # newer connect supersedes this listener. Checking
+                    # identity here, not just trusting the stop signal, is
+                    # what keeps a superseded listener's write a no-op
+                    # instead of a race against the session that replaced
+                    # it (see the module-level `state["listener"]` comment).
+                    if state["listener"] is not listener:
+                        return
                 c2 = conn.cursor()
                 try:
                     apply_picks(c2, listener.picks())
@@ -290,16 +432,30 @@ def register_live_routes(app, conn):
                     c2.close()
                 _recompute(session, made)
 
-            run_listener(listener, body.url, STATE_PATH, on_change=on_change)
+            try:
+                run_listener(listener, body.url, STATE_PATH,
+                            on_change=on_change, stop_event=stop_event)
+            except Exception as exc:      # noqa: BLE001 -- any failure (bad
+                # url, Playwright missing, ESPN unreachable) must reach
+                # /api/live/state instead of dying silently on a daemon
+                # thread with a stderr trace nobody watches during a live
+                # draft. Only recorded if this is still the active listener
+                # -- a superseded one that's mid-shutdown raising on its way
+                # out must not clobber the error of whatever replaced it.
+                with lock:
+                    if state["listener"] is listener:
+                        state["listener_error"] = str(exc)
 
+        thread = threading.Thread(target=pump, daemon=True)
         with lock:
             state.update({"session": session, "listener": listener,
+                          "listener_thread": thread, "listener_stop": stop_event,
+                          "listener_error": None,
                           "candidates": [], "as_of_pick": None,
                           "unmapped": [], "last_poll_at": None})
             state["generation"] = state.get("generation", 0) + 1
-        threading.Thread(target=pump, daemon=True).start()
+        thread.start()
         return {"connected": True, "league_id": league_id,
-                "board_fingerprint": session.board_fingerprint,
-                "waiting_room": _is_waiting_room(body.url)}
+                "board_fingerprint": session.board_fingerprint}
 
     return state, _recompute

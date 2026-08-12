@@ -59,7 +59,7 @@ def _as_int(value, fallback):
 
 
 def run_listener(listener, url: str, state_path: str, on_change=None,
-                 headless: bool = False) -> None:
+                 headless: bool = False, stop_event=None) -> None:
     """Drive a browser to `url` and feed the draft socket into `listener`.
 
     Blocking -- the caller runs it on a thread. `on_change` fires after any
@@ -74,6 +74,14 @@ def run_listener(listener, url: str, state_path: str, on_change=None,
     team, untested and liable to get one of the two kicked. `headless=True`
     stays available as a parameter for a test, or a future use that only
     observes and never needs a human at the keyboard.
+
+    `stop_event` (a `threading.Event`, optional) is the cooperative-stop
+    signal: the poll loop below checks it once a second and returns once it
+    is set, closing the browser on the way out. `None` (the default) means
+    "no external stop signal" -- the old behaviour of looping until an
+    exception (a `KeyboardInterrupt`, or the process dying) preserved for
+    any caller that manages its own lifetime rather than a caller that needs
+    to end one listener before starting the next.
     """
     from pathlib import Path
 
@@ -99,7 +107,7 @@ def run_listener(listener, url: str, state_path: str, on_change=None,
             ws.on("framereceived", handle) if "fantasydraft" in ws.url else None))
         page.goto(url)
         try:
-            while True:
+            while stop_event is None or not stop_event.is_set():
                 page.wait_for_timeout(1000)
         except BaseException:      # noqa: BLE001 -- KeyboardInterrupt is not Exception
             pass

@@ -402,12 +402,152 @@ def test_connect_accepts_a_real_draft_url_and_a_mock_url(tmp_path, monkeypatch):
     assert _resolve_league_id("539649131") == "539649131"
 
 
-def test_connect_warns_on_a_waiting_room_url(tmp_path):
-    """A waiting-room URL resolves to the same league, but the socket carries
-    no picks until the draft starts. Saying so beats sitting silently idle."""
-    from api.live import _is_waiting_room
-    assert _is_waiting_room("https://fantasy.espn.com/football/waitingroom?leagueId=1")
-    assert not _is_waiting_room("https://fantasy.espn.com/football/draft?leagueId=1")
+def test_team_id_from_url_reads_teamid_when_present():
+    """The socket speaks team ids (SELECTING 2 30000, SELECTED 2 ... 2), not
+    draft slots -- read it off the URL when ESPN put it there rather than
+    asking the drafter to state their own slot number by hand."""
+    from api.live import _team_id_from_url
+    assert _team_id_from_url(
+        "https://fantasy.espn.com/football/draft?leagueId=1&seasonId=2026"
+        "&teamId=7&memberId={ABC}") == 7
+    assert _team_id_from_url("https://fantasy.espn.com/football/draft?leagueId=1") is None
+    assert _team_id_from_url("") is None
+
+
+def test_slot_for_team_translates_team_id_through_draft_teams(tmp_path):
+    """A team id is not a draft slot -- team 4 is not necessarily drafting
+    4th. draft_teams (season, team_id, manager, slot) is the only record of
+    that mapping, and the most recent season on file wins when a team id
+    appears in more than one."""
+    from api.live import _slot_for_team
+    path = str(tmp_path / "slots.duckdb")
+    conn = get_conn(path)
+    write_table(conn, "draft_teams", pd.DataFrame([
+        {"season": 2024, "team_id": 4, "manager": "m4", "slot": 8},
+        {"season": 2025, "team_id": 4, "manager": "m4", "slot": 2},
+        {"season": 2025, "team_id": 9, "manager": "m9", "slot": 6},
+    ]))
+    assert _slot_for_team(conn, 4) == 2       # 2025 row wins over 2024's
+    assert _slot_for_team(conn, 9) == 6
+    conn.close()
+
+
+def test_slot_for_team_fails_loudly_for_an_unknown_team_id(tmp_path):
+    """A wrong team-id/slot mapping attributes every pick to the wrong
+    manager for the whole draft, and nothing downstream can detect it --
+    so an unknown team id must raise, never silently default to some slot."""
+    from fastapi import HTTPException
+    from api.live import _slot_for_team
+    path = str(tmp_path / "slots.duckdb")
+    conn = get_conn(path)
+    write_table(conn, "draft_teams", pd.DataFrame([
+        {"season": 2025, "team_id": 4, "manager": "m4", "slot": 2}]))
+    with pytest.raises(HTTPException) as exc_info:
+        _slot_for_team(conn, 99)
+    assert exc_info.value.status_code == 422
+    conn.close()
+
+
+def test_connect_resolves_my_slot_from_a_teamid_in_the_url(tmp_path, monkeypatch):
+    """Correction B, end to end: a URL carrying teamId= must resolve my_slot
+    through draft_teams rather than trusting (or requiring) the request
+    body's my_slot -- and the resulting session must actually use the
+    translated slot, not the untranslated team id."""
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    conn = get_conn(path)
+    # Team id 2 drafts from slot 7 -- deliberately NOT slot 2, so a bug that
+    # used the team id itself as the slot would be caught.
+    write_table(conn, "draft_teams", pd.DataFrame([
+        {"season": 2025, "team_id": 1, "manager": "m1", "slot": 1},
+        {"season": 2025, "team_id": 2, "manager": "m2", "slot": 7}]))
+    conn.close()
+
+    monkeypatch.setattr("api.live.run_listener", lambda *a, **k: None)
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    client = TestClient(create_app(path))
+
+    resp = client.post(
+        "/api/live/connect",
+        json={"url": "https://fantasy.espn.com/football/draft?leagueId=1"
+                     "&seasonId=2026&teamId=2&memberId={X}"})
+    assert resp.status_code == 200
+
+    state = client.get("/api/live/state").json()
+    assert state["my_slot"] == 7
+    client.post("/api/live/stop")
+
+
+def test_connect_fails_loudly_when_teamid_is_unknown_to_draft_teams(tmp_path):
+    """Correction B's other half: draft_teams has no row for this team id --
+    refuse rather than silently drafting under the wrong slot."""
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    client = TestClient(create_app(path))
+
+    resp = client.post(
+        "/api/live/connect",
+        json={"url": "https://fantasy.espn.com/football/draft?leagueId=1"
+                     "&teamId=999&memberId={X}"})
+    assert resp.status_code == 422
+
+
+def test_a_rejected_connect_does_not_tear_down_the_running_listener(
+        tmp_path, monkeypatch):
+    """my_slot/teamId validation must run before the old listener is
+    stopped. Stopping first would mean an invalid second request (typo'd
+    URL, forgotten my_slot) kills a listener that was working fine, leaving
+    the draft unwatched even though the request that broke it was refused."""
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+
+    def fake_run_listener(listener, url, state_path, on_change=None,
+                          headless=False, stop_event=None):
+        while stop_event is None or not stop_event.is_set():
+            time.sleep(0.01)
+
+    monkeypatch.setattr("api.live.run_listener", fake_run_listener)
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    client = TestClient(create_app(path))
+
+    r1 = _connect(client, "1")
+    assert r1.status_code == 200
+    assert _wait_until(
+        lambda: client.get("/api/live/state").json()["listener_alive"])
+
+    # No teamId in the URL and no my_slot in the body -- must be rejected
+    # without touching the still-good first listener.
+    bad = client.post(
+        "/api/live/connect",
+        json={"url": "https://fantasy.espn.com/football/draft?leagueId=2"})
+    assert bad.status_code == 422
+
+    assert client.get("/api/live/state").json()["listener_alive"] is True
+    client.post("/api/live/stop")
+
+
+def test_connect_requires_my_slot_when_the_url_has_no_teamid(tmp_path):
+    """my_slot is only a fallback for a URL without teamId -- if neither is
+    given there is nothing to build a session with, and that must be a
+    clear error, not a crash or a silent default."""
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    client = TestClient(create_app(path))
+
+    resp = client.post(
+        "/api/live/connect",
+        json={"url": "https://fantasy.espn.com/football/draft?leagueId=1"})
+    assert resp.status_code == 422
 
 
 import json
@@ -480,11 +620,16 @@ def test_connect_wires_the_listener_to_apply_picks_and_recompute(tmp_path, monke
 
     done = threading.Event()
 
-    def fake_run_listener(listener, url, state_path, on_change=None, headless=False):
+    def fake_run_listener(listener, url, state_path, on_change=None,
+                          headless=False, stop_event=None):
         """Stands in for the real, browser-driving run_listener. Replays
         real frames and fires on_change exactly when the real one would --
         after any frame that changes the pick count -- so the wiring under
-        test sees the same call shape it would against a live socket."""
+        test sees the same call shape it would against a live socket.
+        Accepts (and ignores) stop_event: this fake finishes on its own
+        after three frames, so nothing here needs to check it, but the real
+        live_connect always passes it and a fake with a narrower signature
+        would raise a TypeError as soon as connect called it."""
         seen = 0
         for frame in _first_n_selected_frames(3):
             listener.on_frame(frame)
@@ -528,3 +673,273 @@ def test_connect_wires_the_listener_to_apply_picks_and_recompute(tmp_path, monke
     assert state["candidates_as_of_pick"] == 3
     assert state["candidates"] == [{"player_id": "winner", "ev": 1.0, "se": 0.1,
                                     "applied_pct": 1.0, "rank": 1}]
+
+
+# --- Listener lifecycle: at most one running, stop really stops it, a dead
+# listener is visible, and a superseded one can never write. -----------------
+#
+# None of this had a test before: connect started a daemon thread and nothing
+# else in this file ever exercised what a *second* connect, or a stop, or a
+# thread that raises, actually does to that thread. The four tests below
+# correspond one to one with the four review criticals.
+
+import threading
+import time
+
+
+def _wait_until(predicate, timeout=5.0, interval=0.01):
+    """Poll a background thread's effect on shared state instead of
+    sleeping a fixed guess. Every listener-lifecycle test below is racing a
+    real (fake) thread, and a fixed sleep is either too slow (flaky in CI)
+    or too fast (flaky here) -- polling is the only version of this that is
+    both fast and reliable."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return False
+
+
+def _connect(client, league_id, my_slot=1):
+    return client.post(
+        "/api/live/connect",
+        json={"url": f"https://fantasy.espn.com/football/draft?leagueId={league_id}",
+             "my_slot": my_slot})
+
+
+def test_a_second_connect_stops_the_first_listener_before_starting_a_new_one(
+        tmp_path, monkeypatch):
+    """Critical #1: nothing rejected a repeat POST /api/live/connect and
+    nothing stopped the first thread -- it kept running run_listener's
+    `while True` with its own browser and socket forever. That is a second
+    socket as the same team, the one thing this whole module exists to
+    prevent.
+
+    The fake below blocks on its own stop_event exactly like the real
+    run_listener's poll loop, and records (under a lock, so a violation
+    detected on the fake's own thread is not lost) whenever it starts while
+    another fake is already active. If connect #2 does not fully stop and
+    join connect #1's thread before starting its own, this test catches it
+    two ways: a recorded overlap, or #1 missing from `stopped` by the time
+    connect #2's HTTP response has already come back (which only happens if
+    the stop-and-join is synchronous inside the handler, not fire-and-forget).
+    """
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+
+    active = {"n": 0}
+    violations = []
+    started, stopped = [], []
+    tracker_lock = threading.Lock()
+
+    def make_fake(fake_id):
+        def fake_run_listener(listener, url, state_path, on_change=None,
+                              headless=False, stop_event=None):
+            with tracker_lock:
+                if active["n"] != 0:
+                    violations.append(
+                        f"{fake_id} started while {active['n']} listener(s) already active")
+                active["n"] += 1
+                started.append(fake_id)
+            try:
+                while stop_event is None or not stop_event.is_set():
+                    time.sleep(0.01)
+            finally:
+                with tracker_lock:
+                    active["n"] -= 1
+                    stopped.append(fake_id)
+        return fake_run_listener
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    client = TestClient(create_app(path))
+
+    monkeypatch.setattr("api.live.run_listener", make_fake("first"))
+    r1 = _connect(client, "1")
+    assert r1.status_code == 200
+    assert _wait_until(lambda: "first" in started), "first listener never started"
+
+    monkeypatch.setattr("api.live.run_listener", make_fake("second"))
+    r2 = _connect(client, "2")
+    assert r2.status_code == 200
+    # By the time connect #2's response has returned, _stop_listener already
+    # ran (and joined) synchronously inside the handler, before the second
+    # thread was even created -- so this is true immediately, no polling.
+    assert stopped == ["first"], (
+        "connect #2 must not answer until connect #1's thread has fully exited")
+
+    assert _wait_until(lambda: "second" in started), "second listener never started"
+    assert violations == [], f"two listeners were active at once: {violations}"
+
+    client.post("/api/live/stop")
+    assert _wait_until(lambda: stopped == ["first", "second"])
+
+
+def test_stop_actually_joins_the_listener_thread(tmp_path, monkeypatch):
+    """Critical #3: live_stop reset the state dict and never touched the
+    thread or browser -- after "stopping", the old thread kept writing
+    picks and recomputing indefinitely. `stopped.append(...)` below only
+    runs when the fake's target function actually returns, which is the
+    same event as the real Thread finishing -- so seeing it appear here is
+    proof the thread exited, not just that the API forgot about it.
+    """
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+
+    started, stopped = [], []
+
+    def fake_run_listener(listener, url, state_path, on_change=None,
+                          headless=False, stop_event=None):
+        started.append(True)
+        while stop_event is None or not stop_event.is_set():
+            time.sleep(0.01)
+        stopped.append(True)
+
+    monkeypatch.setattr("api.live.run_listener", fake_run_listener)
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    client = TestClient(create_app(path))
+
+    r = _connect(client, "1")
+    assert r.status_code == 200
+    assert _wait_until(lambda: started), "listener never started"
+    assert not stopped, "listener exited before stop was even requested"
+
+    resp = client.post("/api/live/stop")
+    body = resp.json()
+    assert body == {"active": False, "listener_stopped": True}
+    # No polling here either: live_stop's own {"listener_stopped": True}
+    # already asserts the join completed synchronously before it answered.
+    assert stopped == [True]
+
+
+def test_a_listener_exception_reaches_live_state_instead_of_dying_silently(
+        tmp_path, monkeypatch):
+    """Critical #4: chromium.launch, page.goto and the Playwright import sat
+    outside any try/except, and pump() did not wrap the call -- any failure
+    (bad URL, ESPN down, Playwright missing) killed the daemon thread with a
+    stderr trace nobody sees, while the endpoint had already answered
+    {"connected": true}. A dead listener must be visible through the API,
+    not indistinguishable from a working one."""
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+
+    def fake_run_listener(listener, url, state_path, on_change=None,
+                          headless=False, stop_event=None):
+        raise RuntimeError("simulated: ESPN unreachable")
+
+    monkeypatch.setattr("api.live.run_listener", fake_run_listener)
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    client = TestClient(create_app(path))
+
+    resp = _connect(client, "1")
+    # The endpoint itself still answers 200 -- the failure happens
+    # asynchronously, on the thread, after the response was already sent.
+    # That asymmetry is exactly why /api/live/state has to carry it.
+    assert resp.status_code == 200
+
+    assert _wait_until(
+        lambda: client.get("/api/live/state").json()["listener_error"] is not None), \
+        "listener_error never appeared on /api/live/state"
+
+    body = client.get("/api/live/state").json()
+    assert body["active"] is True
+    assert "simulated: ESPN unreachable" in body["listener_error"]
+    assert body["listener_alive"] is False
+
+
+def test_a_superseded_listeners_late_callback_cannot_write_drafted(
+        tmp_path, monkeypatch):
+    """Critical #2: on_change called apply_picks unconditionally, with no
+    check that its own listener was still the active one. Traced: connect
+    #2 bumps state["generation"], but connect #1's on_change can still fire
+    afterward -- `stop_event` only asks run_listener's *loop* to exit, it
+    does not cancel a websocket callback Playwright may already be running
+    when the frame arrives. The generation guard inside _recompute only
+    protects a race within one _recompute call; it does nothing for an
+    entire second listener still calling apply_picks from outside it.
+
+    This test invokes a captured on_change directly, after the listener it
+    belongs to has already been superseded by a second connect, to prove
+    the write is refused by identity -- not merely that it happens not to
+    race in practice.
+    """
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+
+    captured = {}
+
+    def fake_run_listener_capture(listener, url, state_path, on_change=None,
+                                  headless=False, stop_event=None):
+        captured["on_change"] = on_change
+        captured["listener"] = listener
+        while stop_event is None or not stop_event.is_set():
+            time.sleep(0.01)
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    client = TestClient(create_app(path))
+
+    monkeypatch.setattr("api.live.run_listener", fake_run_listener_capture)
+    r1 = _connect(client, "1")
+    assert r1.status_code == 200
+    assert _wait_until(lambda: "on_change" in captured)
+
+    # Give the soon-to-be-superseded listener one real, crosswalk-resolvable
+    # pick, so a buggy on_change (the one this test guards against) would
+    # have something real to write.
+    captured["listener"].on_frame("SELECTED 1 4429795 2")
+    stale_on_change, stale_listener = captured["on_change"], captured["listener"]
+
+    # Connect #2 supersedes #1: stops and joins it (see the first test in
+    # this section), and replaces state["listener"].
+    monkeypatch.setattr("api.live.run_listener", lambda *a, **k: None)
+    r2 = _connect(client, "2")
+    assert r2.status_code == 200
+    assert captured["listener"] is stale_listener   # sanity: didn't get overwritten
+
+    # Now fire the STALE listener's on_change directly, simulating the
+    # queued Playwright callback the stop signal could not cancel.
+    stale_on_change()
+
+    conn = get_conn(path)
+    n = conn.execute("SELECT count(*) FROM drafted").fetchone()[0]
+    conn.close()
+    assert n == 0, "a superseded listener's callback must never write to drafted"
+
+    client.post("/api/live/stop")
+
+
+def test_stop_listener_refuses_a_reconnect_if_the_old_thread_will_not_die(
+        tmp_path, monkeypatch):
+    """The other half of the "stop and wait" choice made for Critical #1:
+    if the previous listener does not honour stop_event within
+    LISTENER_STOP_TIMEOUT, connect must refuse rather than start a second
+    thread while the first might still be alive -- the one outcome the
+    whole module exists to prevent. Shrinks the timeout so the test does
+    not actually wait ten seconds for a thread that, by construction, never
+    stops."""
+    monkeypatch.setattr("api.live.LISTENER_STOP_TIMEOUT", 0.05)
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+
+    def fake_run_listener_ignores_stop(listener, url, state_path, on_change=None,
+                                       headless=False, stop_event=None):
+        # Deliberately never checks stop_event -- an uncooperative listener.
+        time.sleep(5)
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    client = TestClient(create_app(path))
+
+    monkeypatch.setattr("api.live.run_listener", fake_run_listener_ignores_stop)
+    r1 = _connect(client, "1")
+    assert r1.status_code == 200
+
+    r2 = _connect(client, "2")
+    assert r2.status_code == 503
+    assert "did not stop" in r2.json()["detail"].lower()
