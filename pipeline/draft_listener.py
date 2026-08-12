@@ -27,11 +27,33 @@ class DraftListener:
         self.on_the_clock = None
         self.ms_remaining = None
         self.started = False
+        # Set once, from TOKEN -- see the comment in on_frame for why TOKEN
+        # and not JOINED. build_session runs before the socket connects (see
+        # api/live.py's DraftSession.my_slot), so this is the only place the
+        # session's own team, and therefore its own draft slot, is ever
+        # learned.
+        self.my_team_id = None
 
-    def on_frame(self, payload: str) -> None:
+    def on_frame(self, payload: str) -> bool:
+        """Fold one frame into accumulated state.
+
+        Returns True when this frame changed something a caller watching for
+        updates needs to react to: the pick count moved (a real,
+        crosswalk-resolvable pick landed), or my_team_id became known for
+        the first time. The second case matters even though no pick landed,
+        because api/live.py's on_change must resolve my_slot the moment the
+        socket names our team -- waiting for the next pick to notice would
+        mean, at worst, missing a recommendation for the very first pick of
+        the draft, which may be ours. (run_listener is the only caller that
+        reads this return value; it needs a browser and so is not exercised
+        by these tests, but everything it depends on -- this method's
+        return value -- is.)
+        """
         event = parse_frame(payload)
         if event is None:
-            return
+            return False
+        before_picks = len(self.picks().rows)
+        had_team = self.my_team_id is not None
         self.events.append(event)
         if event.verb == "STATE":
             self.started = True
@@ -44,6 +66,25 @@ class DraftListener:
                 self.ms_remaining = _as_int(event.args[1], self.ms_remaining)
         elif event.verb == "CLOCK" and len(event.args) > 1:
             self.ms_remaining = _as_int(event.args[1], self.ms_remaining)
+        elif event.verb == "TOKEN" and event.args:
+            # TOKEN is the one frame ESPN addresses to *this* connection
+            # alone: its teamId echoes the identity the socket authenticated
+            # with (the same value socket_url sent as the URL's own `token`
+            # parameter), sent once near the top of a session. JOINED, by
+            # contrast, broadcasts to the whole room every time *any* team's
+            # browser attaches -- in the captured fixture, team 3's JOINED
+            # lands 150 frames after ours, well into the draft -- so it names
+            # a team id with no way to tell "ours" from "theirs" short of
+            # already knowing our own SWID from somewhere else. TOKEN needs
+            # nothing else, so it is the only source used here. A malformed
+            # TOKEN must not erase an already-known good id, so a failed
+            # parse is ignored rather than assigned.
+            parsed = _team_id_from_token(event.args[0])
+            if parsed is not None:
+                self.my_team_id = parsed
+        after_picks = len(self.picks().rows)
+        newly_learned_team = self.my_team_id is not None and not had_team
+        return after_picks != before_picks or newly_learned_team
 
     def picks(self) -> LivePicks:
         """Fold everything seen so far. Re-foldable: the event list is
@@ -58,12 +99,29 @@ def _as_int(value, fallback):
         return fallback
 
 
+def _team_id_from_token(arg: str) -> int | None:
+    """teamId out of a TOKEN frame's `1:<leagueId>:<teamId>:{SWID}:<nonce>`
+    argument (see espn_live.socket_url, which builds the URL this token
+    echoes back). Malformed input returns None rather than raising -- a
+    garbled frame must not take down the listener (see
+    test_a_garbage_frame_does_not_break_the_listener)."""
+    parts = (arg or "").split(":")
+    if len(parts) < 3:
+        return None
+    try:
+        return int(parts[2])
+    except ValueError:
+        return None
+
+
 def run_listener(listener, url: str, state_path: str, on_change=None,
                  headless: bool = False, stop_event=None) -> None:
     """Drive a browser to `url` and feed the draft socket into `listener`.
 
     Blocking -- the caller runs it on a thread. `on_change` fires after any
-    frame that changed the pick count, which is the signal to recompute.
+    frame `DraftListener.on_frame` reports as notable (see its docstring):
+    the pick count changed, which is the signal to recompute, or my_team_id
+    just became known, which is the signal to resolve my_slot.
 
     Visible by default, and that is load-bearing, not cosmetic. The draft
     socket's URL carries a token with no known derivation, so we cannot open
@@ -87,15 +145,9 @@ def run_listener(listener, url: str, state_path: str, on_change=None,
 
     from playwright.sync_api import sync_playwright
 
-    seen = [0]
-
     def handle(payload):
-        listener.on_frame(payload)
-        count = len(listener.picks().rows)
-        if count != seen[0]:
-            seen[0] = count
-            if on_change is not None:
-                on_change()
+        if listener.on_frame(payload) and on_change is not None:
+            on_change()
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=headless)
