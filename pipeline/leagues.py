@@ -37,3 +37,33 @@ def league_db_path(league_id: str, root: str = LEAGUES_ROOT) -> str:
     if league_id == DEFAULT_LEAGUE:
         return DEFAULT_PATH
     return str(Path(root) / f"{_safe_id(league_id)}.duckdb")
+
+
+from pipeline.db import UNIVERSAL_TABLES, get_conn, read_table, write_table
+
+
+def provision_league(league_id: str, universal_path: str,
+                     root: str = LEAGUES_ROOT) -> str:
+    """Ensure a league's database exists, seeded with the universal tables.
+
+    Idempotent: an existing file is left exactly as it is, so reconnecting
+    mid-draft never wipes the `drafted` rows already recorded. Only the
+    universal tables are copied; the league-specific tables start absent,
+    which is precisely the cold-start state `cold_start_fits` handles.
+    """
+    path = league_db_path(league_id, root=root)
+    if league_id == DEFAULT_LEAGUE or Path(path).exists():
+        return path
+    src = get_conn(universal_path)
+    try:
+        dst = get_conn(path)
+        try:
+            for table in UNIVERSAL_TABLES:
+                df = read_table(src, table)
+                if not df.empty:
+                    write_table(dst, table, df)
+        finally:
+            dst.close()
+    finally:
+        src.close()
+    return path

@@ -34,3 +34,46 @@ def test_league_id_is_sanitised_into_the_filename():
     p = league_db_path("../../etc/passwd", root="/tmp/lg")
     assert p.startswith("/tmp/lg/")
     assert ".." not in p.split("/tmp/lg/")[1]
+
+
+def test_provision_copies_universal_tables_but_not_league_ones(tmp_path):
+    """A provisioned league can build a board (universal data present) but
+    starts with no draft history of its own (league tables empty), which is
+    the cold-start case the model already handles."""
+    from pipeline.db import get_conn, write_table, read_table
+    from pipeline.leagues import provision_league
+    import pandas as pd
+
+    shared = str(tmp_path / "universal.duckdb")
+    conn = get_conn(shared)
+    write_table(conn, "weekly", pd.DataFrame([{"player_id": "p1", "season": 2025}]))
+    write_table(conn, "draft_picks", pd.DataFrame([{"season": 2025, "overall_pick": 1}]))
+    conn.close()
+
+    path = provision_league("999", universal_path=shared, root=str(tmp_path / "lg"))
+    lg = get_conn(path)
+    # universal came across
+    assert not read_table(lg, "weekly").empty
+    # league-specific did NOT -- this league has its own (empty) history
+    assert read_table(lg, "draft_picks").empty
+    lg.close()
+
+
+def test_provision_is_idempotent(tmp_path):
+    """Connecting twice must not reprovision and wipe a draft in progress."""
+    from pipeline.db import get_conn, write_table, read_table
+    from pipeline.leagues import provision_league
+    import pandas as pd
+
+    shared = str(tmp_path / "universal.duckdb")
+    get_conn(shared).close()
+    path = provision_league("999", universal_path=shared, root=str(tmp_path / "lg"))
+    lg = get_conn(path)
+    lg.execute("INSERT INTO drafted VALUES ('p1', 1)")
+    lg.close()
+
+    again = provision_league("999", universal_path=shared, root=str(tmp_path / "lg"))
+    assert again == path
+    lg = get_conn(path)
+    assert not read_table(lg, "drafted").empty      # the in-progress draft survived
+    lg.close()
