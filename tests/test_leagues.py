@@ -77,3 +77,24 @@ def test_provision_is_idempotent(tmp_path):
     lg = get_conn(path)
     assert not read_table(lg, "drafted").empty      # the in-progress draft survived
     lg.close()
+
+
+def test_two_leagues_have_independent_drafted_tables(tmp_path):
+    """The whole point. A pick marked in league A must be invisible to
+    league B -- they are different files, so a global `drafted` table can no
+    longer merge two live drafts into one."""
+    from pipeline.db import get_conn, read_table
+    from pipeline.leagues import provision_league
+
+    shared = str(tmp_path / "universal.duckdb")
+    get_conn(shared).close()
+    root = str(tmp_path / "lg")
+
+    a = get_conn(provision_league("aaa", universal_path=shared, root=root))
+    b = get_conn(provision_league("bbb", universal_path=shared, root=root))
+    a.execute("INSERT INTO drafted VALUES ('gibbs', 1)")
+
+    assert read_table(a, "drafted")["player_id"].tolist() == ["gibbs"]
+    assert read_table(b, "drafted").empty       # league B never saw it
+    a.close()
+    b.close()
