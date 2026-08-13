@@ -424,15 +424,29 @@ def register_live_routes(app, conn, db_path):
                         "listener_alive": False,
                         "token_received": state.get("token") is not None}
             snapshot = dict(state)
-        # Same connection choice as _recompute: the league this session
-        # belongs to, not always the shared `conn`, or the picks-made count
-        # (and the on-the-clock slot derived from it) would be read off the
-        # wrong league's `drafted` table.
-        cur = (snapshot["league_conn"] or conn).cursor()
-        try:
-            picks_made = cur.execute("SELECT count(*) FROM drafted").fetchone()[0]
-        finally:
-            cur.close()
+            # Same connection choice as _recompute: the league this session
+            # belongs to, not always the shared `conn`, or the picks-made
+            # count (and the on-the-clock slot derived from it) would be
+            # read off the wrong league's `drafted` table.
+            #
+            # Read while STILL holding `lock`, not after releasing it: this
+            # is a plain HTTP GET handler, running on whatever thread
+            # FastAPI happens to hand the request -- unlike _recompute (see
+            # its own comment), nothing here ties this call to the thread
+            # that owns the connection. A concurrent /api/live/stop, on a
+            # different request thread, closes exactly this connection
+            # under the same lock; snapshotting it and querying after
+            # release would leave a window where that close lands in
+            # between, and this count then runs against a closed
+            # connection. The query is one fast COUNT(*), so holding the
+            # lock across it costs negligible contention, and it cannot
+            # deadlock: the query itself takes no lock of its own, and
+            # nothing else holds `lock` while blocking on the database.
+            cur = (snapshot["league_conn"] or conn).cursor()
+            try:
+                picks_made = cur.execute("SELECT count(*) FROM drafted").fetchone()[0]
+            finally:
+                cur.close()
         slots = snake_slots(session.settings.teams, session.settings.rounds)
         on_clock = slots[picks_made] if picks_made < len(slots) else None
         thread = snapshot["listener_thread"]

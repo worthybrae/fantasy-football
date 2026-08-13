@@ -1202,3 +1202,90 @@ def test_stop_does_not_close_a_league_conn_the_listener_thread_is_still_using(
     assert closed == [], (
         "live_stop must not close a per-league connection while its "
         "listener thread is still alive")
+
+
+def test_state_query_and_stop_close_are_serialized_by_the_lock(
+        tmp_path, monkeypatch, _isolated_leagues_root):
+    """Review finding: /api/live/state used to snapshot league_conn under
+    `lock`, then release the lock before running the picks-made count on it
+    -- a concurrent /api/live/stop, on a different HTTP thread (Starlette
+    runs each sync handler on its own threadpool thread), could close that
+    exact connection in the gap between snapshot and query. The fix moves
+    the query inside the same `with lock:` block live_stop/_stop_listener
+    take to close the connection, so the two now serialize instead of
+    racing.
+
+    Constructed as a real two-thread race, not just reasoned about: get_conn
+    is wrapped so cursor() on the per-league connection blocks mid-call
+    until a concurrent /api/live/stop has had a real chance to run. With the
+    fix, that stop cannot actually close anything until the blocked
+    cursor()/count query's whole critical section (which now includes the
+    close-gating lock) has released it -- so the close can never land before
+    the query finishes, and /api/live/state must return a clean 200. Without
+    the fix, the stop's close is free to run while the query is still
+    parked in cursor(), so resuming afterward calls cursor() on an
+    already-closed connection.
+    """
+    from pipeline.db import get_conn as real_get_conn
+
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    monkeypatch.setattr("api.live.run_listener", lambda *a, **k: None)
+
+    entered_cursor = threading.Event()
+    release_cursor = threading.Event()
+
+    class _SlowSpyConn:
+        """Delegates to the real connection, except cursor() blocks until
+        told to proceed -- the window the concurrent stop races into."""
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def cursor(self):
+            entered_cursor.set()
+            release_cursor.wait(timeout=5)
+            return self._inner.cursor()
+
+    monkeypatch.setattr("api.live.get_conn", lambda p: _SlowSpyConn(real_get_conn(p)))
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    client = TestClient(create_app(path))
+
+    r = _connect(client, "1")
+    assert r.status_code == 200
+
+    results = {}
+
+    def do_state():
+        try:
+            results["state"] = client.get("/api/live/state")
+        except Exception as exc:                          # noqa: BLE001
+            results["state_exc"] = exc
+
+    t_state = threading.Thread(target=do_state)
+    t_state.start()
+    assert entered_cursor.wait(timeout=5), "state handler never reached cursor()"
+
+    def do_stop():
+        results["stop"] = client.post("/api/live/stop")
+
+    t_stop = threading.Thread(target=do_stop)
+    t_stop.start()
+    # A real window for the race to land in, before letting the blocked
+    # query proceed: with the fix, the stop thread spends this whole time
+    # blocked trying to acquire `lock` (the state handler is still holding
+    # it, parked in cursor()) -- it cannot have closed anything yet no
+    # matter how long this sleep is.
+    time.sleep(0.2)
+    release_cursor.set()
+    t_state.join(timeout=5)
+    t_stop.join(timeout=5)
+
+    assert "state_exc" not in results, (
+        f"/api/live/state raised against a connection a concurrent stop "
+        f"closed underneath it: {results.get('state_exc')!r}")
+    assert results["state"].status_code == 200
