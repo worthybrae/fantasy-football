@@ -4,6 +4,23 @@ import pandas as pd
 
 DEFAULT_PATH = "data/nfl.duckdb"
 
+# The two kinds of table, kept in one place because the whole multi-league
+# design depends on the split being correct. A per-league database holds only
+# LEAGUE_TABLES; UNIVERSAL_TABLES are read from the shared file. A table that
+# is neither would be treated as universal by provisioning and leak one
+# league's rows into every other -- so the classification is asserted complete
+# in tests rather than left implicit.
+LEAGUE_TABLES = frozenset({
+    "league", "draft_picks", "draft_teams", "draft_order",
+    "manager_profiles", "manager_tendencies", "drafted",
+    "sim_board", "sim_results", "sim_survival",
+})
+UNIVERSAL_TABLES = frozenset({
+    "weekly", "snap_counts", "depth_charts", "players", "schedules",
+    "adp", "espn_adp", "fp_ecr", "cbs_ranks", "mfl_adp",
+    "historic_adp", "historic_espn_cs", "sleeper_ids", "meta", "model_backtest",
+})
+
 def get_conn(path: str = DEFAULT_PATH) -> duckdb.DuckDBPyConnection:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     conn = duckdb.connect(path)
