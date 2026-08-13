@@ -1767,7 +1767,9 @@ td:first-child {
 
 /* The point: a long bar means you can wait on him. Same track/fill geometry
    as .rankings-row-bar so a percentage-bar always reads the same way across
-   the app. */
+   the app. Fill color is risk, not brand -- set inline per-candidate by
+   riskTone() in LiveDraft.tsx (red gone-soon -> amber -> green lasts), so the
+   fallback here only matters before that style attribute lands. */
 .live-alt-bar-track {
   display: block;
   height: 8px;
@@ -1780,7 +1782,7 @@ td:first-child {
   display: block;
   height: 100%;
   border-radius: 4px;
-  background: var(--accent);
+  background: var(--fail);
 }
 
 .live-alt-pct {

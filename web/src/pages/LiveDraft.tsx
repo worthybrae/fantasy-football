@@ -44,6 +44,23 @@ function posBadge(position: string | undefined): ReactNode {
 
 const fmtEvDelta = (n: number) => (n === 0 ? '—' : n.toFixed(1))
 
+// The alt bar's fill color: a continuous red -> amber -> green ramp keyed to
+// applied_pct, same color-mix technique as PlayerCard's sosTone (two-stop
+// interpolation between the design system's fixed --ok/--fail tokens) but
+// extended to three stops through --accent -- this app's amber -- at the
+// midpoint, since the brief calls for amber as its own readable tier, not
+// just a blend implied by two endpoints. Low pct (gone before your next
+// pick) reads --fail; high pct (he'll last, you can wait) reads --ok.
+function riskTone(pct: number): string {
+  const t = Math.max(0, Math.min(100, pct))
+  if (t >= 50) {
+    const k = ((t - 50) / 50) * 100
+    return `color-mix(in srgb, var(--ok) ${k}%, var(--accent) ${100 - k}%)`
+  }
+  const k = (t / 50) * 100
+  return `color-mix(in srgb, var(--accent) ${k}%, var(--fail) ${100 - k}%)`
+}
+
 // The reason sentence: candidates[0] (the call) vs. candidates[1] (the
 // runner-up). The argument this renders, per the task brief: the runner-up
 // is nearly as good AND likely to survive to your next pick, so take the
@@ -311,7 +328,13 @@ export default function LiveDraft() {
                           {fmtEvDelta(c.ev - (leader?.ev ?? c.ev))}
                         </span>
                         <span className="live-alt-bar-track" aria-hidden="true">
-                          <span className="live-alt-bar-fill" style={{ width: `${Math.max(0, Math.min(100, c.applied_pct))}%` }} />
+                          <span
+                            className="live-alt-bar-fill"
+                            style={{
+                              width: `${Math.max(0, Math.min(100, c.applied_pct))}%`,
+                              background: riskTone(c.applied_pct),
+                            }}
+                          />
                         </span>
                         <span className="live-alt-pct mono">{Math.round(c.applied_pct)}%</span>
                       </li>
