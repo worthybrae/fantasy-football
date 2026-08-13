@@ -60,22 +60,39 @@ def test_provision_copies_universal_tables_but_not_league_ones(tmp_path):
 
 
 def test_provision_is_idempotent(tmp_path):
-    """Connecting twice must not reprovision and wipe a draft in progress."""
+    """Connecting twice must not reprovision.
+
+    `drafted` surviving alone doesn't pin this -- it's a LEAGUE_TABLE, and
+    the copy loop only ever touches UNIVERSAL_TABLES, so it would survive
+    even with the idempotency guard deleted. What the guard actually
+    protects is any UNIVERSAL table already in the league file: without it,
+    a reconnect re-copies from the shared source and clobbers whatever has
+    changed there since provisioning. A sentinel written into a universal
+    table (`weekly`), absent from the shared source, pins that.
+    """
     from pipeline.db import get_conn, write_table, read_table
     from pipeline.leagues import provision_league
     import pandas as pd
 
     shared = str(tmp_path / "universal.duckdb")
-    get_conn(shared).close()
+    conn = get_conn(shared)
+    write_table(conn, "weekly", pd.DataFrame([{"player_id": "p1", "season": 2025}]))
+    conn.close()
+
     path = provision_league("999", universal_path=shared, root=str(tmp_path / "lg"))
     lg = get_conn(path)
     lg.execute("INSERT INTO drafted VALUES ('p1', 1)")
+    # Overwrite the copied-in universal table with a value the shared source
+    # does not have. A reprovision that skips the guard re-copies "weekly"
+    # from the source and wipes this.
+    write_table(lg, "weekly", pd.DataFrame([{"player_id": "sentinel", "season": 9999}]))
     lg.close()
 
     again = provision_league("999", universal_path=shared, root=str(tmp_path / "lg"))
     assert again == path
     lg = get_conn(path)
     assert not read_table(lg, "drafted").empty      # the in-progress draft survived
+    assert read_table(lg, "weekly")["player_id"].tolist() == ["sentinel"]  # not re-copied
     lg.close()
 
 
