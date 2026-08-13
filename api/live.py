@@ -111,6 +111,24 @@ class ConnectBody(BaseModel):
     url: str
 
 
+class TokenBody(BaseModel):
+    """What the browser extension (or bookmarklet) delivers.
+
+    Deliberately NOT the account session. `token` is ESPN's per-draft
+    draftSecurity value -- scoped to this one draft, worthless once it ends --
+    and `swid` identifies the account but is not a login credential on its
+    own. The espn_s2 session cookie never reaches here: the extension uses it
+    only to fetch this token from ESPN and forwards just the result. So the
+    most this endpoint ever holds is a two-hour nonce, in memory, which is the
+    whole point of doing it this way rather than taking a password.
+    """
+    leagueId: str
+    teamId: str
+    swid: str
+    token: str
+    season: str
+
+
 def _resolve_league_id(url: str) -> str:
     """League id from anything ESPN shows you.
 
@@ -361,7 +379,8 @@ def register_live_routes(app, conn):
                         "candidates": [], "candidates_as_of_pick": None,
                         "last_poll_at": None, "stale": True,
                         "unmapped_picks": [], "listener_error": None,
-                        "listener_alive": False}
+                        "listener_alive": False,
+                        "token_received": state.get("token") is not None}
             snapshot = dict(state)
         cur = conn.cursor()
         try:
@@ -391,6 +410,7 @@ def register_live_routes(app, conn):
             # exception is still visible even though it sets no error.
             "listener_error": snapshot["listener_error"],
             "listener_alive": thread.is_alive() if thread is not None else False,
+            "token_received": snapshot.get("token") is not None,
         }
 
     @app.post("/api/live/stop")
@@ -404,6 +424,31 @@ def register_live_routes(app, conn):
                           "listener_thread": None, "listener_stop": None,
                           "listener_error": None})
         return {"active": False, "listener_stopped": stopped}
+
+    @app.post("/api/live/token")
+    def live_token(body: TokenBody):
+        """Receive a draft token from the extension and hold it in memory.
+
+        This is the credential half of the direct-socket path, kept separate
+        from opening the socket on purpose. Storing and acknowledging the
+        token lets the extension be verified end to end -- did it deliver a
+        well-formed, ESPN-valid token -- independently of whether the socket
+        accepts a self-minted token during a live draft, which is a distinct
+        question still to be settled against a running draft.
+
+        In memory only: a draft token is a short-lived nonce, and writing it
+        to disk would be the one thing that turns a breach from nothing into
+        a leak. It dies with this process, same as every other piece of live
+        state here.
+        """
+        with lock:
+            state["token"] = {
+                "league_id": body.leagueId, "team_id": body.teamId,
+                "swid": body.swid, "token": body.token, "season": body.season,
+                "received_at": datetime.now(timezone.utc).isoformat(),
+            }
+        return {"received": True, "league_id": body.leagueId,
+                "team_id": body.teamId}
 
     @app.post("/api/live/connect")
     def live_connect(body: ConnectBody):
