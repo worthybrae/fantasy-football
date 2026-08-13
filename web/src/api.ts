@@ -424,6 +424,9 @@ export interface LiveState {
   // (api/live.py's STALE_AFTER_SECONDS) -- including "never polled."
   stale: boolean
   unmapped_picks: UnmappedPick[]
+  // The extension has delivered a draft token. The onboarding gate flips from
+  // "open your draft and click the extension" to the live board on this.
+  token_received?: boolean
 }
 
 export async function fetchLiveState(): Promise<LiveState> {

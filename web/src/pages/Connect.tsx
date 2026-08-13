@@ -1,120 +1,115 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { connectDraft } from '../api'
+import { fetchLiveState } from '../api'
+import { detectExtension, STORE_URL } from '../lib/extension'
 
-type Phase = 'form' | 'connecting' | 'connected'
+// Onboarding gate. With the browser extension delivering the draft token,
+// there is no URL to type and no form to fill -- the page only has to work
+// out which of three states the user is in and show the one next step.
+//
+//   missing  -> install the extension (a button to the store)
+//   ready    -> installed, but no draft synced yet: open ESPN, click the icon
+//   live     -> a token has arrived; go to the board
+//
+// The URL field the old connect screen had is gone on purpose: the extension
+// reads leagueId/teamId off the ESPN tab and posts them with the token, so
+// the server already knows the draft. The field only ever existed because the
+// browser-window path had no other way to learn it.
+type Gate = 'checking' | 'missing' | 'ready' | 'live'
 
-// Landing screen: the first thing anyone sees. One input (the draft URL),
-// one optional fallback (slot), one button. The backend accepts any ESPN
-// URL that carries a leagueId -- draft room, waiting room, lobby, wherever
-// the drafter happens to be -- and navigates to exactly that page itself
-// (see api/live.py's DraftListener), so this screen deliberately doesn't
-// steer anyone toward one ESPN page over another.
 export default function Connect() {
-  const [url, setUrl] = useState('')
-  const [phase, setPhase] = useState<Phase>('form')
-  const [error, setError] = useState<string | null>(null)
-  const [leagueId, setLeagueId] = useState<string | null>(null)
-  const [mySlot, setMySlot] = useState<number | null>(null)
-  const [slotUnknown, setSlotUnknown] = useState(false)
+  const [gate, setGate] = useState<Gate>('checking')
+  const [extVersion, setExtVersion] = useState<string | null>(null)
   const navigate = useNavigate()
 
-  const busy = phase === 'connecting'
+  // Detect the extension once, then poll live state for a delivered token.
+  useEffect(() => {
+    let cancelled = false
 
-  async function handleSubmit(e: FormEvent) {
-    e.preventDefault()
-    const trimmed = url.trim()
-    if (!trimmed || busy) return
-    setError(null)
-    setPhase('connecting')
-    try {
-      const result = await connectDraft(trimmed)
-      setLeagueId(result.league_id)
-      // Shown back for a human to sanity-check. The slot is resolved from
-      // the URL's teamId through draft_teams using the most recent completed
-      // season, so a league that re-randomised its draft order since then
-      // gets a silently wrong answer no data source here can detect. One
-      // glance catches it; nothing else does.
-      setMySlot(result.my_slot ?? null)
-      setSlotUnknown(result.my_slot == null)
-      setPhase('connected')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not connect to that draft')
-      setPhase('form')
+    detectExtension().then((version) => {
+      if (cancelled) return
+      setExtVersion(version)
+      setGate(version ? 'ready' : 'missing')
+    })
+
+    // Only meaningful once the extension is present, but harmless before:
+    // token_received stays false until a sync lands.
+    const poll = async () => {
+      try {
+        const state = await fetchLiveState()
+        if (!cancelled && state.token_received) setGate('live')
+      } catch {
+        /* helper not up yet; the gate simply stays where it is */
+      }
     }
-  }
-
-  function reconnect() {
-    setPhase('form')
-    setError(null)
-  }
-
-  if (phase === 'connected') {
-    return (
-      <main className="connect">
-        <div className="connect-card connect-confirm">
-          <p className="connect-eyebrow">Connected · league {leagueId}</p>
-          {slotUnknown ? (
-            <p className="connect-slot-unknown">
-              Couldn't confirm a draft slot for this connection. You can still
-              enter the draft room, or reconnect and set a slot by hand below.
-            </p>
-          ) : (
-            <p className="connect-slot-line">
-              You're drafting from slot <strong className="connect-slot-value">{mySlot}</strong>.
-            </p>
-          )}
-          <p className="connect-slot-hint">
-            Not your slot? Reconnect and enter it directly -- the auto-detect
-            reads it off last season's draft, and a league that re-shuffled
-            its order this year would get this wrong.
-          </p>
-          <div className="connect-actions">
-            <button type="button" className="connect-submit" onClick={() => navigate('/draft')}>
-              Enter draft room
-            </button>
-            <button type="button" className="connect-secondary" onClick={reconnect}>
-              Reconnect
-            </button>
-          </div>
-        </div>
-      </main>
-    )
-  }
+    poll()
+    const id = setInterval(poll, 2500)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
+  }, [])
 
   return (
     <main className="connect">
       <div className="connect-card">
-        <p className="connect-eyebrow">
-          <span className="connect-dot" aria-hidden="true" />
-          Draft helper
-        </p>
-        <h1>Sync to your draft</h1>
-        <p className="connect-lede">
-          Paste the address of any ESPN page for your draft. As long as it
-          carries a leagueId, this connects and takes you there.
-        </p>
-        <form onSubmit={handleSubmit}>
-          <label htmlFor="draft-url">Draft URL</label>
-          <input
-            id="draft-url"
-            value={url}
-            autoFocus
-            autoComplete="off"
-            inputMode="url"
-            onChange={(e) => setUrl(e.target.value)}
-            placeholder="https://fantasy.espn.com/football/draft?leagueId=…"
-            disabled={busy}
-          />
-          <button type="submit" className="connect-submit" disabled={busy || !url.trim()}>
-            {busy ? 'Connecting…' : 'Sync to draft'}
-          </button>
-        </form>
-        {error && (
-          <p className="connect-error" role="alert">
-            {error}
-          </p>
+        <h1 className="connect-kicker">
+          <span className="connect-pip" aria-hidden="true" /> Draft Helper
+        </h1>
+
+        {gate === 'checking' && (
+          <>
+            <h2 className="connect-title">Getting ready…</h2>
+            <p className="connect-lede">Checking for the browser extension.</p>
+          </>
         )}
+
+        {gate === 'missing' && (
+          <>
+            <h2 className="connect-title">Add the extension</h2>
+            <p className="connect-lede">
+              One install, then every draft is a single click — no login, no
+              password, nothing to paste. The extension only ever reads a
+              token specific to each draft.
+            </p>
+            <a className="connect-submit" href={STORE_URL} target="_blank" rel="noreferrer">
+              Add to Chrome
+            </a>
+            <p className="connect-note">
+              After installing, this page picks it up automatically. Using
+              Chrome, Edge, Brave, or another Chromium browser.
+            </p>
+          </>
+        )}
+
+        {gate === 'ready' && (
+          <>
+            <h2 className="connect-title">You're set</h2>
+            <p className="connect-lede">
+              Open your ESPN draft, then click the{' '}
+              <strong className="connect-anchor">⚓</strong> Draft Helper icon in
+              your toolbar. Your board goes live here the moment you do.
+            </p>
+            <div className="connect-waiting">
+              <span className="connect-spinner" aria-hidden="true" />
+              Waiting for a draft to sync…
+            </div>
+            {extVersion && (
+              <p className="connect-note">Extension v{extVersion} detected.</p>
+            )}
+          </>
+        )}
+
+        {gate === 'live' && (
+          <>
+            <h2 className="connect-title">Draft synced</h2>
+            <p className="connect-lede">Your board is live.</p>
+            <button className="connect-submit" onClick={() => navigate('/draft')}>
+              Go to the board
+            </button>
+          </>
+        )}
+
         <p className="connect-legacy">
           Looking for the research tool? It's at <Link to="/legacy">/legacy</Link>.
         </p>

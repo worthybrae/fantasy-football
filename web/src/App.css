@@ -1942,10 +1942,62 @@ td:first-child {
   flex-shrink: 0;
 }
 
-.connect-card h1 {
+.connect-kicker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-sm);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  margin: 0 0 var(--space-3);
+}
+.connect-pip {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 10px 1px var(--accent);
+  flex: none;
+}
+.connect-title {
   font-size: 24px;
-  letter-spacing: -0.01em;
-  margin-bottom: var(--space-2);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin: 0 0 var(--space-2);
+  text-wrap: balance;
+}
+.connect-anchor { color: var(--accent); font-style: normal; }
+.connect-waiting {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: var(--space-3);
+  padding: 12px 14px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+.connect-spinner {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  flex: none;
+  animation: connect-spin 0.8s linear infinite;
+}
+@keyframes connect-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .connect-spinner { animation: none; border-top-color: var(--accent); }
+}
+/* connect-submit doubles as an <a> (the store link), so anchor-proof it. */
+a.connect-submit {
+  display: inline-block;
+  text-align: center;
+  text-decoration: none;
 }
 
 .connect-lede {
