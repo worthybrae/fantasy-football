@@ -1061,18 +1061,24 @@ def run_sim(conn, my_slot: int, slot_managers: dict,
     pool = build_pool(conn, board, settings)
 
     fits = fit_all(conn, settings)
-    if not [m for m in fits if m != "__pooled__"]:
-        # With no fitted opponent, every beta is zeros and every opponent
-        # draws uniformly over roughly 500 available players. Measured on a
-        # 500-player pool: the consensus number one comes back 100% likely to
-        # still be there at slot 8, and the top ten average 98.75%. That is
-        # not a degraded answer, it is a confident wrong one, and the board
-        # merges it with no way to tell.
+    # This used to reject a fit with no per-manager entries, on the reasoning
+    # that "no fitted opponent" meant every beta defaulted to zeros -- a
+    # uniform-random draft, a confident wrong answer. That reasoning is stale.
+    # `fit_all` now returns a market-following prior as `__pooled__` when a
+    # league has no history (draft_model.cold_start_fits), and every opponent
+    # without a personal fit inherits it via the `setdefault(manager, pooled)`
+    # below. So "only __pooled__" now means "everyone drafts to the board",
+    # which is a measured default, not noise. The only genuinely broken case
+    # is a degenerate pooled vector -- missing or all zeros -- which no code
+    # path produces today but is cheap to refuse rather than silently simulate
+    # a uniform draft.
+    pooled_check = fits.get("__pooled__")
+    if pooled_check is None or not np.any(pooled_check):
         raise ValueError(
-            "no manager models could be fitted from the imported draft "
-            "history -- run `make espn-import` and then `make fit-managers` "
-            "first. Without them every opponent would pick uniformly at "
-            "random and the simulation's numbers would be meaningless.")
+            "no usable opponent model: the pooled coefficients are missing or "
+            "all zero, which would make every opponent draft uniformly at "
+            "random. This should not happen -- fit_all returns a market prior "
+            "even with no history -- so it points at a build error upstream.")
     profiles = read_table(conn, "manager_profiles")
     pooled = fits.get("__pooled__", np.zeros(len(FEATURE_NAMES)))
     betas = {}

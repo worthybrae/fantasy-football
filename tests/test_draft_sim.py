@@ -545,6 +545,13 @@ def test_build_pool_ranks_market_known_players_before_unranked_ones(tmp_path):
 
 
 from scoring.draft_model import FEATURE_NAMES
+
+# run_sim now refuses an all-zero pooled vector: with cold-start returning a
+# real market prior, "pooled is zeros" can only mean a degenerate build, which
+# would draft every opponent uniformly. These smoke tests never cared about the
+# pooled *values* -- only that a fit exists -- so they use a small non-zero
+# stand-in rather than zeros, which the guard (correctly) rejects.
+_POOLED = np.full(len(FEATURE_NAMES), 0.05)
 from scoring.draft_sim import SimPool, _run_draft, rollout, snake_slots
 
 
@@ -998,7 +1005,7 @@ def test_run_sim_refuses_to_run_when_a_drafted_row_has_no_pick_no(
     conn.execute("INSERT INTO drafted VALUES ('p3', NULL)")
     personal = np.zeros(len(FEATURE_NAMES))
     monkeypatch.setattr(draft_model_mod, "fit_all",
-                        lambda conn, settings=None: {"__pooled__": personal,
+                        lambda conn, settings=None: {"__pooled__": _POOLED,
                                                      "m1": personal})
     monkeypatch.setattr(board_mod, "build_board",
                         lambda conn, weights=None, settings=None: pd.DataFrame())
@@ -1021,7 +1028,7 @@ def test_run_sim_seeds_rosters_from_the_recorded_pick_order(tmp_path, monkeypatc
         conn.execute("INSERT INTO drafted VALUES (?, ?)", [pid, pick_no])
     zeros = np.zeros(len(FEATURE_NAMES))
     monkeypatch.setattr(draft_model_mod, "fit_all",
-                        lambda conn, settings=None: {"__pooled__": zeros, "m1": zeros})
+                        lambda conn, settings=None: {"__pooled__": _POOLED, "m1": zeros})
     monkeypatch.setattr(board_mod, "build_board",
                         lambda conn, weights=None, settings=None: pd.DataFrame())
     monkeypatch.setattr(draft_sim_mod, "build_pool",
@@ -1256,7 +1263,7 @@ def test_run_sim_gates_personal_coefficients_on_the_manager_profiles_flag(
 
     personal_beta = np.zeros(len(FEATURE_NAMES))
     personal_beta[FEATURE_NAMES.index("reach")] = 9.0
-    pooled_beta = np.zeros(len(FEATURE_NAMES))
+    pooled_beta = _POOLED
     fits = {"__pooled__": pooled_beta, "reacher": personal_beta,
             "average": personal_beta}
 
@@ -1309,7 +1316,7 @@ def test_run_sim_writes_sim_results_and_sim_survival_and_returns_the_run_id(
     # uniformly over the whole pool. This mock's job is to stand in for
     # "manager models exist", not to make that check vacuous.
     monkeypatch.setattr(draft_model_mod, "fit_all",
-                        lambda conn, settings=None: {"__pooled__": zeros,
+                        lambda conn, settings=None: {"__pooled__": _POOLED,
                                                      **{f"m{i}": zeros for i in range(1, 9)}})
     monkeypatch.setattr(board_mod, "build_board",
                         lambda conn, weights=None, settings=None: pd.DataFrame())
@@ -1365,24 +1372,51 @@ def test_run_sim_warns_when_a_fitted_reach_coefficient_is_positive(
                 n_rollouts=2, seed=0)
 
 
-def test_run_sim_refuses_to_run_with_no_fitted_manager_models(tmp_path, monkeypatch):
-    """No draft history means fit_all returns {} and every opponent's beta is
-    zeros -- a uniform draw over roughly 500 available players. Measured on a
-    500-player pool, the consensus number one's Avail% at slot 8 comes back
-    100% and the top ten average 98.75%. That is a confidently wrong answer,
-    not a degraded one, and the board merges it with no way to tell.
+def test_run_sim_refuses_a_degenerate_all_zero_pooled_model(tmp_path, monkeypatch):
+    """The guard's new contract. A no-history league is NO LONGER refused --
+    fit_all returns a market-following prior (cold_start_fits) and every
+    opponent inherits it, which is a measured default rather than noise.
+
+    What IS still refused is a pooled vector of all zeros: that produces a
+    uniform draw over ~500 players, where the consensus number one comes back
+    100% available at slot 8 -- a confidently wrong answer the board would
+    merge with no way to tell. No production path yields it (fit_all always
+    returns a non-zero prior), so reaching it means a build error upstream,
+    and refusing beats simulating a uniform draft silently.
     """
     conn = get_conn(str(tmp_path / "t.duckdb"))
-    monkeypatch.setattr(draft_model_mod, "fit_all", lambda conn, settings=None: {})
+    monkeypatch.setattr(draft_model_mod, "fit_all",
+                        lambda conn, settings=None: {
+                            "__pooled__": np.zeros(len(FEATURE_NAMES))})
     monkeypatch.setattr(board_mod, "build_board",
                         lambda conn, weights=None, settings=None: pd.DataFrame())
     monkeypatch.setattr(draft_sim_mod, "build_pool",
                         lambda conn, board, settings: _pool(12))
 
-    with pytest.raises(ValueError, match="fit-managers"):
-        run_sim(conn, my_slot=1, slot_managers={i: "m1" for i in range(1, 9)}, n_rollouts=2, seed=0)
+    with pytest.raises(ValueError, match="all zero"):
+        run_sim(conn, my_slot=1, slot_managers={i: "m1" for i in range(1, 9)},
+                n_rollouts=2, seed=0)
     assert read_table(conn, "sim_results").empty
 
+
+def test_run_sim_runs_a_cold_start_league_with_only_the_market_prior(tmp_path, monkeypatch):
+    """The other half: a league with no history at all still runs. fit_all's
+    real cold_start_fits returns just __pooled__ (the market prior), every
+    opponent inherits it, and the sim produces a result rather than raising --
+    which is what makes the tool usable for a brand-new user."""
+    from scoring.draft_model import cold_start_fits
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    monkeypatch.setattr(draft_model_mod, "fit_all",
+                        lambda conn, settings=None: cold_start_fits())
+    monkeypatch.setattr(board_mod, "build_board",
+                        lambda conn, weights=None, settings=None: pd.DataFrame())
+    monkeypatch.setattr(draft_sim_mod, "build_pool",
+                        lambda conn, board, settings: _pool(12))
+
+    run_id = run_sim(conn, my_slot=1,
+                     slot_managers={i: f"stranger{i}" for i in range(1, 9)},
+                     n_rollouts=3, seed=0)
+    assert not read_table(conn, "sim_results").empty
 
 def test_run_sim_falls_back_to_pooled_when_manager_profiles_has_not_been_written(
         tmp_path, monkeypatch):
@@ -1413,7 +1447,7 @@ def test_run_sim_falls_back_to_pooled_when_manager_profiles_has_not_been_written
     # manager_profiles deliberately never written.
     personal_beta = np.zeros(len(FEATURE_NAMES))
     personal_beta[FEATURE_NAMES.index("reach")] = 5.0
-    fits = {"__pooled__": np.zeros(len(FEATURE_NAMES)), "some_manager": personal_beta}
+    fits = {"__pooled__": _POOLED, "some_manager": personal_beta}
     monkeypatch.setattr(draft_model_mod, "fit_all", lambda conn, settings=None: fits)
     monkeypatch.setattr(board_mod, "build_board",
                         lambda conn, weights=None, settings=None: pd.DataFrame())
@@ -1434,10 +1468,9 @@ def test_run_sim_falls_back_to_pooled_when_manager_profiles_has_not_been_written
     run_sim(conn, my_slot=1, slot_managers={i: "some_manager" for i in range(1, 9)}, n_rollouts=5, seed=0)
 
     # No manager_profiles row exists to say "yes, use the personal fit" --
-    # must fall back to pooled (all zeros), not crash, and not silently use
+    # must fall back to pooled, not crash, and not silently use
     # the personal fit either.
-    np.testing.assert_allclose(captured["betas"]["some_manager"],
-                               np.zeros(len(FEATURE_NAMES)))
+    np.testing.assert_allclose(captured["betas"]["some_manager"], _POOLED)
 
 
 def test_run_sim_refuses_a_draft_order_that_does_not_cover_every_slot(tmp_path, monkeypatch):
@@ -1452,7 +1485,7 @@ def test_run_sim_refuses_a_draft_order_that_does_not_cover_every_slot(tmp_path, 
     write_table(conn, "league", pd.DataFrame(
         [{"season": 2026, "settings_json": league.to_json(league.default_settings())}]))
     monkeypatch.setattr(draft_model, "fit_all", lambda *a, **k: {
-        "__pooled__": np.zeros(len(FEATURE_NAMES)),
+        "__pooled__": _POOLED,
         "solo": np.zeros(len(FEATURE_NAMES))})
     with pytest.raises(ValueError, match="have no manager"):
         run_sim(conn, my_slot=1, slot_managers={None: "solo"}, n_rollouts=2)
@@ -1791,7 +1824,7 @@ def test_run_sim_writes_sim_board(tmp_path, monkeypatch):
         [{"season": 2026, "settings_json": league.to_json(league.default_settings())}]))
     _seed_board_tables(conn)
     monkeypatch.setattr(draft_model, "fit_all", lambda *a, **k: {
-        "__pooled__": np.zeros(len(FEATURE_NAMES)),
+        "__pooled__": _POOLED,
         **{f"m{i}": np.zeros(len(FEATURE_NAMES)) for i in range(1, 9)}})
     run_id = run_sim(conn, my_slot=1,
                      slot_managers={i: f"m{i}" for i in range(1, 9)},

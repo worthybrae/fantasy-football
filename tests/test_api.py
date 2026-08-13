@@ -33,10 +33,10 @@ def _seed(path):
 def _seed_draft_history(path):
     """Minimal imported league: one season, two managers, matched ADP.
 
-    run_sim refuses to run with no fitted opponent models -- with none, every
-    opponent draws uniformly over the whole pool and the output is
-    confidently wrong rather than merely rough. Any test that runs a real sim
-    therefore needs enough history for fit_all to produce a per-manager fit.
+    Not strictly required since cold-start: a no-history league now runs on
+    the market prior. But a fixture WITH history exercises the per-manager fit
+    path -- the personal-vs-pooled gating, the reach warning -- that a
+    cold-start league never reaches, so tests wanting that path seed this.
     """
     conn = get_conn(path)
     write_table(conn, "draft_picks", pd.DataFrame([
@@ -541,29 +541,36 @@ def test_sim_endpoint_starts_and_completes(tmp_path):
 def test_sim_status_for_unknown_run_is_404(tmp_path):
     assert _client(tmp_path).get("/api/sim/nope").status_code == 404
 
-def test_sim_refuses_to_run_without_fitted_manager_models(tmp_path):
-    """With no imported draft history, fit_all returns nothing and every
-    opponent's beta is zeros -- a uniform draw over the whole pool. Measured
-    on a 500-player pool, the consensus number one comes back 100% likely to
-    still be available at slot 8 and the top ten average 98.75%. The run has
-    to fail loudly rather than write those numbers onto the board."""
+def test_sim_runs_a_league_with_no_history_via_the_market_prior(tmp_path):
+    """The cold-start contract, at the API level. A brand-new league has no
+    imported draft history, so there are no per-manager fits -- but the sim no
+    longer refuses. `fit_all` returns a market-following prior (cold_start_fits)
+    and every opponent inherits it, so the run completes and writes real sim
+    columns onto the board.
+
+    This replaced a test asserting the opposite (refuse with "fit-managers"),
+    which was correct only while a no-history league had no opponent model at
+    all. It does now, and that is the whole point of the cold-start prior: the
+    tool works for a first-time user instead of only the one league whose
+    history was baked into the database.
+    """
     import time
     client = _client(tmp_path)                 # deliberately no draft history
     client.put("/api/draft-order", json={
         "order": [{"slot": s, "manager": f"m{s}"} for s in range(1, 9)],
         "my_slot": 1})
     run_id = client.post("/api/sim", json={"my_slot": 1, "rollouts": 3}).json()["run_id"]
-    for _ in range(200):
+    status = {"status": "running"}
+    for _ in range(400):
         status = client.get(f"/api/sim/{run_id}").json()
         if status["status"] != "running":
             break
         time.sleep(0.05)
-    assert status["status"] == "error"
-    assert "fit-managers" in status["detail"]
-    # Nothing written, so the board keeps showing blank sim columns rather
-    # than a confident set of fabricated ones.
-    row = client.get("/api/players").json()["players"][0]
-    assert row["avail_pct"] is None and row["ev"] is None
+    assert status["status"] == "done", status
+    # The board now carries real sim output rather than blanks -- an actual
+    # recommendation for a league the tool has never seen before.
+    players = client.get("/api/players").json()["players"]
+    assert any(p["ev"] is not None for p in players)
 
 def test_sim_latest_is_null_before_any_run_and_carries_provenance_after(tmp_path):
     """The board merges sim_results into every request unconditionally, so a

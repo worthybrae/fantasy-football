@@ -1304,3 +1304,47 @@ def test_reach_metrics_exclude_kickers(tmp_path):
     assert int(overall.iloc[0]["n"]) == 6      # 8 picks, both kickers dropped
     # The kicker still counts everywhere it is a fact about the manager.
     assert not _tendency(tendencies, "worthy", "first_at_position", "K").empty
+
+
+def test_cold_start_prior_has_one_weight_per_feature():
+    """A feature added to FEATURE_NAMES without extending the prior would make
+    every cold-start opponent silently mis-score. The module-level assert
+    catches it at import; this pins it as a test too."""
+    from scoring.draft_model import COLD_START_PRIOR, FEATURE_NAMES
+    assert len(COLD_START_PRIOR) == len(FEATURE_NAMES)
+
+
+def test_fit_all_falls_back_to_the_market_prior_with_no_history(tmp_path):
+    """A league with no draft history must not leave the simulator with no
+    opponents. fit_all used to return {} -- now it returns the market prior."""
+    from scoring.draft_model import cold_start_fits, fit_all
+    from pipeline.db import get_conn
+    conn = get_conn(str(tmp_path / "empty.duckdb"))
+    fits = fit_all(conn)                         # no tables seeded at all
+    import numpy as np
+    assert set(fits) == {"__pooled__"}
+    np.testing.assert_array_equal(fits["__pooled__"], cold_start_fits()["__pooled__"])
+
+
+def test_cold_start_opponent_drafts_toward_the_market(tmp_path):
+    """The prior has to actually behave like 'draft to the board', not merely
+    exist. Under it, at an early pick, the softmax over a pool must put more
+    weight on the best-ranked available player than on a much worse one.
+
+    Verified as behaviour, not shape: a prior of zeros (no market signal)
+    would spread weight evenly and fail this."""
+    import numpy as np
+    from scoring import league
+    from scoring.draft_model import (COLD_START_PRIOR, PickObservation,
+                                     _softmax, feature_matrix)
+    settings = league.default_settings()
+    # Ten players, market ranks 1..10, at overall pick 3 (early). The choice
+    # model should prefer rank 1 over rank 10 by a wide margin.
+    pool = _pool([(f"p{i}", "WR", float(i)) for i in range(1, 11)])
+    obs = PickObservation(season=2026, overall_pick=3, manager="x",
+                          chosen=0, pool=pool, roster={}, recent=[])
+    scores = feature_matrix(obs, settings) @ COLD_START_PRIOR
+    probs = _softmax(scores)
+    best, worst = probs[0], probs[9]             # rank 1 vs rank 10
+    assert best > worst
+    assert best > 3 * worst, (best, worst)       # a clear market lean, not a nudge

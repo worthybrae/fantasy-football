@@ -609,11 +609,67 @@ def select_lambda(X_list, chosen_list, seasons, prior, grid=None,
     return best
 
 
+# The market-following prior for a league with no draft history of its own.
+#
+# A brand-new user's league has zero picks on record, so `fit_all` has nothing
+# to fit and used to return {} -- no opponents, no simulation, the tool simply
+# did not work for anyone but the one league baked into the database. This is
+# the coefficient vector to fall back on instead.
+#
+# It is not invented. These are the pooled (league-average) coefficients fitted
+# from six real seasons of an actual PPR league, frozen here with their
+# provenance. They already encode "draft roughly to the market": `reach` -8.1
+# penalises taking a player the board ranks well below the pick, `fall` +3.8
+# rewards taking a value that has slid, and `pos_DST` -11.1 / `qb_early` +1.5
+# capture the structural facts every league shares (nobody drafts a defense in
+# round two; quarterbacks go earlier than their raw value). An unknown league's
+# opponents drafting like the average of a real, observed one is a defensible
+# default and a measured one -- this same pooled fit scores top-1 0.25 against
+# real drafts.
+#
+# As a league accrues its own history, `fit_all` shrinks each manager off this
+# prior via `select_lambda`, so the market default is the anchor that a real
+# fit moves away from rather than a value that has to be unlearned.
+COLD_START_PRIOR = np.array([
+    -8.088053,    # reach
+    +3.801103,    # fall
+    +0.641107,    # pos_RB
+    +0.341051,    # pos_WR
+    +0.896758,    # pos_TE
+    +3.417835,    # pos_K
+    -11.141479,   # pos_DST
+    +1.482160,    # qb_early
+    +0.324423,    # te_early
+    +2.246026,    # need
+    +0.595798,    # run
+    +0.050222,    # age
+    -0.331173,    # no_track_record
+    -0.063443,    # hype
+    -0.003743,    # trend
+])
+assert len(COLD_START_PRIOR) == len(FEATURE_NAMES), (
+    "COLD_START_PRIOR must have one weight per feature; a feature was added to "
+    "FEATURE_NAMES without extending the prior")
+
+
+def cold_start_fits() -> dict:
+    """The fits to use when a league has no history to fit from.
+
+    One entry, `__pooled__`, the market-following prior. There are no
+    per-manager fits because there is nothing to distinguish the managers by
+    yet -- every opponent drafts to the same market default until the league's
+    own picks start telling them apart.
+    """
+    return {"__pooled__": COLD_START_PRIOR.copy()}
+
+
 def fit_all(conn, settings=None) -> dict:
     settings = settings or league_mod.load(conn)
     observations = build_observations(conn)
     if not observations:
-        return {}
+        # No history: fall back to the market prior rather than returning
+        # nothing, which left the simulator with no opponents at all.
+        return cold_start_fits()
     X_list, chosen, managers, seasons = prepare(observations, settings)
     pooled = fit(X_list, chosen)
     fits = {"__pooled__": pooled}
