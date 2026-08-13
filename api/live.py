@@ -291,11 +291,14 @@ def register_live_routes(app, conn, db_path):
              # The session's own connection when it was built for a
              # non-default league (None for the default league, which uses
              # `conn` and never touches this). Set only by live_connect,
-             # closed and cleared only by _stop_listener (and, as a
-             # never-leave-it-locked fallback on a join timeout, by
-             # live_stop) -- DuckDB is single-writer per file, so a league's
-             # connection left open after its session ends would make every
-             # future reconnect to that same league fail.
+             # closed and cleared only by _stop_listener, and only once it
+             # has confirmed the listener thread actually exited -- never on
+             # a join timeout, when the thread might still be using it (see
+             # _stop_listener's and live_stop's docstrings). DuckDB is
+             # single-writer per file, so a league's connection left open
+             # after its session truly ends would make every future
+             # reconnect to that same league fail; closing one a thread is
+             # still using would be worse.
              "league_conn": None}
     lock = threading.Lock()
 
@@ -461,26 +464,25 @@ def register_live_routes(app, conn, db_path):
         stopped = _stop_listener()
         with lock:
             state["generation"] += 1
-            # _stop_listener already closed and cleared league_conn on the
-            # path where it confirmed the thread stopped -- this is None on
-            # that path. On a timeout it deliberately leaves the connection
-            # alone, in case the still-alive thread is using it. live_stop
-            # detaches the rest of state from that thread regardless of
-            # whether it actually stopped (see listener/listener_thread
-            # below, unchanged from before this connection existed); a
-            # per-league file left locked would refuse every future
-            # reconnect to that league for the rest of this process's life,
-            # which is worse than the same narrow race the identity guard
-            # (state["listener"] is listener) already accepts for the
-            # thread itself.
-            leftover_league_conn = state["league_conn"]
+            # league_conn is deliberately left out of this update.
+            # _stop_listener already closed and cleared it on the path where
+            # it confirmed the listener thread had actually exited -- this
+            # is None on that path, and there is nothing left to do. On a
+            # timeout (stopped is False) the thread is confirmed still
+            # alive, and closing the connection out from under a thread that
+            # might be using it right now would turn "stop this listener"
+            # into "corrupt a DuckDB connection in use" -- a leaked
+            # connection is recoverable on restart, a use-after-close is
+            # not. `session`/`listener`/`listener_thread` are still cleared
+            # unconditionally below (unchanged from before this connection
+            # existed): that only detaches new work from the old thread via
+            # the identity guard, it does not touch anything the thread
+            # itself might still hold open.
             state.update({"session": None, "candidates": [],
                           "as_of_pick": None, "unmapped": [],
                           "last_poll_at": None, "listener": None,
                           "listener_thread": None, "listener_stop": None,
-                          "listener_error": None, "league_conn": None})
-        if leftover_league_conn is not None:
-            leftover_league_conn.close()
+                          "listener_error": None})
         return {"active": False, "listener_stopped": stopped}
 
     @app.post("/api/live/token")
@@ -539,15 +541,35 @@ def register_live_routes(app, conn, db_path):
                 status_code=503,
                 detail="the previous listener did not stop in time -- try again")
 
-        # The default league keeps building against the shared `conn`,
-        # unchanged from before per-league routing existed. Every other
-        # league gets its own connection, to its own file -- provisioned
-        # (idempotently; a reconnect mid-draft must not wipe the `drafted`
-        # rows already recorded there) from this app's own database, so a
-        # league's `drafted`, `draft_teams`, `draft_order` and `league` rows
-        # never mix with another league's or with the shared one's.
+        # The default league -- the __default__ sentinel, or a league id
+        # equal to this deployment's configured DEFAULT_LEAGUE_ID -- keeps
+        # building against the shared `conn`, unchanged from before
+        # per-league routing existed. parse_league_id only ever returns
+        # digits, never __default__, so DEFAULT_LEAGUE_ID is how a real URL
+        # actually reaches this branch: it names the one real league
+        # data/nfl.duckdb already belongs to, with its draft history and
+        # fitted managers already in it -- the existing user reconnecting to
+        # their own draft, not a stranger to cold-start. This check has to
+        # happen here, before provision_league: league_db_path resolves
+        # DEFAULT_LEAGUE_ID to pipeline.db's own DEFAULT_PATH, a fixed
+        # string that is not necessarily this app's own `db_path` (a test
+        # instance, say), and `conn` is already an open connection to
+        # `db_path` -- calling get_conn on the same file again from here
+        # would be a second, conflicting connection to a file `conn` already
+        # holds, even before considering it might be the wrong file
+        # entirely.
+        #
+        # Every OTHER league gets its own connection, to its own file --
+        # provisioned (idempotently; a reconnect mid-draft must not wipe the
+        # `drafted` rows already recorded there) from this app's own
+        # database, so a league's `drafted`, `draft_teams`, `draft_order`
+        # and `league` rows never mix with another league's or with the
+        # shared one's. This is a genuine cold start -- no history has been
+        # imported for a league we've never seen -- until per-league ESPN
+        # history import lands (deferred; see the plan's slice 3).
         league_conn = None
-        if league_id and league_id != DEFAULT_LEAGUE:
+        if (league_id and league_id != DEFAULT_LEAGUE
+                and league_id != leagues_mod.DEFAULT_LEAGUE_ID):
             # `root` is read off the module, not provision_league's own
             # default parameter -- that default is bound once, at import
             # time, to whatever pipeline.leagues.LEAGUES_ROOT was then, so a

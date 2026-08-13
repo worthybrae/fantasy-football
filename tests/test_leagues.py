@@ -22,9 +22,29 @@ def test_default_league_resolves_to_the_existing_database():
 
 
 def test_a_real_league_gets_its_own_file_under_the_leagues_root():
+    """A league id other than the configured default -- 909090, not
+    53929318, which is now DEFAULT_LEAGUE_ID (see the two tests below)."""
     from pipeline.leagues import league_db_path
-    p = league_db_path("53929318", root="/tmp/lg")
-    assert p == "/tmp/lg/53929318.duckdb"
+    p = league_db_path("909090", root="/tmp/lg")
+    assert p == "/tmp/lg/909090.duckdb"
+
+
+def test_the_configured_default_league_id_also_resolves_to_the_existing_database():
+    """The existing user's own league -- data/nfl.duckdb already holds its
+    712 draft_picks and fitted managers -- must resolve exactly like the
+    __default__ sentinel, not cold-start into a fresh per-league file just
+    because it arrived as a real, parsed ESPN league id (which is the only
+    way it ever arrives: parse_league_id returns digits, never
+    __default__)."""
+    from pipeline.leagues import DEFAULT_LEAGUE_ID, league_db_path
+    from pipeline.db import DEFAULT_PATH
+    assert DEFAULT_LEAGUE_ID == "53929318"
+    assert league_db_path(DEFAULT_LEAGUE_ID) == DEFAULT_PATH
+
+
+def test_a_league_id_unequal_to_the_default_gets_its_own_path():
+    from pipeline.leagues import league_db_path
+    assert league_db_path("999") != league_db_path("53929318")
 
 
 def test_league_id_is_sanitised_into_the_filename():

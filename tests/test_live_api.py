@@ -1089,3 +1089,116 @@ def test_connect_with_a_league_id_isolates_its_drafted_table(tmp_path, monkeypat
     # table during this test) -- pin that the session genuinely routed to
     # league 777's own file, provisioned separately from the default one.
     assert (tmp_path / "lg" / "777.duckdb").exists()
+
+
+def test_connect_to_the_configured_default_league_uses_the_apps_own_database(
+        tmp_path, monkeypatch, _isolated_leagues_root):
+    """The existing user's own league -- DEFAULT_LEAGUE_ID, "53929318" unless
+    overridden -- must resolve to THIS app's own database (`db_path`, a tmp
+    file standing in for the real data/nfl.duckdb here), not cold-start a
+    fresh per-league file. league_db_path resolves DEFAULT_LEAGUE_ID to
+    pipeline.db's own DEFAULT_PATH -- a fixed string, not necessarily this
+    app's db_path -- so live_connect has to special-case this id itself,
+    before ever calling provision_league, or a test (or a deployment) whose
+    db_path differs from the literal "data/nfl.duckdb" would silently open
+    the wrong file (or a second, conflicting connection to the one `conn`
+    already holds, if the two happen to be the same file).
+
+    This is the regression review caught: without the special case, EVERY
+    connect -- including one naming the project's own real league --
+    cold-starts, discarding the 712 draft_picks and fitted managers already
+    in the database and losing my_slot resolution (draft_teams/draft_order
+    would be empty on the fresh file too).
+    """
+    from pipeline.db import read_table
+    from pipeline.leagues import DEFAULT_LEAGUE_ID
+
+    path = str(tmp_path / "default.duckdb")
+    _seed_minimal_live_db(path)
+    monkeypatch.setattr("api.live.run_listener", lambda *a, **k: None)
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    client = TestClient(create_app(path))
+
+    resp = client.post("/api/live/connect", json={
+        "url": f"https://fantasy.espn.com/football/draft?leagueId={DEFAULT_LEAGUE_ID}"
+               "&teamId=2"})
+    assert resp.status_code == 200
+    # my_slot resolves at all -- draft_teams/draft_order were only ever
+    # seeded on `path`, so this fails if the session built against anything
+    # else. team_id 2 -> m2 -> slot 2 in _seed_minimal_live_db.
+    assert resp.json()["my_slot"] == 2
+    client.post("/api/live/stop")
+
+    # No per-league file was created for the configured default league.
+    assert not (Path(_isolated_leagues_root) / f"{DEFAULT_LEAGUE_ID}.duckdb").exists()
+    # And the pick history/board this session actually built against is
+    # `path` itself -- proven by reading draft_picks (seeded only on `path`)
+    # straight back off it, undisturbed.
+    assert not read_table(get_conn(path), "draft_picks").empty
+
+
+def test_stop_does_not_close_a_league_conn_the_listener_thread_is_still_using(
+        tmp_path, monkeypatch, _isolated_leagues_root):
+    """Review finding #2: a stop that cannot confirm the listener thread has
+    actually exited must not close that session's per-league connection --
+    the thread might be using it at that exact moment, and closing a live
+    DuckDB connection out from under an in-flight use is worse than leaving
+    it open (a leaked connection is recoverable on restart; a use-after-close
+    is not). Pre-Task-5 this had no window at all: the shared `conn` was
+    immortal, never closed by anything.
+
+    Verified directly by spying on close(), rather than inferring it from a
+    file-lock conflict: DuckDB, at least in the version this project pins,
+    allows more than one connection to the same file within one process
+    (confirmed empirically -- opening a second one did not raise), so a lock
+    error is not a reliable signal here. What actually matters is simpler
+    and more direct: was .close() ever called on the connection api.live
+    itself opened.
+    """
+    monkeypatch.setattr("api.live.LISTENER_STOP_TIMEOUT", 0.05)
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+
+    from pipeline.db import get_conn as real_get_conn
+    closed = []
+
+    class _SpyConn:
+        """Delegates everything to the real connection except close(),
+        which is recorded rather than merely trusted to have (not) run."""
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def close(self):
+            closed.append(True)
+            self._inner.close()
+
+    monkeypatch.setattr("api.live.get_conn", lambda p: _SpyConn(real_get_conn(p)))
+
+    def fake_run_listener_ignores_stop(listener, url, state_path, on_change=None,
+                                       headless=False, stop_event=None):
+        # Deliberately never checks stop_event -- an uncooperative listener,
+        # same as test_stop_listener_refuses_a_reconnect_if_the_old_thread_will_not_die.
+        time.sleep(5)
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    client = TestClient(create_app(path))
+
+    monkeypatch.setattr("api.live.run_listener", fake_run_listener_ignores_stop)
+    r1 = _connect(client, "1")
+    assert r1.status_code == 200
+
+    stop_resp = client.post("/api/live/stop").json()
+    assert stop_resp["listener_stopped"] is False, (
+        "test setup: the listener thread must still be alive for this to "
+        "pin anything -- if it isn't, LISTENER_STOP_TIMEOUT or the fake "
+        "above needs adjusting")
+
+    assert closed == [], (
+        "live_stop must not close a per-league connection while its "
+        "listener thread is still alive")

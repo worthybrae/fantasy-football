@@ -9,6 +9,7 @@ site -- never has to know which league it is looking at.
 The default league is the existing single database, so the single-user path
 this project started as does not move.
 """
+import os
 import re
 from pathlib import Path
 
@@ -16,6 +17,15 @@ from pipeline.db import DEFAULT_PATH
 
 DEFAULT_LEAGUE = "__default__"
 LEAGUES_ROOT = "data/leagues"
+# The one real league data/nfl.duckdb already belongs to -- this project's
+# own league, with its draft history and fitted managers already in it. A
+# connect naming this id is the existing user reconnecting to their own
+# draft, not a stranger we have no history for, so it must resolve to that
+# same file rather than a fresh, cold-started per-league one. Overridable via
+# env var so a deployment for a different real league doesn't need a code
+# change; read via os.environ.get so it is fixed once per process start,
+# same as every other piece of deployment config.
+DEFAULT_LEAGUE_ID = os.environ.get("DEFAULT_LEAGUE_ID", "53929318")
 
 
 def _safe_id(league_id: str) -> str:
@@ -32,9 +42,11 @@ def _safe_id(league_id: str) -> str:
 
 
 def league_db_path(league_id: str, root: str = LEAGUES_ROOT) -> str:
-    """The database file for a league. The default league is the shared
-    single-user database, unchanged; every other league is its own file."""
-    if league_id == DEFAULT_LEAGUE:
+    """The database file for a league. The default league -- the
+    __default__ sentinel, or a real league id equal to this deployment's
+    configured DEFAULT_LEAGUE_ID -- is the shared single-user database,
+    unchanged; every other league is its own file."""
+    if league_id == DEFAULT_LEAGUE or league_id == DEFAULT_LEAGUE_ID:
         return DEFAULT_PATH
     return str(Path(root) / f"{_safe_id(league_id)}.duckdb")
 
@@ -52,7 +64,7 @@ def provision_league(league_id: str, universal_path: str,
     which is precisely the cold-start state `cold_start_fits` handles.
     """
     path = league_db_path(league_id, root=root)
-    if league_id == DEFAULT_LEAGUE or Path(path).exists():
+    if league_id in (DEFAULT_LEAGUE, DEFAULT_LEAGUE_ID) or Path(path).exists():
         return path
     src = get_conn(universal_path)
     try:
