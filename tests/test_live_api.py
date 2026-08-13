@@ -7,6 +7,22 @@ from pipeline.db import get_conn, write_table
 from scoring import league as league_mod
 
 
+@pytest.fixture(autouse=True)
+def _isolated_leagues_root(tmp_path, monkeypatch):
+    """Every /api/live/connect in this file that names a real (non-default)
+    league id -- which is every one of them, since parse_league_id only ever
+    reads a URL's digits and never the __default__ sentinel -- now provisions
+    a per-league file under pipeline.leagues.LEAGUES_ROOT. Autouse and
+    file-wide so no test here, including ones written before per-league
+    routing existed and mentioning nothing about leagues, can create a real
+    file under the repo's data/leagues/. Returns the root so a test that
+    needs to pre-seed a league's own file (see league_db_path) can find it.
+    """
+    root = str(tmp_path / "leagues_root")
+    monkeypatch.setattr("pipeline.leagues.LEAGUES_ROOT", root)
+    return root
+
+
 def _fake_session(seed=20260811):
     """A DraftSession with cheap stand-ins for the expensive fields.
 
@@ -281,8 +297,9 @@ def _live_routes_with_conn(tmp_path):
     exercising _recompute directly without going through the FastAPI app."""
     from fastapi import FastAPI
     from pipeline.db import get_conn
-    conn = get_conn(str(tmp_path / "live.duckdb"))
-    return register_live_routes(FastAPI(), conn)
+    path = str(tmp_path / "live.duckdb")
+    conn = get_conn(path)
+    return register_live_routes(FastAPI(), conn, path)
 
 
 def _live_session(seed=DEFAULT_SEED):
@@ -486,14 +503,25 @@ def test_slot_for_team_returns_none_when_the_chain_breaks(tmp_path):
     conn.close()
 
 
-def test_connect_resolves_my_slot_from_a_teamid_in_the_url(tmp_path, monkeypatch):
+def test_connect_resolves_my_slot_from_a_teamid_in_the_url(
+        tmp_path, monkeypatch, _isolated_leagues_root):
     """Correction B, end to end: a URL carrying teamId= must resolve my_slot
     through draft_teams rather than trusting (or requiring) the request
     body's my_slot -- and the resulting session must actually use the
     translated slot, not the untranslated team id."""
     path = str(tmp_path / "live.duckdb")
     _seed_minimal_live_db(path)
-    conn = get_conn(path)
+
+    # leagueId=1 in the URL below names a real, non-default league, so the
+    # connect builds against ITS OWN file -- draft_teams and draft_order are
+    # LEAGUE_TABLES (pipeline/db.py), which live there, not on `path`.
+    # provision_league first (copies the universal tables `path` seeded)
+    # so the league-specific write below lands on top of that, not wiped by
+    # it -- the same idempotent-reconnect guarantee live_connect itself
+    # relies on.
+    from pipeline.leagues import provision_league
+    lg_path = provision_league("1", universal_path=path, root=_isolated_leagues_root)
+    conn = get_conn(lg_path)
     # Team id 2 drafts from slot 7 -- deliberately NOT slot 2, so a bug that
     # used the team id itself as the slot would be caught.
     # slot is null in draft_teams on the real database -- always. The hop
@@ -639,7 +667,8 @@ def _first_n_selected_frames(n):
 
 
 @pytest.mark.skipif(not _SOCKET_FIXTURE.exists(), reason="no draft capture")
-def test_connect_wires_the_listener_to_apply_picks_and_recompute(tmp_path, monkeypatch):
+def test_connect_wires_the_listener_to_apply_picks_and_recompute(
+        tmp_path, monkeypatch, _isolated_leagues_root):
     """No test exercised connect's success path before this one -- nothing
     verified that it actually wires DraftListener to apply_picks and
     _recompute rather than just returning a 200.
@@ -675,6 +704,22 @@ def test_connect_wires_the_listener_to_apply_picks_and_recompute(tmp_path, monke
     setup_conn.close()
     for espn_id in (4430807, 4429795, 4426515):
         assert espn_id in crosswalk, f"fixture espn id {espn_id} did not cross-walk"
+
+    # leagueId=1 in the URL below is a real, non-default league: the
+    # connect below builds against its own file, not `path`. draft_teams and
+    # draft_order are LEAGUE_TABLES (pipeline/db.py) and so are not among the
+    # universal tables provision_league copies -- on_change's my_slot
+    # resolution (via listener.my_team_id -> _slot_for_team) needs them on
+    # THAT file, the same as `path` already has them, or my_slot never
+    # resolves and _recompute skips every call.
+    from pipeline.db import read_table
+    from pipeline.leagues import provision_league
+    lg_path = provision_league("1", universal_path=path, root=_isolated_leagues_root)
+    lg_conn, src_conn = get_conn(lg_path), get_conn(path)
+    for table in ("draft_teams", "draft_order"):
+        write_table(lg_conn, table, read_table(src_conn, table))
+    lg_conn.close()
+    src_conn.close()
 
     recompute_calls = []
     monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
@@ -721,8 +766,11 @@ def test_connect_wires_the_listener_to_apply_picks_and_recompute(tmp_path, monke
     assert done.wait(timeout=5), "fake listener thread never finished"
 
     # apply_picks must have written the RIGHT player at the RIGHT pick_no,
-    # in the socket's order -- not merely three rows.
-    conn = get_conn(path)
+    # in the socket's order -- not merely three rows. leagueId=1 is a real,
+    # non-default league, so the write landed on its own file, not `path`.
+    from pipeline.leagues import league_db_path
+    lg_path = league_db_path("1", root=_isolated_leagues_root)
+    conn = get_conn(lg_path)
     rows = conn.execute(
         "SELECT player_id, pick_no FROM drafted ORDER BY pick_no").fetchall()
     conn.close()
@@ -917,7 +965,7 @@ def test_a_listener_exception_reaches_live_state_instead_of_dying_silently(
 
 
 def test_a_superseded_listeners_late_callback_cannot_write_drafted(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, _isolated_leagues_root):
     """Critical #2: on_change called apply_picks unconditionally, with no
     check that its own listener was still the active one. Traced: connect
     #2 bumps state["generation"], but connect #1's on_change can still fire
@@ -970,7 +1018,14 @@ def test_a_superseded_listeners_late_callback_cannot_write_drafted(
     # queued Playwright callback the stop signal could not cancel.
     stale_on_change()
 
-    conn = get_conn(path)
+    # The stale listener belongs to league "1" -- a real, non-default
+    # league -- so a write that slipped past the identity guard would land
+    # on ITS OWN file, not `path`. Checking `path` here would pass trivially
+    # (nothing was ever routed there for this league), which would no longer
+    # pin the guard this test exists for.
+    from pipeline.leagues import league_db_path
+    lg_path = league_db_path("1", root=_isolated_leagues_root)
+    conn = get_conn(lg_path)
     n = conn.execute("SELECT count(*) FROM drafted").fetchone()[0]
     conn.close()
     assert n == 0, "a superseded listener's callback must never write to drafted"
@@ -1007,3 +1062,30 @@ def test_stop_listener_refuses_a_reconnect_if_the_old_thread_will_not_die(
     r2 = _connect(client, "2")
     assert r2.status_code == 503
     assert "did not stop" in r2.json()["detail"].lower()
+
+
+def test_connect_with_a_league_id_isolates_its_drafted_table(tmp_path, monkeypatch):
+    """A connect naming a real league builds against that league's own file,
+    so marking a pick there does not touch the default database."""
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    from pipeline.db import get_conn, read_table
+
+    default_path = str(tmp_path / "default.duckdb")
+    _seed_minimal_live_db(default_path)
+    monkeypatch.setattr("api.live.run_listener", lambda *a, **k: None)
+    monkeypatch.setattr("pipeline.leagues.LEAGUES_ROOT", str(tmp_path / "lg"))
+
+    client = TestClient(create_app(default_path))
+    r = client.post("/api/live/connect", json={
+        "url": "https://fantasy.espn.com/football/draft?leagueId=777&teamId=2"})
+    assert r.status_code == 200
+    client.post("/api/live/stop")
+
+    # The default database's drafted table is untouched by league 777's session.
+    assert read_table(get_conn(default_path), "drafted").empty
+    # And this isn't vacuously true because nothing was ever written anywhere
+    # (run_listener is a no-op above, so no pick lands in *any* drafted
+    # table during this test) -- pin that the session genuinely routed to
+    # league 777's own file, provisioned separately from the default one.
+    assert (tmp_path / "lg" / "777.duckdb").exists()

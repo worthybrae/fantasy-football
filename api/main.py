@@ -564,7 +564,7 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
         return state
 
     from api.live import register_live_routes
-    register_live_routes(app, conn)
+    register_live_routes(app, conn, db_path)
 
     return app
 
