@@ -1289,3 +1289,151 @@ def test_state_query_and_stop_close_are_serialized_by_the_lock(
         f"/api/live/state raised against a connection a concurrent stop "
         f"closed underneath it: {results.get('state_exc')!r}")
     assert results["state"].status_code == 200
+
+
+# --- Bookmarklet path: /api/live/connect-token opens the socket directly ------
+#
+# The bookmarklet mints ESPN's per-draft token in the user's own browser and
+# delivers only that token plus the public ids. This endpoint opens the socket
+# from it with no browser window on this machine (run_socket_listener), so a
+# stranger's league with no saved login here still produces a live board. Only
+# run_socket_listener is faked -- the one piece that needs a real ESPN socket;
+# everything downstream (build_session, apply_picks, _recompute) is real code,
+# the same discipline the browser-path wiring test above holds.
+
+@pytest.mark.skipif(not _SOCKET_FIXTURE.exists(), reason="no draft capture")
+def test_connect_token_resolves_slot_and_wires_socket_picks(
+        tmp_path, monkeypatch, _isolated_leagues_root):
+    """End to end for the bookmarklet path: a delivered token must resolve
+    my_slot from its team id up front (the socket path knows the team from the
+    start, unlike the browser JOIN), open the socket via run_socket_listener,
+    and wire the replayed frames through apply_picks and _recompute exactly as
+    the browser path does -- plus mark token_received so the connect screen
+    knows the click landed."""
+    import threading
+
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path, extra_players=[
+        {"player_id": "p2", "name": "B Runner", "position": "RB",
+         "team": "DET", "espn_id": 4430807},
+        {"player_id": "p3", "name": "C Slot", "position": "WR",
+         "team": "GB", "espn_id": 4426515},
+    ])
+
+    setup_conn = get_conn(path)
+    crosswalk = build_session(setup_conn, my_slot=1).crosswalk
+    setup_conn.close()
+    for espn_id in (4430807, 4429795, 4426515):
+        assert espn_id in crosswalk, f"fixture espn id {espn_id} did not cross-walk"
+
+    # leagueId=1 is a real, non-default league: connect-token builds against
+    # its own file. draft_teams/draft_order are LEAGUE_TABLES, so they must be
+    # seeded on THAT file for team 2 -> slot 7 to resolve. Team 2 drafts slot
+    # 7 (deliberately not 2), so a bug using the team id as the slot is caught.
+    from pipeline.leagues import provision_league
+    lg_path = provision_league("1", universal_path=path, root=_isolated_leagues_root)
+    lg_conn = get_conn(lg_path)
+    write_table(lg_conn, "draft_teams", pd.DataFrame([
+        {"season": 2025, "team_id": 1, "manager": "m1", "slot": None},
+        {"season": 2025, "team_id": 2, "manager": "m2", "slot": None}]))
+    write_table(lg_conn, "draft_order", pd.DataFrame([
+        {"slot": 1, "manager": "m1", "is_me": False},
+        {"slot": 7, "manager": "m2", "is_me": True}]))
+    lg_conn.close()
+
+    recompute_calls = []
+    monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
+    monkeypatch.setattr(
+        "api.live.search_pick",
+        lambda *a, **k: recompute_calls.append(k) or _fake_candidates_frame("winner"))
+
+    done = threading.Event()
+    seen_args = {}
+
+    def fake_run_socket_listener(listener, league_id, team_id, swid, token,
+                                 on_change=None, stop_event=None):
+        """Stands in for the real, socket-opening run_socket_listener. Records
+        the args it was called with (so the test can prove the token and ids
+        reached it) and replays real captured frames, firing on_change exactly
+        when the pick count changes -- the same contract run_listener's fake
+        uses on the browser path."""
+        seen_args.update(league_id=league_id, team_id=team_id, swid=swid,
+                         token=token)
+        prev = 0
+        for frame in _first_n_selected_frames(3):
+            listener.on_frame(frame)
+            count = len(listener.picks().rows)
+            if count != prev:
+                prev = count
+                if on_change is not None:
+                    on_change()
+        done.set()
+
+    monkeypatch.setattr("api.live.run_socket_listener", fake_run_socket_listener)
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    client = TestClient(create_app(path))
+
+    resp = client.post("/api/live/connect-token", json={
+        "leagueId": "1", "teamId": "2", "swid": "{X}",
+        "token": "1953383334", "season": "2026"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["connected"] is True
+    assert body["league_id"] == "1"
+    # Resolved up front from the team id -- no need to wait for the socket.
+    assert body["my_slot"] == 7
+
+    assert done.wait(timeout=5), "fake socket listener thread never finished"
+
+    # The token and public ids actually reached run_socket_listener.
+    assert seen_args == {"league_id": "1", "team_id": "2", "swid": "{X}",
+                         "token": "1953383334"}
+
+    from pipeline.leagues import league_db_path
+    conn = get_conn(league_db_path("1", root=_isolated_leagues_root))
+    rows = conn.execute(
+        "SELECT player_id, pick_no FROM drafted ORDER BY pick_no").fetchall()
+    conn.close()
+    assert rows == [(crosswalk[4430807], 1), (crosswalk[4429795], 2),
+                    (crosswalk[4426515], 3)]
+
+    assert len(recompute_calls) >= 1
+    state = client.get("/api/live/state").json()
+    assert state["candidates_as_of_pick"] == 3
+    # The click landed: token_received flips true so the connect screen can
+    # stop showing the install guide and follow the board.
+    assert state["token_received"] is True
+    client.post("/api/live/stop")
+
+
+def test_connect_token_rejects_missing_or_nonnumeric_fields(tmp_path, monkeypatch):
+    """Bad requests are refused up front -- before any listener teardown --
+    so a malformed bookmarklet POST can never stop a listener that was
+    working. A missing token and a non-numeric team id are the two things the
+    socket path cannot proceed without: it has no browser JOIN to learn the
+    team from, and _slot_for_team compares against integer team ids."""
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    # Fail loudly if the endpoint ever reaches the listener on a bad request.
+    monkeypatch.setattr("api.live.run_socket_listener",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("listener started on an invalid request")))
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    client = TestClient(create_app(path))
+
+    missing_token = client.post("/api/live/connect-token", json={
+        "leagueId": "1", "teamId": "2", "swid": "{X}", "token": "",
+        "season": "2026"})
+    assert missing_token.status_code == 422
+
+    nonnumeric_team = client.post("/api/live/connect-token", json={
+        "leagueId": "1", "teamId": "notanumber", "swid": "{X}",
+        "token": "99", "season": "2026"})
+    assert nonnumeric_team.status_code == 422
+
+    # Nothing was started, so nothing is active.
+    assert client.get("/api/live/state").json()["active"] is False

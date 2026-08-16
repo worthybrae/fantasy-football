@@ -1,54 +1,86 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { fetchLiveState } from '../api'
-import { detectExtension, STORE_URL } from '../lib/extension'
+import { connectWithToken, fetchLiveState } from '../api'
+import { BOOKMARKLET } from '../lib/bookmarklet'
 
-// Onboarding gate. With the browser extension delivering the draft token,
-// there is no URL to type and no form to fill -- the page only has to work
-// out which of three states the user is in and show the one next step.
+// The bookmarklet onboarding. A bookmarklet cannot be detected -- browsers
+// hide the bookmarks bar from pages by design -- so there is nothing to poll
+// for and no "is it installed?" gate. Instead the page shows the install-and-
+// use guide by default and flips to "live" the moment the bookmarklet is
+// actually used: clicking it on the ESPN draft page mints a token there and
+// opens THIS page in a new window with the token in the URL hash. That hash is
+// the only signal that matters (did it work), and it is self-announcing.
 //
-//   missing  -> install the extension (a button to the store)
-//   ready    -> installed, but no draft synced yet: open ESPN, click the icon
-//   live     -> a token has arrived; go to the board
-//
-// The URL field the old connect screen had is gone on purpose: the extension
-// reads leagueId/teamId off the ESPN tab and posts them with the token, so
-// the server already knows the draft. The field only ever existed because the
-// browser-window path had no other way to learn it.
-type Gate = 'checking' | 'missing' | 'ready' | 'live'
+//   connecting -> arrived from the bookmarklet with a token: open the socket
+//   install    -> the default: drag the button, open your draft, click it
+//   live       -> a previous connect is already running: offer the board
+//   error      -> the token connect failed; show why, let them retry
+type Gate = 'connecting' | 'install' | 'live' | 'error'
+
+// The token params the bookmarklet packs into the hash of the window it opens.
+// Returns null unless all four load-bearing fields are present -- season is
+// optional-ish (the bookmarklet always sends it, but a connect can proceed on
+// the ids alone) so it is read separately.
+function tokenFromHash(hash: string) {
+  const p = new URLSearchParams(hash.replace(/^#/, ''))
+  const leagueId = p.get('leagueId')
+  const teamId = p.get('teamId')
+  const swid = p.get('swid')
+  const token = p.get('token')
+  if (!leagueId || !teamId || !swid || !token) return null
+  return { leagueId, teamId, swid, token, season: p.get('season') || '' }
+}
 
 export default function Connect() {
-  const [gate, setGate] = useState<Gate>('checking')
-  const [extVersion, setExtVersion] = useState<string | null>(null)
+  const [gate, setGate] = useState<Gate>('install')
+  const [error, setError] = useState<string | null>(null)
   const navigate = useNavigate()
+  const bookmarkRef = useRef<HTMLAnchorElement>(null)
 
-  // Detect the extension once, then poll live state for a delivered token.
+  // Set the bookmarklet's `javascript:` href via the DOM, not JSX: React
+  // strips javascript: URLs from href props (a security default), which would
+  // leave nothing to drag. setAttribute is not filtered. The user drags this
+  // to their bookmarks bar; clicking it here does nothing useful (it would run
+  // against our own URL), so the click is swallowed and the copy says "drag."
+  useEffect(() => {
+    bookmarkRef.current?.setAttribute('href', BOOKMARKLET)
+  })
+
   useEffect(() => {
     let cancelled = false
 
-    detectExtension().then((version) => {
-      if (cancelled) return
-      setExtVersion(version)
-      setGate(version ? 'ready' : 'missing')
-    })
+    // Arrived from the bookmarklet? Open the socket from the delivered token.
+    const params = tokenFromHash(window.location.hash)
+    if (params) {
+      setGate('connecting')
+      // Drop the token out of the address bar immediately -- it should not sit
+      // there, be bookmarked, or survive a refresh into a duplicate connect.
+      window.history.replaceState(null, '', window.location.pathname)
+      connectWithToken(params)
+        .then(() => { if (!cancelled) navigate('/draft') })
+        .catch((e) => {
+          if (cancelled) return
+          setError(e instanceof Error ? e.message : String(e))
+          setGate('error')
+        })
+      return () => { cancelled = true }
+    }
 
-    // Only meaningful once the extension is present, but harmless before:
-    // token_received stays false until a sync lands.
+    // No token in the hash: this is the install/landing view. Still poll once
+    // in case a connect is already running from a click in another window --
+    // then this page can just offer the board rather than re-installing.
     const poll = async () => {
       try {
         const state = await fetchLiveState()
-        if (!cancelled && state.token_received) setGate('live')
+        if (!cancelled && (state.active || state.token_received)) setGate('live')
       } catch {
-        /* helper not up yet; the gate simply stays where it is */
+        /* helper not up yet; the gate simply stays on the install guide */
       }
     }
     poll()
     const id = setInterval(poll, 2500)
-    return () => {
-      cancelled = true
-      clearInterval(id)
-    }
-  }, [])
+    return () => { cancelled = true; clearInterval(id) }
+  }, [navigate])
 
   return (
     <main className="connect">
@@ -57,46 +89,58 @@ export default function Connect() {
           <span className="connect-pip" aria-hidden="true" /> Draft Helper
         </h1>
 
-        {gate === 'checking' && (
+        {gate === 'connecting' && (
           <>
-            <h2 className="connect-title">Getting ready…</h2>
-            <p className="connect-lede">Checking for the browser extension.</p>
-          </>
-        )}
-
-        {gate === 'missing' && (
-          <>
-            <h2 className="connect-title">Add the extension</h2>
+            <h2 className="connect-title">Connecting to your draft…</h2>
             <p className="connect-lede">
-              One install, then every draft is a single click — no login, no
-              password, nothing to paste. The extension only ever reads a
-              token specific to each draft.
-            </p>
-            <a className="connect-submit" href={STORE_URL} target="_blank" rel="noreferrer">
-              Add to Chrome
-            </a>
-            <p className="connect-note">
-              After installing, this page picks it up automatically. Using
-              Chrome, Edge, Brave, or another Chromium browser.
-            </p>
-          </>
-        )}
-
-        {gate === 'ready' && (
-          <>
-            <h2 className="connect-title">You're set</h2>
-            <p className="connect-lede">
-              Open your ESPN draft, then click the{' '}
-              <strong className="connect-anchor">⚓</strong> Draft Helper icon in
-              your toolbar. Your board goes live here the moment you do.
+              Opening the board from the token your browser just minted on ESPN.
             </p>
             <div className="connect-waiting">
               <span className="connect-spinner" aria-hidden="true" />
-              Waiting for a draft to sync…
+              One moment
             </div>
-            {extVersion && (
-              <p className="connect-note">Extension v{extVersion} detected.</p>
-            )}
+          </>
+        )}
+
+        {gate === 'install' && (
+          <>
+            <h2 className="connect-title">Add the Draft Helper button</h2>
+            <p className="connect-lede">
+              One drag, then every draft is a single click — no install, no
+              login, nothing to paste. Your ESPN password never leaves ESPN.
+            </p>
+
+            <div className="connect-bookmark-row">
+              <a
+                ref={bookmarkRef}
+                className="connect-bookmark"
+                onClick={(e) => e.preventDefault()}
+                title="Drag me to your bookmarks bar"
+              >
+                <span aria-hidden="true">⚓</span>&nbsp;Draft&nbsp;Helper
+              </a>
+              <span className="connect-bookmark-hint">
+                ← drag this to your bookmarks bar
+              </span>
+            </div>
+
+            <ol className="connect-steps">
+              <li>
+                Show your bookmarks bar if it’s hidden
+                (<kbd>⌘⇧B</kbd> / <kbd>Ctrl⇧B</kbd>), then drag the button up
+                to it.
+              </li>
+              <li>Open your ESPN draft room (a mock draft works too).</li>
+              <li>
+                Click <strong>⚓ Draft&nbsp;Helper</strong> in your bookmarks
+                bar. Your board opens in a new window.
+              </li>
+            </ol>
+
+            <p className="connect-note">
+              Nothing to detect and nothing to confirm — this page goes live on
+              its own the moment you click the button in a draft.
+            </p>
           </>
         )}
 
@@ -110,8 +154,18 @@ export default function Connect() {
           </>
         )}
 
+        {gate === 'error' && (
+          <>
+            <h2 className="connect-title">Couldn’t connect</h2>
+            <p className="connect-lede">{error}</p>
+            <button className="connect-submit" onClick={() => setGate('install')}>
+              Back to setup
+            </button>
+          </>
+        )}
+
         <p className="connect-legacy">
-          Looking for the research tool? It's at <Link to="/legacy">/legacy</Link>.
+          Looking for the research tool? It’s at <Link to="/legacy">/legacy</Link>.
         </p>
       </div>
     </main>

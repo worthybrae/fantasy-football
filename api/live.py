@@ -97,6 +97,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel
 
 from pipeline.draft_listener import DraftListener, run_listener
+from pipeline.draft_socket import run_socket_listener
 from pipeline.espn_league import STATE_PATH, parse_league_id
 from pipeline.espn_live import apply_picks
 from pipeline import leagues as leagues_mod
@@ -392,6 +393,132 @@ def register_live_routes(app, conn, db_path):
             state["candidates"] = frame.to_dict(orient="records")
             state["as_of_pick"] = picks_made
 
+    def _provision_and_build(league_id, team_id):
+        """Open (provisioning if needed) the connection this league's session
+        lives on, and build the session against it.
+
+        The default league -- the __default__ sentinel or this deployment's
+        DEFAULT_LEAGUE_ID -- keeps building against the shared `conn`, which
+        already holds its draft history and fitted managers. Every other
+        league gets its own connection to its own file, provisioned
+        idempotently (a reconnect mid-draft must not wipe the `drafted` rows
+        already recorded there) from this app's own database, so a league's
+        rows never mix with another's or with the shared one's. Until
+        per-league ESPN history import lands this is a genuine cold start for
+        any league we've never seen.
+
+        `root` is read off the module, not provision_league's import-time
+        default, so a test that reassigns pipeline.leagues.LEAGUES_ROOT is
+        honoured. Returns (work_conn, league_conn, session); league_conn is
+        None for the default league and otherwise the caller's to register in
+        state and eventually close. On any failure building the session the
+        freshly opened league_conn is closed here -- nothing else holds it
+        yet -- so a provisioned file is never left locked.
+        """
+        league_conn = None
+        if (league_id and league_id != DEFAULT_LEAGUE
+                and league_id != leagues_mod.DEFAULT_LEAGUE_ID):
+            league_path = provision_league(
+                league_id, universal_path=db_path, root=leagues_mod.LEAGUES_ROOT)
+            league_conn = get_conn(league_path)
+        work_conn = league_conn if league_conn is not None else conn
+        try:
+            cur = work_conn.cursor()
+            try:
+                # The socket speaks team ids, not slots (see _slot_for_team's
+                # docstring). A resolvable teamId fixes my_slot immediately;
+                # otherwise it stays None and the socket's TOKEN frame names
+                # our team once it connects (see the my_slot back-fill in
+                # _launch_listener's on_change). Read off `work_conn`, the
+                # same connection build_session uses just below, so a resolved
+                # slot cannot come from a different league's draft order.
+                my_slot = (_slot_for_team(cur, team_id)
+                           if team_id is not None else None)
+                session = build_session(cur, my_slot, league_id=league_id)
+            finally:
+                cur.close()
+        except Exception:
+            if league_conn is not None:
+                league_conn.close()
+            raise
+        return work_conn, league_conn, session
+
+    def _launch_listener(work_conn, league_conn, league_id, session, run_fn):
+        """Register a built session's listener thread and start it.
+
+        `run_fn(listener, on_change, stop_event)` is what actually opens and
+        pumps frames -- `run_listener` (browser observer) or
+        `run_socket_listener` (direct socket). Everything around it is
+        identical for both, so it lives here once: the pick pump, the my_slot
+        back-fill, the identity guard that keeps a superseded listener's
+        in-flight callback a no-op, the listener_error capture, and the state
+        registration + generation bump.
+        """
+        listener = DraftListener(session.crosswalk)
+        stop_event = threading.Event()
+        # DraftSession is frozen, so the my_slot back-fill replaces the
+        # session object rather than mutating it. `current` is that one
+        # mutable cell, closed over by on_change one-to-one with `listener`.
+        current = {"session": session}
+
+        def pump():
+            def on_change():
+                # stop_event only asks the poll loop to exit; it does not gate
+                # an in-flight callback a newer connect may have superseded.
+                # Checking identity here is what keeps a superseded listener's
+                # write a no-op instead of a race (see state["listener"]).
+                with lock:
+                    if state["listener"] is not listener:
+                        return
+                c2 = work_conn.cursor()
+                try:
+                    sess = current["session"]
+                    if sess.my_slot is None and listener.my_team_id is not None:
+                        resolved = _slot_for_team(c2, listener.my_team_id)
+                        if resolved is not None:
+                            sess = dataclasses.replace(sess, my_slot=resolved)
+                            current["session"] = sess
+                            with lock:
+                                if state["listener"] is listener:
+                                    state["session"] = sess
+                    apply_picks(c2, listener.picks())
+                    made = c2.execute(
+                        "SELECT count(*) FROM drafted").fetchone()[0]
+                finally:
+                    c2.close()
+                _recompute(current["session"], made)
+
+            try:
+                run_fn(listener, on_change, stop_event)
+            except Exception as exc:      # noqa: BLE001 -- any failure (bad
+                # url/token, ESPN unreachable, Playwright missing) must reach
+                # /api/live/state instead of dying silently on a daemon
+                # thread. Only recorded if this is still the active listener,
+                # so a superseded one mid-shutdown cannot clobber the error of
+                # whatever replaced it.
+                with lock:
+                    if state["listener"] is listener:
+                        state["listener_error"] = str(exc)
+
+        thread = threading.Thread(target=pump, daemon=True)
+        with lock:
+            state.update({"session": session, "listener": listener,
+                          "listener_thread": thread, "listener_stop": stop_event,
+                          "listener_error": None, "league_conn": league_conn,
+                          "candidates": [], "as_of_pick": None,
+                          "unmapped": [], "last_poll_at": None})
+            state["generation"] = state.get("generation", 0) + 1
+        thread.start()
+        # my_slot is echoed back deliberately: None means genuinely undetected
+        # yet, not a default. A resolved value went through draft_teams ->
+        # draft_order by manager, which a re-randomised draft order would make
+        # silently wrong -- a human glancing at "you're drafting from slot 4"
+        # catches that; nothing else does. So the real value (or its absence)
+        # is returned, never a guess.
+        return {"connected": True, "league_id": league_id,
+                "board_fingerprint": session.board_fingerprint,
+                "my_slot": session.my_slot}
+
     @app.post("/api/live/start")
     def live_start(my_slot: int):
         with lock:
@@ -526,196 +653,92 @@ def register_live_routes(app, conn, db_path):
 
     @app.post("/api/live/connect")
     def live_connect(body: ConnectBody):
-        # Invalid before anything else runs: a request that turns out to be
-        # invalid must never tear down a listener that was working, and this
-        # is the one thing about this request that can actually be invalid
-        # (team id / slot resolution below never raises -- see
-        # _slot_for_team's docstring).
+        # Validate the one thing that can be invalid (the league id) BEFORE
+        # tearing down a working listener -- an invalid request must never
+        # stop one that was running. Team id / slot resolution never raises
+        # (see _slot_for_team's docstring).
         league_id = _resolve_league_id(body.url)
 
-        # Exactly one listener may run at a time: the draft socket's URL
-        # carries a token with no known derivation, so we can only ever
-        # observe the one connection a real browser holds, never open a
-        # second. Rather than refuse a reconnect outright -- which would
-        # trap a caller recovering from a dead listener (listener_error
-        # set) behind a separate, easy-to-forget /api/live/stop call --
-        # the old listener is always stopped and joined FIRST, so the two
-        # can never overlap. If it will not stop in time, refuse instead of
-        # racing it.
-        #
-        # This now also has to happen before a new per-league connection is
-        # opened below, not just before the new listener starts: DuckDB is
-        # single-writer per file, and a reconnect to the SAME league would
-        # try to open a second connection to a file the previous (not yet
-        # confirmed stopped) session's connection might still hold. Stopping
-        # first -- which is also where that old connection gets closed, see
-        # _stop_listener -- guarantees the file is free before we touch it.
+        # Exactly one listener at a time. Rather than refuse a reconnect --
+        # which would trap a caller recovering from a dead listener behind a
+        # separate, easy-to-forget /api/live/stop -- the old one is always
+        # stopped and joined FIRST. That is also where its per-league
+        # connection is closed, so the single-writer DuckDB file is free
+        # before _provision_and_build reopens it. If it will not stop in
+        # time, refuse rather than race it.
         if not _stop_listener():
             raise HTTPException(
                 status_code=503,
                 detail="the previous listener did not stop in time -- try again")
 
-        # The default league -- the __default__ sentinel, or a league id
-        # equal to this deployment's configured DEFAULT_LEAGUE_ID -- keeps
-        # building against the shared `conn`, unchanged from before
-        # per-league routing existed. parse_league_id only ever returns
-        # digits, never __default__, so DEFAULT_LEAGUE_ID is how a real URL
-        # actually reaches this branch: it names the one real league
-        # data/nfl.duckdb already belongs to, with its draft history and
-        # fitted managers already in it -- the existing user reconnecting to
-        # their own draft, not a stranger to cold-start. This check has to
-        # happen here, before provision_league: league_db_path resolves
-        # DEFAULT_LEAGUE_ID to pipeline.db's own DEFAULT_PATH, a fixed
-        # string that is not necessarily this app's own `db_path` (a test
-        # instance, say), and `conn` is already an open connection to
-        # `db_path` -- calling get_conn on the same file again from here
-        # would be a second, conflicting connection to a file `conn` already
-        # holds, even before considering it might be the wrong file
-        # entirely.
-        #
-        # Every OTHER league gets its own connection, to its own file --
-        # provisioned (idempotently; a reconnect mid-draft must not wipe the
-        # `drafted` rows already recorded there) from this app's own
-        # database, so a league's `drafted`, `draft_teams`, `draft_order`
-        # and `league` rows never mix with another league's or with the
-        # shared one's. This is a genuine cold start -- no history has been
-        # imported for a league we've never seen -- until per-league ESPN
-        # history import lands (deferred; see the plan's slice 3).
-        league_conn = None
-        if (league_id and league_id != DEFAULT_LEAGUE
-                and league_id != leagues_mod.DEFAULT_LEAGUE_ID):
-            # `root` is read off the module, not provision_league's own
-            # default parameter -- that default is bound once, at import
-            # time, to whatever pipeline.leagues.LEAGUES_ROOT was then, so a
-            # test (or future config) that monkeypatches/reassigns the
-            # module attribute after import would otherwise be silently
-            # ignored here.
-            league_path = provision_league(
-                league_id, universal_path=db_path, root=leagues_mod.LEAGUES_ROOT)
-            league_conn = get_conn(league_path)
-        work_conn = league_conn if league_conn is not None else conn
+        team_id = _team_id_from_url(body.url)
+        work_conn, league_conn, session = _provision_and_build(league_id, team_id)
 
+        def run_fn(listener, on_change, stop_event):
+            # The browser observer: watches the socket a real ESPN tab holds.
+            # Still the fallback for the waiting-room URL that carries no
+            # teamId, where the direct socket has no team to open with.
+            run_listener(listener, body.url, STATE_PATH,
+                         on_change=on_change, stop_event=stop_event)
+
+        return _launch_listener(work_conn, league_conn, league_id, session, run_fn)
+
+    @app.post("/api/live/connect-token")
+    def live_connect_token(body: TokenBody):
+        """Open the draft socket directly, from a token the bookmarklet minted
+        in the user's own browser -- no browser window on this machine.
+
+        The bookmarklet runs on the ESPN draft page, makes the one call that
+        needs the account session (minting the per-draft draftSecurity token,
+        which never leaves that page), and delivers only the token plus the
+        public ids here. `run_socket_listener` opens the socket with the SWID
+        and token alone -- espn_s2 is not needed (see its docstring) -- so a
+        stranger's league with no saved login on this machine still produces
+        a live board. This is the whole point of the bookmarklet path, and
+        the reason the browser-window fallback (`/api/live/connect`) can be
+        avoided whenever the drafter can click a bookmark.
+        """
+        if not (body.leagueId and body.teamId and body.swid and body.token):
+            raise HTTPException(
+                status_code=422,
+                detail="missing leagueId, teamId, swid, or token")
+        # The socket path needs a team id up front (it has no browser JOIN to
+        # learn it from), and _slot_for_team compares against integer team
+        # ids -- so a non-numeric teamId is a real, up-front error here rather
+        # than a silent None slot later.
         try:
-            cur = work_conn.cursor()
-            try:
-                # The socket speaks team ids, not slots (see
-                # _slot_for_team's docstring). A teamId on the URL -- present
-                # on a draft-room URL, absent on the waiting-room one ESPN
-                # redirects there from -- resolves my_slot immediately, an
-                # instant answer the connect screen can show right away.
-                # Otherwise my_slot stays None: the socket's own TOKEN frame
-                # will name our team once it connects (see on_change below),
-                # and that -- not a guess -- is what fills it in. Read off
-                # `work_conn`, the same connection build_session uses just
-                # below: draft_teams/draft_order and the session's own
-                # slot_managers must come from the one file this session
-                # actually belongs to, or a resolved slot could point at a
-                # different league's draft order.
-                team_id = _team_id_from_url(body.url)
-                my_slot = _slot_for_team(cur, team_id) if team_id is not None else None
-                session = build_session(cur, my_slot, league_id=league_id)
-            finally:
-                cur.close()
-        except Exception:
-            # build_session (or slot resolution) failed before this
-            # connection was ever handed to state -- nothing else will close
-            # it, so it must close here or a freshly provisioned league's
-            # file stays locked and every retry 503s forever.
-            if league_conn is not None:
-                league_conn.close()
-            raise
-        listener = DraftListener(session.crosswalk)
-        stop_event = threading.Event()
+            team_id = int(body.teamId)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="teamId must be numeric")
 
-        def pump():
-            """Write every pick the socket reports, then recompute.
+        # Same one-listener-at-a-time teardown as live_connect, and for the
+        # same reason: stop and join the old one (closing its connection)
+        # before _provision_and_build reopens this league's single-writer file.
+        if not _stop_listener():
+            raise HTTPException(
+                status_code=503,
+                detail="the previous listener did not stop in time -- try again")
 
-            `apply_picks` replaces the table wholesale, so re-folding the
-            whole event stream on each change is correct rather than
-            wasteful -- and it keeps `picks_from_events` the single
-            definition of pick numbering.
-            """
-            def on_change():
-                nonlocal session
-                with lock:
-                    # `stop_event` only asks run_listener's poll loop to
-                    # exit -- it does not gate an in-flight websocket
-                    # callback Playwright may already be running when a
-                    # newer connect supersedes this listener. Checking
-                    # identity here, not just trusting the stop signal, is
-                    # what keeps a superseded listener's write a no-op
-                    # instead of a race against the session that replaced
-                    # it (see the module-level `state["listener"]` comment).
-                    if state["listener"] is not listener:
-                        return
-                # work_conn, not conn: this listener's picks belong to
-                # session's own league (or the shared database, for the
-                # default league) -- the same connection build_session read
-                # from above.
-                c2 = work_conn.cursor()
-                try:
-                    # my_slot is still unknown exactly when the URL carried
-                    # no teamId -- the case DraftListener.on_frame's
-                    # "newly learned team" signal exists for, so this check
-                    # runs on the very first on_change, potentially before
-                    # any pick has landed. DraftSession is frozen, so the
-                    # resolved session replaces `session` (closed over by
-                    # this function, one-to-one with `listener`) rather than
-                    # mutating it; the replacement is mirrored into
-                    # state["session"] under the same identity guard as
-                    # every other write here, so /api/live/state picks up
-                    # the real my_slot on its very next read. If
-                    # _slot_for_team still can't resolve it (a mock draft's
-                    # opponents, say), my_slot just stays None -- this retries
-                    # every future on_change rather than giving up once.
-                    if session.my_slot is None and listener.my_team_id is not None:
-                        resolved = _slot_for_team(c2, listener.my_team_id)
-                        if resolved is not None:
-                            session = dataclasses.replace(session, my_slot=resolved)
-                            with lock:
-                                if state["listener"] is listener:
-                                    state["session"] = session
-                    apply_picks(c2, listener.picks())
-                    made = c2.execute("SELECT count(*) FROM drafted").fetchone()[0]
-                finally:
-                    c2.close()
-                _recompute(session, made)
+        work_conn, league_conn, session = _provision_and_build(
+            body.leagueId, team_id)
 
-            try:
-                run_listener(listener, body.url, STATE_PATH,
-                            on_change=on_change, stop_event=stop_event)
-            except Exception as exc:      # noqa: BLE001 -- any failure (bad
-                # url, Playwright missing, ESPN unreachable) must reach
-                # /api/live/state instead of dying silently on a daemon
-                # thread with a stderr trace nobody watches during a live
-                # draft. Only recorded if this is still the active listener
-                # -- a superseded one that's mid-shutdown raising on its way
-                # out must not clobber the error of whatever replaced it.
-                with lock:
-                    if state["listener"] is listener:
-                        state["listener_error"] = str(exc)
+        def run_fn(listener, on_change, stop_event):
+            run_socket_listener(listener, body.leagueId, body.teamId, body.swid,
+                                body.token, on_change=on_change,
+                                stop_event=stop_event)
 
-        thread = threading.Thread(target=pump, daemon=True)
+        # Record the token so /api/live/state's token_received stays truthful
+        # for the connect screen. In memory only, same as /api/live/token: a
+        # draft token is a short-lived nonce, and writing it to disk is the
+        # one thing that would turn a breach into a leak. Set before launch;
+        # _launch_listener's own state.update never touches "token".
         with lock:
-            state.update({"session": session, "listener": listener,
-                          "listener_thread": thread, "listener_stop": stop_event,
-                          "listener_error": None, "league_conn": league_conn,
-                          "candidates": [], "as_of_pick": None,
-                          "unmapped": [], "last_poll_at": None})
-            state["generation"] = state.get("generation", 0) + 1
-        thread.start()
-        # `my_slot` is echoed back deliberately -- None here means genuinely
-        # undetected yet, not a default of some kind. When it IS resolved
-        # (from the URL's teamId now, or the socket's TOKEN shortly after),
-        # it went through draft_teams -> draft_order by manager, and a
-        # league that re-randomised its draft order since draft_order was
-        # last set would get a silently wrong answer that no data source
-        # here can detect. A human glancing at "you're drafting from slot 4"
-        # catches that in a second; nothing else catches it at all. So the
-        # real value (or its absence) is returned for the connect screen to
-        # show, never a guess standing in for either.
-        return {"connected": True, "league_id": league_id,
-                "board_fingerprint": session.board_fingerprint,
-                "my_slot": session.my_slot}
+            state["token"] = {
+                "league_id": body.leagueId, "team_id": body.teamId,
+                "swid": body.swid, "token": body.token, "season": body.season,
+                "received_at": datetime.now(timezone.utc).isoformat(),
+            }
+        return _launch_listener(work_conn, league_conn, body.leagueId, session,
+                                run_fn)
 
     return state, _recompute

@@ -2144,6 +2144,79 @@ a.connect-submit {
   margin: 0 2px;
 }
 
+/* -- connect screen: bookmarklet install -- */
+
+.connect-note {
+  margin-top: var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--text-3);
+  line-height: 1.5;
+}
+
+/* The draggable button is the whole point of the screen, so it reads as a
+   grabbable object: accent-filled, raised, grab cursor. The user drags it to
+   the bookmarks bar; the href is a javascript: URL set via the DOM (React
+   strips javascript: from href props), and the click is swallowed. */
+.connect-bookmark-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-4);
+}
+
+.connect-bookmark {
+  display: inline-flex;
+  align-items: center;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 700;
+  font-size: var(--text-base);
+  text-decoration: none;
+  padding: 9px 15px;
+  border-radius: var(--radius);
+  border: 1px solid var(--accent-border);
+  box-shadow: 0 2px 8px -2px var(--accent);
+  cursor: grab;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.connect-bookmark:active {
+  cursor: grabbing;
+}
+
+.connect-bookmark-hint {
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+
+.connect-steps {
+  margin: 0 0 var(--space-2);
+  padding-left: 1.3em;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.connect-steps strong {
+  color: var(--text-1);
+}
+
+.connect-card kbd {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
 .connect-slot-unknown {
   font-size: var(--text-md);
   color: var(--text-1);

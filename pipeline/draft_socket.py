@@ -226,8 +226,7 @@ def _connect(url: str, cookie_header: str):
 
 
 def run_socket_listener(listener, league_id, team_id, swid, token,
-                        on_change=None, stop_event=None,
-                        state_path: str = STATE_PATH) -> None:
+                        on_change=None, stop_event=None) -> None:
     """Connect directly to ESPN's draft socket and feed it into `listener`.
 
     Blocking -- the caller runs it on a thread. Matches `run_listener`'s
@@ -236,17 +235,24 @@ def run_socket_listener(listener, league_id, team_id, swid, token,
     connection is always closed on the way out, success or exception) so
     api/live.py can call either one from the same `pump()` shape.
 
+    Authenticates the handshake with the `SWID` cookie alone -- NOT the
+    `espn_s2` session cookie. Verified against a live draft under three
+    conditions (with espn_s2, with SWID only, with no cookie): the socket
+    connects and streams real SELECTED frames whenever the URL carries a
+    self-minted token and the handshake carries SWID, and rejects the bare
+    no-cookie case. espn_s2 was accepted but never required. That is the
+    whole reason this path can watch a stranger's draft: `swid` comes off
+    the draft URL's memberId and `token` is minted by the bookmarklet from
+    the user's own ESPN session, so nothing here needs a saved login on
+    this machine -- the account session cookie stays in the user's browser
+    and never reaches this process.
+
     `swid` and `token` are taken as already-resolved values rather than
-    derived here, matching the split `draft_security_token`/`load_cookies`
-    already draw: minting a token needs a network call, and this function's
-    job is only the socket once one exists. `state_path` still defaults to
-    the shared STATE_PATH because the *cookie* used to authenticate the
-    handshake (`espn_s2`, which never appears in the URL itself) is not
-    among this function's parameters either -- there is nowhere else to
-    read it from.
+    derived here, matching the split `draft_security_token` already draws:
+    minting a token needs a network call, and this function's job is only
+    the socket once one exists.
     """
-    cookies = load_cookies(state_path)
-    cookie_header = f"espn_s2={cookies['espn_s2']}; SWID={cookies['SWID']}"
+    cookie_header = f"SWID={swid}"
     url = socket_url(league_id, team_id, swid, token)
     ws = _connect(url, cookie_header)
     try:

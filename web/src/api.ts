@@ -470,3 +470,33 @@ export async function connectDraft(url: string): Promise<ConnectResult> {
   }
   return res.json()
 }
+
+// What the bookmarklet mints on the ESPN page and hands to this window in the
+// URL hash: the throwaway per-draft token plus the public ids. The account
+// session (espn_s2) is never among them -- it stays in the user's ESPN tab,
+// where the bookmarklet used it only to fetch this token.
+export interface TokenConnectParams {
+  leagueId: string
+  teamId: string
+  swid: string
+  token: string
+  season: string
+}
+
+// The bookmarklet path's connect. The server opens ESPN's draft socket
+// directly from these values (no browser window on the server), so this both
+// starts the listener and returns the resolved slot -- unlike the extension's
+// old /api/live/token, which only stored a token and opened nothing.
+export async function connectWithToken(
+  params: TokenConnectParams,
+): Promise<ConnectResult> {
+  const res = await fetch('/api/live/connect-token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  if (!res.ok) {
+    throw new Error(await detailText(res))
+  }
+  return res.json()
+}
