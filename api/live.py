@@ -200,6 +200,56 @@ def _slot_for_team(cur, team_id: int):
     return int(mine.iloc[0]["slot"])
 
 
+def _safe_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _slot_from_socket(listener, teams: int):
+    """Derive my draft slot from the socket alone, when history cannot.
+
+    `_slot_for_team` translates a team id through imported draft history; a
+    mock draft (or any league not yet imported) has none, so it returns None
+    and every recommendation stays blank because the simulator has no slot to
+    reason from. But the socket carries enough to name the slot without any
+    history: in a snake draft the first round's overall pick order IS the slot
+    order, so the team picking k-th of the first `teams` picks drafts from
+    slot k. My team's own first-round pick position -- or, before it has
+    picked, its position on the clock during round 1 -- names its slot exactly.
+
+    Returns None until my team is seen in round 1 (picked or on the clock),
+    which is honest: with no history and no round-1 appearance yet the slot
+    genuinely is not known, and a guess would attribute picks to the wrong
+    manager. Replay-safe: it dedups repeated SELECTED frames by player the
+    same way picks_from_events does (a repeat is ESPN replaying the draft on a
+    reconnect JOIN, not a second pick), since the raw event list it reads
+    still contains those replays even though the drafted table does not.
+    """
+    mine = listener.my_team_id
+    if mine is None or not teams:
+        return None
+    seen_players, pick_teams = set(), []   # pick_teams[i] = team id of pick i+1
+    for event in listener.events:
+        if event is None or event.verb != "SELECTED":
+            continue
+        pid = _safe_int(event.args[1] if len(event.args) >= 2 else None)
+        if pid is not None and pid in seen_players:
+            continue                       # replayed pick -- already counted
+        if pid is not None:
+            seen_players.add(pid)
+        pick_teams.append(_safe_int(event.args[0]) if event.args else None)
+    # Round 1: overall pick k (1-based) is slot k.
+    for i, team in enumerate(pick_teams[:teams], start=1):
+        if team == mine:
+            return i
+    # Not yet picked. On the clock during round 1 -> the next pick's slot.
+    if len(pick_teams) < teams and listener.on_the_clock == mine:
+        return len(pick_teams) + 1
+    return None
+
+
 # Picks arrive pushed, not polled, so any real gap means the socket is
 # wedged rather than merely quiet. Five seconds is long enough to survive a
 # slow frame and short enough that a dead listener is obvious while there is
@@ -462,7 +512,21 @@ def register_live_routes(app, conn, db_path):
         current = {"session": session}
 
         def pump():
+            def on_activity():
+                # Liveness heartbeat: stamp last_poll_at so a healthy socket
+                # never reads as stale between picks (picks arrive every
+                # 20-30s, well past STALE_AFTER_SECONDS). The socket path fires
+                # this on every received frame; on_change also calls it so the
+                # browser path stays fresh at least per pick. Identity-guarded
+                # like every other write, so a superseded listener cannot keep
+                # the board looking fresh after it has been replaced.
+                now = datetime.now(timezone.utc)
+                with lock:
+                    if state["listener"] is listener:
+                        state["last_poll_at"] = now
+
             def on_change():
+                on_activity()
                 # stop_event only asks the poll loop to exit; it does not gate
                 # an in-flight callback a newer connect may have superseded.
                 # Checking identity here is what keeps a superseded listener's
@@ -474,7 +538,15 @@ def register_live_routes(app, conn, db_path):
                 try:
                     sess = current["session"]
                     if sess.my_slot is None and listener.my_team_id is not None:
+                        # History first; the socket's own round-1 ordering is
+                        # the fallback for a mock (or an un-imported league),
+                        # where no history can translate the team id (see
+                        # _slot_from_socket). Without it a mock never resolves
+                        # a slot and every recommendation stays blank.
                         resolved = _slot_for_team(c2, listener.my_team_id)
+                        if resolved is None:
+                            resolved = _slot_from_socket(
+                                listener, getattr(sess.settings, "teams", 0))
                         if resolved is not None:
                             sess = dataclasses.replace(sess, my_slot=resolved)
                             current["session"] = sess
@@ -489,7 +561,7 @@ def register_live_routes(app, conn, db_path):
                 _recompute(current["session"], made)
 
             try:
-                run_fn(listener, on_change, stop_event)
+                run_fn(listener, on_change, on_activity, stop_event)
             except Exception as exc:      # noqa: BLE001 -- any failure (bad
                 # url/token, ESPN unreachable, Playwright missing) must reach
                 # /api/live/state instead of dying silently on a daemon
@@ -674,10 +746,12 @@ def register_live_routes(app, conn, db_path):
         team_id = _team_id_from_url(body.url)
         work_conn, league_conn, session = _provision_and_build(league_id, team_id)
 
-        def run_fn(listener, on_change, stop_event):
+        def run_fn(listener, on_change, on_activity, stop_event):
             # The browser observer: watches the socket a real ESPN tab holds.
             # Still the fallback for the waiting-room URL that carries no
-            # teamId, where the direct socket has no team to open with.
+            # teamId, where the direct socket has no team to open with. It has
+            # no per-frame hook, so on_activity is unused here; on_change still
+            # stamps last_poll_at each pick.
             run_listener(listener, body.url, STATE_PATH,
                          on_change=on_change, stop_event=stop_event)
 
@@ -722,10 +796,10 @@ def register_live_routes(app, conn, db_path):
         work_conn, league_conn, session = _provision_and_build(
             body.leagueId, team_id)
 
-        def run_fn(listener, on_change, stop_event):
+        def run_fn(listener, on_change, on_activity, stop_event):
             run_socket_listener(listener, body.leagueId, body.teamId, body.swid,
                                 body.token, on_change=on_change,
-                                stop_event=stop_event)
+                                stop_event=stop_event, on_activity=on_activity)
 
         # Record the token so /api/live/state's token_received stays truthful
         # for the connect screen. In memory only, same as /api/live/token: a

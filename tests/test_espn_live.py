@@ -321,3 +321,86 @@ def test_the_real_capture_folds_into_picks():
     half = dict(list(ids.items())[: len(ids) // 2])
     partial = picks_from_events(events, half)
     assert len(partial.rows) + len(partial.unmapped) == len(selected)
+
+
+def test_picks_from_events_dedups_a_reconnect_replay():
+    """ESPN re-sends every prior SELECTED when a socket rejoins a draft in
+    progress. A player cannot be drafted twice, so a repeated id is that
+    replay, not a new pick -- it must not consume a fresh pick_no, or one
+    reconnect would double every pick and shift the whole board."""
+    from pipeline.espn_live import parse_frame, picks_from_events
+
+    xwalk = {1001: "a", 1002: "b", 1003: "c", 1004: "d"}
+    frames = ["SELECTED 40 1001 2", "SELECTED 41 1002 2", "SELECTED 42 1003 2"]
+    events = [parse_frame(f) for f in frames]
+
+    once = picks_from_events(events, xwalk)
+    assert list(once.rows["player_id"]) == ["a", "b", "c"]
+    assert list(once.rows["pick_no"]) == [1, 2, 3]
+
+    # Reconnect: the three replay verbatim, then a fourth, new pick lands.
+    replayed = events + [parse_frame(f) for f in frames] \
+        + [parse_frame("SELECTED 43 1004 2")]
+    twice = picks_from_events(replayed, xwalk)
+    assert list(twice.rows["player_id"]) == ["a", "b", "c", "d"]
+    assert list(twice.rows["pick_no"]) == [1, 2, 3, 4]
+
+
+def test_run_socket_listener_reconnects_after_a_drop(monkeypatch):
+    """One dropped socket must not end the watch: ESPN ends even a pinged
+    connection with 'no close frame received or sent' after a while, so
+    run_socket_listener reopens and keeps folding picks. Both picks below land
+    across two separate connections."""
+    import threading
+
+    from pipeline import draft_socket
+    from pipeline.draft_listener import DraftListener
+    from websockets.exceptions import ConnectionClosed
+
+    monkeypatch.setattr(draft_socket, "RECONNECT_BACKOFF_SECONDS", 0.01)
+    stop = threading.Event()
+    scripts = [
+        ["SELECTED 40 1001 2", "__DROP__"],   # conn 1: one frame, then dropped
+        ["SELECTED 41 1002 2", "__STOP__"],   # conn 2: one frame, then we stop
+    ]
+    connects = {"n": 0}
+
+    class FakeWS:
+        def __init__(self, script):
+            self.script = list(script)
+
+        def send(self, _msg):
+            pass
+
+        def recv(self, timeout=None):
+            if not self.script:
+                raise TimeoutError
+            item = self.script.pop(0)
+            if item == "__DROP__":
+                raise ConnectionClosed(None, None)
+            if item == "__STOP__":
+                stop.set()
+                raise TimeoutError
+            return item
+
+        def close(self):
+            pass
+
+    def fake_connect(url, cookie_header):
+        i = connects["n"]
+        connects["n"] += 1
+        return FakeWS(scripts[i] if i < len(scripts) else [])
+
+    monkeypatch.setattr(draft_socket, "_connect", fake_connect)
+
+    listener = DraftListener({1001: "a", 1002: "b"})
+    activity = {"n": 0}
+    draft_socket.run_socket_listener(
+        listener, "100", "2", "{S}", "tok",
+        on_change=lambda: None,
+        on_activity=lambda: activity.__setitem__("n", activity["n"] + 1),
+        stop_event=stop)
+
+    assert connects["n"] >= 2, "did not reconnect after the drop"
+    assert list(listener.picks().rows["player_id"]) == ["a", "b"]
+    assert activity["n"] >= 2, "on_activity did not fire per frame"

@@ -1351,17 +1351,20 @@ def test_connect_token_resolves_slot_and_wires_socket_picks(
     seen_args = {}
 
     def fake_run_socket_listener(listener, league_id, team_id, swid, token,
-                                 on_change=None, stop_event=None):
+                                 on_change=None, stop_event=None,
+                                 on_activity=None):
         """Stands in for the real, socket-opening run_socket_listener. Records
         the args it was called with (so the test can prove the token and ids
-        reached it) and replays real captured frames, firing on_change exactly
-        when the pick count changes -- the same contract run_listener's fake
-        uses on the browser path."""
+        reached it) and replays real captured frames, firing on_activity on
+        every frame and on_change when the pick count changes -- the same
+        contract the real run_socket_listener holds."""
         seen_args.update(league_id=league_id, team_id=team_id, swid=swid,
                          token=token)
         prev = 0
         for frame in _first_n_selected_frames(3):
             listener.on_frame(frame)
+            if on_activity is not None:
+                on_activity()
             count = len(listener.picks().rows)
             if count != prev:
                 prev = count
@@ -1405,6 +1408,11 @@ def test_connect_token_resolves_slot_and_wires_socket_picks(
     # The click landed: token_received flips true so the connect screen can
     # stop showing the install guide and follow the board.
     assert state["token_received"] is True
+    # on_activity stamped last_poll_at, so the board is not falsely stale --
+    # the "no successful update" banner would otherwise show forever, since
+    # nothing else ever set last_poll_at.
+    assert state["last_poll_at"] is not None
+    assert state["stale"] is False
     client.post("/api/live/stop")
 
 
@@ -1437,3 +1445,36 @@ def test_connect_token_rejects_missing_or_nonnumeric_fields(tmp_path, monkeypatc
 
     # Nothing was started, so nothing is active.
     assert client.get("/api/live/state").json()["active"] is False
+
+
+def test_slot_from_socket_derives_slot_for_a_mock():
+    """A mock's managers are in no history, so _slot_for_team returns None and
+    recommendations would stay blank forever. _slot_from_socket recovers the
+    slot from the socket alone: in round 1 the overall pick order is the slot
+    order, so my team's position on the clock -- or its first-round pick --
+    names its slot, and a reconnect replay must not shift it."""
+    from api.live import _slot_from_socket
+    from pipeline.draft_listener import DraftListener
+
+    L = DraftListener({})
+    L.on_frame("TOKEN 1:100:77:{SWID}:12345")     # names my team as 77
+    assert L.my_team_id == 77
+
+    # Two picks in, my team unseen in round 1 -> not known yet.
+    L.on_frame("SELECTED 40 1001 2")              # slot 1
+    L.on_frame("SELECTED 41 1002 2")              # slot 2
+    assert _slot_from_socket(L, 8) is None
+
+    # My team on the clock at pick 3 -> slot 3, before it even picks.
+    L.on_frame("SELECTING 77 30000")
+    assert _slot_from_socket(L, 8) == 3
+
+    # It picks; still slot 3 by position.
+    L.on_frame("SELECTED 77 1003 2")
+    assert _slot_from_socket(L, 8) == 3
+
+    # ESPN replays the whole first round on a reconnect JOIN -- the duplicate
+    # SELECTED frames must not move the slot.
+    for f in ("SELECTED 40 1001 2", "SELECTED 41 1002 2", "SELECTED 77 1003 2"):
+        L.on_frame(f)
+    assert _slot_from_socket(L, 8) == 3

@@ -194,6 +194,19 @@ PING_INTERVAL_SECONDS = 15.0
 # How often the recv loop wakes up to check stop_event and the ping clock,
 # even with no frame waiting -- same cadence run_listener's poll loop uses.
 RECV_POLL_SECONDS = 1.0
+# ESPN drops a live draft socket periodically even with keepalive pings: a
+# healthy connection still ends in "no close frame received or sent" after a
+# few minutes (observed live). One drop must not end the watch -- reconnect
+# and let ESPN replay the draft state on JOIN, which it does (the first connect
+# mid-draft already arrives with every prior pick; picks_from_events dedups the
+# replay). Back off briefly between attempts.
+RECONNECT_BACKOFF_SECONDS = 2.0
+# Give up only when reconnects stop yielding ANY data -- a connection that
+# opens and closes with no frame, repeatedly, is what a dead or expired token
+# looks like, as opposed to a live token whose socket merely keeps dropping.
+# The caller surfaces the resulting error on /api/live/state so the user knows
+# to click the bookmark again for a fresh token.
+MAX_EMPTY_RECONNECTS = 5
 
 
 def _ping_message() -> str:
@@ -225,15 +238,38 @@ def _connect(url: str, cookie_header: str):
                    open_timeout=10)
 
 
+def _wait_or_stopped(stop_event, seconds: float) -> bool:
+    """Sleep `seconds`, but wake early and return True if stop is signalled.
+
+    Returns True when the caller should stop (stop_event set during the
+    wait), False when the wait simply elapsed. With no stop_event it is a
+    plain sleep that never asks to stop -- the old "manage your own lifetime"
+    behaviour."""
+    if stop_event is None:
+        time.sleep(seconds)
+        return False
+    return stop_event.wait(seconds)
+
+
 def run_socket_listener(listener, league_id, team_id, swid, token,
-                        on_change=None, stop_event=None) -> None:
+                        on_change=None, stop_event=None, on_activity=None) -> None:
     """Connect directly to ESPN's draft socket and feed it into `listener`.
 
     Blocking -- the caller runs it on a thread. Matches `run_listener`'s
     contract on purpose (`on_change` fires exactly when `listener.on_frame`
-    reports a change; `stop_event` is polled cooperatively and the
-    connection is always closed on the way out, success or exception) so
-    api/live.py can call either one from the same `pump()` shape.
+    reports a change; `stop_event` is polled cooperatively and the connection
+    is always closed on the way out) so api/live.py can call either one from
+    the same `pump()` shape. `on_activity`, if given, fires on every frame
+    successfully received -- the liveness heartbeat api/live.py stamps
+    last_poll_at from, so a healthy socket never looks stale between picks.
+
+    Reconnects on drop. ESPN ends even a pinged connection with "no close
+    frame received or sent" after a few minutes, so a single drop must not
+    end the watch: the loop reopens the socket and ESPN replays the draft so
+    far on JOIN (picks_from_events dedups the replay, so re-reading it is
+    harmless). It gives up only after MAX_EMPTY_RECONNECTS attempts that
+    yield no frame at all -- the signature of a dead or expired token, which
+    it raises so /api/live/state can tell the user to re-mint one.
 
     Authenticates the handshake with the `SWID` cookie alone -- NOT the
     `espn_s2` session cookie. Verified against a live draft under three
@@ -246,34 +282,68 @@ def run_socket_listener(listener, league_id, team_id, swid, token,
     the user's own ESPN session, so nothing here needs a saved login on
     this machine -- the account session cookie stays in the user's browser
     and never reaches this process.
-
-    `swid` and `token` are taken as already-resolved values rather than
-    derived here, matching the split `draft_security_token` already draws:
-    minting a token needs a network call, and this function's job is only
-    the socket once one exists.
     """
+    from websockets.exceptions import ConnectionClosed
+
     cookie_header = f"SWID={swid}"
     url = socket_url(league_id, team_id, swid, token)
-    ws = _connect(url, cookie_header)
-    try:
-        last_ping = time.monotonic()
-        while stop_event is None or not stop_event.is_set():
-            now = time.monotonic()
-            if now - last_ping >= PING_INTERVAL_SECONDS:
-                ws.send(_ping_message())
-                last_ping = now
-            try:
-                frame = ws.recv(timeout=RECV_POLL_SECONDS)
-            except TimeoutError:
-                continue
-            if listener.on_frame(frame) and on_change is not None:
-                on_change()
-    finally:
-        # Best effort, mirroring run_listener's own cleanup: a socket the
-        # server already dropped cannot be closed twice without complaint,
-        # and failing to close it is not worth losing whatever picks were
-        # already collected over.
+    empty_reconnects = 0
+    while stop_event is None or not stop_event.is_set():
+        got_frame = False
         try:
-            ws.close()
-        except Exception:                              # noqa: BLE001
-            pass
+            ws = _connect(url, cookie_header)
+        except Exception as exc:                       # noqa: BLE001 -- a
+            # failed handshake (rejected token, ESPN unreachable) is a
+            # frameless attempt: count it toward the give-up threshold and,
+            # if not there yet, back off and retry rather than dying on the
+            # first blip.
+            empty_reconnects += 1
+            if empty_reconnects >= MAX_EMPTY_RECONNECTS:
+                raise RuntimeError(
+                    "could not reconnect to the draft socket -- the draft "
+                    "token may have expired; click the Draft Helper bookmark "
+                    f"again to mint a fresh one ({exc})") from exc
+            if _wait_or_stopped(stop_event, RECONNECT_BACKOFF_SECONDS):
+                return
+            continue
+        try:
+            last_ping = time.monotonic()
+            while stop_event is None or not stop_event.is_set():
+                now = time.monotonic()
+                if now - last_ping >= PING_INTERVAL_SECONDS:
+                    ws.send(_ping_message())
+                    last_ping = now
+                try:
+                    frame = ws.recv(timeout=RECV_POLL_SECONDS)
+                except TimeoutError:
+                    continue
+                except ConnectionClosed:
+                    break                              # drop out to reconnect
+                got_frame = True
+                if on_activity is not None:
+                    on_activity()
+                if listener.on_frame(frame) and on_change is not None:
+                    on_change()
+        finally:
+            # Best effort: a socket the server already dropped cannot be
+            # closed twice without complaint, and failing to close it is not
+            # worth losing whatever picks were already collected over.
+            try:
+                ws.close()
+            except Exception:                          # noqa: BLE001
+                pass
+
+        # A connection that delivered real frames proves the token still
+        # works -- reset the counter and reconnect freely. One that opened
+        # and closed with nothing accumulates toward the give-up threshold.
+        if got_frame:
+            empty_reconnects = 0
+        else:
+            empty_reconnects += 1
+            if empty_reconnects >= MAX_EMPTY_RECONNECTS:
+                raise RuntimeError(
+                    "the draft socket kept dropping without any data -- the "
+                    "draft token may have expired; click the Draft Helper "
+                    "bookmark again to mint a fresh one")
+        if _wait_or_stopped(stop_event, RECONNECT_BACKOFF_SECONDS):
+            return

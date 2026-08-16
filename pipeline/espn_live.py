@@ -160,18 +160,39 @@ def picks_from_events(events, crosswalk: dict) -> LivePicks:
     invented number. -1 in particular is already ESPN's own sentinel for "no
     player yet" elsewhere in this codebase (see `translate`), so reusing it
     here for a different meaning would be actively misleading.
+
+    A SELECTED frame for a player already counted is a replay, not a new
+    pick: ESPN re-sends every prior SELECTED when a socket (re)JOINs a draft
+    in progress -- that is how the first connect mid-draft arrives already
+    knowing the picks so far, and it happens again on every reconnect. A
+    player cannot be drafted twice, so a repeated id is always that replay
+    and must NOT consume a fresh pick_no; otherwise a single reconnect would
+    double every pick and shift the whole board. Dedup is by ESPN player id,
+    keeping the first occurrence, so pick_no stays the 1-based position among
+    the distinct picks -- identical output to before for any stream with no
+    repeats (the fixtures, and any single uninterrupted connection).
     """
-    rows, unmapped, pick_no = [], [], 0
+    rows, unmapped, pick_no, seen = [], [], 0, set()
     for event in events:
         if event is None or event.verb != "SELECTED":
             continue
-        pick_no += 1
         raw_id = event.args[1] if len(event.args) >= 2 else None
         try:
             espn_id = int(raw_id)
         except (TypeError, ValueError):
+            espn_id = None
+        # Read the id before consuming a pick_no, so a replayed pick can be
+        # skipped whole. A frame with no parseable id at all cannot be
+        # deduped (there is nothing to key on) -- it still counts as its own
+        # pick, exactly as before, since dropping it would leave a drafted
+        # player on the board.
+        if espn_id is not None and espn_id in seen:
+            continue
+        pick_no += 1
+        if espn_id is None:
             unmapped.append({"espn_player_id": None, "overall_pick": pick_no})
             continue
+        seen.add(espn_id)
         player_id = crosswalk.get(espn_id)
         if player_id is None:
             unmapped.append({"espn_player_id": espn_id, "overall_pick": pick_no})
