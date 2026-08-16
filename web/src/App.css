@@ -2165,6 +2165,8 @@ a.connect-submit {
   margin-bottom: var(--space-4);
 }
 
+.connect-bookmark-wrap { display: inline-flex; }
+
 .connect-bookmark {
   display: inline-flex;
   align-items: center;

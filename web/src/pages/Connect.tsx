@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { connectWithToken, fetchLiveState } from '../api'
 import { BOOKMARKLET } from '../lib/bookmarklet'
@@ -35,16 +35,6 @@ export default function Connect() {
   const [gate, setGate] = useState<Gate>('install')
   const [error, setError] = useState<string | null>(null)
   const navigate = useNavigate()
-  const bookmarkRef = useRef<HTMLAnchorElement>(null)
-
-  // Set the bookmarklet's `javascript:` href via the DOM, not JSX: React
-  // strips javascript: URLs from href props (a security default), which would
-  // leave nothing to drag. setAttribute is not filtered. The user drags this
-  // to their bookmarks bar; clicking it here does nothing useful (it would run
-  // against our own URL), so the click is swallowed and the copy says "drag."
-  useEffect(() => {
-    bookmarkRef.current?.setAttribute('href', BOOKMARKLET)
-  })
 
   useEffect(() => {
     let cancelled = false
@@ -111,14 +101,23 @@ export default function Connect() {
             </p>
 
             <div className="connect-bookmark-row">
-              <a
-                ref={bookmarkRef}
-                className="connect-bookmark"
-                onClick={(e) => e.preventDefault()}
-                title="Drag me to your bookmarks bar"
-              >
-                <span aria-hidden="true">⚓</span>&nbsp;Draft&nbsp;Helper
-              </a>
+              {/* The real javascript: link, present from first paint so a drag
+                  to the bookmarks bar copies IT, not this page's URL (setting
+                  the href after mount was too late -- the drag grabbed
+                  localhost instead). React strips javascript: from href props,
+                  so it is injected as raw HTML. The string has no single quotes
+                  (verified in bookmarklet.ts), so a single-quoted href is safe;
+                  onclick returns false so a stray click here does nothing --
+                  it is a drag target, not a button. */}
+              <span
+                className="connect-bookmark-wrap"
+                dangerouslySetInnerHTML={{
+                  __html:
+                    "<a class='connect-bookmark' title='Drag me to your bookmarks bar' "
+                    + "onclick='return false' href='" + BOOKMARKLET + "'>"
+                    + "<span aria-hidden='true'>⚓</span>&nbsp;Draft&nbsp;Helper</a>",
+                }}
+              />
               <span className="connect-bookmark-hint">
                 ← drag this to your bookmarks bar
               </span>
