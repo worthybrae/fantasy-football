@@ -251,12 +251,14 @@ def _slot_from_socket(listener, teams: int):
     return None
 
 
-# Picks arrive pushed, not polled, so any real gap means the socket is
-# wedged rather than merely quiet. Five seconds is long enough to survive a
-# slow frame and short enough that a dead listener is obvious while there is
-# still time to do something about it -- which, on a 30-second clock, is the
-# only window that matters.
-STALE_AFTER_SECONDS = 5
+# Picks arrive pushed, not polled, so any real gap means the socket is wedged
+# rather than merely quiet. The heartbeat (on_activity) now fires on every
+# frame -- CLOCK ticks about once a second while any clock runs -- so a live
+# socket stamps well inside this window; only a genuine wedge, or the couple
+# of seconds a reconnect's backoff+handshake takes, approaches it. Ten
+# seconds spans a reconnect without crying wolf, yet still surfaces a truly
+# dead listener while a 30-second pick clock leaves time to react.
+STALE_AFTER_SECONDS = 10
 # Measured on the live board: 25 -> 4.7s, 100 -> 19.5s, 200 -> 35.2s.
 # Picks arrive every ~20-30s; the clock is ~90s.
 ROLLOUTS_FAR, ROLLOUTS_NEAR, ROLLOUTS_NOW = 25, 100, 200
@@ -340,6 +342,15 @@ def register_live_routes(app, conn, db_path):
              # visible on /api/live/state instead of failing silently.
              "listener": None, "listener_thread": None,
              "listener_stop": None, "listener_error": None,
+             # The per-session recompute worker (see _launch_listener):
+             # search_pick is seconds-slow, so it runs here, off the
+             # frame-reading thread, or a fast draft's frames would pile up
+             # unread behind it. Tracked so _stop_listener joins it before
+             # closing league_conn -- the worker holds a cursor on that
+             # connection mid-search, so closing it out from under the worker
+             # would be a use-after-close, the same hazard listener_thread
+             # guards against.
+             "recompute_thread": None,
              # The session's own connection when it was built for a
              # non-default league (None for the default league, which uses
              # `conn` and never touches this). Set only by live_connect,
@@ -381,16 +392,27 @@ def register_live_routes(app, conn, db_path):
         with lock:
             stop_event = state["listener_stop"]
             thread = state["listener_thread"]
+            recompute_thread = state["recompute_thread"]
         if stop_event is not None:
             stop_event.set()
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=timeout)
-            if thread.is_alive():
-                return False
+        # Both the frame-reading thread AND the recompute worker share this
+        # stop_event and must be confirmed exited before league_conn closes:
+        # each may hold a cursor on it (the worker for the whole of a
+        # multi-second search_pick), so closing it under either is a
+        # use-after-close. A timeout on either means "a thread may still be
+        # using the connection" -- refuse the reconnect and leave the
+        # connection open rather than corrupt it, exactly as for the listener
+        # alone before the worker existed.
+        for t in (thread, recompute_thread):
+            if t is not None and t.is_alive():
+                t.join(timeout=timeout)
+                if t.is_alive():
+                    return False
         with lock:
             state["listener"] = None
             state["listener_thread"] = None
             state["listener_stop"] = None
+            state["recompute_thread"] = None
             old_league_conn = state["league_conn"]
             state["league_conn"] = None
         if old_league_conn is not None:
@@ -509,24 +531,109 @@ def register_live_routes(app, conn, db_path):
         stop_event = threading.Event()
         # DraftSession is frozen, so the my_slot back-fill replaces the
         # session object rather than mutating it. `current` is that one
-        # mutable cell, closed over by on_change one-to-one with `listener`.
+        # mutable cell, closed over by the callbacks one-to-one with `listener`.
         current = {"session": session}
+
+        # The recompute request queue -- coalescing, depth one. search_pick is
+        # seconds-slow; running it inline in the frame callback (as this used
+        # to) blocked the socket read loop for its whole duration, so in a fast
+        # draft frames -- picks, CLOCK heartbeats -- piled up unread and the
+        # board fell behind. Now the callback only records "recompute wanted at
+        # pick N" and returns instantly; the worker below does the slow part.
+        # Coalescing (a single latest-wins slot, not a queue) is deliberate: a
+        # burst of quick picks collapses to one recompute of the final state
+        # instead of a backlog of stale ones, and _recompute's own as_of_pick
+        # guard drops any result a newer pick has already outrun.
+        recompute_cv = threading.Condition()
+        pending = {"session": None, "made": None}
+
+        def request_recompute(sess, made):
+            with recompute_cv:
+                pending["session"] = sess
+                pending["made"] = made
+                recompute_cv.notify()
+
+        def recompute_worker():
+            while not stop_event.is_set():
+                with recompute_cv:
+                    while pending["made"] is None and not stop_event.is_set():
+                        # Timed wait, not an infinite one: stop_event is set
+                        # from _stop_listener without touching this condition,
+                        # so the worker must poll it to notice a shutdown.
+                        recompute_cv.wait(timeout=0.5)
+                    if stop_event.is_set():
+                        return
+                    sess, made = pending["session"], pending["made"]
+                    pending["session"] = pending["made"] = None
+                # The expensive part, outside the condition lock. Skip it
+                # entirely if a newer connect has already superseded this
+                # listener -- no point searching against a session about to be
+                # torn down, and _recompute's generation guard would discard
+                # it anyway.
+                with lock:
+                    if state["listener"] is not listener:
+                        continue
+                _recompute(sess, made)
+
+        def _resolve_slot(c2) -> bool:
+            """Resolve my_slot from history or the socket if not yet known;
+            return True if it just resolved.
+
+            Runs from on_activity (every frame) as well as on_change (every
+            pick), because the moment that matters most -- our own team coming
+            ON the clock -- arrives as a SELECTING frame, which changes no pick
+            count and so never reaches on_change. History (_slot_for_team)
+            first; the socket's round-1 ordering (_slot_from_socket) is the
+            fallback for a mock or an un-imported league, where no history can
+            translate the team id and the slot would otherwise stay unknown --
+            leaving every recommendation blank, including for our first pick.
+            """
+            sess = current["session"]
+            if sess.my_slot is not None or listener.my_team_id is None:
+                return False
+            resolved = _slot_for_team(c2, listener.my_team_id)
+            if resolved is None:
+                resolved = _slot_from_socket(
+                    listener, getattr(sess.settings, "teams", 0))
+            if resolved is None:
+                return False
+            new = dataclasses.replace(sess, my_slot=resolved)
+            current["session"] = new
+            with lock:
+                if state["listener"] is listener:
+                    state["session"] = new
+            return True
 
         def pump():
             def on_activity():
-                # Liveness heartbeat: stamp last_poll_at so a healthy socket
-                # never reads as stale between picks (picks arrive every
-                # 20-30s, well past STALE_AFTER_SECONDS). The socket path fires
-                # this on every received frame; on_change also calls it so the
-                # browser path stays fresh at least per pick. Identity-guarded
-                # like every other write, so a superseded listener cannot keep
-                # the board looking fresh after it has been replaced.
+                # Liveness heartbeat: stamp last_poll_at on every frame so a
+                # healthy socket never reads as stale (CLOCK ticks ~1/s while
+                # any clock runs). Identity-guarded like every other write, so
+                # a superseded listener cannot keep the board looking fresh
+                # after it has been replaced.
                 now = datetime.now(timezone.utc)
                 with lock:
-                    if state["listener"] is listener:
-                        state["last_poll_at"] = now
+                    if state["listener"] is not listener:
+                        return
+                    state["last_poll_at"] = now
+                # Resolve my_slot as soon as the socket reveals it -- crucially
+                # on the SELECTING frame that puts our team on the clock, which
+                # on_change never sees. Only touches the database until the
+                # slot is known; once resolved this is just the stamp above.
+                if current["session"].my_slot is None:
+                    c2 = work_conn.cursor()
+                    try:
+                        if _resolve_slot(c2):
+                            made = c2.execute(
+                                "SELECT count(*) FROM drafted").fetchone()[0]
+                            request_recompute(current["session"], made)
+                    finally:
+                        c2.close()
 
             def on_change():
+                # on_activity first: stamps freshness and (on the browser
+                # path, which has no per-frame hook of its own) is the only
+                # place my_slot gets resolved.
                 on_activity()
                 # stop_event only asks the poll loop to exit; it does not gate
                 # an in-flight callback a newer connect may have superseded.
@@ -537,29 +644,14 @@ def register_live_routes(app, conn, db_path):
                         return
                 c2 = work_conn.cursor()
                 try:
-                    sess = current["session"]
-                    if sess.my_slot is None and listener.my_team_id is not None:
-                        # History first; the socket's own round-1 ordering is
-                        # the fallback for a mock (or an un-imported league),
-                        # where no history can translate the team id (see
-                        # _slot_from_socket). Without it a mock never resolves
-                        # a slot and every recommendation stays blank.
-                        resolved = _slot_for_team(c2, listener.my_team_id)
-                        if resolved is None:
-                            resolved = _slot_from_socket(
-                                listener, getattr(sess.settings, "teams", 0))
-                        if resolved is not None:
-                            sess = dataclasses.replace(sess, my_slot=resolved)
-                            current["session"] = sess
-                            with lock:
-                                if state["listener"] is listener:
-                                    state["session"] = sess
                     apply_picks(c2, listener.picks())
                     made = c2.execute(
                         "SELECT count(*) FROM drafted").fetchone()[0]
                 finally:
                     c2.close()
-                _recompute(current["session"], made)
+                # Hand off to the worker instead of searching here -- this
+                # callback runs on the socket read thread and must return fast.
+                request_recompute(current["session"], made)
 
             try:
                 run_fn(listener, on_change, on_activity, stop_event)
@@ -574,13 +666,16 @@ def register_live_routes(app, conn, db_path):
                         state["listener_error"] = str(exc)
 
         thread = threading.Thread(target=pump, daemon=True)
+        recompute_thread = threading.Thread(target=recompute_worker, daemon=True)
         with lock:
             state.update({"session": session, "listener": listener,
                           "listener_thread": thread, "listener_stop": stop_event,
+                          "recompute_thread": recompute_thread,
                           "listener_error": None, "league_conn": league_conn,
                           "candidates": [], "as_of_pick": None,
                           "unmapped": [], "last_poll_at": None})
             state["generation"] = state.get("generation", 0) + 1
+        recompute_thread.start()
         thread.start()
         # my_slot is echoed back deliberately: None means genuinely undetected
         # yet, not a default. A resolved value went through draft_teams ->
