@@ -98,7 +98,7 @@ def board_fingerprint(board: pd.DataFrame) -> str:
 
 
 def build_session(conn, my_slot: int | None, seed: int = DEFAULT_SEED,
-                  league_id: str = "") -> DraftSession:
+                  league_id: str = "", settings=None) -> DraftSession:
     """Everything expensive, once. Roughly 17s against a real database.
 
     `league_id` is passed in rather than looked up, because the database has
@@ -108,7 +108,13 @@ def build_session(conn, my_slot: int | None, seed: int = DEFAULT_SEED,
     ran. The caller already has it -- parsed from the URL the user pasted,
     which is the only place it exists.
     """
-    settings = league_mod.load(conn)
+    # `settings` is passed in when the connect flow fetched the league's real
+    # roster/scoring from ESPN (see _league_settings_from_espn); None falls
+    # back to whatever the database holds (the owner's imported league, or the
+    # cold-start default). Everything downstream -- the board, the pool, the
+    # round count, the roster the simulator drafts FOR -- keys off it.
+    if settings is None:
+        settings = league_mod.load(conn)
     board = build_board(conn, settings=settings)
     board = _attach_espn_proj(conn, board)
     pool = build_pool(conn, board, settings)
@@ -137,7 +143,7 @@ from pipeline.draft_listener import DraftListener, run_listener
 from pipeline.draft_socket import run_socket_listener
 from pipeline.espn_league import STATE_PATH, parse_league_id
 from pipeline.espn_live import apply_picks
-from pipeline.espn_teams import fetch_team_slots
+from pipeline.espn_teams import fetch_league_settings, fetch_team_slots
 from pipeline.espn_teams import http_fetch as _team_view_fetch
 from pipeline import leagues as leagues_mod
 from pipeline.leagues import DEFAULT_LEAGUE, provision_league
@@ -231,6 +237,35 @@ def _attach_team_slots(session, league_id, season):
     """
     slots = fetch_team_slots(_team_view_fetch(), league_id, season)
     return dataclasses.replace(session, team_slots=slots) if slots else session
+
+
+def _league_settings_from_espn(league_id, season):
+    """The league's real roster/scoring as a LeagueSettings, or None.
+
+    Fetches ESPN's mSettings (best-effort) and runs it through
+    league.from_espn, so the session drafts for the league's ACTUAL roster --
+    how many of each starter, flex and bench, and therefore how many rounds --
+    rather than the cold-start default. None on any failure, so the caller
+    falls back to the database's own settings and a connect never fails over a
+    settings fetch.
+
+    One backfill: if ESPN's scoring items don't map to anything the model
+    scores (from_espn leaves `scoring` empty), the roster is still ESPN's but
+    the scoring is filled from the default rules -- an empty scoring dict would
+    otherwise zero out every projection downstream. The roster is the part this
+    task is about; it is taken from ESPN verbatim.
+    """
+    raw = fetch_league_settings(_team_view_fetch(), league_id, season)
+    if not raw:
+        return None
+    try:
+        settings = league_mod.from_espn(raw)
+    except Exception:      # noqa: BLE001 -- best-effort; fall back to the db's
+        return None
+    if not settings.scoring:
+        settings = dataclasses.replace(
+            settings, scoring=dict(league_mod.default_settings().scoring))
+    return settings
 
 
 def _slot_for_team(cur, team_id: int):
@@ -632,9 +667,14 @@ def register_live_routes(app, conn, db_path):
             state["candidates"] = frame.to_dict(orient="records")
             state["as_of_pick"] = picks_made
 
-    def _provision_and_build(league_id, team_id):
+    def _provision_and_build(league_id, team_id, settings=None):
         """Open (provisioning if needed) the connection this league's session
         lives on, and build the session against it.
+
+        `settings` (a LeagueSettings, optional) is the league's real roster and
+        scoring fetched from ESPN by the caller; None lets build_session read
+        the database's own settings (the owner's imported league, or the
+        cold-start default).
 
         The default league -- the __default__ sentinel or this deployment's
         DEFAULT_LEAGUE_ID -- keeps building against the shared `conn`, which
@@ -673,7 +713,8 @@ def register_live_routes(app, conn, db_path):
                 # slot cannot come from a different league's draft order.
                 my_slot = (_slot_for_team(cur, team_id)
                            if team_id is not None else None)
-                session = build_session(cur, my_slot, league_id=league_id)
+                session = build_session(cur, my_slot, league_id=league_id,
+                                        settings=settings)
             finally:
                 cur.close()
         except Exception:
@@ -810,11 +851,23 @@ def register_live_routes(app, conn, db_path):
                         return
                 c2 = work_conn.cursor()
                 try:
-                    apply_picks(c2, listener.picks())
+                    live = listener.picks()
+                    apply_picks(c2, live)
                     made = c2.execute(
                         "SELECT count(*) FROM drafted").fetchone()[0]
                 finally:
                     c2.close()
+                # Surface picks the crosswalk could not resolve. They are
+                # computed on every fold (LivePicks.unmapped) but were being
+                # discarded, so /api/live/state's unmapped_picks read empty
+                # even when a real pick -- most often a D/ST whose id didn't
+                # map -- silently vanished from the board. Storing them makes
+                # that visible (and is how a wrong D/ST id scheme gets caught:
+                # the raw espn id shows up here). Same identity guard as every
+                # other write.
+                with lock:
+                    if state["listener"] is listener:
+                        state["unmapped"] = live.unmapped
                 # Hand off to the worker instead of searching here -- this
                 # callback runs on the socket read thread and must return fast.
                 request_recompute(current["session"], made)
@@ -1036,11 +1089,17 @@ def register_live_routes(app, conn, db_path):
                 detail="the previous listener did not stop in time -- try again")
 
         team_id = _team_id_from_url(body.url)
-        work_conn, league_conn, session = _provision_and_build(league_id, team_id)
+        season = _season_from_url(body.url)
+        # The league's real roster/scoring from ESPN, so the session drafts for
+        # the actual roster (rounds, starters) rather than the cold-start
+        # default. None on any failure -> build_session reads the db's own.
+        espn_settings = _league_settings_from_espn(league_id, season)
+        work_conn, league_conn, session = _provision_and_build(
+            league_id, team_id, settings=espn_settings)
         # Real ESPN team names for the board's columns, fetched once here (the
         # URL carries the season). Best-effort -- a failure leaves team_slots
         # empty and the board falls back to "Team {slot}".
-        session = _attach_team_slots(session, league_id, _season_from_url(body.url))
+        session = _attach_team_slots(session, league_id, season)
 
         def run_fn(listener, on_change, on_activity, stop_event):
             # The browser observer: watches the socket a real ESPN tab holds.
@@ -1089,8 +1148,11 @@ def register_live_routes(app, conn, db_path):
                 status_code=503,
                 detail="the previous listener did not stop in time -- try again")
 
+        # The league's real roster/scoring from ESPN (TokenBody carries the
+        # season). None on failure -> the db's own settings.
+        espn_settings = _league_settings_from_espn(body.leagueId, body.season)
         work_conn, league_conn, session = _provision_and_build(
-            body.leagueId, team_id)
+            body.leagueId, team_id, settings=espn_settings)
         # Real ESPN team names for the board's columns. TokenBody carries the
         # season outright. Best-effort, same as the browser path.
         session = _attach_team_slots(session, body.leagueId, body.season)

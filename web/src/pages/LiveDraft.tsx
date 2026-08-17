@@ -141,7 +141,16 @@ export default function LiveDraft() {
     return () => window.clearInterval(id)
   }, [])
 
-  const candidates = state?.candidates ?? []
+  // `state.candidates` is the server's own recommendation for `my_slot` --
+  // recomputed after every pick, but that recompute lags a few seconds
+  // behind the board itself, so a player taken moments ago can still be
+  // sitting in the last-computed list. `board.cells` updates immediately (it
+  // is exactly the set of picks already made), so filtering the candidate
+  // list against it drops a just-taken player right away instead of waiting
+  // on the next recompute -- applied here, once, so both the call and the
+  // alternatives list (built from the same filtered array below) inherit it.
+  const draftedIds = new Set((board?.active ? board.cells : []).map((c) => c.player.player_id))
+  const candidates = (state?.candidates ?? []).filter((c) => !draftedIds.has(c.player_id))
   const leader = candidates[0]
   const runnerUp = candidates[1]
   const alternatives = candidates.slice(1)

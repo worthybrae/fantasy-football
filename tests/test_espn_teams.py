@@ -93,3 +93,36 @@ def test_fetch_team_slots_skips_a_pick_order_id_absent_from_teams():
     slots = fetch_team_slots(lambda url: json.dumps(payload),
                              league_id="99", season=2026)
     assert slots == {1: "Only One"}
+
+
+def test_fetch_league_settings_parses_the_roster():
+    """The league's real roster (lineupSlotCounts) becomes the from_espn shape,
+    so the session drafts for the actual roster -- 1QB/2RB/2WR/1TE/1DST/1K +
+    2 FLEX + 5 bench = 15 rounds. Best-effort: any failure or an absent lineup
+    config returns None so the caller falls back to the database's settings."""
+    import json
+    from pipeline.espn_teams import fetch_league_settings
+    from scoring import league as lm
+
+    body = json.dumps({
+        "teams": [{"id": i} for i in range(1, 9)],
+        "settings": {
+            "rosterSettings": {"lineupSlotCounts": {
+                "0": 1, "2": 2, "4": 2, "6": 1, "16": 1, "17": 1,
+                "20": 5, "23": 2}},
+            "scoringSettings": {"scoringItems": [{"statId": 53, "points": 1.0}]},
+            "draftSettings": {"type": "SNAKE", "pickOrder": [3, 1, 2]},
+        },
+    })
+    raw = fetch_league_settings(lambda url: body, "1", 2026)
+    assert raw["teams"] == 8
+    assert raw["draft_type"] == "SNAKE"
+    s = lm.from_espn(raw)
+    assert s.rounds == 15
+    assert s.starters == {"QB": 1, "RB": 2, "WR": 2, "TE": 1, "DST": 1, "K": 1}
+    assert (s.flex_slots, s.bench) == (2, 5)
+
+    # Failure paths -> None (caller falls back), never a raise.
+    assert fetch_league_settings(
+        lambda url: (_ for _ in ()).throw(ValueError()), "1", 2026) is None
+    assert fetch_league_settings(lambda url: "{}", "1", 2026) is None

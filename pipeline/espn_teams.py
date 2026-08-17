@@ -100,6 +100,46 @@ def fetch_team_slots(fetch, league_id, season) -> dict:
         return {}
 
 
+def fetch_league_settings(fetch, league_id, season) -> dict | None:
+    """The league's real roster + scoring config, shaped for
+    `scoring.league.from_espn`, or None.
+
+    Same public mTeam&mSettings view fetch_team_slots already reads, so the two
+    can share one GET. `settings.rosterSettings.lineupSlotCounts` is the roster
+    (how many of each lineup slot, incl. FLEX and bench) -- the thing that
+    decides how many rounds the draft is and what each team is drafting FOR;
+    `settings.scoringSettings.scoringItems` is the scoring; `draftSettings`
+    carries the snake type and pick order.
+
+    Best-effort, like the rest of this module: returns None on any failure or
+    an absent lineup config, so a connect that could not reach ESPN (or a mock
+    whose settings are not published) falls back to the caller's default
+    settings rather than failing. None, not {} -- the caller distinguishes
+    "use the default" from a real (possibly empty-scoring) config.
+    """
+    try:
+        body = fetch(_team_view_url(league_id, season))
+        payload = body if isinstance(body, dict) else json.loads(body)
+        settings = payload.get("settings") or {}
+        lineup_slots = ((settings.get("rosterSettings") or {})
+                        .get("lineupSlotCounts")) or {}
+        n_teams = len(payload.get("teams") or []) or settings.get("size")
+        if not lineup_slots or not n_teams:
+            return None
+        draft = settings.get("draftSettings") or {}
+        return {
+            "season": int(season),
+            "teams": int(n_teams),
+            "lineup_slots": {str(k): int(v) for k, v in lineup_slots.items()},
+            "scoring_items": (settings.get("scoringSettings") or {})
+                             .get("scoringItems") or [],
+            "draft_type": draft.get("type") or "SNAKE",
+            "pick_order": list(draft.get("pickOrder") or ()),
+        }
+    except Exception:      # noqa: BLE001 -- best-effort; caller falls back
+        return None
+
+
 def http_fetch():
     """A `fetch(url) -> body_text` callable hitting ESPN directly over httpx.
 

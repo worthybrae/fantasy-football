@@ -26,13 +26,16 @@ def _isolated_leagues_root(tmp_path, monkeypatch):
 @pytest.fixture(autouse=True)
 def _stub_team_slots_fetch(monkeypatch):
     """Keep every connect in this file hermetic. On connect, api.live now
-    fetches ESPN's real team names for the board's columns -- a network call.
-    It is best-effort (fetch_team_slots returns {} on any failure) so a live
-    draft still connects offline, but a real GET in a unit test is slow and
-    non-deterministic. Stub it to {} file-wide; the board test that cares
-    about column names attaches team_slots to its session directly instead.
+    fetches ESPN's real team names AND the league's real roster/scoring for the
+    session -- both network calls. Both are best-effort (team names -> {},
+    settings -> None, so a live draft still connects offline), but a real GET
+    in a unit test is slow and non-deterministic. Stub both file-wide: team
+    slots to {} (the board test attaches team_slots to its session directly),
+    and league settings to None so build_session falls back to the seeded
+    database's own settings, which every existing test already relies on.
     """
     monkeypatch.setattr("api.live.fetch_team_slots", lambda *a, **k: {})
+    monkeypatch.setattr("api.live.fetch_league_settings", lambda *a, **k: None)
 
 
 def _fake_session(seed=20260811):
@@ -1577,3 +1580,57 @@ def test_board_returns_the_grid_with_snake_positions_and_stats(tmp_path):
     assert star["value"] == 9 - star["market_rank"]
     assert star["value"] > 0
     conn.close()
+
+
+def test_build_session_uses_passed_settings_over_the_database(tmp_path):
+    """When the connect flow fetched the league's real roster from ESPN, the
+    session must draft for THAT roster, not the database's own -- so build_session
+    with an explicit settings arg overrides league.load(conn)."""
+    import dataclasses as _dc
+    from scoring.league import default_settings
+    path = str(tmp_path / "s.duckdb")
+    _seed_minimal_live_db(path)
+    conn = get_conn(path)
+    # bench 8 instead of the default 5 -> 18 rounds, a value the seeded db's
+    # own league row does not carry, so it can only come from the passed arg.
+    custom = _dc.replace(default_settings(), bench=8)
+    session = build_session(conn, my_slot=1, settings=custom)
+    assert session.settings.bench == 8
+    assert session.settings.rounds == custom.rounds == 18
+    conn.close()
+
+
+def test_unmapped_picks_surface_in_state(tmp_path, monkeypatch, _isolated_leagues_root):
+    """A pick the crosswalk can't resolve (a D/ST whose id doesn't map, say)
+    must show up in /api/live/state.unmapped_picks rather than vanishing --
+    that visibility is how a wrong id scheme gets caught. The LivePicks.unmapped
+    list was being computed and discarded; now it is stored."""
+    path = str(tmp_path / "u.duckdb")
+    _seed_minimal_live_db(path)
+    monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
+    monkeypatch.setattr("api.live.search_pick",
+                        lambda *a, **k: _fake_candidates_frame("x"))
+
+    def fake_socket(listener, league_id, team_id, swid, token,
+                    on_change=None, stop_event=None, on_activity=None):
+        # An ESPN id no board row carries -> picks_from_events routes it to
+        # `unmapped`, not `drafted`.
+        listener.on_frame("SELECTED 1 99999999 2")
+        if on_change is not None:
+            on_change()
+
+    monkeypatch.setattr("api.live.run_socket_listener", fake_socket)
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    client = TestClient(create_app(path))
+    resp = client.post("/api/live/connect-token", json={
+        "leagueId": "1", "teamId": "2", "swid": "{X}", "token": "t",
+        "season": "2026"})
+    assert resp.status_code == 200
+    assert _wait_until(
+        lambda: len(client.get("/api/live/state").json()["unmapped_picks"]) >= 1), \
+        "the unmapped pick never surfaced in state"
+    um = client.get("/api/live/state").json()["unmapped_picks"]
+    assert um[0]["espn_player_id"] == 99999999
+    client.post("/api/live/stop")

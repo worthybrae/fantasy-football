@@ -1173,11 +1173,26 @@ td:first-child {
 /* The viewer's own column, tinted across its whole height -- applied per
    cell (header and body alike) rather than as a single column rule, since
    CSS grid has no clean "style the Nth column" selector for a column count
-   that varies with league size. Same accent-tint recipe as depth-me in the
-   depth chart card. */
+   that varies with league size. A 2px accent border on the left+right edge
+   of every cell in the column (header included) lines up top-to-bottom into
+   one continuous rule, so the column reads as unmistakably "yours" even
+   before the header's "YOU" chip is read; the header itself gets a
+   stronger fill plus an accent-colored underline in place of the plain
+   border. */
 .board-col-mine {
-  background: var(--accent-bg);
+  background: color-mix(in srgb, var(--accent) 20%, var(--bg-1));
   color: var(--text-1);
+  border-bottom-color: var(--accent);
+  border-left: 2px solid var(--accent);
+  border-right: 2px solid var(--accent);
+}
+
+/* `.board-cell` (below) also sets border-right and is declared after this in
+   the cascade -- the compound selector here (not just `.board-cell-mine`)
+   is what keeps this border winning regardless of source order. */
+.board-cell.board-cell-mine {
+  border-left: 2px solid var(--accent);
+  border-right: 2px solid var(--accent);
 }
 
 .board-you-chip {
@@ -1305,7 +1320,7 @@ td:first-child {
 }
 
 .board-cell-empty.board-cell-mine {
-  background: color-mix(in srgb, var(--accent-bg) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg-2));
 }
 
 .board-cell-filled {
@@ -1314,7 +1329,7 @@ td:first-child {
 }
 
 .board-cell-filled.board-cell-mine {
-  background: var(--accent-bg);
+  background: color-mix(in srgb, var(--accent) 22%, var(--bg-1));
 }
 
 .board-cell-filled:hover {
@@ -1322,7 +1337,7 @@ td:first-child {
 }
 
 .board-cell-filled.board-cell-mine:hover {
-  background: color-mix(in srgb, var(--accent-bg) 70%, var(--bg-2));
+  background: color-mix(in srgb, var(--accent) 32%, var(--bg-2));
 }
 
 .board-cell-filled:focus-visible {
@@ -1352,21 +1367,34 @@ td:first-child {
   color: var(--text-3);
 }
 
-/* On-the-clock: a solid ring always (the reduced-motion baseline), pulsing
-   layered on top when motion is allowed -- same split as .live-strip-you's
-   own pulse above. */
-.board-cell-clock {
-  box-shadow: 0 0 0 2px var(--accent);
+/* On-the-clock: a pulsing accent-tinted overlay filling the cell, not a
+   border ring -- an absolutely-positioned ::before layered inside `.board-cell`
+   (already `position: relative; overflow: hidden`), so it paints on top of
+   whatever the cell already carries -- including `.board-cell-mine`'s own
+   tint/border below -- and always reads as the single strongest highlight on
+   the board, without disturbing the fixed 62px cell height. Reduced motion:
+   a solid tint, no pulse -- still unmistakably the active cell without
+   relying on motion to say so (same split as .live-strip-you's own pulse
+   above). */
+.board-cell-clock::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--accent) 38%, transparent);
+  pointer-events: none;
   animation: board-clock-pulse 1.6s ease-in-out infinite;
 }
 
 @keyframes board-clock-pulse {
-  0%, 100% { box-shadow: 0 0 0 2px var(--accent); }
-  50% { box-shadow: 0 0 0 4px var(--accent), 0 0 14px 2px var(--accent-border); }
+  0%, 100% { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+  50% { background: color-mix(in srgb, var(--accent) 55%, transparent); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .board-cell-clock { animation: none; }
+  .board-cell-clock::before {
+    animation: none;
+    background: color-mix(in srgb, var(--accent) 45%, transparent);
+  }
 }
 
 /* -- cell popover: fixed positioning (not absolute) is the point -- it
