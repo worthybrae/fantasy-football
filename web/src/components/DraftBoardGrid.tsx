@@ -41,6 +41,19 @@ function valueTag(value: number | null): { label: string; tone: 'steal' | 'reach
     : { label: `reach ${Math.abs(value).toFixed(0)}`, tone: 'reach' }
 }
 
+// The in-cell +/- vs ADP: a signed number, green when the pick fell past its
+// ADP (a value), red when it went ahead of it (a reach). Null/zero shows
+// nothing rather than a bare "0".
+function adpDelta(value: number | null): ReactNode {
+  if (value === null || value === 0) return null
+  const steal = value > 0
+  return (
+    <span className={`board-cell-adp ${steal ? 'is-steal' : 'is-reach'}`}>
+      {steal ? `+${value.toFixed(0)}` : value.toFixed(0)}
+    </span>
+  )
+}
+
 // The hover/focus detail card: everything ESPN-clean cell content leaves
 // out. Every row is conditional on its own field being non-null -- a player
 // with no market coverage (no ADP, no edge) still gets a popover, just a
@@ -159,9 +172,14 @@ export default function DraftBoardGrid({ board }: DraftBoardGridProps) {
                   onFocus={(e) => showPopover(cell, e)}
                   onBlur={() => setHover(null)}
                 >
-                  {posBadge(cell.player.position)}
+                  <div className="board-cell-top">
+                    {posBadge(cell.player.position)}
+                    <span className="board-cell-meta">
+                      {adpDelta(cell.player.value)}
+                      <span className="board-cell-team mono">{cell.player.team ?? ''}</span>
+                    </span>
+                  </div>
                   <span className="board-cell-name">{cell.player.name}</span>
-                  <span className="board-cell-team mono">{cell.player.team ?? ''}</span>
                 </Link>
               )
             })}

@@ -20,6 +20,26 @@ class LivePicks(NamedTuple):
                                  # no parseable id (see picks_from_events)
 
 
+# ESPN's proTeamId per NFL team, keyed by the abbreviations the board uses
+# (plus a few common aliases, so a differently-abbreviated feed still maps).
+# Used only to reconstruct D/ST ids below; nothing else here needs it.
+ESPN_PRO_TEAM_BY_ABBREV = {
+    "ATL": 1, "BUF": 2, "CHI": 3, "CIN": 4, "CLE": 5, "DAL": 6, "DEN": 7,
+    "DET": 8, "GB": 9, "TEN": 10, "IND": 11, "KC": 12, "LV": 13, "OAK": 13,
+    "LA": 14, "LAR": 14, "MIA": 15, "MIN": 16, "NE": 17, "NO": 18, "NYG": 19,
+    "NYJ": 20, "PHI": 21, "ARI": 22, "PIT": 23, "LAC": 24, "SD": 24, "SF": 25,
+    "SEA": 26, "TB": 27, "WAS": 28, "WSH": 28, "CAR": 29, "JAX": 30, "JAC": 30,
+    "BAL": 33, "HOU": 34,
+}
+
+
+def _dst_espn_id(pro_team_id: int) -> int:
+    """ESPN's own D/ST player id for a team: a negative value, -(16000 +
+    proTeamId). Verified against ESPN's player universe: Falcons -16001,
+    Ravens (proTeamId 33) -16033, Texans (34) -16034, and so on."""
+    return -(16000 + pro_team_id)
+
+
 def build_crosswalk(board) -> dict:
     """ESPN player id -> board player_id, as an exact lookup.
 
@@ -38,11 +58,27 @@ def build_crosswalk(board) -> dict:
 
     No unit test could have caught that: the fixture ids were invented, so
     they mapped by construction. Only a live draft exposed it.
+
+    D/STs are the one position espn_id can't cover: ESPN leaves team defenses
+    off the rank sheet _espn_ranks reads, so every DST row lands on the board
+    with a null espn_id. The draft socket still SELECTs them, by ESPN's own
+    D/ST id (a negative -(16000 + proTeamId), e.g. -16033 for Baltimore), so
+    those picks are reconstructed here from each DST row's NFL team. Without
+    this every defense pick fails to crosswalk and shows as a gap on the board
+    -- measured at 8 empty cells (the DSTs) in a full mock draft.
     """
     if board is None or "espn_id" not in getattr(board, "columns", []):
         return {}
     pairs = board[["espn_id", "player_id"]].dropna()
-    return {int(e): str(p) for e, p in zip(pairs["espn_id"], pairs["player_id"])}
+    crosswalk = {int(e): str(p)
+                 for e, p in zip(pairs["espn_id"], pairs["player_id"])}
+    if "position" in board.columns and "team" in board.columns:
+        dst = board[board["position"] == "DST"][["team", "player_id"]].dropna()
+        for team, pid in zip(dst["team"], dst["player_id"]):
+            pro = ESPN_PRO_TEAM_BY_ABBREV.get(str(team).upper())
+            if pro is not None:
+                crosswalk[_dst_espn_id(pro)] = str(pid)
+    return crosswalk
 
 
 def translate(payload: dict, crosswalk: dict) -> LivePicks:

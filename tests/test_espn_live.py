@@ -404,3 +404,23 @@ def test_run_socket_listener_reconnects_after_a_drop(monkeypatch):
     assert connects["n"] >= 2, "did not reconnect after the drop"
     assert list(listener.picks().rows["player_id"]) == ["a", "b"]
     assert activity["n"] >= 2, "on_activity did not fire per frame"
+
+
+def test_build_crosswalk_maps_dst_by_team():
+    """DSTs never get an espn_id (ESPN omits team defenses from the rank sheet
+    the board reads), so their picks -- SELECTed by ESPN's own negative D/ST
+    id, -(16000+proTeamId) -- must be reconstructed from each DST row's NFL
+    team, or every defense shows as a gap on the board."""
+    import pandas as pd
+    from pipeline.espn_live import build_crosswalk, _dst_espn_id
+    board = pd.DataFrame([
+        {"espn_id": 3117251.0, "player_id": "mccaffrey", "position": "RB", "team": "SF"},
+        {"espn_id": float("nan"), "player_id": "adp_baltimore_defense",
+         "position": "DST", "team": "BAL"},
+        {"espn_id": float("nan"), "player_id": "adp_sf_defense",
+         "position": "DST", "team": "SF"},
+    ])
+    x = build_crosswalk(board)
+    assert x[3117251] == "mccaffrey"                       # ordinary espn_id path
+    assert x[_dst_espn_id(33)] == "adp_baltimore_defense"  # -16033, Ravens
+    assert x[-16025] == "adp_sf_defense"                   # 49ers, proTeamId 25
