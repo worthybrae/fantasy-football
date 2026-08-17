@@ -13,14 +13,34 @@ The pipeline stages are:
    FantasyPros ECR) into a local DuckDB file.
 2. **api** — compute PPR points, per-player scoring factors, value over
    replacement (VOR), tiers, and market consensus; serve it all over HTTP.
-3. **web** — a React draft board: sortable table with market consensus and
-   edge columns, live weight sliders, position filters, search, keyboard
-   navigation, and drafted-player tracking that persists to disk.
+3. **web** — a React front end in three screens: a landing page that hands
+   over the bookmarklet and reports whether this machine is ready to draft,
+   the live board that follows your ESPN draft pick by pick, and a full
+   player profile behind any name on it.
+
+## The landing page
+
+`/` is the front door. It opens with what the tool does, then proves it: the
+top of your own board, drawn from your own DuckDB, under a demo pick clock.
+Below that is the bookmarklet — drag it to your bookmarks bar once and every
+draft after that is one click — and the three steps for using it.
+
+The last band is a readiness strip: when the data last refreshed, whether a
+league and its draft history are imported, whether manager models are fitted,
+whether a sim has ever run. Draft night is the one night this has to work,
+and every way it can fail is something that did or didn't happen days
+earlier, so each row that isn't ready names the command that fixes it.
+
+Two endpoints feed it, split by what they cost. `GET /api/landing/status` is
+table reads only and paints immediately. `GET /api/landing/preview?limit=N`
+builds the board (seconds) and returns just the eight columns the preview
+renders, so the page isn't downloading the full 185KB `/api/players` payload
+to show twelve rows.
 
 ## Player profiles
 
-Clicking a row (or pressing `Enter` on the keyboard-selected row) opens that
-player's profile drawer: header chips (rank, tier, VOR, composite, Mkt,
+Any player on the live board opens their profile at `/players/<slug>`:
+header chips (rank, tier, VOR, composite, Mkt,
 edge), the five scoring factors as bars, a weekly PPR-points chart across up
 to three seasons with a per-season average line, full season-by-season stat
 totals, an expandable game log, next-season outlook (depth slot, implied
@@ -32,35 +52,6 @@ target/carry share, and efficiency — shown next to what that twin's *next*
 season's PPG turned out to be, a quick gut check on what a comparable stat
 line tends to become; rookies and K/DST (no stat history) instead get
 similar-value neighbors from the board.
-
-## Search and keyboard shortcuts
-
-Type into the search box to narrow the board by player name or team — it
-composes with the position tabs and "hide drafted" checkbox rather than
-replacing them. The board also has a keyboard cursor, independent of the
-mouse, that moves over whatever rows are currently visible (i.e. after
-search/tab/hide-drafted filtering, in the current sort order):
-
-| Key     | Action                                                   |
-| ------- | --------------------------------------------------------- |
-| `/`     | Focus the search box                                     |
-| `↑` `↓` | Move the board cursor, scrolling it into view as needed  |
-| `Enter` | Open the selected player's profile drawer                |
-| `D`     | Toggle the selected player's drafted status               |
-| `Esc`   | Close the profile drawer if it's open; else clear search |
-
-The cursor/toggle/open shortcuts are inert while an input has focus (the
-search box, a weight slider) or while the profile drawer is open — but not
-after clicking a button (a position tab, the rail toggle, a row's
-drafted-toggle ✓), which stays live for the very next keypress. Tabbing to
-one of those buttons and pressing `Enter` activates the button itself
-instead (drafts/undrafts the row, switches the tab) rather than also
-opening the drawer or toggling drafted on whatever row the board cursor
-happens to be on. `Esc` mostly ignores the input/drawer rule: with the
-search box focused, it always just clears and blurs search, drawer or no;
-with focus anywhere else, it closes the drawer if one's open, else clears
-search if it has
-text, else does nothing.
 
 ## Project structure
 
@@ -94,24 +85,23 @@ ESPN. Everything else in this repo works without it.
 
 ## Usage
 
-Run these three, in order, each time you want a fresh draft board (steps 2
-and 3 can be left running throughout your draft):
-
 ```bash
 # 1. Pull the latest data into data/nfl.duckdb
-.venv/bin/python -m pipeline.refresh
+make refresh
 
-# 2. Start the API (from the repo root)
-.venv/bin/uvicorn api.main:app --port 8000
-
-# 3. Start the frontend (in another terminal)
-cd web && npm run dev
+# 2. Start the API and the frontend together (Ctrl-C stops both)
+make up
 ```
 
-Vite proxies `/api` requests to the backend, so just open the `npm run dev`
-URL and go. Re-run `pipeline.refresh` any time you want newer stats/ADP —
-the API reads straight from the DuckDB file, so a restart isn't required for
-the underlying data, only for picking up schema changes.
+Open the printed Vite URL. The landing page tells you what's ready and hands
+you the bookmarklet; drag it to your bookmarks bar once. On draft night, open
+your ESPN draft room and click it — your board opens in a new window and
+follows the draft from there. A mock draft works the same way, which is the
+cheapest way to check the whole path before it matters.
+
+Vite proxies `/api` to the backend. Re-run `make refresh` any time you want
+newer stats/ADP — the API reads straight from the DuckDB file, so a restart
+isn't required for the underlying data, only for picking up schema changes.
 
 ## How scoring works
 
@@ -133,10 +123,9 @@ within their position (missing data defaults to 50, i.e. neutral):
 Those five factors combine into a **composite** score using a weighted
 average. Default weights live in `scoring/config.py: DEFAULT_WEIGHTS`
 (production 0.35, role 0.25, environment 0.20, schedule 0.10, durability
-0.10) but every request to `/api/players` can override them — the web UI's
-weight sliders do exactly this, live, no restart needed. Editing
-`DEFAULT_WEIGHTS` in `scoring/config.py` just changes what the sliders start
-at.
+0.10) but every request to `/api/players` can override them per call, no
+restart needed. Editing `DEFAULT_WEIGHTS` in `scoring/config.py` changes the
+weights every screen uses.
 
 The composite score converts to **VOR** (value over replacement) by
 subtracting, per position, the composite score of the last starter-caliber
@@ -144,9 +133,7 @@ player at that position (`scoring/config.py: REPLACEMENT_RANK`, calibrated
 to this league's 8-team starting lineup). Players are then bucketed into
 **tiers** per position, breaking wherever the VOR gap to the next player is
 unusually large (mean + one standard deviation of that position's gaps).
-The board is ranked by VOR overall; when sorted by rank on a single
-position, the table also bands rows by tier (a faint alternating
-background) so a tier boundary is visible at a glance.
+The board is ranked by VOR overall.
 
 League size and roster shape (`LEAGUE_TEAMS`, `REPLACEMENT_RANK`) also live
 in `scoring/config.py` — update them there if the league format changes.
@@ -155,10 +142,9 @@ in `scoring/config.py` — update them there if the league format changes.
 
 On top of the season-long scouting board, the tool can import your own
 league's ESPN draft history, learn how each manager in your league actually
-drafts, and simulate the upcoming draft from any slot. Think of it as a
-pre-draft study you run in the days before your draft, not a live
-draft-room client — it doesn't poll an active ESPN draft room, and it
-doesn't cover auctions, keeper leagues, or in-draft trades.
+drafts, and simulate the upcoming draft from any slot. This is the study you
+run in the days before the draft; the live board is what you use during it.
+Neither covers auctions, keeper leagues, or in-draft trades.
 
 ### Importing draft history
 
@@ -282,8 +268,8 @@ calibrated, very slightly less accurate at the top of the list. If a future refi
 doesn't clear that baseline out of sample, the command prints a warning,
 and it means what it says: treat the simulator's output as indicative only,
 not as a real prediction, until the fit improves. The result is also saved
-and served from `/api/model`, so the same warning appears in the draft rail
-rather than only in the terminal you happened to run `make fit-managers` in.
+and served from `/api/model`, so the warning outlives the terminal you
+happened to run `make fit-managers` in.
 
 The same fit also measures one league-wide **positional bias**: how far
 ahead of or behind the market this league takes each position, by round.
@@ -365,9 +351,9 @@ reliably convert a real difference into better held-out log-likelihood.**
 Sometimes it does. Not dependably, and not in a way that survives asking how
 many chances it had.
 
-**What the manager cards show instead is measured, not fitted.** Every card
-on `/draft-board`'s "By manager" tab carries statistics counted straight
-from that manager's real picks: what they open a draft with and in how many
+**What `GET /api/managers/history` reports instead is measured, not
+fitted.** It carries statistics counted straight
+from each manager's real picks: what they open a draft with and in how many
 of their drafts, how many picks ahead of or behind the market board they
 take players and which rounds that's strongest in, which positions they jump
 the board hardest for, and the typical round of their first QB, TE, K and
@@ -389,10 +375,9 @@ history` serves it.
 make sim SLOT=4 ROLLOUTS=300
 ```
 
-or click "Run simulation" in the draft rail on the board itself, after
-setting your slot and (optionally) editing the draft order — it's seeded
-from ESPN's published order but you can override any slot, so "what if I'm
-picking third instead" is answerable before the real order is out.
+Pass any slot you like: the draft order is seeded from ESPN's published one
+(`GET /api/draft-order`) but a run takes the slot you give it, so "what if
+I'm picking third instead" is answerable before the real order is out.
 
 A real run at the default 300 rollouts takes roughly a minute: about 10
 seconds fitting manager models and about 50 seconds searching. At each of
@@ -422,8 +407,7 @@ unchanged; only the policy that picks candidates during a rollout changed.
 models every opponent would pick uniformly at random over the whole pool,
 which makes the consensus number one look about 100% likely to still be
 available at any slot — a confidently wrong answer rather than a rough one —
-so the run fails with that message instead, and the rail says so before you
-click.
+so the run fails with that message instead.
 
 If you've marked players drafted, the simulator reads `drafted.pick_no` to
 work out which team took each of them and resumes with real rosters. Rows
@@ -447,18 +431,21 @@ page load too, since those columns come from whatever run last finished):
 
 ### The predicted draft board
 
-A simulation run also fills in a full board, not just your own picks: open
-**Grid** in the header, or go to `/draft-board`, for a grid with rounds down
-the side and managers across the top, one predicted player in every cell for
-the whole draft. It's built from the same rollouts as the `Avail%` and `ΔEV`
-columns, `predict_board` in `scoring/draft_sim.py`, so it doesn't form a
-second opinion; it adds roughly 4 seconds to a run that already takes about
-50, and the results are written to a new `sim_board` table and served at
+A simulation run also fills in a full board, not just your own picks: one
+predicted player at every pick of the whole draft, rounds down the side and
+managers across the top. It's built from the same rollouts as the `Avail%`
+and `ΔEV` columns, `predict_board` in `scoring/draft_sim.py`, so it doesn't
+form a second opinion; it adds roughly 4 seconds to a run that already takes
+about 50, and the results are written to a `sim_board` table and served at
 `GET /api/sim/board`.
 
-Each cell shows the model's single most likely player at that pick. Hover a
-cell to see the second and third most likely players and their
-probabilities.
+Nothing in the web app renders this today — the grid page that did was
+removed along with the rest of the standalone research tool. The table and
+the endpoint stayed because the run produces them either way, and because
+the reasoning below is the part worth keeping.
+
+Each cell is the model's single most likely player at that pick, with the
+second and third most likely carried alongside it.
 
 **The name in the cell is a consistency choice, not just "the highest raw
 number."** If four adjacent picks each have the same player as their
@@ -504,8 +491,8 @@ before this feature existed (or one that otherwise wrote no per-pick rows)
 produces an empty grid, and the page says so and tells you to re-run rather
 than showing a silently blank board.
 
-Clicking a cell opens the **player card**: a condensed, draft-night version
-of the full profile, not the profile itself. It leads with projected
+Any player on the live board opens the **player card**: a condensed,
+draft-night version of the full profile, not the profile itself. It leads with projected
 points per game next to the player's recent actual PPG (a wide gap between
 the two is flagged, since a projection well ahead of recent real production
 is a bet, not a fact), a row of Rank/Tier/Mkt/Edge plus that player's
@@ -515,31 +502,12 @@ position (finish, role, snap share, games played, strength of schedule,
 whichever apply), and an 18-cell strength-of-schedule strip, one cell per
 week, coloured soft to tough with the bye week marked. A link to the full
 profile page covers anything the card leaves out, and a mark-drafted button
-means a pick doesn't send you back to the board page.
+means a pick doesn't send you anywhere else.
 
 Because the grid is built on the same fitted manager models as the rest of
 the simulator, the backtest line `make fit-managers` prints matters even
 more here than for `Avail%`/`ΔEV`: a full, confident-looking board is easy to
 over-trust, and it's only as good as that line says the model is.
-
-### Viewing the board by manager
-
-`/draft-board` has two tabs. **Grid** is the round-by-manager table above.
-**By manager** shows the same run as one card per team instead of one row
-of cells per round. Each card pairs two different kinds of information and
-keeps them visually apart on purpose: a quiet, monochrome panel of that
-manager's real draft history (their actual first-round pick every season
-it's imported, and their overall positional shape by round bucket: rounds
-1-3, 4-8, 9+), and below it, in colour with probabilities attached, their
-tendency in one line and their next few predicted picks from this run. Fact
-and forecast never share a color, so a real pick can't be mistaken for one
-more guess. The history comes from `GET /api/managers/history`, a plain
-read of `draft_picks` and `draft_teams`, no model involved.
-
-Since no manager currently earns a personal model (above), that real
-history is, for now, more informative about a specific manager than the
-forecast next to it is, which is exactly why the card leads with it rather
-than hiding it behind the coefficients.
 
 ## Data sources and quirks
 
@@ -551,10 +519,9 @@ than hiding it behind the coefficients.
 - **Market consensus** blends up to three independent sources — Fantasy
   Football Calculator (FFC) ADP, ESPN ADP, and FantasyPros' expert consensus
   rankings (ECR) — averaged per player into the board's **Mkt** rank (the
-  drawer's Market section and the board's Mkt-column tooltip both show each
-  source's raw rank so you can see where they agree or don't, and how many
-  actually had the player — a Mkt rank can come from just one source with no
-  warning on the board itself beyond that tooltip). FFC is explicitly a
+  profile page's Market section shows each source's raw rank so you can see
+  where they agree or don't, and how many actually had the player — a Mkt
+  rank can come from just one source, with no warning anywhere else). FFC is explicitly a
   **12-team** consensus feed, not 8-team (`pipeline/sources.py:
   fetch_adp`); ESPN and FantasyPros don't publish a team-count parameter to
   check against, but treat all of Mkt as a rough market-consensus signal

@@ -1,4 +1,4 @@
-import type { BoardStats, GameStats, SeasonSummary } from './api'
+import type { GameStats, SeasonSummary } from './api'
 
 // One position -> columns definition drives both the season table and the
 // game log, so the two read consistently. Add a position here and both
@@ -98,52 +98,3 @@ export function ptsShadeClass(points: number, avg: number): string {
   return ''
 }
 
-// Board (landing page) stat columns. `cell` renders the display string,
-// `sortValue` the number TanStack sorts on -- split because Cmp/Att renders
-// two numbers but sorts on attempts.
-export interface BoardStatColumn {
-  id: string
-  label: string
-  cell: (s: BoardStats) => string
-  sortValue: (s: BoardStats) => number
-}
-
-export const BOARD_SUMMARY: BoardStatColumn[] = [
-  { id: 'g', label: 'G', cell: (s) => n(s.games), sortValue: (s) => s.games },
-  { id: 'ppg', label: 'PPG', cell: (s) => s.ppg.toFixed(1), sortValue: (s) => s.ppg },
-  { id: 'pts', label: 'Pts', cell: (s) => s.points.toFixed(1), sortValue: (s) => s.points },
-]
-
-const BOARD_QB: BoardStatColumn[] = [
-  { id: 'cmp_att', label: 'Cmp/Att', cell: (s) => `${s.completions}/${s.attempts}`, sortValue: (s) => s.attempts },
-  { id: 'pass_yards', label: 'Pass Yds', cell: (s) => n(s.pass_yards), sortValue: (s) => s.pass_yards },
-  { id: 'pass_tds', label: 'Pass TD', cell: (s) => n(s.pass_tds), sortValue: (s) => s.pass_tds },
-  { id: 'interceptions', label: 'INT', cell: (s) => n(s.interceptions), sortValue: (s) => s.interceptions },
-  { id: 'carries', label: 'Car', cell: (s) => n(s.carries), sortValue: (s) => s.carries },
-  { id: 'rush_yards', label: 'Rush Yds', cell: (s) => n(s.rush_yards), sortValue: (s) => s.rush_yards },
-]
-const BOARD_RB: BoardStatColumn[] = [
-  { id: 'carries', label: 'Car', cell: (s) => n(s.carries), sortValue: (s) => s.carries },
-  { id: 'rush_yards', label: 'Rush Yds', cell: (s) => n(s.rush_yards), sortValue: (s) => s.rush_yards },
-  { id: 'targets', label: 'Tgt', cell: (s) => n(s.targets), sortValue: (s) => s.targets },
-  { id: 'receptions', label: 'Rec', cell: (s) => n(s.receptions), sortValue: (s) => s.receptions },
-  { id: 'rec_yards', label: 'Rec Yds', cell: (s) => n(s.rec_yards), sortValue: (s) => s.rec_yards },
-  { id: 'tds', label: 'TD', cell: (s) => n(s.tds), sortValue: (s) => s.tds },
-]
-const BOARD_WRTE: BoardStatColumn[] = [
-  { id: 'targets', label: 'Tgt', cell: (s) => n(s.targets), sortValue: (s) => s.targets },
-  { id: 'receptions', label: 'Rec', cell: (s) => n(s.receptions), sortValue: (s) => s.receptions },
-  { id: 'rec_yards', label: 'Rec Yds', cell: (s) => n(s.rec_yards), sortValue: (s) => s.rec_yards },
-  { id: 'carries', label: 'Car', cell: (s) => n(s.carries), sortValue: (s) => s.carries },
-  { id: 'rush_yards', label: 'Rush Yds', cell: (s) => n(s.rush_yards), sortValue: (s) => s.rush_yards },
-  { id: 'tds', label: 'TD', cell: (s) => n(s.tds), sortValue: (s) => s.tds },
-]
-
-// Summary always; a single-position tab appends that position's counting
-// stats. ALL/FLEX/K/DST get summary only (mixed positions / no weekly stats).
-export function boardColumnsFor(positionFilter: string): BoardStatColumn[] {
-  if (positionFilter === 'QB') return [...BOARD_SUMMARY, ...BOARD_QB]
-  if (positionFilter === 'RB') return [...BOARD_SUMMARY, ...BOARD_RB]
-  if (positionFilter === 'WR' || positionFilter === 'TE') return [...BOARD_SUMMARY, ...BOARD_WRTE]
-  return BOARD_SUMMARY
-}
