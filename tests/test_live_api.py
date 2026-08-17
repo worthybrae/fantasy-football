@@ -23,6 +23,18 @@ def _isolated_leagues_root(tmp_path, monkeypatch):
     return root
 
 
+@pytest.fixture(autouse=True)
+def _stub_team_slots_fetch(monkeypatch):
+    """Keep every connect in this file hermetic. On connect, api.live now
+    fetches ESPN's real team names for the board's columns -- a network call.
+    It is best-effort (fetch_team_slots returns {} on any failure) so a live
+    draft still connects offline, but a real GET in a unit test is slow and
+    non-deterministic. Stub it to {} file-wide; the board test that cares
+    about column names attaches team_slots to its session directly instead.
+    """
+    monkeypatch.setattr("api.live.fetch_team_slots", lambda *a, **k: {})
+
+
 def _fake_session(seed=20260811):
     """A DraftSession with cheap stand-ins for the expensive fields.
 
@@ -1464,3 +1476,98 @@ def test_slot_from_socket_derives_slot_for_a_mock():
     for f in ("SELECTED 40 1001 2", "SELECTED 41 1002 2", "SELECTED 77 1003 2"):
         L.on_frame(f)
     assert _slot_from_socket(L, 8) == 3
+
+
+# --- GET /api/live/board: the full draft-board grid ---------------------------
+
+
+def test_board_is_inactive_before_a_session(tmp_path):
+    """No session -> the endpoint says so and nothing else, the same shape the
+    front end already keys the whole board screen off."""
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    body = TestClient(create_app(str(tmp_path / "t.duckdb"))).get(
+        "/api/live/board").json()
+    assert body == {"active": False}
+
+
+def test_board_returns_the_grid_with_snake_positions_and_stats(tmp_path):
+    """The whole contract in one pass: columns named (with a placeholder for a
+    slot the fetch never learned), is_me on the right column, the snake sending
+    an overall-9 pick to the reversed second round's slot 8, player stats
+    joined off the board, a crosswalk miss still emitting a cell, and value =
+    overall - market_rank with the right sign."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    path = str(tmp_path / "board.duckdb")
+    _seed_minimal_live_db(path, extra_players=[
+        {"player_id": "p2", "name": "B Runner", "position": "RB",
+         "team": "DET", "espn_id": 222},
+        {"player_id": "p3", "name": "C Slot", "position": "WR",
+         "team": "GB", "espn_id": 333},
+    ])
+
+    conn = get_conn(path)
+    app = FastAPI()
+    state, _recompute = register_live_routes(app, conn, path)
+
+    # A real session -- real board with per-player stats -- with my_slot=7 and
+    # team names attached the way _attach_team_slots would on connect, except
+    # slot 8 is deliberately omitted so the endpoint's "Team 8" fallback shows.
+    session = build_session(conn, my_slot=7, league_id="53929318")
+    team_slots = {i: f"Franchise {i}" for i in range(1, 8)}      # 1..7, no 8
+    state["session"] = dataclasses.replace(session, team_slots=team_slots)
+
+    # Seed drafted directly: a round-1 pair, a crosswalk miss, and -- the
+    # load-bearing case -- the star at overall 9, which the snake sends to slot
+    # 8 in the reversed second round (drafted far below rank, so a steal: >0).
+    conn.execute("DELETE FROM drafted")
+    for pid, overall in [("p2", 1), ("p3", 2), ("ghost_id", 3), ("p1", 9)]:
+        conn.execute("INSERT INTO drafted VALUES (?, ?)", [pid, overall])
+
+    body = TestClient(app).get("/api/live/board").json()
+
+    assert body["active"] is True
+    assert body["teams"] == 8
+    assert body["rounds"] == 16
+    assert body["my_slot"] == 7
+    assert body["picks_made"] == 4
+    # 4 picks made -> pick #5 is on the clock: slot 5, still round 1.
+    assert body["on_the_clock"] == 5
+
+    cols = body["columns"]
+    assert [c["slot"] for c in cols] == list(range(1, 9))
+    assert cols[6]["is_me"] is True                      # slot 7 == my_slot
+    assert sum(c["is_me"] for c in cols) == 1            # and only that one
+    assert cols[6]["team_name"] == "Franchise 7"
+    assert cols[7]["team_name"] == "Team 8"              # the omitted-slot fallback
+
+    cells = {c["overall"]: c for c in body["cells"]}
+    assert set(cells) == {1, 2, 3, 9}
+    # Round 1 ascends by slot...
+    assert (cells[1]["round"], cells[1]["slot"]) == (1, 1)
+    assert (cells[2]["round"], cells[2]["slot"]) == (1, 2)
+    # ...and overall 9 lands in the REVERSED second round: slot 8.
+    assert (cells[9]["round"], cells[9]["slot"]) == (2, 8)
+
+    # Player stats joined from the board.
+    assert cells[1]["player"]["name"] == "B Runner"
+    assert cells[1]["player"]["position"] == "RB"
+    assert cells[9]["player"]["name"] == "A Star"
+    assert cells[9]["player"]["last_ppg"] is not None    # p1 has weekly rows
+
+    # A crosswalk miss (an id the board does not carry) still emits a cell --
+    # id as the name, everything else null -- so the grid never drops a pick.
+    ghost = cells[3]["player"]
+    assert ghost["name"] == "ghost_id"
+    assert ghost["position"] is None
+    assert ghost["market_rank"] is None
+    assert ghost["value"] is None
+
+    # value = overall - market_rank, and the star taken at 9 is a steal (>0).
+    star = cells[9]["player"]
+    assert star["market_rank"] is not None
+    assert star["value"] == 9 - star["market_rank"]
+    assert star["value"] > 0
+    conn.close()

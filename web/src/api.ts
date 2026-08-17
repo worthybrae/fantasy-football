@@ -205,6 +205,70 @@ export async function fetchLiveState(): Promise<LiveState> {
   return res.json()
 }
 
+// -- live draft board (the round x team grid, GET /api/live/board) --
+
+// A board cell's player: the same shape whether the pick was a steal or a
+// reach, unlike `LiveCandidate` which carries no player identity at all --
+// the grid renders straight off this, no join against `fetchPlayers()`
+// needed. `value` is signed relative to ADP: positive means the player fell
+// past where the market had him (a steal), negative means he went early (a
+// reach).
+export interface BoardPlayer {
+  player_id: string
+  name: string
+  position: string
+  team: string | null
+  bye: number | null
+  overall_rank: number | null
+  tier: number | null
+  market_rank: number | null
+  vor: number | null
+  last_ppg: number | null
+  last_points: number | null
+  value: number | null
+}
+
+// One landed pick, already placed at its `round`/`slot` by the server --
+// the grid trusts these rather than re-deriving them from `overall` and the
+// team count, so it never has to know this league's snake variant.
+export interface BoardCell {
+  overall: number
+  round: number
+  slot: number
+  player: BoardPlayer
+}
+
+// One column header. `is_me` marks the viewer's own team -- there is
+// exactly one `true` among `teams` columns whenever `my_slot` is non-null.
+export interface BoardColumn {
+  slot: number
+  team_name: string
+  is_me: boolean
+}
+
+// Mirrors `LiveState`'s own convention (see its comment above): every field
+// below is typed non-optional even though the `active: false` response
+// omits all but `active` itself, since every read site already checks
+// `board.active` before touching the rest.
+export interface LiveBoard {
+  active: boolean
+  teams: number
+  rounds: number
+  my_slot: number | null
+  on_the_clock: number | null
+  picks_made: number
+  columns: BoardColumn[]
+  cells: BoardCell[]
+}
+
+export async function fetchBoard(): Promise<LiveBoard> {
+  const res = await fetch('/api/live/board')
+  if (!res.ok) {
+    throw new Error(`Failed to load the draft board (${res.status}): ${await detailText(res)}`)
+  }
+  return res.json()
+}
+
 // The connect screen's only call. `board_fingerprint` identifies the pool
 // build the session locked in, not shown to the user -- what the connect
 // screen actually shows is a slot number, but that comes from a follow-up
@@ -218,25 +282,6 @@ export interface ConnectResult {
   // screen can show it for a sanity check -- a league that re-randomised its
   // draft order would make this silently wrong and nothing else would catch it.
   my_slot: number | null
-}
-
-// No slot argument: the draft slot is not something a human should have to
-// know. ESPN's socket announces the team on connect, and the backend
-// translates it through draft_order. Until it does, `my_slot` is null --
-// which is honest, and better than a guess that would attribute picks to
-// the wrong manager.
-export async function connectDraft(url: string): Promise<ConnectResult> {
-  const res = await fetch('/api/live/connect', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url }),
-  })
-  if (!res.ok) {
-    // The backend writes this detail for a human to read, verbatim -- no
-    // prefix, no re-wording (see detailText).
-    throw new Error(await detailText(res))
-  }
-  return res.json()
 }
 
 // What the bookmarklet mints on the ESPN page and hands to this window in the

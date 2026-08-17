@@ -47,6 +47,21 @@ class DraftSession:
     # recommendation mean a changed board rather than a different sample.
     seed: int
     started_at: datetime
+    # The full board DataFrame build_session already pays to build. It used to
+    # be discarded once `pool` was derived from it; /api/live/board keeps it so
+    # it can serve rich per-player stats for every pick without rebuilding.
+    # Defaults to None so callers that construct a DraftSession directly (test
+    # fixtures, any future caller) need not supply it -- the board endpoint
+    # then simply falls back to the raw player id for every cell.
+    board: object = None
+    # slot (1-based) -> ESPN team display name, fetched once on connect (see
+    # pipeline.espn_teams.fetch_team_slots) and attached via
+    # dataclasses.replace, since this dataclass is frozen. Empty until then,
+    # and empty forever for a session with no league context (live_start) or
+    # one whose team-name fetch failed -- /api/live/board falls back to
+    # "Team {slot}" for any missing column. default_factory so the shared empty
+    # default is not one dict aliased across every session.
+    team_slots: dict = dataclasses.field(default_factory=dict)
 
 
 def board_fingerprint(board: pd.DataFrame) -> str:
@@ -87,7 +102,7 @@ def build_session(conn, my_slot: int | None, seed: int = DEFAULT_SEED,
         settings=settings, pool=pool, betas=betas,
         crosswalk=build_crosswalk(board),
         board_fingerprint=board_fingerprint(board), seed=seed,
-        started_at=datetime.now(timezone.utc))
+        started_at=datetime.now(timezone.utc), board=board)
 
 
 import re
@@ -100,8 +115,11 @@ from pipeline.draft_listener import DraftListener, run_listener
 from pipeline.draft_socket import run_socket_listener
 from pipeline.espn_league import STATE_PATH, parse_league_id
 from pipeline.espn_live import apply_picks
+from pipeline.espn_teams import fetch_team_slots
+from pipeline.espn_teams import http_fetch as _team_view_fetch
 from pipeline import leagues as leagues_mod
 from pipeline.leagues import DEFAULT_LEAGUE, provision_league
+from scoring.config import CURRENT_SEASON
 from scoring.draft_sim import _drafted_state, search_pick, snake_slots
 
 
@@ -162,6 +180,37 @@ def _team_id_from_url(url: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def _season_from_url(url: str) -> int:
+    """Season id from a pasted draft URL, or the current season as a default.
+
+    A live draft URL carries `seasonId=2026`; a bare id or a waiting-room URL
+    may not, so CURRENT_SEASON stands in. The season is only ever used to
+    fetch ESPN's team-name view for a draft happening now, and that fetch is
+    best-effort -- a wrong season merely falls the board's columns back to
+    "Team {slot}" placeholders (fetch_team_slots returns {}), never breaks the
+    connect. TokenBody carries `season` outright, so only the URL path needs
+    this.
+    """
+    m = re.search(r"seasonId=(\d+)", url or "")
+    return int(m.group(1)) if m else CURRENT_SEASON
+
+
+def _attach_team_slots(session, league_id, season):
+    """Fetch ESPN's real team names for this league and pin them to the
+    session, so /api/live/board can name every column without re-fetching.
+
+    Lives on the connect path, not in build_session: build_session is also
+    called by live_start with no league context, and it should never do a
+    network fetch. fetch_team_slots is best-effort (returns {} on any failure,
+    including no network), so this never raises into a connect. DraftSession is
+    frozen, so a non-empty result is attached with dataclasses.replace rather
+    than mutation; an empty one leaves the session untouched (its team_slots
+    default stays {}, and the board endpoint falls back to placeholders).
+    """
+    slots = fetch_team_slots(_team_view_fetch(), league_id, season)
+    return dataclasses.replace(session, team_slots=slots) if slots else session
+
+
 def _slot_for_team(cur, team_id: int):
     """Translate an ESPN team id to a draft slot, or None if it cannot be.
 
@@ -206,6 +255,83 @@ def _safe_int(value):
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+# NaN -> None serialization, the same rule api/main.py applies to board rows:
+# a missing/NA cell must reach JSON as null, not as NaN (which FastAPI's
+# encoder rejects) and not as a pandas/numpy scalar. Kept local to the board
+# endpoint rather than imported from main to avoid a cross-module dependency
+# between the two route files.
+def _int_or_none(value):
+    return None if value is None or pd.isna(value) else int(value)
+
+
+def _float_or_none(value):
+    return None if value is None or pd.isna(value) else float(value)
+
+
+def _str_or_none(value):
+    return None if value is None or pd.isna(value) else str(value)
+
+
+def _board_index(board) -> dict:
+    """player_id -> board row (a Series), for /api/live/board's cell join.
+
+    A None board (a session built without one, e.g. a test fixture) yields an
+    empty index, so every pick falls back to its raw id rather than the grid
+    silently dropping picks. Built once per request, not once per cell.
+    """
+    if board is None or getattr(board, "empty", True):
+        return {}
+    return {str(row["player_id"]): row for _, row in board.iterrows()}
+
+
+def _board_cell(player_id, pick_no, teams: int, slots: list, by_id: dict) -> dict:
+    """One drafted pick as a board-grid cell: its snake round/slot plus the
+    rich player payload the front end draws in the column.
+
+    round/slot come from the snake order, not from any teamId ESPN stores --
+    `drafted` carries none (it is (player_id, pick_no)); the pick's overall
+    number alone fixes both. `value` = overall - market_rank is the steal/reach
+    signal: a player who fell past his ADP (drafted later than his consensus
+    rank) scores positive, a reach negative, and null when there is no market
+    rank to compare against.
+
+    A player id the board does not carry -- a crosswalk miss, or a manually
+    marked id -- still produces a cell, named by its raw id with everything
+    else null, so the grid never silently drops a pick.
+    """
+    overall = int(pick_no)
+    idx = overall - 1
+    slot = slots[idx] if 0 <= idx < len(slots) else None
+    rnd = (idx // teams) + 1 if teams else None
+    row = by_id.get(str(player_id))
+    if row is None:
+        player = {"player_id": str(player_id), "name": str(player_id),
+                  "position": None, "team": None, "bye": None,
+                  "overall_rank": None, "tier": None, "market_rank": None,
+                  "vor": None, "last_ppg": None, "last_points": None,
+                  "value": None}
+    else:
+        market_rank = _float_or_none(row.get("market_rank"))
+        stats = row.get("stats")
+        stats = stats if isinstance(stats, dict) else {}
+        player = {
+            "player_id": str(row["player_id"]),
+            "name": _str_or_none(row.get("name")),
+            "position": _str_or_none(row.get("position")),
+            "team": _str_or_none(row.get("team")),
+            "bye": _int_or_none(row.get("bye")),
+            "overall_rank": _int_or_none(row.get("rank")),
+            "tier": _int_or_none(row.get("tier")),
+            "market_rank": market_rank,
+            "vor": _float_or_none(row.get("vor")),
+            "last_ppg": _float_or_none(stats.get("ppg")),
+            "last_points": _float_or_none(stats.get("points")),
+            # >0 = fell past ADP (a steal), <0 = reach; null with no ADP.
+            "value": None if market_rank is None else float(overall) - market_rank,
+        }
+    return {"overall": overall, "round": rnd, "slot": slot, "player": player}
 
 
 def _slot_from_socket(listener, teams: int):
@@ -768,6 +894,61 @@ def register_live_routes(app, conn, db_path):
             "token_received": snapshot.get("token") is not None,
         }
 
+    @app.get("/api/live/board")
+    def live_board():
+        """The full draft-board grid: every column named, every pick placed.
+
+        Read-only and purely additive to the live session -- it touches none
+        of the recompute/listener machinery, only the same `drafted` rows
+        live_state reads. The board itself (player stats) and the slot->name
+        map were both computed once, on connect, and are read off the session.
+        """
+        with lock:
+            session = state["session"]
+            if session is None:
+                return {"active": False}
+            snapshot = dict(state)
+            # Same connection choice and the same under-the-lock discipline as
+            # live_state (see its long comment): read the drafted rows off the
+            # league this session belongs to, and while STILL holding `lock`,
+            # so a concurrent /api/live/stop closing that connection cannot
+            # land between the snapshot and the query. Unlike live_state this
+            # pulls the rows themselves, not just a count -- the grid needs
+            # each pick's player id and overall number.
+            cur = (snapshot["league_conn"] or conn).cursor()
+            try:
+                picks = cur.execute(
+                    "SELECT player_id, pick_no FROM drafted").fetchall()
+            finally:
+                cur.close()
+
+        settings = session.settings
+        teams, rounds = settings.teams, settings.rounds
+        slots = snake_slots(teams, rounds)
+        picks_made = len(picks)
+        on_clock = slots[picks_made] if picks_made < len(slots) else None
+
+        columns = [
+            {"slot": slot,
+             "team_name": session.team_slots.get(slot, f"Team {slot}"),
+             "is_me": slot == session.my_slot}
+            for slot in range(1, teams + 1)]
+
+        by_id = _board_index(session.board)
+        cells = [_board_cell(pid, pick_no, teams, slots, by_id)
+                 for pid, pick_no in picks]
+
+        return {
+            "active": True,
+            "teams": teams,
+            "rounds": rounds,
+            "my_slot": session.my_slot,
+            "on_the_clock": on_clock,
+            "picks_made": picks_made,
+            "columns": columns,
+            "cells": cells,
+        }
+
     @app.post("/api/live/stop")
     def live_stop():
         stopped = _stop_listener()
@@ -816,6 +997,10 @@ def register_live_routes(app, conn, db_path):
 
         team_id = _team_id_from_url(body.url)
         work_conn, league_conn, session = _provision_and_build(league_id, team_id)
+        # Real ESPN team names for the board's columns, fetched once here (the
+        # URL carries the season). Best-effort -- a failure leaves team_slots
+        # empty and the board falls back to "Team {slot}".
+        session = _attach_team_slots(session, league_id, _season_from_url(body.url))
 
         def run_fn(listener, on_change, on_activity, stop_event):
             # The browser observer: watches the socket a real ESPN tab holds.
@@ -866,6 +1051,9 @@ def register_live_routes(app, conn, db_path):
 
         work_conn, league_conn, session = _provision_and_build(
             body.leagueId, team_id)
+        # Real ESPN team names for the board's columns. TokenBody carries the
+        # season outright. Best-effort, same as the browser path.
+        session = _attach_team_slots(session, body.leagueId, body.season)
 
         def run_fn(listener, on_change, on_activity, stop_event):
             run_socket_listener(listener, body.leagueId, body.teamId, body.swid,

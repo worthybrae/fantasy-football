@@ -1,27 +1,10 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { fetchLiveState, fetchPlayers, type LiveCandidate, type LiveState, type Player } from '../api'
+import { fetchBoard, fetchLiveState, fetchPlayers, type LiveBoard, type LiveCandidate, type LiveState, type Player } from '../api'
+import DraftBoardGrid from '../components/DraftBoardGrid'
 import PlayerCard from '../components/PlayerCard'
 
 const POLL_MS = 2500
-// Cap on the "off the board" feed -- see the component doc comment for how
-// it's built. Eight is enough to cover the last round or so without the
-// aside outgrowing the decision panel next to it.
-const MAX_RECENT_PICKS = 8
-
-// One drafted player this client has observed since mount, joined against
-// the one-time player fetch at the moment its `drafted` flag flipped. This
-// is the only honest way to build a "recent picks" feed: `/api/live/state`
-// carries no pick history (only `picks_made`, a count) and `/api/players`
-// carries no timestamp -- see the module doc comment below for the full
-// rationale.
-interface RecentPick {
-  player_id: string
-  name: string
-  position: string
-  team: string
-  detectedAt: number
-}
 
 // "Xs ago" against a live-ticking clock, distinct from api.ts's `ageLabel`
 // (which rounds to whole minutes -- right for a sim run's age, but the
@@ -83,41 +66,29 @@ function buildReason(
 export default function LiveDraft() {
   const [state, setState] = useState<LiveState | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [board, setBoard] = useState<LiveBoard | null>(null)
+  const [boardError, setBoardError] = useState<string | null>(null)
   const [players, setPlayers] = useState<Record<string, Player>>({})
-  const [recentPicks, setRecentPicks] = useState<RecentPick[]>([])
   const [selectedPlayerId, setSelectedPlayerId] = useState<string | null>(null)
   // Forces a re-render every second purely so pollAgeLabel's text ticks
   // forward between polls -- no new data is fetched for this, it just
   // reformats the elapsed time against `last_poll_at`, which is real.
   const [nowMs, setNowMs] = useState(() => Date.now())
 
-  // `drafted` truth as of the last players fetch, checked by identity
-  // (`.has`) rather than trusting a derived boolean in `players` state,
-  // since the diff that builds `recentPicks` needs "was this NOT drafted a
-  // moment ago" -- a question a plain state snapshot can't answer inside
-  // the same async callback that's about to replace it.
-  const draftedIdsRef = useRef<Set<string>>(new Set())
-  const picksMadeRef = useRef<number | null>(null)
-  const playersLoadedRef = useRef(false)
-
   // Player identity (name/position/team/market_rank/market_spread) is a
   // one-time join table -- per the task brief, it does not change mid-draft.
-  // `drafted` does change, but only in response to a real pick landing (see
-  // the poll effect below), never on a fixed timer of its own.
+  // The grid needs no such join (its cells carry full player data already);
+  // this table exists only for the sidebar's candidate list, which -- like
+  // the live search loop upstream -- is cheap by design and carries
+  // `player_id` alone.
   useEffect(() => {
     let cancelled = false
     fetchPlayers()
       .then((list) => {
         if (cancelled) return
         const map: Record<string, Player> = {}
-        const drafted = new Set<string>()
-        for (const p of list) {
-          map[p.player_id] = p
-          if (p.drafted) drafted.add(p.player_id)
-        }
+        for (const p of list) map[p.player_id] = p
         setPlayers(map)
-        draftedIdsRef.current = drafted
-        playersLoadedRef.current = true
       })
       .catch(() => {
         // Candidates still render by player_id; the join table just stays
@@ -128,60 +99,32 @@ export default function LiveDraft() {
     }
   }, [])
 
+  // Both live endpoints share one poll cadence: `/api/live/state` for the
+  // sidebar's recommendation, `/api/live/board` for the grid. Each has its
+  // own error slot so a hiccup in one doesn't blank out the other -- the
+  // board can still be read while the recommendation banner explains a
+  // stale search, and vice versa.
   useEffect(() => {
     let cancelled = false
-
-    async function refreshPlayersAndDiff() {
-      if (!playersLoadedRef.current) return
-      try {
-        const list = await fetchPlayers()
-        if (cancelled) return
-        const map: Record<string, Player> = {}
-        const nowDrafted = new Set<string>()
-        const newlyDrafted: Player[] = []
-        for (const p of list) {
-          map[p.player_id] = p
-          if (p.drafted) {
-            nowDrafted.add(p.player_id)
-            if (!draftedIdsRef.current.has(p.player_id)) newlyDrafted.push(p)
-          }
-        }
-        setPlayers(map)
-        draftedIdsRef.current = nowDrafted
-        if (newlyDrafted.length > 0) {
-          const detectedAt = Date.now()
-          setRecentPicks((prev) =>
-            [
-              ...newlyDrafted.map((p) => ({
-                player_id: p.player_id, name: p.name, position: p.position,
-                team: p.team, detectedAt,
-              })),
-              ...prev,
-            ].slice(0, MAX_RECENT_PICKS)
-          )
-        }
-      } catch {
-        // Non-fatal: the join table goes stale until the next successful
-        // poll picks the diff back up -- candidates and status still render.
-      }
-    }
 
     async function poll() {
       try {
         const data = await fetchLiveState()
-        if (cancelled) return
-        setState(data)
-        setError(null)
-        // Only re-fetch the player join table when a pick has actually
-        // landed -- never on the bare 2500ms cadence. `picksMadeRef` starts
-        // at null so the very first poll after mount never counts as "a
-        // pick landed" on its own.
-        if (picksMadeRef.current !== null && data.picks_made > picksMadeRef.current) {
-          await refreshPlayersAndDiff()
+        if (!cancelled) {
+          setState(data)
+          setError(null)
         }
-        picksMadeRef.current = data.picks_made
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load live state')
+      }
+      try {
+        const data = await fetchBoard()
+        if (!cancelled) {
+          setBoard(data)
+          setBoardError(null)
+        }
+      } catch (e) {
+        if (!cancelled) setBoardError(e instanceof Error ? e.message : 'Failed to load the draft board')
       }
     }
 
@@ -219,32 +162,41 @@ export default function LiveDraft() {
     && state.candidates_as_of_pick < state.picks_made
   const isUncertain = !!state?.stale || isRecomputing
 
-  const turnAnnouncement = !state?.active
-    ? 'Not connected to a draft.'
+  // Whoever's on the clock, named by their board column when the grid has
+  // loaded -- falls back to "Slot N" (the only thing `/api/live/state`
+  // alone can offer) until it has.
+  const clockTeam = state?.active && state.on_the_clock !== null
+    ? (board?.active ? board.columns.find((c) => c.slot === state.on_the_clock)?.team_name : undefined)
+      ?? `Slot ${state.on_the_clock}`
+    : null
+
+  const turnText = !state
+    ? 'Loading…'
+    : !state.active
+    ? 'Not connected'
     : draftDone
-    ? 'Draft complete.'
+    ? 'Draft complete'
     : youAreUp
-    ? "You're up."
-    : `Slot ${state.on_the_clock} is on the clock.`
+    ? "You're up"
+    : `${clockTeam} on the clock`
 
   return (
     <div className="live-page">
-      <div className="sr-only" aria-live="polite">{turnAnnouncement}</div>
+      <div className="sr-only" aria-live="polite">{turnText}.</div>
 
       <header className={`live-strip${youAreUp ? ' live-strip-you' : ''}`}>
-        <div className="live-strip-turn">
-          {!state ? 'Loading…' : !state.active ? 'Not connected' : draftDone ? 'Draft complete' : youAreUp ? "You're up" : `Slot ${state.on_the_clock} on the clock`}
-        </div>
+        <div className="live-strip-turn">{turnText}</div>
         {state?.active && (
           <div className="live-strip-meta mono">
             <span>Pick {state.picks_made + 1}</span>
-            <span>{state.picks_made} made</span>
+            {state.my_slot !== null && <span>Your slot {state.my_slot}</span>}
             <span title={state.last_poll_at ?? undefined}>updated {pollAgeLabel(state.last_poll_at, nowMs)}</span>
           </div>
         )}
       </header>
 
       {error && <p className="error live-banner">{error}</p>}
+      {boardError && <p className="error live-banner">{boardError}</p>}
 
       {!state?.active && !error && (
         <p className="rail-empty live-banner">
@@ -281,84 +233,82 @@ export default function LiveDraft() {
             </div>
           )}
 
-          <div className="live-body">
-            <div className={`live-decision${isUncertain ? ' is-uncertain' : ''}`}>
-              <section className="live-call">
-                {leader ? (
-                  <>
-                    <button
-                      type="button"
-                      className="live-call-name"
-                      onClick={() => setSelectedPlayerId(leader.player_id)}
-                    >
-                      {playerName(leader.player_id)}
-                    </button>
-                    <div className="live-call-meta">
-                      {posBadge(players[leader.player_id]?.position)}
-                      <span>{players[leader.player_id]?.team ?? '—'}</span>
-                    </div>
-                    <p className="live-call-reason">
-                      {buildReason(leader, playerName(leader.player_id), runnerUp,
-                        runnerUp ? playerName(runnerUp.player_id) : '')}
-                    </p>
-                  </>
-                ) : (
-                  <p className="rail-empty">No recommendation yet.</p>
-                )}
-              </section>
-
-              <section className="live-alts">
-                <h2>Alternatives</h2>
-                {alternatives.length === 0 ? (
-                  <p className="rail-empty">Nobody else in range.</p>
-                ) : (
-                  <ul className="live-alts-list">
-                    {alternatives.map((c) => (
-                      <li className="live-alt" key={c.player_id}>
-                        <button
-                          type="button"
-                          className="live-alt-btn"
-                          onClick={() => setSelectedPlayerId(c.player_id)}
-                        >
-                          {posBadge(players[c.player_id]?.position)}
-                          <span className="live-alt-name">{playerName(c.player_id)}</span>
-                          <span className="live-alt-team">{players[c.player_id]?.team ?? '—'}</span>
-                        </button>
-                        <span className="live-alt-cost mono" title="EV cost against the call">
-                          {fmtEvDelta(c.ev - (leader?.ev ?? c.ev))}
-                        </span>
-                        <span className="live-alt-bar-track" aria-hidden="true">
-                          <span
-                            className="live-alt-bar-fill"
-                            style={{
-                              width: `${Math.max(0, Math.min(100, c.applied_pct))}%`,
-                              background: riskTone(c.applied_pct),
-                            }}
-                          />
-                        </span>
-                        <span className="live-alt-pct mono">{Math.round(c.applied_pct)}%</span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </section>
-            </div>
-
-            <aside className="live-offboard">
-              <h2>Off the board</h2>
-              {recentPicks.length === 0 ? (
-                <p className="rail-empty">No picks observed yet.</p>
+          <div className="live-layout">
+            <section className="live-main">
+              {board?.active ? (
+                <DraftBoardGrid board={board} />
               ) : (
-                <ul className="live-offboard-list">
-                  {recentPicks.map((p) => (
-                    <li className="live-offboard-item" key={`${p.player_id}-${p.detectedAt}`}>
-                      {posBadge(p.position)}
-                      <span className="live-offboard-name">{p.name}</span>
-                      <span className="live-offboard-team">{p.team}</span>
-                    </li>
-                  ))}
-                </ul>
+                <p className="rail-empty">Waiting for the draft board…</p>
               )}
+            </section>
+
+            <aside className="live-sidebar">
+              <div className="live-sidebar-head">
+                <span className="live-sidebar-turn">{turnText}</span>
+                {state.my_slot !== null && <span className="live-sidebar-slot mono">Slot {state.my_slot}</span>}
+              </div>
+
+              <div className={`live-decision${isUncertain ? ' is-uncertain' : ''}`}>
+                <section className="live-call">
+                  {leader ? (
+                    <>
+                      <button
+                        type="button"
+                        className="live-call-name"
+                        onClick={() => setSelectedPlayerId(leader.player_id)}
+                      >
+                        {playerName(leader.player_id)}
+                      </button>
+                      <div className="live-call-meta">
+                        {posBadge(players[leader.player_id]?.position)}
+                        <span>{players[leader.player_id]?.team ?? '—'}</span>
+                      </div>
+                      <p className="live-call-reason">
+                        {buildReason(leader, playerName(leader.player_id), runnerUp,
+                          runnerUp ? playerName(runnerUp.player_id) : '')}
+                      </p>
+                    </>
+                  ) : (
+                    <p className="rail-empty">No recommendation yet.</p>
+                  )}
+                </section>
+
+                <section className="live-alts">
+                  <h2>Alternatives</h2>
+                  {alternatives.length === 0 ? (
+                    <p className="rail-empty">Nobody else in range.</p>
+                  ) : (
+                    <ul className="live-alts-list">
+                      {alternatives.map((c) => (
+                        <li className="live-alt" key={c.player_id}>
+                          <button
+                            type="button"
+                            className="live-alt-btn"
+                            onClick={() => setSelectedPlayerId(c.player_id)}
+                          >
+                            {posBadge(players[c.player_id]?.position)}
+                            <span className="live-alt-name">{playerName(c.player_id)}</span>
+                            <span className="live-alt-team">{players[c.player_id]?.team ?? '—'}</span>
+                          </button>
+                          <span className="live-alt-cost mono" title="EV cost against the call">
+                            {fmtEvDelta(c.ev - (leader?.ev ?? c.ev))}
+                          </span>
+                          <span className="live-alt-bar-track" aria-hidden="true">
+                            <span
+                              className="live-alt-bar-fill"
+                              style={{
+                                width: `${Math.max(0, Math.min(100, c.applied_pct))}%`,
+                                background: riskTone(c.applied_pct),
+                              }}
+                            />
+                          </span>
+                          <span className="live-alt-pct mono">{Math.round(c.applied_pct)}%</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </section>
+              </div>
             </aside>
           </div>
         </>
