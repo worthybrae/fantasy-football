@@ -1237,10 +1237,11 @@ td:first-child {
   gap: 2px;
   /* Fixed, not min-height: a one-line name and a two-line name must occupy
      the same cell height so every row is uniform. The name area below clamps
-     to two lines and this height reserves room for both, so a short name just
-     centers with space around it rather than shrinking its row. */
-  height: 54px;
-  padding: 4px 8px;
+     to two lines and this height reserves room for both PLUS breathing room,
+     so a wrapped name centers with slack above and below rather than filling
+     the cell edge-to-edge (which read as squished). */
+  height: 62px;
+  padding: 7px 8px;
   border-bottom: 1px solid var(--border);
   border-right: 1px solid var(--border);
   text-decoration: none;
