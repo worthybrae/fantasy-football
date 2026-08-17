@@ -36,6 +36,34 @@ def _norm(name):
     from scoring.board import _norm_name  # deferred: avoids circular import
     return _norm_name(name)
 
+def select_format(df, fmt="ppr"):
+    """A source table's rows for the league's scoring format.
+
+    The contract with the ADP importer (which owns pipeline/, populating this
+    exact shape):
+      * A source table gains a text `format` column with values in
+        {'ppr','half','std'} -- one row-set per format the source publishes.
+      * A source may not carry the requested format (mfl_adp has no 'half'
+        feed, for instance). When the requested format has NO rows, fall back
+        to that source's 'ppr' rows rather than dropping the source from the
+        consensus.
+      * BACKWARD COMPATIBILITY: an old database -- and many existing test
+        fixtures -- seed these tables with NO `format` column at all. With
+        the column absent, every row is PPR: the frame is returned untouched,
+        so a PPR league (or an unknown one) sees exactly today's rows.
+
+    The `format` column is dropped on the way out, so a table filtered to
+    'ppr' is byte-identical to one that never carried the column -- which is
+    what keeps the PPR path unchanged. ESPN is never passed through here:
+    espn_adp is PPR-only by contract and stays PPR everywhere.
+    """
+    if df is None or df.empty or "format" not in df.columns:
+        return df
+    rows = df[df["format"] == fmt]
+    if rows.empty:  # source lacks this format -> fall back to its PPR rows
+        rows = df[df["format"] == "ppr"]
+    return rows.drop(columns=["format"]).reset_index(drop=True)
+
 def _espn_ranks(board, espn, sleeper):
     """ESPN's ADP rank, PPR rank and player id, per board row.
 
@@ -144,8 +172,19 @@ def _fp_ranks(board, fp):
     tiers.loc[is_dst] = board.loc[is_dst, "team"].map(dst["fp_tier"]).astype(float)
     return ranks, tiers
 
-def add_market(board, espn, fp, sleeper, mfl=None, cbs=None):
+def add_market(board, espn, fp, sleeper, mfl=None, cbs=None, fmt="ppr"):
     out = board.copy()
+    # Pick each opinion source's rows for the LEAGUE's scoring format before
+    # it votes, so a half-PPR or standard league gets a format-appropriate
+    # consensus. FFC is already handled upstream: build_board format-selects
+    # the `adp` table before it becomes this board's `adp` column (and thus
+    # `ffc_rank`). ESPN is exempt -- espn_adp is PPR-only by contract, and
+    # espn_ppr_rank / espn_id must stay PPR wherever they are read. `fmt`
+    # defaults to 'ppr', so callers that don't pass it (and PPR leagues) get
+    # exactly today's consensus.
+    fp = select_format(fp, fmt)
+    mfl = select_format(mfl, fmt)
+    cbs = select_format(cbs, fmt)
     out["ffc_rank"] = out["adp"].rank(method="first")
     out["espn_rank"], out["espn_ppr_rank"], out["espn_id"] = _espn_ranks(
         out, espn, sleeper)

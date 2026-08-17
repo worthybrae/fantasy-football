@@ -49,7 +49,7 @@ from pipeline.db import read_table
 from scoring import factors, league
 from scoring.composite import compute_composite, apply_vor, assign_tiers
 from scoring.config import DEFAULT_WEIGHTS, RECENCY_WEIGHTS
-from scoring.market import add_market
+from scoring.market import add_market, select_format
 from scoring.similarity import player_season_features
 
 _SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
@@ -248,12 +248,20 @@ def build_board(conn, weights: dict | None = None,
     # veterans for decade-old injuries.
     settings = settings or league.load(conn)
     rules = settings.scoring
+    # The consensus ADP is scoring-format-aware: FFC/FantasyPros/MFL/CBS each
+    # publish a per-format feed, and the board reflects the LEAGUE's format so
+    # both the recommendations and the +/- vs ADP are right for PPR, half-PPR
+    # or standard. `fmt` is 'ppr' for an unknown/PPR league, which is today's
+    # behavior. FFC (the `adp` table) is format-selected here, before it
+    # becomes the board's `adp` column / `ffc_rank`; the other three sources
+    # are selected inside add_market. ESPN stays PPR (espn_adp is PPR-only).
+    fmt = league.scoring_format(settings)
     weekly = read_table(conn, "weekly")
     if not weekly.empty:
         weekly = weekly[weekly["season"].isin(RECENCY_WEIGHTS)]
     depth = _adapt_depth_charts(read_table(conn, "depth_charts"))
     sched = read_table(conn, "schedules")
-    adp = _adapt_adp(read_table(conn, "adp"))
+    adp = _adapt_adp(select_format(read_table(conn, "adp"), fmt))
     drafted = read_table(conn, "drafted")
     espn = read_table(conn, "espn_adp")
     fp = read_table(conn, "fp_ecr")
@@ -331,7 +339,7 @@ def build_board(conn, weights: dict | None = None,
     uni = assign_tiers(uni)
     uni = uni.sort_values("vor", ascending=False).reset_index(drop=True)
     uni["rank"] = uni.index + 1
-    uni = add_market(uni, espn, fp, sleeper, mfl=mfl, cbs=cbs)
+    uni = add_market(uni, espn, fp, sleeper, mfl=mfl, cbs=cbs, fmt=fmt)
     # A player ESPN does not rank is not draftable, and the board is the
     # draftable pool -- the simulator builds from it, so anyone left here can
     # be assigned a pick. Retired and out-of-league players were reaching the

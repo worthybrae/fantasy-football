@@ -71,3 +71,35 @@ def test_load_reads_newest_season_from_league_table(tmp_path):
     ])
     write_table(conn, "league", rows)
     assert league.load(conn).season == 2026
+
+
+def _with_receptions(pts):
+    """A LeagueSettings identical to the default except for the reception
+    point value, which is the only thing scoring_format reads."""
+    from dataclasses import replace
+    base = league.default_settings()
+    return replace(base, scoring={**base.scoring, "receptions": pts})
+
+
+def test_scoring_format_maps_reception_points_to_the_three_tokens():
+    # Boundaries: 0.75 and 0.25 are the cutoffs, inclusive at the bottom of
+    # each band. The real PPR league scores receptions 1.0.
+    assert league.scoring_format(_with_receptions(1.0)) == "ppr"
+    assert league.scoring_format(_with_receptions(0.75)) == "ppr"
+    assert league.scoring_format(_with_receptions(0.74)) == "half"
+    assert league.scoring_format(_with_receptions(0.5)) == "half"
+    assert league.scoring_format(_with_receptions(0.25)) == "half"
+    assert league.scoring_format(_with_receptions(0.24)) == "std"
+    assert league.scoring_format(_with_receptions(0.0)) == "std"
+    # The real ESPN-parsed PPR league (receptions 1.0) reads 'ppr'.
+    assert league.scoring_format(_settings()) == "ppr"
+
+
+def test_scoring_format_defaults_to_ppr_for_unknown_settings():
+    # None (no ESPN import) and an empty scoring dict both mean "assume PPR",
+    # which is the format the board has always read every source as.
+    from dataclasses import replace
+    assert league.scoring_format(None) == "ppr"
+    assert league.scoring_format(replace(league.default_settings(), scoring={})) == "ppr"
+    # default_settings is full PPR (DEFAULT_RULES scores receptions 1.0).
+    assert league.scoring_format(league.default_settings()) == "ppr"

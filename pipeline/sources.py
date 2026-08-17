@@ -5,16 +5,24 @@ import nfl_data_py as nfl
 import pandas as pd
 import requests
 
-ADP_URL = "https://fantasyfootballcalculator.com/api/v1/adp/ppr"
+ADP_URL = "https://fantasyfootballcalculator.com/api/v1/adp/{fmt}"
 WEEKLY_URL = "https://github.com/nflverse/nflverse-data/releases/download/stats_player/stats_player_week_{year}.parquet"
 
 UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
 ESPN_URL = ("https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/"
             "seasons/{year}/segments/0/leaguedefaults/3?view=kona_player_info")
-FP_URL = "https://www.fantasypros.com/nfl/rankings/ppr-cheatsheets.php"
+FP_URL = "https://www.fantasypros.com/nfl/rankings/{fmt}-cheatsheets.php"
 SLEEPER_URL = "https://api.sleeper.app/v1/players/nfl"
 _ESPN_POS = {1: "QB", 2: "RB", 3: "WR", 4: "TE", 5: "K", 16: "DST"}
 _FANTASY_POS = {"QB", "RB", "WR", "TE", "K", "DST"}
+
+# Scoring-format tokens shared with the board/market consumer side -- every
+# format-aware fetcher in this module accepts one of exactly these three and
+# tags its output rows with it in a `format` column. 'ppr' is the default
+# everywhere so a caller that doesn't know about formats yet (existing
+# refresh jobs, import_league's historic-ADP backfill) keeps getting exactly
+# today's rows, just carrying an extra format='ppr' column.
+FORMAT_TOKENS = ("ppr", "half", "std")
 
 def _normalize_weekly(df: pd.DataFrame) -> pd.DataFrame:
     """Normalize the new nflverse `stats_player_week` schema to what
@@ -48,17 +56,27 @@ def fetch_depth_charts(season):
 def fetch_schedules(season):
     return nfl.import_schedules([season])
 
-def parse_adp(payload: dict) -> pd.DataFrame:
+# FFC serves one endpoint per scoring format outright -- /adp/ppr,
+# /adp/half-ppr, /adp/standard -- and all three return distinct player pools
+# (verified: standard's #1 overall is Saquon Barkley, ppr's is Ja'Marr
+# Chase). This is the only one of the five sources where every format token
+# maps to a genuinely separate live page.
+_FFC_FMT_SLUG = {"ppr": "ppr", "half": "half-ppr", "std": "standard"}
+
+def parse_adp(payload: dict, fmt: str = "ppr") -> pd.DataFrame:
     rows = [{"adp_name": p["name"],
              "position": "DST" if p["position"] == "DEF" else p["position"],
-             "team": p.get("team"), "adp": p["adp"]}
+             "team": p.get("team"), "adp": p["adp"], "format": fmt}
             for p in payload.get("players", [])]
-    return pd.DataFrame(rows, columns=["adp_name", "position", "team", "adp"])
+    return pd.DataFrame(rows, columns=["adp_name", "position", "team", "adp", "format"])
 
-def fetch_adp(year: int, teams: int = 12) -> pd.DataFrame:
-    resp = requests.get(ADP_URL, params={"teams": teams, "year": year}, timeout=30)
+def fetch_adp(year: int, teams: int = 12, fmt: str = "ppr") -> pd.DataFrame:
+    if fmt not in _FFC_FMT_SLUG:
+        raise ValueError(f"FFC has no {fmt!r} ADP (only {sorted(_FFC_FMT_SLUG)})")
+    url = ADP_URL.format(fmt=_FFC_FMT_SLUG[fmt])
+    resp = requests.get(url, params={"teams": teams, "year": year}, timeout=30)
     resp.raise_for_status()
-    return parse_adp(resp.json())
+    return parse_adp(resp.json(), fmt=fmt)
 
 def _espn_season_projection(p: dict, year: int):
     # statSourceId 1 = projection (0 = actuals), statSplitTypeId 0 = full
@@ -188,14 +206,20 @@ def fetch_espn_adp(year: int, limit: int = 500) -> pd.DataFrame:
         raise ValueError("no rows parsed - upstream schema drift?")
     return df
 
-# IS_PPR=1 restricts to PPR-scored leagues; PERIOD=DRAFT widens the sample
-# to the whole draft season (~2.8k drafts vs ~280 for the recent window).
-MFL_ADP_URL = "https://api.myfantasyleague.com/{year}/export?TYPE=adp&JSON=1&IS_PPR=1&PERIOD=DRAFT"
+# IS_PPR is a binary flag (1 = PPR-scored leagues, 0 = standard), not a
+# scoring-format enum, so MFL has no half-PPR ADP export at all -- there is
+# no third value to ask for (verified: IS_PPR=1 and IS_PPR=0 both return
+# distinct player pools; nothing in between exists). 'half' is deliberately
+# absent from _MFL_FMT_IS_PPR; callers that iterate formats must skip it for
+# this source. PERIOD=DRAFT widens the sample to the whole draft season
+# (~2.8k drafts vs ~280 for the recent window).
+MFL_ADP_URL = "https://api.myfantasyleague.com/{year}/export?TYPE=adp&JSON=1&IS_PPR={is_ppr}&PERIOD=DRAFT"
 MFL_PLAYERS_URL = "https://api.myfantasyleague.com/{year}/export?TYPE=players&JSON=1"
-CBS_URL = "https://www.cbssports.com/fantasy/football/rankings/ppr/top200/"
+CBS_URL = "https://www.cbssports.com/fantasy/football/rankings/{fmt}/top200/"
 _MFL_POS = {"QB": "QB", "RB": "RB", "WR": "WR", "TE": "TE", "PK": "K"}
+_MFL_FMT_IS_PPR = {"ppr": "1", "std": "0"}
 
-def parse_mfl(adp_payload: dict, players_payload: dict) -> pd.DataFrame:
+def parse_mfl(adp_payload: dict, players_payload: dict, fmt: str = "ppr") -> pd.DataFrame:
     """Join MFL's adp export to its player directory.
 
     Names arrive "Last, First"; positions use PK for kickers; team-defense
@@ -215,17 +239,21 @@ def parse_mfl(adp_payload: dict, players_payload: dict) -> pd.DataFrame:
                      "avg_pick": pd.to_numeric(entry.get("averagePick"), errors="coerce")})
     df = pd.DataFrame(rows, columns=["mfl_name", "position", "avg_pick"])
     if df.empty:
-        return pd.DataFrame(columns=["mfl_name", "position", "mfl_rank"])
+        return pd.DataFrame(columns=["mfl_name", "position", "mfl_rank", "format"])
     df = df.dropna(subset=["avg_pick"]).sort_values("avg_pick").reset_index(drop=True)
     df["mfl_rank"] = df.index + 1
-    return df[["mfl_name", "position", "mfl_rank"]]
+    df["format"] = fmt
+    return df[["mfl_name", "position", "mfl_rank", "format"]]
 
-def fetch_mfl_adp(year: int) -> pd.DataFrame:
-    adp = requests.get(MFL_ADP_URL.format(year=year), headers=UA, timeout=30)
+def fetch_mfl_adp(year: int, fmt: str = "ppr") -> pd.DataFrame:
+    if fmt not in _MFL_FMT_IS_PPR:
+        raise ValueError(f"MFL has no {fmt!r} ADP (only {sorted(_MFL_FMT_IS_PPR)})")
+    adp_url = MFL_ADP_URL.format(year=year, is_ppr=_MFL_FMT_IS_PPR[fmt])
+    adp = requests.get(adp_url, headers=UA, timeout=30)
     adp.raise_for_status()
     players = requests.get(MFL_PLAYERS_URL.format(year=year), headers=UA, timeout=60)
     players.raise_for_status()
-    df = parse_mfl(adp.json(), players.json())
+    df = parse_mfl(adp.json(), players.json(), fmt=fmt)
     if df.empty:
         raise ValueError("no rows parsed - upstream schema drift?")
     return df
@@ -234,7 +262,13 @@ _CBS_RANK = re.compile(r'<div class="rank">(\d+)</div>')
 _CBS_PLAYER = re.compile(r'href="/nfl/players/[^/]+/([a-z0-9-]+)/')
 _CBS_POS = re.compile(r'<span class="team position">\s*([A-Z]+)')
 
-def parse_cbs(html: str) -> pd.DataFrame:
+# CBS has no half-PPR top-200 page -- /rankings/half-ppr/top200/ 404s
+# (verified); ppr and standard both 200 with distinct rankings (227 vs 225
+# rows, verified). 'half' is deliberately absent; callers that iterate
+# formats must skip it for this source.
+_CBS_FMT_SLUG = {"ppr": "ppr", "std": "standard"}
+
+def parse_cbs(html: str, fmt: str = "ppr") -> pd.DataFrame:
     """Rank + full name (from the href slug -- the visible name is
     abbreviated to "J. Gibbs") + position, per player-row block.
 
@@ -250,22 +284,35 @@ def parse_cbs(html: str) -> pd.DataFrame:
         if rank and player and pos:
             rows.append({"cbs_name": player.group(1).replace("-", " "),
                          "position": pos.group(1),
-                         "cbs_rank": int(rank.group(1))})
-    df = pd.DataFrame(rows, columns=["cbs_name", "position", "cbs_rank"])
+                         "cbs_rank": int(rank.group(1)), "format": fmt})
+    df = pd.DataFrame(rows, columns=["cbs_name", "position", "cbs_rank", "format"])
     # The page embeds each player several times (responsive layout copies).
     return df.sort_values("cbs_rank").drop_duplicates(
         ["cbs_name", "position"], keep="first").reset_index(drop=True)
 
-def fetch_cbs() -> pd.DataFrame:
-    resp = requests.get(CBS_URL, headers=UA, timeout=30)
+def fetch_cbs(fmt: str = "ppr") -> pd.DataFrame:
+    if fmt not in _CBS_FMT_SLUG:
+        raise ValueError(f"CBS has no {fmt!r} rankings (only {sorted(_CBS_FMT_SLUG)})")
+    url = CBS_URL.format(fmt=_CBS_FMT_SLUG[fmt])
+    resp = requests.get(url, headers=UA, timeout=30)
     resp.raise_for_status()
-    df = parse_cbs(resp.text)
+    df = parse_cbs(resp.text, fmt=fmt)
     if df.empty:
         raise ValueError("no rows parsed - upstream markup drift?")
     return df
 
-def parse_fp_ecr(html: str) -> pd.DataFrame:
-    cols = ["fp_name", "team", "position", "rank_ecr", "rank_ave", "rank_std", "fp_tier"]
+# FantasyPros only publishes a distinct preseason cheat sheet for PPR --
+# half-ppr-cheatsheets.php and standard-cheatsheets.php (and the bare
+# cheatsheets.php) all 302-redirect to the same consensus-cheatsheets.php
+# page (verified: identical ecrData blob for half and standard). `requests`
+# follows the redirect transparently, so both still fetch real, non-empty
+# rankings -- just the same ones for 'half' and 'std' alike, distinct from
+# 'ppr'. That's an upstream limitation, not a 404, so both formats are kept.
+_FP_FMT_SLUG = {"ppr": "ppr", "half": "half-ppr", "std": "standard"}
+
+def parse_fp_ecr(html: str, fmt: str = "ppr") -> pd.DataFrame:
+    cols = ["fp_name", "team", "position", "rank_ecr", "rank_ave", "rank_std",
+            "fp_tier", "format"]
     m = re.search(r"var ecrData = (\{.*?\});", html, re.DOTALL)
     if not m:
         return pd.DataFrame(columns=cols)
@@ -275,14 +322,17 @@ def parse_fp_ecr(html: str) -> pd.DataFrame:
              "rank_ecr": p.get("rank_ecr"),
              "rank_ave": pd.to_numeric(p.get("rank_ave"), errors="coerce"),
              "rank_std": pd.to_numeric(p.get("rank_std"), errors="coerce"),
-             "fp_tier": p.get("tier")}
+             "fp_tier": p.get("tier"), "format": fmt}
             for p in data.get("players", [])]
     return pd.DataFrame(rows, columns=cols)
 
-def fetch_fp_ecr() -> pd.DataFrame:
-    resp = requests.get(FP_URL, headers=UA, timeout=30)
+def fetch_fp_ecr(fmt: str = "ppr") -> pd.DataFrame:
+    if fmt not in _FP_FMT_SLUG:
+        raise ValueError(f"FantasyPros has no {fmt!r} cheatsheet (only {sorted(_FP_FMT_SLUG)})")
+    url = FP_URL.format(fmt=_FP_FMT_SLUG[fmt])
+    resp = requests.get(url, headers=UA, timeout=30)
     resp.raise_for_status()
-    df = parse_fp_ecr(resp.text)
+    df = parse_fp_ecr(resp.text, fmt=fmt)
     if df.empty:
         raise ValueError("no rows parsed - upstream schema drift?")
     return df

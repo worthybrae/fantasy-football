@@ -107,6 +107,35 @@ def default_settings() -> LeagueSettings:
     )
 
 
+def scoring_format(settings: "LeagueSettings | None") -> str:
+    """League scoring format as one of `'ppr'` | `'half'` | `'std'`.
+
+    The market consensus (scoring.market) picks each ADP source's rows for
+    the league's format, so a half-PPR or standard league sees a consensus
+    ADP built from that format's drafts rather than always PPR's. Only the
+    reception point value separates the three common formats, so it is the
+    whole signal:
+
+        pts >= 0.75         -> 'ppr'   (full-point PPR, the real league's 1.0)
+        0.25 <= pts < 0.75  -> 'half'
+        else                -> 'std'   (0-point, standard)
+
+    Unknown settings stay PPR -- today's behavior. `None` is "no ESPN import"
+    and an empty `scoring` dict is `from_espn` finding nothing that maps
+    (see scoring.ppr on why {} is not silently treated as full PPR
+    *scoring*); for *format* selection, though, both mean "assume PPR", which
+    is the format every source has always been read as.
+    """
+    if settings is None or not settings.scoring:
+        return "ppr"
+    pts = settings.scoring.get("receptions", 0)
+    if pts >= 0.75:
+        return "ppr"
+    if pts >= 0.25:
+        return "half"
+    return "std"
+
+
 def to_json(settings: LeagueSettings) -> str:
     return json.dumps(asdict(settings))
 

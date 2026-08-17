@@ -45,7 +45,11 @@ def test_parse_adp():
         {"player_id": 2, "name": "49ers Defense", "position": "DEF", "team": "SF", "adp": 140.1},
     ]}
     df = parse_adp(payload)
-    assert list(df.columns) == ["adp_name", "position", "team", "adp"]
+    # `format` is additive: same four columns as before, plus the format tag.
+    # Default fmt='ppr' keeps a caller that doesn't pass fmt getting exactly
+    # today's shape (see the multi-scoring-format ADP ingestion spec).
+    assert list(df.columns) == ["adp_name", "position", "team", "adp", "format"]
+    assert (df["format"] == "ppr").all()
     assert df.iloc[1]["position"] == "DST"  # FFC "DEF" mapped to nflverse "DST"
 
 def test_normalize_weekly_renames_team_to_recent_team():
@@ -282,3 +286,201 @@ def test_cheatsheet_url_switches_naming_convention_in_2023():
     assert sources.cheatsheet_url(2022).endswith("/22/NFLDK2022_CS_PPR300.pdf")
     assert sources.cheatsheet_url(2023).endswith("/23/NFL23_CS_PPR300.pdf")
     assert sources.cheatsheet_url(2026).endswith("/26/NFL26_CS_PPR300.pdf")
+
+
+# --- Multi-scoring-format ADP ingestion -------------------------------------
+# FFC/FantasyPros/CBS/MFL each gain a `fmt` argument ('ppr' | 'half' | 'std',
+# default 'ppr') so the board's consensus ADP can be built per league scoring
+# instead of hardcoded to PPR. Every fetcher tags its rows with the format it
+# fetched; ESPN stays untouched (its rank is explicitly PPR, no other format
+# exists to ask for). See pipeline/sources.py's per-source comments for how
+# each site's format support was verified against a live fetch.
+
+class _URLCapture:
+    """Stands in for `requests.get`: records every URL it was called with
+    (so a test can assert which URL a `fmt` value maps to) and returns a
+    canned response instead of hitting the network."""
+    def __init__(self, response):
+        self.urls = []
+        self._response = response
+    def __call__(self, url, *a, **k):
+        self.urls.append(url)
+        return self._response
+
+def _no_request_allowed(*a, **k):
+    raise AssertionError("requests.get should not have been called")
+
+
+def test_fetch_adp_std_hits_the_standard_url_and_tags_rows(monkeypatch):
+    payload = {"players": [{"name": "Saquon Barkley", "position": "RB",
+                            "team": "PHI", "adp": 1.0}]}
+    capture = _URLCapture(_StubResponse(json_data=payload))
+    monkeypatch.setattr(sources.requests, "get", capture)
+    df = sources.fetch_adp(2026, fmt="std")
+    assert capture.urls == ["https://fantasyfootballcalculator.com/api/v1/adp/standard"]
+    assert (df["format"] == "std").all()
+
+
+def test_fetch_adp_default_fmt_is_ppr_and_reproduces_todays_rows(monkeypatch):
+    """The default fmt='ppr' path must hit exactly the URL it always did and
+    produce exactly the same rows -- just carrying a format='ppr' tag now.
+    This is the byte-identical-PPR-pass guarantee the board's existing
+    consumers depend on."""
+    payload = {"players": [
+        {"name": "Justin Jefferson", "position": "WR", "team": "MIN", "adp": 3.2}]}
+    capture = _URLCapture(_StubResponse(json_data=payload))
+    monkeypatch.setattr(sources.requests, "get", capture)
+    df = sources.fetch_adp(2026)
+    assert capture.urls == ["https://fantasyfootballcalculator.com/api/v1/adp/ppr"]
+    assert df.to_dict("records") == [
+        {"adp_name": "Justin Jefferson", "position": "WR", "team": "MIN",
+         "adp": 3.2, "format": "ppr"}]
+
+
+def test_fetch_adp_unsupported_format_raises_before_any_request(monkeypatch):
+    monkeypatch.setattr(sources.requests, "get", _no_request_allowed)
+    with pytest.raises(ValueError):
+        sources.fetch_adp(2026, fmt="bogus")
+
+
+def test_fetch_fp_ecr_std_hits_the_standard_cheatsheets_url(monkeypatch):
+    html = ('<script>var ecrData = {"players": [{"player_name": "Test Guy",'
+            '"player_team_id": "KC", "player_position_id": "RB", "rank_ecr": 1,'
+            '"rank_ave": "1.0", "rank_std": "0.1", "tier": 1}]};</script>')
+    capture = _URLCapture(_StubResponse(text=html))
+    monkeypatch.setattr(sources.requests, "get", capture)
+    df = sources.fetch_fp_ecr(fmt="std")
+    assert capture.urls == ["https://www.fantasypros.com/nfl/rankings/standard-cheatsheets.php"]
+    assert (df["format"] == "std").all()
+
+
+def test_fetch_fp_ecr_default_fmt_is_ppr_and_hits_the_ppr_url(monkeypatch):
+    html = ('<script>var ecrData = {"players": [{"player_name": "JaMarr Chase",'
+            '"player_team_id": "CIN", "player_position_id": "WR", "rank_ecr": 1,'
+            '"rank_ave": "1.77", "rank_std": "1.2", "tier": 1}]};</script>')
+    capture = _URLCapture(_StubResponse(text=html))
+    monkeypatch.setattr(sources.requests, "get", capture)
+    df = sources.fetch_fp_ecr()
+    assert capture.urls == ["https://www.fantasypros.com/nfl/rankings/ppr-cheatsheets.php"]
+    assert (df["format"] == "ppr").all()
+
+
+def test_fetch_cbs_half_ppr_is_not_a_supported_format(monkeypatch):
+    """CBS's half-ppr top200 page 404s (verified against the live site) --
+    fetch_cbs raises before making a request rather than surfacing a raw
+    404, and refresh's per-format loop (pipeline/refresh.py's
+    _fetch_multi_format) treats that as "this source contributes no half
+    rows", not a crash."""
+    monkeypatch.setattr(sources.requests, "get", _no_request_allowed)
+    with pytest.raises(ValueError):
+        sources.fetch_cbs(fmt="half")
+
+
+def test_fetch_cbs_std_hits_the_standard_url(monkeypatch):
+    html = ('<div class="player-row first"><div class="rank">1</div>'
+            '<a href="/nfl/players/1/saquon-barkley/fantasy/">'
+            '<span class="player-name">S. Barkley</span></a>'
+            '<span class="team position">RB $34</span></div>')
+    capture = _URLCapture(_StubResponse(text=html))
+    monkeypatch.setattr(sources.requests, "get", capture)
+    df = sources.fetch_cbs(fmt="std")
+    assert capture.urls == ["https://www.cbssports.com/fantasy/football/rankings/standard/top200/"]
+    assert (df["format"] == "std").all()
+
+
+def test_fetch_mfl_adp_std_requests_is_ppr_0(monkeypatch):
+    adp_payload = {"adp": {"player": [{"id": "1", "averagePick": "2.0", "rank": "1"}]}}
+    players_payload = {"players": {"player": [
+        {"id": "1", "name": "Barkley, Saquon", "position": "RB", "team": "PHI"}]}}
+    responses = iter([_StubResponse(json_data=adp_payload),
+                      _StubResponse(json_data=players_payload)])
+    capture = _URLCapture(None)
+    def fake_get(url, *a, **k):
+        capture.urls.append(url)
+        return next(responses)
+    monkeypatch.setattr(sources.requests, "get", fake_get)
+    df = sources.fetch_mfl_adp(2026, fmt="std")
+    assert "IS_PPR=0" in capture.urls[0]
+    assert (df["format"] == "std").all()
+
+
+def test_fetch_mfl_adp_default_fmt_requests_is_ppr_1(monkeypatch):
+    adp_payload = {"adp": {"player": [{"id": "1", "averagePick": "2.0", "rank": "1"}]}}
+    players_payload = {"players": {"player": [
+        {"id": "1", "name": "Chase, JaMarr", "position": "WR", "team": "CIN"}]}}
+    responses = iter([_StubResponse(json_data=adp_payload),
+                      _StubResponse(json_data=players_payload)])
+    capture = _URLCapture(None)
+    def fake_get(url, *a, **k):
+        capture.urls.append(url)
+        return next(responses)
+    monkeypatch.setattr(sources.requests, "get", fake_get)
+    df = sources.fetch_mfl_adp(2026)
+    assert "IS_PPR=1" in capture.urls[0]
+    assert (df["format"] == "ppr").all()
+
+
+def test_fetch_mfl_adp_has_no_half_format(monkeypatch):
+    """MFL's ADP export is a binary IS_PPR flag -- there is no half-PPR
+    value to request at all, unlike CBS's 404. Both must be skippable by
+    refresh's per-format loop without erroring, which is what matters; the
+    ValueError here is what makes that possible."""
+    monkeypatch.setattr(sources.requests, "get", _no_request_allowed)
+    with pytest.raises(ValueError):
+        sources.fetch_mfl_adp(2026, fmt="half")
+
+
+def test_parse_mfl_tags_rows_with_the_given_format():
+    from pipeline.sources import parse_mfl
+    adp = {"adp": {"player": [{"id": "100", "averagePick": "2.85", "rank": "1"}]}}
+    players = {"players": {"player": [
+        {"id": "100", "name": "Gibbs, Jahmyr", "position": "RB", "team": "DET"}]}}
+    df = parse_mfl(adp, players, fmt="std")
+    assert df["format"].tolist() == ["std"]
+
+
+def test_parse_cbs_tags_rows_with_the_given_format():
+    from pipeline.sources import parse_cbs
+    html = ('<div class="player-row first"><div class="rank">1</div>'
+            '<a href="/nfl/players/1/jahmyr-gibbs/fantasy/">'
+            '<span class="player-name">J. Gibbs</span></a>'
+            '<span class="team position">RB $34</span></div>')
+    df = parse_cbs(html, fmt="half")
+    assert df["format"].tolist() == ["half"]
+
+
+def test_refresh_fetch_multi_format_skips_an_unsupported_format_without_erroring():
+    """Mirrors CBS/MFL in production: a fetch_fn that raises for one format
+    token (the source doesn't support it) must not abort the whole source --
+    the other formats' rows still come back, correctly tagged, and the
+    caller never sees an exception."""
+    from pipeline.refresh import _fetch_multi_format
+
+    def fake_fetch(year, fmt):
+        if fmt == "half":
+            raise ValueError("no half endpoint")
+        return pd.DataFrame({"name": ["A"], "format": [fmt]})
+
+    df = _fetch_multi_format(fake_fetch, ("ppr", "half", "std"), 2026)
+    assert sorted(df["format"].tolist()) == ["ppr", "std"]
+
+
+def test_refresh_fetch_multi_format_raises_if_every_format_fails():
+    from pipeline.refresh import _fetch_multi_format
+
+    def fake_fetch(fmt):
+        raise ValueError("upstream down")
+
+    with pytest.raises(ValueError):
+        _fetch_multi_format(fake_fetch, ("ppr", "std"))
+
+
+def test_refresh_formats_by_source_matches_verified_support():
+    """Locks in exactly what was verified against the live sites: FFC and
+    FantasyPros serve all three formats, CBS and MFL only ppr/std (CBS's
+    half-ppr page 404s, MFL's IS_PPR flag has no half value)."""
+    from pipeline.refresh import FORMATS_BY_SOURCE
+    assert set(FORMATS_BY_SOURCE["adp"]) == {"ppr", "half", "std"}
+    assert set(FORMATS_BY_SOURCE["fp_ecr"]) == {"ppr", "half", "std"}
+    assert set(FORMATS_BY_SOURCE["cbs_ranks"]) == {"ppr", "std"}
+    assert set(FORMATS_BY_SOURCE["mfl_adp"]) == {"ppr", "std"}

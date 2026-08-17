@@ -297,3 +297,58 @@ def test_consensus_uses_espn_ppr_rank_not_adp():
     g2 = out[out["player_id"] == "g2"].iloc[0]
     assert g2["market_sources"]["espn"] == 4.0
     assert g2["market_rank"] == round((2 + 4 + 3) / 3, 1)
+
+
+# -- scoring-format-aware consensus (select_format threading) --------------
+
+def test_source_without_format_column_is_treated_as_all_ppr():
+    # Backward compatibility: old DBs and most fixtures seed sources with NO
+    # `format` column. Every row is then PPR, so a PPR call is byte-identical
+    # to the no-fmt default and a non-PPR call still sees the same rows (there
+    # is no per-format data to filter to).
+    mfl = pd.DataFrame({"mfl_name": ["Jahmyr Gibbs"], "position": ["RB"], "mfl_rank": [3]})
+    default = add_market(_board(), _espn(), _fp(), _sleeper(), mfl=mfl)
+    for fmt in ("ppr", "half", "std"):
+        out = add_market(_board(), _espn(), _fp(), _sleeper(), mfl=mfl, fmt=fmt)
+        g1 = out[out["player_id"] == "g1"].iloc[0]
+        assert g1["market_sources"]["mfl"] == 3.0
+        # PPR must match the no-fmt default exactly.
+        if fmt == "ppr":
+            assert g1["market_rank"] == default[default["player_id"] == "g1"].iloc[0]["market_rank"]
+
+
+def test_ppr_with_a_format_column_is_byte_identical_to_no_column():
+    # The `format` column itself must not perturb the consensus: a PPR build
+    # from a format-tagged table (PPR rows + a decoy std row the PPR league
+    # must ignore) has to match a build from the same rows with no column.
+    mfl_plain = pd.DataFrame({"mfl_name": ["Jahmyr Gibbs"], "position": ["RB"], "mfl_rank": [3]})
+    mfl_fmt = pd.DataFrame({
+        "mfl_name": ["Jahmyr Gibbs", "Jahmyr Gibbs"], "position": ["RB", "RB"],
+        "mfl_rank": [3, 25], "format": ["ppr", "std"]})
+    a = add_market(_board(), _espn(), _fp(), _sleeper(), mfl=mfl_plain, fmt="ppr")
+    b = add_market(_board(), _espn(), _fp(), _sleeper(), mfl=mfl_fmt, fmt="ppr")
+    assert list(a["market_rank"]) == list(b["market_rank"])
+    assert [s["mfl"] for s in a["market_sources"]] == [s["mfl"] for s in b["market_sources"]]
+
+
+def test_format_column_filters_to_the_requested_format():
+    # MFL carries a PPR row (rank 3) and a STD row (rank 25) for the same
+    # player. A PPR league takes 3, a standard league 25 -- proving the vote
+    # follows the league's format.
+    mfl = pd.DataFrame({
+        "mfl_name": ["Jahmyr Gibbs", "Jahmyr Gibbs"], "position": ["RB", "RB"],
+        "mfl_rank": [3, 25], "format": ["ppr", "std"]})
+    ppr = add_market(_board(), _espn(), _fp(), _sleeper(), mfl=mfl, fmt="ppr")
+    std = add_market(_board(), _espn(), _fp(), _sleeper(), mfl=mfl, fmt="std")
+    assert ppr[ppr["player_id"] == "g1"].iloc[0]["market_sources"]["mfl"] == 3.0
+    assert std[std["player_id"] == "g1"].iloc[0]["market_sources"]["mfl"] == 25.0
+
+
+def test_source_falls_back_to_ppr_when_it_lacks_the_requested_format():
+    # MFL publishes no 'half' feed (true of the real source). A half-PPR
+    # league must fall back to MFL's PPR rows, not drop MFL from the vote.
+    mfl = pd.DataFrame({
+        "mfl_name": ["Jahmyr Gibbs", "Jahmyr Gibbs"], "position": ["RB", "RB"],
+        "mfl_rank": [3, 25], "format": ["ppr", "std"]})
+    half = add_market(_board(), _espn(), _fp(), _sleeper(), mfl=mfl, fmt="half")
+    assert half[half["player_id"] == "g1"].iloc[0]["market_sources"]["mfl"] == 3.0

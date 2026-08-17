@@ -525,3 +525,70 @@ def test_adp_match_key_returns_none_for_a_missing_position():
     assert adp_match_key(pd.NA, pd.NA, pd.NA) is None
     assert adp_match_key(None, None) is None
     assert adp_match_key("Justin Jefferson", "WR") is not None
+
+
+# -- scoring-format-aware consensus, end to end ----------------------------
+
+def _settings_std():
+    """A standard-scoring (receptions 0) LeagueSettings for build_board --
+    scoring_format reads it as 'std', so the consensus must select each
+    source's 'std' rows (falling back to 'ppr' where a source has none)."""
+    from dataclasses import replace
+    from scoring import league
+    base = league.default_settings()
+    return replace(base, scoring={**base.scoring, "receptions": 0.0})
+
+
+def test_board_market_rank_unchanged_none_vs_explicit_ppr_settings(tmp_path):
+    # Passing an explicit PPR league must not move any player's market_rank
+    # off what settings=None (default PPR) produces. Row ORDER can differ
+    # (VOR depends on the scoring rules, and the ESPN-parsed league scores a
+    # hair differently than DEFAULT_RULES), so compare per player_id, not
+    # positionally -- market_rank is consensus-ADP, independent of scoring.
+    from tests.test_league import _settings
+    conn = _seed(tmp_path)
+    a = build_board(conn).set_index("player_id")["market_rank"]
+    b = build_board(conn, settings=_settings()).set_index("player_id")["market_rank"]
+    assert a.sort_index().round(3).equals(b.sort_index().round(3))
+
+
+def test_board_ppr_is_byte_identical_when_sources_carry_a_format_column(tmp_path):
+    # The most important invariant: for a PPR league the format machinery must
+    # reproduce today's board exactly, even once the source tables carry a
+    # `format` column (and extra non-PPR rows). Baseline board has no `format`
+    # column anywhere; the second seeds the FFC/adp table with format-tagged
+    # PPR rows identical to the baseline PLUS a decoy std row a PPR league must
+    # drop. The two boards must match on every consensus column.
+    plain = _seed(tmp_path)
+    fmt = _seed(tmp_path / "fmt")
+    write_table(fmt, "adp", pd.DataFrame([
+        {"adp_name": "Amon-Ra St Brown", "position": "WR", "team": "DET", "adp": 5.1, "format": "ppr"},
+        {"adp_name": "Rookie Guy", "position": "WR", "team": "GB", "adp": 90.0, "format": "ppr"},
+        # decoy: a standard-format row the PPR build must ignore.
+        {"adp_name": "Amon-Ra St Brown", "position": "WR", "team": "DET", "adp": 40.0, "format": "std"},
+    ]))
+    a = build_board(plain).set_index("player_id")
+    b = build_board(fmt).set_index("player_id")
+    assert list(a.index) == list(b.index)
+    assert a["market_rank"].tolist() == b["market_rank"].tolist()
+    assert a["ffc_rank"].tolist() == b["ffc_rank"].tolist()
+    assert list(a["market_sources"]) == list(b["market_sources"])
+
+
+def test_board_consensus_follows_the_league_scoring_format(tmp_path):
+    # A source that publishes per-format rows must vote its format's row. MFL
+    # ranks the star 1 in PPR and 25 in standard; the PPR board's consensus
+    # must land on 1, the standard board's on 25 -- moving market_rank with it.
+    conn = _seed(tmp_path)
+    write_table(conn, "mfl_adp", pd.DataFrame([
+        {"mfl_name": "Amon-Ra St Brown", "position": "WR", "mfl_rank": 1, "format": "ppr"},
+        {"mfl_name": "Amon-Ra St Brown", "position": "WR", "mfl_rank": 25, "format": "std"},
+    ]))
+    ppr = build_board(conn).set_index("player_id")            # settings=None -> ppr
+    std = build_board(conn, settings=_settings_std()).set_index("player_id")
+    # star: ffc 1, espn 2, mfl 1 -> median([1,1,2]) = 1.0 in PPR;
+    #       ffc 1, espn 2, mfl 25 -> median([1,2,25]) = 2.0 in standard.
+    assert ppr.loc["p1", "market_sources"]["mfl"] == 1.0
+    assert std.loc["p1", "market_sources"]["mfl"] == 25.0
+    assert ppr.loc["p1", "market_rank"] == 1.0
+    assert std.loc["p1", "market_rank"] == 2.0
