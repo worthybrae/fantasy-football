@@ -220,20 +220,22 @@ from api.live import STALE_AFTER_SECONDS, picks_until_turn, rollouts_for
 
 
 def test_rollouts_scale_with_how_close_my_turn_is():
-    """One code path, N as a parameter. Measured costs: 25 -> 4.7s,
-    100 -> 19.5s, 200 -> 35.2s. Picks arrive every ~20-30s and the clock is
-    ~90s, so each tier has to fit the window it is chosen for."""
-    assert rollouts_for(7) == 25
-    assert rollouts_for(3) == 25
-    assert rollouts_for(2) == 100
-    assert rollouts_for(1) == 100
-    assert rollouts_for(0) == 200
+    """One code path, N as a parameter. Budgets were cut (~0.19s/rollout) so a
+    recompute lands in ~2-8s instead of up to ~35s -- a fast mock blew several
+    picks past our turn before the old on-the-clock search (200 -> ~35s)
+    finished. FAR is smallest (runs on every opponent pick, coarse is fine),
+    NOW largest (our actual decision) but still inside a real clock."""
+    assert rollouts_for(7) == 12
+    assert rollouts_for(3) == 12
+    assert rollouts_for(2) == 25
+    assert rollouts_for(1) == 25
+    assert rollouts_for(0) == 40
 
 
 def test_rollouts_never_returns_zero_or_negative():
     """A negative distance means the pick count ran past my turn -- a desync.
     It must still produce a usable budget rather than an empty search."""
-    assert rollouts_for(-1) == 200
+    assert rollouts_for(-1) == 40
 
 
 def test_picks_until_turn_counts_the_snake_correctly():

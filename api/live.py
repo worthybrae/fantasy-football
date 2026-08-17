@@ -385,9 +385,19 @@ def _slot_from_socket(listener, teams: int):
 # seconds spans a reconnect without crying wolf, yet still surfaces a truly
 # dead listener while a 30-second pick clock leaves time to react.
 STALE_AFTER_SECONDS = 10
-# Measured on the live board: 25 -> 4.7s, 100 -> 19.5s, 200 -> 35.2s.
-# Picks arrive every ~20-30s; the clock is ~90s.
-ROLLOUTS_FAR, ROLLOUTS_NEAR, ROLLOUTS_NOW = 25, 100, 200
+# Measured on the live board, roughly 0.19s/rollout: 25 -> 4.7s, 100 -> 19.5s,
+# 200 -> 35.2s. Those were far too slow to stay current: the on-the-clock
+# budget (200 -> ~35s) meant a fast mock, where auto-picks land every few
+# seconds, blew several picks past our own turn before the recommendation for
+# it finished -- the sidebar showed "no recommendation" exactly when it
+# mattered. Budgets are cut so a recompute lands in ~2-8s: FAR (just watching
+# opponents pick) is smallest because it runs on every single pick and a
+# slightly coarse estimate there is harmless; NOW is largest because it is our
+# actual decision, but still inside a real 30-90s clock with room to spare.
+# The seed is pinned, so these coarser passes still converge on the same
+# scenario set -- fewer rollouts is a noisier estimate, not a different one,
+# and a current top-3 beats a precise answer for a pick already gone.
+ROLLOUTS_FAR, ROLLOUTS_NEAR, ROLLOUTS_NOW = 12, 25, 40
 
 # How long _stop_listener waits for the previous listener thread to notice
 # stop_event and exit (browser close included) before refusing a reconnect

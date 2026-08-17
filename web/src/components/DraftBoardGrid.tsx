@@ -111,7 +111,7 @@ export default function DraftBoardGrid({ board }: DraftBoardGridProps) {
 
   return (
     <div className="board-wrap">
-      <div className="board-grid" style={{ gridTemplateColumns: `56px repeat(${teams}, minmax(112px, 1fr))` }}>
+      <div className="board-grid" style={{ gridTemplateColumns: `40px repeat(${teams}, minmax(0, 1fr))` }}>
         <div className="board-corner" />
         {columns.map((col) => (
           <div key={col.slot} className={`board-col-header${col.is_me ? ' board-col-mine' : ''}`}>
@@ -120,11 +120,14 @@ export default function DraftBoardGrid({ board }: DraftBoardGridProps) {
           </div>
         ))}
 
-        {Array.from({ length: rounds }, (_, i) => i + 1).map((round) => (
+        {Array.from({ length: rounds }, (_, i) => i + 1).map((round) => {
+          const leftToRight = round % 2 === 1
+          const rowClass = round % 2 === 0 ? ' board-row-even' : ''
+          return (
           <Fragment key={round}>
-            <div className="board-round-label">
-              <span className="mono">{round}</span>
-              <span className="board-snake-dir" aria-hidden="true">{round % 2 === 1 ? '→' : '←'}</span>
+            <div className={`board-round-label${rowClass}`}>
+              <span className="board-round-n mono">{round}</span>
+              <span className="board-snake-dir" aria-hidden="true">{leftToRight ? '→' : '←'}</span>
             </div>
             {columns.map((col) => {
               const cell = byCell.get(`${round}-${col.slot}`)
@@ -137,6 +140,7 @@ export default function DraftBoardGrid({ board }: DraftBoardGridProps) {
                       'board-cell board-cell-empty',
                       col.is_me ? 'board-cell-mine' : '',
                       isClock ? 'board-cell-clock' : '',
+                      rowClass.trim(),
                     ].filter(Boolean).join(' ')}
                   />
                 )
@@ -146,26 +150,24 @@ export default function DraftBoardGrid({ board }: DraftBoardGridProps) {
                 <Link
                   key={col.slot}
                   to={`/players/${playerSlug(cell.player.name)}`}
-                  className={`board-cell board-cell-filled${col.is_me ? ' board-cell-mine' : ''}`}
+                  className={['board-cell board-cell-filled',
+                    col.is_me ? 'board-cell-mine' : '', rowClass.trim()]
+                    .filter(Boolean).join(' ')}
                   aria-label={`${cell.player.name}, ${cell.player.position}, pick ${cell.round}.${pickInRound}`}
                   onMouseEnter={(e) => showPopover(cell, e)}
                   onMouseLeave={() => setHover(null)}
                   onFocus={(e) => showPopover(cell, e)}
                   onBlur={() => setHover(null)}
                 >
-                  <div className="board-cell-top">
-                    <span className="board-cell-pick mono">
-                      {cell.round}.{String(pickInRound).padStart(2, '0')}
-                    </span>
-                    {posBadge(cell.player.position)}
-                  </div>
-                  <div className="board-cell-name">{cell.player.name}</div>
-                  <div className="board-cell-team mono">{cell.player.team ?? '—'}</div>
+                  {posBadge(cell.player.position)}
+                  <span className="board-cell-name">{cell.player.name}</span>
+                  <span className="board-cell-team mono">{cell.player.team ?? ''}</span>
                 </Link>
               )
             })}
           </Fragment>
-        ))}
+          )
+        })}
       </div>
 
       {hover && <BoardPopover player={hover.cell.player} style={popoverStyle(hover.rect)} />}
