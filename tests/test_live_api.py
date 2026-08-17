@@ -757,10 +757,13 @@ def test_connect_wires_the_listener_to_apply_picks_and_recompute(
     assert rows == expected
 
     # And a recompute really ran off the resulting pick count -- not just
-    # that drafted got written.
+    # that drafted got written. It runs on the background worker now, so poll
+    # for its result rather than reading it synchronously.
+    assert _wait_until(
+        lambda: client.get("/api/live/state").json()["candidates_as_of_pick"] == 3), \
+        "recompute worker never produced candidates for pick 3"
     assert len(recompute_calls) >= 1
     state = client.get("/api/live/state").json()
-    assert state["candidates_as_of_pick"] == 3
     assert state["candidates"] == [{"player_id": "winner", "ev": 1.0, "se": 0.1,
                                     "applied_pct": 1.0, "rank": 1}]
 
@@ -1380,9 +1383,14 @@ def test_connect_token_resolves_slot_and_wires_socket_picks(
     assert rows == [(crosswalk[4430807], 1), (crosswalk[4429795], 2),
                     (crosswalk[4426515], 3)]
 
+    # search_pick now runs on the background recompute worker, not inline in
+    # the frame callback, so the result arrives shortly AFTER the listener
+    # finishes -- poll for it rather than reading it synchronously.
+    assert _wait_until(
+        lambda: client.get("/api/live/state").json()["candidates_as_of_pick"] == 3), \
+        "recompute worker never produced candidates for pick 3"
     assert len(recompute_calls) >= 1
     state = client.get("/api/live/state").json()
-    assert state["candidates_as_of_pick"] == 3
     # The click landed: token_received flips true so the connect screen can
     # stop showing the install guide and follow the board.
     assert state["token_received"] is True

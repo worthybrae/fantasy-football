@@ -48,6 +48,13 @@ def _seasons_or_none(value):
         return None
 
 
+# The only board columns /api/landing/preview returns. Named here rather than
+# sliced inline so the response cannot quietly grow back toward /api/players'
+# full 27 columns (185KB) as the board gains more.
+PREVIEW_COLUMNS = ("rank", "name", "position", "team", "tier", "vor",
+                   "market_rank", "edge")
+
+
 # Positions the history shape row always reports, zero-filled -- matches the
 # web's SHAPE_POSITIONS order (ManagerForecast.tsx) so a manager who has
 # never taken a position at all still shows a badge for it, not a gap.
@@ -178,18 +185,102 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
         finally:
             cur.close()
 
+    def _sources(cur):
+        """Per-source freshness rows, shaped for JSON.
+
+        Shared by /api/meta and the landing page's readiness strip so the two
+        cannot disagree about what "never refreshed" looks like.
+        """
+        m = read_table(cur, "meta")
+        if m.empty:
+            return []
+        # astype(object).where(notna, None) first to convert NaN -> None,
+        # then stringify non-null values to avoid "NaT" in JSON
+        m = m.astype(object).where(m.notna(), None)
+        m["refreshed_at"] = m["refreshed_at"].map(
+            lambda v: None if v is None else str(v)
+        )
+        return m.to_dict(orient="records")
+
     @app.get("/api/meta")
     def meta():
         cur = conn.cursor()
         try:
-            m = read_table(cur, "meta")
-            # astype(object).where(notna, None) first to convert NaN -> None,
-            # then stringify non-null values to avoid "NaT" in JSON
-            m = m.astype(object).where(m.notna(), None)
-            m["refreshed_at"] = m["refreshed_at"].map(
-                lambda v: None if v is None else str(v)
-            )
-            return {"sources": m.to_dict(orient="records")}
+            return {"sources": _sources(cur)}
+        finally:
+            cur.close()
+
+    @app.get("/api/landing/status")
+    def landing_status():
+        """Is this machine ready for draft night?
+
+        Raw table reads only -- deliberately never build_board, which costs
+        seconds. That is the whole reason this is split from
+        /api/landing/preview: the landing page paints readiness on the first
+        frame and lets the board preview arrive behind a skeleton. A test
+        pins the no-board-build property, since it is the kind of thing a
+        later "simplification" would merge away.
+        """
+        cur = conn.cursor()
+        try:
+            settings = league.load(cur)
+            picks = read_table(cur, "draft_picks")
+            teams = read_table(cur, "draft_teams")
+            profiles = read_table(cur, "manager_profiles")
+            sim = read_table(cur, "sim_results")
+
+            # manager_profiles is long -- one row per model coefficient -- so
+            # counting rows would report the number of terms as the number of
+            # managers.
+            per_manager = profiles.drop_duplicates("manager") if not profiles.empty else profiles
+
+            return {
+                "sources": _sources(cur),
+                "league": {"season": settings.season, "teams": settings.teams,
+                           "rounds": settings.rounds,
+                           # False means "the built-in default shape", not
+                           # "no league" -- the strip says which, rather than
+                           # implying a configured league that isn't there.
+                           "derived": not read_table(cur, "league").empty},
+                "history": {
+                    "picks": int(len(picks)),
+                    "seasons": (sorted(int(s) for s in picks["season"].unique())
+                                if not picks.empty else []),
+                    "teams": (int(teams["team_id"].nunique())
+                              if not teams.empty else 0),
+                },
+                "managers": {
+                    "fitted": int(len(per_manager)),
+                    # The subset whose own fitted model beat the pooled one.
+                    "personal": (int(per_manager["uses_personal"].sum())
+                                 if not per_manager.empty else 0),
+                },
+                "sim": (None if sim.empty or "created_at" not in sim.columns else {
+                    "run_id": str(sim.iloc[0]["run_id"]),
+                    "my_slot": _int_or_none(sim.iloc[0].get("my_slot")),
+                    "created_at": str(sim.iloc[0]["created_at"]),
+                }),
+            }
+        finally:
+            cur.close()
+
+    @app.get("/api/landing/preview")
+    def landing_preview(limit: int = 12):
+        """The top of the board, for the landing page's preview panel.
+
+        `limit` is clamped, not validated: this feeds a panel whose job is to
+        show the tool works, and rendering an error there in answer to
+        ?limit=0 would defeat the point. Fifty is the ceiling because nothing
+        on that page scrolls past it.
+        """
+        cur = conn.cursor()
+        try:
+            board = build_board(cur, DEFAULT_WEIGHTS)
+            n = max(1, min(int(limit), 50))
+            top = board.sort_values("rank").head(n)[list(PREVIEW_COLUMNS)]
+            top = top.astype(object).where(top.notna(), None)
+            return {"pool": int(len(board)),
+                    "players": top.to_dict(orient="records")}
         finally:
             cur.close()
 

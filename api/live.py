@@ -791,7 +791,7 @@ def register_live_routes(app, conn, db_path):
                           "as_of_pick": None, "unmapped": [],
                           "last_poll_at": None, "listener": None,
                           "listener_thread": None, "listener_stop": None,
-                          "listener_error": None})
+                          "recompute_thread": None, "listener_error": None})
         return {"active": False, "listener_stopped": stopped}
 
     @app.post("/api/live/connect")

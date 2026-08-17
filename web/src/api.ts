@@ -74,14 +74,6 @@ export async function setDrafted(playerId: string, drafted: boolean): Promise<vo
   await fetch(`/api/drafted/${playerId}`, { method: drafted ? 'POST' : 'DELETE' })
 }
 
-export async function fetchMeta(): Promise<{ sources: { source: string; ok: boolean; rows: number; refreshed_at: string }[] }> {
-  const res = await fetch('/api/meta')
-  if (!res.ok) {
-    throw new Error(`Failed to load meta (${res.status}): ${await detailText(res)}`)
-  }
-  return res.json()
-}
-
 export interface SeasonSummary {
   season: number; games: number; ppg: number; ppg_std: number | null;
   pos_finish: number; targets: number;
@@ -144,168 +136,9 @@ export async function fetchProfile(playerId: string): Promise<PlayerProfileData>
   return res.json()
 }
 
-export interface ManagerCoefficient {
-  feature: string
-  value: number
-  pooled_value: number
-  /** Whether a three-bar card may summarize this coefficient on its own.
-   *  Comes from `draft_model.SUMMARY_FEATURES`; false for the position
-   *  dummies, which only mean anything relative to each other. Server-side
-   *  so adding a feature to the model doesn't need a matching edit here. */
-  shown: boolean
-}
-
-export interface Manager {
-  manager: string
-  summary: string
-  n_picks: number
-  uses_personal: boolean
-  heldout_gain: number | null
-  coefficients: ManagerCoefficient[]
-}
-
-export interface DraftOrderEntry {
-  slot: number
-  manager: string
-}
-
-export interface DraftOrder {
-  order: DraftOrderEntry[]
-  my_slot: number | null
-  // 'unpublished' means ESPN has the league's managers but has not set a
-  // draft order yet, so the slots below are a placeholder to rearrange.
-  source: 'espn' | 'manual' | 'none' | 'unpublished'
-}
-
-// Just the fields DraftRail needs (teams/rounds, for turning a pick count
-// into round.pick notation) -- /api/league returns more (season, starters,
-// flex_slots, bench, derived, unmapped_scoring) that nothing on this board
-// consumes yet.
-export interface LeagueInfo {
-  teams: number
-  rounds: number
-}
-
-export async function fetchManagers(): Promise<Manager[]> {
-  const res = await fetch('/api/managers')
-  if (!res.ok) throw new Error('Failed to load managers')
-  return (await res.json()).managers
-}
-
-// A manager's real round-1 pick in one season. player_name/position/
-// nfl_team are null when that pick's ESPN id was missing from that season's
-// player directory (a real gap in ESPN's own data, not a bug) -- render as
-// an explicit "unidentified pick" rather than the literal string "null".
-export interface ManagerFirstRounder {
-  season: number
-  player_name: string | null
-  position: string | null
-  nfl_team: string | null
-  keeper: boolean
-}
-
-// Pick counts by position within a round bucket ("early" = rounds 1-3,
-// "mid" = 4-8, "late" = 9+ -- the same cutoffs the model trains against, see
-// api/main.py's _history_round_bucket). Keyed loosely rather than by a fixed
-// position union so an unexpected position from the backend degrades to
-// "not shown" instead of a type error.
-export type ManagerShapeBucket = Record<string, number>
-
-// Measured statistics over a manager's real picks -- counted, never fitted,
-// so every field here stays true whether or not their coefficients
-// generalize (see scoring/draft_model.py's manager_tendencies). `mean_gap` is
-// market_rank - overall_pick: positive means they take players earlier than
-// the board ranks them, negative means they let players slide.
-export interface ManagerTendencies {
-  // Positions they've opened a draft with, most-used first. `drafts` is how
-  // many of `of` drafts started that way.
-  first_pick: { position: string; drafts: number; of: number }[]
-  // Across every pick with a market rank to compare against. Null when none
-  // of their picks matched that season's ADP board.
-  reach: { mean_gap: number; n: number } | null
-  // Same number split by round bucket, always in early -> late order.
-  reach_by_bucket: { bucket: string; mean_gap: number; n: number }[]
-  // Same number split by position, strongest reach first, only for positions
-  // with enough picks behind them to mean anything.
-  reach_by_position: { position: string; mean_gap: number; n: number }[]
-  // Typical round of their first QB/TE/K/DST, earliest first. `drafts` is how
-  // many drafts they took that position at all.
-  first_at_position: { position: string; mean_round: number; drafts: number }[]
-}
-
-export interface ManagerHistory {
-  manager: string
-  // Distinct seasons this manager appears in draft_teams for -- "how many
-  // drafts they appear in."
-  seasons: number
-  total_picks: number
-  // Most recent season first.
-  first_rounders: ManagerFirstRounder[]
-  shape: { early: ManagerShapeBucket; mid: ManagerShapeBucket; late: ManagerShapeBucket }
-  // Null on a database where `make fit-managers` has not written the
-  // manager_tendencies table -- the card omits the block rather than
-  // rendering blanks.
-  tendencies: ManagerTendencies | null
-}
-
-export async function fetchManagerHistory(): Promise<ManagerHistory[]> {
-  const res = await fetch('/api/managers/history')
-  if (!res.ok) throw new Error('Failed to load manager history')
-  return (await res.json()).managers
-}
-
-export async function fetchDraftOrder(): Promise<DraftOrder> {
-  const res = await fetch('/api/draft-order')
-  if (!res.ok) throw new Error('Failed to load draft order')
-  return res.json()
-}
-
-export async function fetchLeague(): Promise<LeagueInfo> {
-  const res = await fetch('/api/league')
-  if (!res.ok) throw new Error('Failed to load league settings')
-  return res.json()
-}
-
-export async function saveDraftOrder(order: DraftOrderEntry[], mySlot: number) {
-  const res = await fetch('/api/draft-order', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ order, my_slot: mySlot }),
-  })
-  if (!res.ok) throw new Error('Failed to save draft order')
-}
-
-export async function startSim(mySlot: number, rollouts: number): Promise<string> {
-  const res = await fetch('/api/sim', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ my_slot: mySlot, rollouts }),
-  })
-  if (!res.ok) throw new Error('Failed to start simulation')
-  return (await res.json()).run_id
-}
-
-export async function pollSim(runId: string): Promise<{ status: string; detail: string | null }> {
-  const res = await fetch(`/api/sim/${runId}`)
-  if (!res.ok) throw new Error('Failed to read simulation status')
-  return res.json()
-}
-
-// Provenance for whatever sim the board's Avail%/ΔEV columns currently come
-// from. Those columns are merged into every /api/players response and each
-// run replaces the tables wholesale, so on a fresh page load they are some
-// run -- possibly for a different slot, possibly hours old.
-export interface SimRun {
-  run_id: string
-  my_slot: number | null
-  /** Overall pick number the run was computed for. */
-  pick_no: number | null
-  created_at: string
-}
-
-/** How stale a sim run is. Shared: the rail and the predicted grid both
- *  render the age of the SAME run, and two spellings of "12m ago" on two
- *  screens for one number would read as two different numbers. */
+/** How old a timestamp is, in the one spelling the whole app uses. Shared by
+ *  the live board's poll age and the landing page's readiness strip -- two
+ *  spellings of "12m ago" would read as two different numbers. */
 export function ageLabel(createdAt: string): string {
   const ms = Date.now() - new Date(createdAt).getTime()
   if (!Number.isFinite(ms) || ms < 60_000) return 'just now'
@@ -314,71 +147,6 @@ export function ageLabel(createdAt: string): string {
   const hours = Math.floor(minutes / 60)
   if (hours < 24) return `${hours}h ago`
   return `${Math.floor(hours / 24)}d ago`
-}
-
-export async function fetchSimLatest(): Promise<SimRun | null> {
-  const res = await fetch('/api/sim/latest')
-  if (!res.ok) throw new Error('Failed to read the last simulation')
-  return (await res.json()).run
-}
-
-export interface Backtest {
-  /** Every season rotated through as the LOSO holdout, not a single one. */
-  seasons: number[] | null
-  top1: number | null
-  top5: number | null
-  logloss: number | null
-  adp_top1: number | null
-  adp_logloss: number | null
-  /** Null when the stored backtest row predates the column -- no comparison
-   *  was made, which is not the same as the model having lost one. */
-  beats_adp: boolean | null
-}
-
-export interface ModelStatus {
-  /** Whether any manager models have been fitted at all. */
-  fitted: boolean
-  n_managers: number
-  backtest: Backtest | null
-}
-
-export async function fetchModel(): Promise<ModelStatus> {
-  const res = await fetch('/api/model')
-  if (!res.ok) throw new Error('Failed to load model status')
-  return res.json()
-}
-
-export interface SimBoardCell {
-  overall_pick: number
-  round: number
-  round_pick: number
-  slot: number
-  alt_rank: number
-  player_id: string
-  name: string
-  position: string | null
-  team: string | null
-  prob: number
-  market_spread: number | null
-  certain: boolean
-}
-
-export interface SimBoard {
-  // The same SimRun /api/sim/latest serves -- the board handler delegates to
-  // it, so my_slot/pick_no are nullable here too (a run that predates those
-  // columns has no slot on record). DraftGrid degrades to "no column marked
-  // (you)" rather than assuming one.
-  run: SimRun | null
-  teams: number
-  rounds: number
-  order: DraftOrderEntry[]
-  cells: SimBoardCell[]
-}
-
-export async function fetchSimBoard(): Promise<SimBoard> {
-  const res = await fetch('/api/sim/board')
-  if (!res.ok) throw new Error('Failed to load the predicted board')
-  return res.json()
 }
 
 // -- live draft mode --
@@ -498,5 +266,53 @@ export async function connectWithToken(
   if (!res.ok) {
     throw new Error(await detailText(res))
   }
+  return res.json()
+}
+
+// -- landing page --------------------------------------------------------
+//
+// Two calls, split by what they cost. `status` is table reads (milliseconds)
+// and paints the readiness strip on the first frame; `preview` pays for a
+// board build (seconds) and lands behind a skeleton. Merging them would put
+// the whole page behind the slow half.
+
+export interface LandingSource {
+  source: string
+  ok: boolean
+  rows: number
+  refreshed_at: string | null
+}
+
+export interface LandingStatus {
+  sources: LandingSource[]
+  /** `derived` false means the built-in default shape, not a configured league. */
+  league: { season: number; teams: number; rounds: number; derived: boolean }
+  history: { picks: number; seasons: number[]; teams: number }
+  /** `personal` is the subset of `fitted` whose own model beat the pooled one. */
+  managers: { fitted: number; personal: number }
+  sim: { run_id: string; my_slot: number | null; created_at: string } | null
+}
+
+export async function fetchLandingStatus(): Promise<LandingStatus> {
+  const res = await fetch('/api/landing/status')
+  if (!res.ok) throw new Error(`Failed to read setup status (${res.status})`)
+  return res.json()
+}
+
+/** Eight fields, not the board's twenty-seven -- see PREVIEW_COLUMNS in api/main.py. */
+export interface LandingPlayer {
+  rank: number
+  name: string
+  position: string
+  team: string | null
+  tier: number | null
+  vor: number | null
+  market_rank: number | null
+  edge: number | null
+}
+
+export async function fetchLandingPreview(limit = 12): Promise<{ pool: number; players: LandingPlayer[] }> {
+  const res = await fetch(`/api/landing/preview?limit=${limit}`)
+  if (!res.ok) throw new Error(`Failed to load the board preview (${res.status})`)
   return res.json()
 }

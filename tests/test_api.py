@@ -2,7 +2,7 @@ import json
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from fastapi.testclient import TestClient
-from pipeline.db import get_conn, write_table
+from pipeline.db import get_conn, record_freshness, write_table
 from api.main import create_app
 
 def _seed(path):
@@ -898,3 +898,87 @@ def test_draft_order_seeds_slots_when_espn_has_not_published_an_order(tmp_path):
     assert body["source"] == "unpublished"
     assert body["order"] == [{"slot": 1, "manager": "worthy"},
                              {"slot": 2, "manager": "dan"}]
+
+
+def test_landing_status_reports_a_ready_machine(tmp_path):
+    """The readiness strip's whole job is answering "will this work tonight",
+    so every fact it shows has to come back on a machine that IS ready --
+    sources refreshed, history imported, managers fitted, a sim on record."""
+    path = str(tmp_path / "t.duckdb")
+    _seed(path)
+    _seed_draft_history(path)
+    conn = get_conn(path)
+    record_freshness(conn, "adp", True, 300)
+    record_freshness(conn, "schedules", False, 0)
+    write_table(conn, "manager_profiles", pd.DataFrame([
+        {"manager": "m1", "feature": "reach", "value": 0.1, "pooled_value": 0.2,
+         "n_picks": 40, "heldout_gain": 0.03, "uses_personal": True,
+         "summary": "reaches"},
+        {"manager": "m2", "feature": "reach", "value": 0.1, "pooled_value": 0.2,
+         "n_picks": 12, "heldout_gain": None, "uses_personal": False,
+         "summary": "league average"},
+    ]))
+    write_table(conn, "sim_results", pd.DataFrame([
+        {"run_id": "r1", "player_id": "p1", "ev": 1.0, "se": 0.1,
+         "applied_pct": 0.5, "rank": 1, "my_slot": 4, "pick_no": 4,
+         "created_at": "2026-08-15 10:00:00"}]))
+    conn.close()
+
+    body = TestClient(create_app(path)).get("/api/landing/status").json()
+
+    assert {s["source"] for s in body["sources"]} == {"adp", "schedules"}
+    assert [s["ok"] for s in body["sources"] if s["source"] == "adp"] == [True]
+    assert body["league"]["teams"] == 8
+    assert body["league"]["rounds"] > 0
+    assert body["history"] == {"picks": 2, "seasons": [2025], "teams": 2}
+    # Fitted counts managers with a profile at all; personal counts the subset
+    # whose own model beat the pooled one -- the rail's `uses_personal` gate.
+    assert body["managers"] == {"fitted": 2, "personal": 1}
+    assert body["sim"]["my_slot"] == 4
+    assert body["sim"]["run_id"] == "r1"
+
+
+def test_landing_status_on_a_machine_with_nothing_done_yet(tmp_path):
+    """The states a first-time user actually sees. These are the ones worth
+    pinning: a strip that reports "ready" on an empty database would be worse
+    than no strip at all."""
+    body = _client(tmp_path).get("/api/landing/status").json()
+    assert body["sim"] is None
+    assert body["history"] == {"picks": 0, "seasons": [], "teams": 0}
+    assert body["managers"] == {"fitted": 0, "personal": 0}
+    # No ESPN import, so the league is the built-in default rather than a
+    # derived one -- the strip says so instead of implying a configured league.
+    assert body["league"]["derived"] is False
+
+
+def test_landing_status_does_not_build_the_board(tmp_path, monkeypatch):
+    """The split between /api/landing/status and /api/landing/preview only
+    buys anything if status stays off the 3.5s board build. Enforced here
+    rather than left as an intention someone later 'simplifies' away."""
+    monkeypatch.setattr("api.main.build_board", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("landing status must not build the board")))
+    assert _client(tmp_path).get("/api/landing/status").status_code == 200
+
+
+def test_landing_preview_slices_the_board_in_rank_order(tmp_path):
+    path = str(tmp_path / "t.duckdb")
+    _seed_two_players(path)
+    client = TestClient(create_app(path))
+
+    body = client.get("/api/landing/preview?limit=1").json()
+    assert body["pool"] == len(client.get("/api/players").json()["players"])
+    assert len(body["players"]) == 1
+    row = body["players"][0]
+    assert row["rank"] == 1
+    # Slim on purpose: the preview renders eight fields, and shipping the
+    # board's full 27 would put 185KB on a landing page for 12 rows.
+    assert set(row) == {"rank", "name", "position", "team", "tier", "vor",
+                        "market_rank", "edge"}
+
+
+def test_landing_preview_clamps_an_out_of_range_limit(tmp_path):
+    """Clamped, not rejected. A bad limit is never worth a landing page that
+    renders an error where the board preview should be."""
+    client = _client(tmp_path)
+    assert len(client.get("/api/landing/preview?limit=0").json()["players"]) == 1
+    assert client.get("/api/landing/preview?limit=999").status_code == 200

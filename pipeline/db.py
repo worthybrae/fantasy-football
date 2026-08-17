@@ -1,8 +1,12 @@
+import os
 from pathlib import Path
 import duckdb
 import pandas as pd
 
-DEFAULT_PATH = "data/nfl.duckdb"
+# Env-overridable so a second instance (a test harness, a staging server) can
+# run against a copy without colliding on the primary file's single-writer
+# lock. Falls back to the repo's real database, unchanged, when unset.
+DEFAULT_PATH = os.environ.get("DRAFT_DB_PATH", "data/nfl.duckdb")
 
 # The two kinds of table, kept in one place because the whole multi-league
 # design depends on the split being correct. A per-league database holds only
