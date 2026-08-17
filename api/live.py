@@ -115,15 +115,16 @@ class ConnectBody(BaseModel):
 
 
 class TokenBody(BaseModel):
-    """What the browser extension (or bookmarklet) delivers.
+    """What the bookmarklet delivers.
 
     Deliberately NOT the account session. `token` is ESPN's per-draft
     draftSecurity value -- scoped to this one draft, worthless once it ends --
     and `swid` identifies the account but is not a login credential on its
-    own. The espn_s2 session cookie never reaches here: the extension uses it
-    only to fetch this token from ESPN and forwards just the result. So the
-    most this endpoint ever holds is a two-hour nonce, in memory, which is the
-    whole point of doing it this way rather than taking a password.
+    own. The espn_s2 session cookie never reaches here: the bookmarklet uses
+    it only to fetch this token from ESPN (on ESPN's own origin, where the
+    cookie stays) and forwards just the result. So the most this endpoint ever
+    holds is a two-hour nonce, in memory, which is the whole point of doing it
+    this way rather than taking a password.
     """
     leagueId: str
     teamId: str
@@ -698,31 +699,6 @@ def register_live_routes(app, conn, db_path):
                           "listener_error": None})
         return {"active": False, "listener_stopped": stopped}
 
-    @app.post("/api/live/token")
-    def live_token(body: TokenBody):
-        """Receive a draft token from the extension and hold it in memory.
-
-        This is the credential half of the direct-socket path, kept separate
-        from opening the socket on purpose. Storing and acknowledging the
-        token lets the extension be verified end to end -- did it deliver a
-        well-formed, ESPN-valid token -- independently of whether the socket
-        accepts a self-minted token during a live draft, which is a distinct
-        question still to be settled against a running draft.
-
-        In memory only: a draft token is a short-lived nonce, and writing it
-        to disk would be the one thing that turns a breach from nothing into
-        a leak. It dies with this process, same as every other piece of live
-        state here.
-        """
-        with lock:
-            state["token"] = {
-                "league_id": body.leagueId, "team_id": body.teamId,
-                "swid": body.swid, "token": body.token, "season": body.season,
-                "received_at": datetime.now(timezone.utc).isoformat(),
-            }
-        return {"received": True, "league_id": body.leagueId,
-                "team_id": body.teamId}
-
     @app.post("/api/live/connect")
     def live_connect(body: ConnectBody):
         # Validate the one thing that can be invalid (the league id) BEFORE
@@ -802,9 +778,9 @@ def register_live_routes(app, conn, db_path):
                                 stop_event=stop_event, on_activity=on_activity)
 
         # Record the token so /api/live/state's token_received stays truthful
-        # for the connect screen. In memory only, same as /api/live/token: a
-        # draft token is a short-lived nonce, and writing it to disk is the
-        # one thing that would turn a breach into a leak. Set before launch;
+        # for the connect screen. In memory only: a draft token is a
+        # short-lived nonce, and writing it to disk is the one thing that
+        # would turn a breach into a leak. Set before launch;
         # _launch_listener's own state.update never touches "token".
         with lock:
             state["token"] = {

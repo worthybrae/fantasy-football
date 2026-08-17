@@ -253,31 +253,6 @@ def test_state_reports_stale_when_the_poll_is_old(tmp_path):
     assert _is_stale(None, now)          # never polled at all
 
 
-def test_token_endpoint_stores_the_payload_and_state_reports_it(tmp_path):
-    """The extension delivers a token here. Storing and acknowledging it is
-    verifiable on its own -- did a well-formed token arrive -- separately from
-    whether the socket later accepts it, which needs a live draft to settle.
-
-    Only the token and public ids: the espn_s2 session cookie is never part
-    of this payload, by design, so a breach of this store leaks a two-hour
-    nonce rather than an account session.
-    """
-    from fastapi.testclient import TestClient
-    from api.main import create_app
-    client = TestClient(create_app(str(tmp_path / "t.duckdb")))
-
-    assert client.get("/api/live/state").json()["token_received"] is False
-
-    r = client.post("/api/live/token", json={
-        "leagueId": "53929318", "teamId": "4",
-        "swid": "{8491403C-A53F-4257-8D52-F8AE32CED897}",
-        "token": "-1339288665", "season": "2026"})
-    assert r.status_code == 200
-    assert r.json() == {"received": True, "league_id": "53929318",
-                        "team_id": "4"}
-    assert client.get("/api/live/state").json()["token_received"] is True
-
-
 def test_state_is_inactive_before_start(tmp_path):
     from fastapi.testclient import TestClient
     from api.main import create_app
@@ -285,6 +260,9 @@ def test_state_is_inactive_before_start(tmp_path):
     assert body["active"] is False
     assert body["candidates"] == []
     assert body["candidates_as_of_pick"] is None
+    # No bookmarklet click yet, so the connect screen keeps showing the
+    # install guide rather than following a board that does not exist.
+    assert body["token_received"] is False
 
 
 import dataclasses

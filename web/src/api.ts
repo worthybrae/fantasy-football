@@ -424,8 +424,8 @@ export interface LiveState {
   // (api/live.py's STALE_AFTER_SECONDS) -- including "never polled."
   stale: boolean
   unmapped_picks: UnmappedPick[]
-  // The extension has delivered a draft token. The onboarding gate flips from
-  // "open your draft and click the extension" to the live board on this.
+  // The bookmarklet has delivered a draft token. The onboarding gate flips
+  // from "open your draft and click Draft Helper" to the live board on this.
   token_received?: boolean
 }
 
@@ -485,8 +485,8 @@ export interface TokenConnectParams {
 
 // The bookmarklet path's connect. The server opens ESPN's draft socket
 // directly from these values (no browser window on the server), so this both
-// starts the listener and returns the resolved slot -- unlike the extension's
-// old /api/live/token, which only stored a token and opened nothing.
+// starts the listener and returns the resolved slot -- one call, not a
+// separate "store the token" step ahead of it.
 export async function connectWithToken(
   params: TokenConnectParams,
 ): Promise<ConnectResult> {
