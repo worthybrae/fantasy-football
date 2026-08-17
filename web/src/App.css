@@ -1234,9 +1234,13 @@ td:first-child {
   display: flex;
   flex-direction: column;
   justify-content: center;
-  gap: 3px;
-  min-height: 46px;
-  padding: 5px 8px;
+  gap: 2px;
+  /* Fixed, not min-height: a one-line name and a two-line name must occupy
+     the same cell height so every row is uniform. The name area below clamps
+     to two lines and this height reserves room for both, so a short name just
+     centers with space around it rather than shrinking its row. */
+  height: 54px;
+  padding: 4px 8px;
   border-bottom: 1px solid var(--border);
   border-right: 1px solid var(--border);
   text-decoration: none;
@@ -1310,7 +1314,7 @@ td:first-child {
   font-size: var(--text-sm);
   font-weight: 600;
   color: var(--text-1);
-  line-height: 1.15;
+  line-height: 1.1;
   /* Up to two lines so a full name fits ("Jaxon Smith-Njigba") instead of
      truncating; a third line (none in practice) would clip rather than grow
      the cell unbounded. */
