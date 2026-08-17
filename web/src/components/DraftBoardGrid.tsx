@@ -41,35 +41,19 @@ function valueTag(value: number | null): { label: string; tone: 'steal' | 'reach
     : { label: `reach ${Math.abs(value).toFixed(0)}`, tone: 'reach' }
 }
 
-// The at-a-glance signals, each shown only when it clears its threshold so a
-// cell carries zero to two, never noise. Titles carry the exact number for
-// anyone who hovers; the icon alone conveys the direction.
-//   trend       this year's projected ppg vs last year's actual, +/- 2 ppg.
-//   steal/reach where the pick landed vs its ADP, +/- 5 (was the old number).
-//
-// A hype/lame icon (ESPN's rank vs the market) was cut for now: in the data
-// espn_ppr_rank is systematically deeper than every market measure, so the
-// signal only ever fires "cold" -- one-sided noise, not a useful tell. Left
-// out until it can be defined against something balanced.
-const ICON_THRESH_VALUE = 5
-const ICON_THRESH_PPG = 2
-
-function cellIcons(p: BoardPlayer): ReactNode {
-  const icons: ReactNode[] = []
-  if (p.proj_ppg !== null && p.last_ppg !== null) {
-    const d = p.proj_ppg - p.last_ppg
-    if (d >= ICON_THRESH_PPG)
-      icons.push(<span key="t" className="board-icon" title={`Projected +${d.toFixed(1)} ppg vs last year`}>📈</span>)
-    else if (d <= -ICON_THRESH_PPG)
-      icons.push(<span key="t" className="board-icon" title={`Projected ${d.toFixed(1)} ppg vs last year`}>📉</span>)
-  }
-  if (p.value !== null) {
-    if (p.value >= ICON_THRESH_VALUE)
-      icons.push(<span key="v" className="board-icon" title={`Fell ${p.value.toFixed(0)} past ADP — steal`}>💎</span>)
-    else if (p.value <= -ICON_THRESH_VALUE)
-      icons.push(<span key="v" className="board-icon" title={`Reached ${Math.abs(p.value).toFixed(0)} ahead of ADP`}>🚨</span>)
-  }
-  return icons.length ? <span className="board-cell-icons">{icons}</span> : null
+// The +/- vs ADP: where the pick landed relative to its PPR consensus ADP
+// (value = overall pick - ADP). Green and signed "+" when the player fell past
+// his ADP (a value); red when he went ahead of it (a reach). Null/zero shows
+// nothing rather than a bare "0". Every ADP source feeding this is PPR-native
+// (see scoring/market.py), so the delta is a PPR delta.
+function adpDelta(value: number | null): ReactNode {
+  if (value === null || value === 0) return null
+  const steal = value > 0
+  return (
+    <span className={`board-cell-adp ${steal ? 'is-steal' : 'is-reach'}`}>
+      {steal ? `+${value.toFixed(0)}` : value.toFixed(0)}
+    </span>
+  )
 }
 
 // The hover/focus detail card: everything ESPN-clean cell content leaves
@@ -192,7 +176,10 @@ export default function DraftBoardGrid({ board }: DraftBoardGridProps) {
                 >
                   <div className="board-cell-top">
                     {posBadge(cell.player.position)}
-                    {cellIcons(cell.player)}
+                    <span className="board-cell-meta">
+                      {adpDelta(cell.player.value)}
+                      <span className="board-cell-team mono">{cell.player.team ?? ''}</span>
+                    </span>
                   </div>
                   <div className="board-cell-namewrap">
                     <span className="board-cell-name">{cell.player.name}</span>
