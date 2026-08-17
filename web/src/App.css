@@ -1233,7 +1233,11 @@ td:first-child {
 .board-cell {
   display: flex;
   flex-direction: column;
-  justify-content: center;
+  /* Top row pinned to the top (so pos/team/ADP line up across every cell);
+     the name fills the space below and centers within it -- see
+     .board-cell-namewrap -- so a one-line name sits centered rather than
+     hugging the top. */
+  justify-content: flex-start;
   gap: 2px;
   /* Fixed, not min-height: a one-line name and a two-line name must occupy
      the same cell height so every row is uniform. The name area below clamps
@@ -1263,6 +1267,23 @@ td:first-child {
   align-items: center;
   gap: 6px;
   flex-shrink: 0;
+}
+
+/* The at-a-glance signal icons (hype/lame, trending, steal/reach), pushed to
+   the right of the pos badge. Emoji carry their own color; the row just sizes
+   and spaces them. */
+.board-cell-icons {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.board-icon {
+  line-height: 1;
+  cursor: default;
 }
 
 .board-cell .pos-badge {

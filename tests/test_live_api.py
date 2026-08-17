@@ -1558,6 +1558,10 @@ def test_board_returns_the_grid_with_snake_positions_and_stats(tmp_path):
     assert cells[1]["player"]["position"] == "RB"
     assert cells[9]["player"]["name"] == "A Star"
     assert cells[9]["player"]["last_ppg"] is not None    # p1 has weekly rows
+    # The icon inputs: ESPN's own PPR rank (hype/lame vs market_rank) and this
+    # year's projected ppg (trending vs last_ppg) = espn_proj / 17.
+    assert cells[9]["player"]["espn_ppr_rank"] is not None
+    assert cells[9]["player"]["proj_ppg"] == round(210.0 / 17, 1)
 
     # A crosswalk miss (an id the board does not carry) still emits a cell --
     # id as the name, everything else null -- so the grid never drops a pick.

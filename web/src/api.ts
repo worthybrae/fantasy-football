@@ -222,9 +222,11 @@ export interface BoardPlayer {
   overall_rank: number | null
   tier: number | null
   market_rank: number | null
+  espn_ppr_rank: number | null
   vor: number | null
   last_ppg: number | null
   last_points: number | null
+  proj_ppg: number | null
   value: number | null
 }
 

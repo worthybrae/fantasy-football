@@ -64,6 +64,27 @@ class DraftSession:
     team_slots: dict = dataclasses.field(default_factory=dict)
 
 
+def _attach_espn_proj(conn, board):
+    """Left-join ESPN's projected season points onto the board by espn_id.
+
+    espn_adp already carries `espn_proj` (the projection pull that feeds the
+    player page's proj_ppg), but build_board keeps only rank and id from that
+    table. /api/live/board's trending icon compares this year's projected ppg
+    to last year's actual, so the projection rides on here. Best-effort: a
+    table written before the projection column existed, or a board with no
+    espn_id, simply leaves the column absent and every proj_ppg null. DST rows
+    have a null espn_id and so never match -- correct, since ESPN projects no
+    per-game line for a defense.
+    """
+    if "espn_id" not in getattr(board, "columns", []):
+        return board
+    espn = read_table(conn, "espn_adp")
+    if espn.empty or "espn_proj" not in espn.columns:
+        return board
+    proj = espn[["espn_id", "espn_proj"]].dropna().drop_duplicates("espn_id")
+    return board.merge(proj, on="espn_id", how="left")
+
+
 def board_fingerprint(board: pd.DataFrame) -> str:
     """Identity of the draftable set, order-independent.
 
@@ -89,6 +110,7 @@ def build_session(conn, my_slot: int | None, seed: int = DEFAULT_SEED,
     """
     settings = league_mod.load(conn)
     board = build_board(conn, settings=settings)
+    board = _attach_espn_proj(conn, board)
     pool = build_pool(conn, board, settings)
     fits = fit_all(conn, settings)
     pooled = fits.get("__pooled__", np.zeros(len(FEATURE_NAMES)))
@@ -310,12 +332,13 @@ def _board_cell(player_id, pick_no, teams: int, slots: list, by_id: dict) -> dic
         player = {"player_id": str(player_id), "name": str(player_id),
                   "position": None, "team": None, "bye": None,
                   "overall_rank": None, "tier": None, "market_rank": None,
-                  "vor": None, "last_ppg": None, "last_points": None,
-                  "value": None}
+                  "espn_ppr_rank": None, "vor": None, "last_ppg": None,
+                  "last_points": None, "proj_ppg": None, "value": None}
     else:
         market_rank = _float_or_none(row.get("market_rank"))
         stats = row.get("stats")
         stats = stats if isinstance(stats, dict) else {}
+        espn_proj = _float_or_none(row.get("espn_proj"))
         player = {
             "player_id": str(row["player_id"]),
             "name": _str_or_none(row.get("name")),
@@ -325,9 +348,16 @@ def _board_cell(player_id, pick_no, teams: int, slots: list, by_id: dict) -> dic
             "overall_rank": _int_or_none(row.get("rank")),
             "tier": _int_or_none(row.get("tier")),
             "market_rank": market_rank,
+            # ESPN's own PPR rank, for the hype/lame icon: ESPN vs the market
+            # consensus (market_rank). A big gap either way is the signal.
+            "espn_ppr_rank": _int_or_none(row.get("espn_ppr_rank")),
             "vor": _float_or_none(row.get("vor")),
             "last_ppg": _float_or_none(stats.get("ppg")),
             "last_points": _float_or_none(stats.get("points")),
+            # This year's ESPN projected points per game (17-game season, the
+            # same denominator last_ppg uses), for the trending icon. Null for
+            # anyone ESPN doesn't project (DST, deep rookies).
+            "proj_ppg": round(espn_proj / 17, 1) if espn_proj else None,
             # >0 = fell past ADP (a steal), <0 = reach; null with no ADP.
             "value": None if market_rank is None else float(overall) - market_rank,
         }
