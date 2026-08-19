@@ -44,6 +44,7 @@ with the *old* nflverse schema):
 """
 import re
 import unicodedata
+import warnings
 import numpy as np
 import pandas as pd
 from pipeline.db import read_table
@@ -392,7 +393,40 @@ def build_board(conn, weights: dict | None = None,
     # number with no cross-position meaning -- and this frame is then sorted
     # across positions. See the spec's section 2.
     proj = projections(conn, uni)
-    uni["proj_points"] = uni["player_id"].map(proj).astype(float)
+    # `.to_numpy()`, not `.map(proj)`: `_add_adp_only_players` synthesizes
+    # `player_id` from the normalized name alone (no position), so two
+    # ADP-only players who share a normalized name at different positions
+    # (e.g. a name collision between an unmatched RB and an unmatched TE)
+    # reach `uni` with the SAME id before any dedup runs. `.map()` against a
+    # duplicate-valued index raises `InvalidIndexError: Reindexing only
+    # valid with uniquely valued Index objects`, taking the whole board down
+    # with it. `projections()` builds `proj`'s values by iterating
+    # `board.iterrows()` in the same row order as `uni`, so assigning
+    # positionally gives every row -- including both id-colliding rows --
+    # its own correct value, without ever reindexing on the id at all.
+    uni["proj_points"] = proj.to_numpy(dtype=float)
+    # `projections()` is not scoring-format-aware: its first rung is ESPN's
+    # own season projection (a fixed external number, never per-league), and
+    # its fallback rung reads `stats.ppg`, which is fixed full-PPR
+    # (similarity.player_season_features -> compute_ppr_points), not
+    # `settings.scoring`. So a half-PPR or standard league's `vor` -- the
+    # board's rank -- is priced in full PPR regardless, even though
+    # `production`/`composite` upstream of it correctly follow this league's
+    # rules (see compute_composite, factors.production_factor). Silently
+    # ranking a non-PPR league on PPR-implied points is exactly the kind of
+    # thing this task exists to stop being silent about, so it is a warning,
+    # not a comment -- tracked as a follow-up, not fixed here (making
+    # projections() format-aware needs a decision about the ESPN-projection
+    # rung the spec never asked for, and draft_sim has always been PPR-only
+    # through this same function).
+    if fmt != "ppr":
+        warnings.warn(
+            f"board: league scoring format is '{fmt}', but proj_points (and "
+            "therefore vor, the board's rank) is priced in fixed full PPR "
+            "regardless -- projections() does not read settings.scoring. "
+            "The board's ranking will not reflect this league's real "
+            "scoring rules.",
+            RuntimeWarning)
     uni = apply_vor(uni, settings.replacement_ranks, column="proj_points")
     uni = assign_tiers(uni)
     uni = uni.sort_values("vor", ascending=False).reset_index(drop=True)

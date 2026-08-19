@@ -409,19 +409,17 @@ def test_board_stats_summary_passing_cols(tmp_path):
     assert qb["interceptions"] == 1 * weeks
 
 def test_board_vor_is_in_projected_points(tmp_path):
-    """The board's headline ranking must be cross-position comparable.
+    """`vor`'s exact arithmetic: it differences `proj_points` at the
+    position's replacement rank, not `composite`.
 
-    Regression for the Mark Andrews case: with VOR built from composite (a
-    within-position percentile), a TE at ADP 149 ranked 13th overall because
-    being far above TE10 in percentile scored the same as being far above
-    RB22 in percentile.
-
-    The brief's own version of this test reads `rbs = board[position == RB]`
-    against a richer fixture -- this file's real fixture (`_seed`) only ever
-    produces WR rows (one real, one ADP-only), so the check runs on WR
-    instead, at WR's own replacement rank (24, from REPLACEMENT_RANK). With
-    only 2 WRs in the fixture, replacement clamps to the 2nd (lowest) one --
-    exactly what `nlargest(24).iloc[-1]` picks out of 2 rows.
+    This runs on `_seed`, the file's real fixture, which only ever produces
+    WR rows (one real, one ADP-only) -- so it can confirm the formula
+    (`vor == proj_points - replacement`) but, with a single position present,
+    it CANNOT catch a cross-position ranking regression: sorting one
+    position's rows by any monotonic function of itself is trivially sorted.
+    `test_board_ranks_by_points_not_by_composite_percentile_across_positions`
+    below is the fixture built specifically to catch that (the actual Mark
+    Andrews case) -- see its docstring.
     """
     conn = _seed(tmp_path)
     board = build_board(conn)
@@ -432,6 +430,92 @@ def test_board_vor_is_in_projected_points(tmp_path):
         24).iloc[-1])).abs().max() < 1e-6
     # and the board is sorted by it
     assert board["vor"].is_monotonic_decreasing
+
+def test_board_ranks_by_points_not_by_composite_percentile_across_positions(tmp_path):
+    """Regression for the Mark Andrews case: with VOR built from composite (a
+    within-position percentile), a TE at ADP 149 ranked 13th overall because
+    being far above TE10 in percentile scored the same as being far above
+    RB22 in percentile -- comparing two numbers with no shared unit.
+
+    `_seed` only ever produces one position (see the test above), which
+    can't exercise this: a within-position ranking sorted by any monotonic
+    function of itself is trivially sorted, whether that function is
+    `composite` or `proj_points`. This builds a dedicated two-position (RB,
+    TE), two-player-per-position fixture where the two facts are engineered
+    to point opposite ways:
+
+      - `te_star` OUT-RANKS `rb_good` on `composite`: both dominate their own
+        2-player position group on production/role/schedule, but `rb_good`'s
+        team is deliberately given a low schedules-implied environment score
+        against `rb_scrub`'s high one (`environment_factor` is purely a
+        team-level number, decoupled from either player's own production),
+        which is the one factor `rb_good` loses and `te_star` wins -- pulling
+        `rb_good`'s composite (0.20 weight on environment) below `te_star`'s.
+      - `rb_good` OUT-SCORES `te_star` on `proj_points`: real rushing volume
+        (20 carries/120 yards per game) outproduces `te_star`'s modest real
+        receiving line (3 rec/30 yards per game) in points, independent of
+        either player's within-position percentile.
+
+    So if `apply_vor` (or `build_board`'s call into it) ever reverts to
+    `column="composite"`, `te_star` -- ranked below `rb_good` today -- would
+    rank above him again, and this test would catch it. Verified against the
+    reverted code path directly, not just asserted: differencing this
+    fixture's own `composite` column the way the old code did gives
+    vor(te_star) = 91.25 - 58.75 = 32.5 > vor(rb_good) = 81.25 - 68.75 =
+    12.5, i.e. exactly the wrong order this test guards against.
+    """
+    conn = get_conn(str(tmp_path / "cross_position.duckdb"))
+    rows = []
+    for w in range(1, 18):
+        rows += [
+            {"player_id": "te_star", "player_display_name": "Star TE", "position": "TE",
+             "recent_team": "KC", "opponent_team": "LV", "season": 2025, "week": w,
+             "receptions": 3, "receiving_yards": 30, "targets": 4, "carries": 0},
+            {"player_id": "te_scrub", "player_display_name": "Scrub TE", "position": "TE",
+             "recent_team": "LV", "opponent_team": "KC", "season": 2025, "week": w,
+             "receptions": 0, "receiving_yards": 0, "targets": 1, "carries": 0},
+            {"player_id": "rb_good", "player_display_name": "Good RB", "position": "RB",
+             "recent_team": "DAL", "opponent_team": "NYG", "season": 2025, "week": w,
+             "receptions": 0, "receiving_yards": 0, "targets": 0, "carries": 20,
+             "rushing_yards": 120},
+            {"player_id": "rb_scrub", "player_display_name": "Scrub RB", "position": "RB",
+             "recent_team": "NYG", "opponent_team": "DAL", "season": 2025, "week": w,
+             "receptions": 0, "receiving_yards": 0, "targets": 0, "carries": 1,
+             "rushing_yards": 2},
+        ]
+    write_table(conn, "weekly", pd.DataFrame(rows))
+    write_table(conn, "schedules", pd.DataFrame([
+        {"home_team": "KC", "away_team": "LV", "week": 1,
+         "total_line": 48.0, "spread_line": 3.0},
+        # NYG home (not DAL): implied points = (total_line +/- spread) / 2,
+        # so the home team gets the higher number. rb_good's team (DAL) must
+        # land BELOW rb_scrub's team (NYG) on environment for the inversion
+        # above to hold -- this is what makes that happen.
+        {"home_team": "NYG", "away_team": "DAL", "week": 1,
+         "total_line": 44.0, "spread_line": 6.0},
+    ]))
+    write_table(conn, "adp", pd.DataFrame([
+        {"adp_name": "Star TE", "position": "TE", "team": "KC", "adp": 40.0},
+        {"adp_name": "Scrub TE", "position": "TE", "team": "LV", "adp": 200.0},
+        {"adp_name": "Good RB", "position": "RB", "team": "DAL", "adp": 20.0},
+        {"adp_name": "Scrub RB", "position": "RB", "team": "NYG", "adp": 220.0},
+    ]))
+    write_table(conn, "depth_charts", pd.DataFrame(
+        columns=["gsis_id", "depth_team", "formation", "week", "position"]))
+    write_table(conn, "espn_adp", pd.DataFrame(
+        columns=["espn_id", "espn_name", "position", "espn_adp", "espn_ppr_rank"]))
+    write_table(conn, "fp_ecr", pd.DataFrame(
+        columns=["fp_name", "team", "position", "rank_ecr", "rank_ave", "rank_std", "fp_tier"]))
+    write_table(conn, "sleeper_ids", pd.DataFrame(
+        columns=["gsis_id", "espn_id", "sleeper_name", "position", "team"]))
+
+    board = build_board(conn).set_index("player_id")
+    assert board.loc["te_star", "composite"] > board.loc["rb_good", "composite"]
+    assert board.loc["rb_good", "proj_points"] > board.loc["te_star", "proj_points"]
+    # The regression: vor, and therefore rank, must follow proj_points, not
+    # the composite ordering above.
+    assert board.loc["rb_good", "vor"] > board.loc["te_star", "vor"]
+    assert board.loc["rb_good", "rank"] < board.loc["te_star", "rank"]
 
 def test_board_uses_league_settings_when_present(tmp_path):
     from pipeline.db import read_table, write_table
