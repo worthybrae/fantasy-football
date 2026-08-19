@@ -541,7 +541,11 @@ export default function DraftRoom() {
         <aside className="draft-rail">
           {state ? (
             <>
-              <ClockPanel state={state} secondsLeft={secondsLeft} />
+              {/* board: Defect 4's "waiting on {team name}" lookup -- this
+                  room already polls /api/live/board every 2.5s (see the
+                  effect above), so ClockPanel is handed the same state
+                  rather than fetching its own. */}
+              <ClockPanel state={state} secondsLeft={secondsLeft} board={board} />
               {state.active ? (
                 <RosterPanel slots={slots} />
               ) : (

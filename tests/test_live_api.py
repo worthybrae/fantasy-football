@@ -2512,3 +2512,60 @@ def test_state_reports_socket_alive_false_with_no_session(tmp_path):
     assert body["active"] is False
     assert body["socket_alive"] is False
     assert body["recompute_error"] is None
+
+
+def test_state_reports_draft_started_from_the_listener(live_app_on_clock):
+    """Defect 4 (post-merge fix): DraftListener.started, set once by the
+    socket's own STATE frame (pipeline/draft_listener.py), reaches
+    /api/live/state as draft_started -- so the rail can tell "the draft has
+    not started yet" apart from "started, waiting on someone else's pick,"
+    which used to render as the identical 'Waiting on the room' heading."""
+    client, state, ws, listener = live_app_on_clock
+    # live_app_on_clock's session carries no real pool (_fake_session's
+    # pool=None) -- fine for /api/live/select, which this fixture exists
+    # for, but /api/live/state's my_slot-known branch reads session.pool for
+    # my_roster. Same trivial-pool/real-settings patch
+    # test_state_reports_socket_alive already applies for the same reason.
+    state["session"] = dataclasses.replace(
+        state["session"],
+        pool=type("P", (), {"player_id": np.array([])})(),
+        settings=league_mod.LeagueSettings(
+            season=2026, teams=8,
+            starters={"QB": 1, "RB": 2, "WR": 2, "TE": 1, "K": 1, "DST": 1},
+            flex_slots=1, bench=6, scoring={"receptions": 1.0},
+            draft_type="SNAKE"))
+
+    assert client.get("/api/live/state").json()["draft_started"] is False
+    listener.on_frame("STATE 1\n")
+    assert client.get("/api/live/state").json()["draft_started"] is True
+
+
+def test_state_draft_started_false_with_no_listener_at_all(tmp_path):
+    """A session with no listener wired up at all (state["listener"] stays
+    None, exactly _launch_listener's own pre-connect state, or a session
+    built via /api/live/start with no socket) reads draft_started False
+    rather than raising -- same "present with a false value, never omitted"
+    convention as listener_alive/socket_alive above."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    conn = get_conn(path)
+    app = FastAPI()
+    state, _recompute = register_live_routes(app, conn, path)
+    client = TestClient(app)
+
+    state["session"] = build_session(conn, my_slot=None)
+    state["listener"] = None
+    body = client.get("/api/live/state").json()
+    assert body["draft_started"] is False
+
+
+def test_state_inactive_reports_draft_started_false(tmp_path):
+    """Present on the inactive (no session at all) branch too, never
+    omitted -- same convention as listener_alive/socket_alive."""
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    body = TestClient(create_app(str(tmp_path / "t.duckdb"))).get("/api/live/state").json()
+    assert body["draft_started"] is False

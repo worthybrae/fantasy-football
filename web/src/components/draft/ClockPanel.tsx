@@ -1,9 +1,21 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import type { LiveState } from '../../api'
+import type { LiveBoard, LiveState } from '../../api'
 import { nextPickFor } from './pickOrder'
 
 const roundOf = (pickNo: number, teams: number) => Math.ceil(pickNo / teams)
+
+// Defect 4: the rail names whose pick it is by the team's real name when it
+// can, straight off /api/live/board's own `columns` (team_name, keyed by
+// slot) -- the room already polls that endpoint every 2.5s (DraftRoom.tsx),
+// so this fetches nothing new. Null (falling back to the bare slot number
+// at the call site) whenever the board hasn't loaded yet, isn't active, or
+// -- defensively, should not happen while the board IS active -- doesn't
+// carry a column for this slot.
+function teamNameForSlot(board: LiveBoard | null, slot: number | null): string | null {
+  if (slot === null || !board?.active) return null
+  return board.columns.find((c) => c.slot === slot)?.team_name ?? null
+}
 
 // "Xs ago" against a live-ticking clock, distinct from api.ts's `ageLabel`
 // (which rounds to whole minutes -- right for a sim run's age, but the
@@ -39,32 +51,69 @@ function formatCountdown(seconds: number | null): string {
 // cosmetic, not a claim about a value the tool does not know.
 const ASSUMED_CLOCK_SECONDS = 30
 
-export default function ClockPanel({ state, secondsLeft }: { state: LiveState; secondsLeft: number | null }) {
+// Defect 3 (post-merge fix): ESPN broadcasts CLOCK roughly every 5s, not
+// every second -- measured in the fixture (tests/fixtures/
+// espn_draft_socket.jsonl): consecutive CLOCK frames land about 5.0s apart
+// (63696 -> 59762 -> 54755 -> 49747 -> ..., a steady ~5007ms). If this
+// component has gone materially longer than that with no FRESH
+// `secondsLeft` value at all, the feed itself has likely stalled (a dropped
+// socket, a reconnect in progress) and continuing to count down locally
+// would show a number silently drifting away from ESPN's own clock -- worse
+// than admitting the countdown does not know. 12s is a little over 2x the
+// observed ~5s cadence: comfortably past one merely-late broadcast (network
+// jitter, or this room's own 2.5s poll landing awkwardly against ESPN's 5s
+// one) while still catching a real stall well inside a single pick's clock.
+const COUNTDOWN_STALE_AFTER_MS = 12_000
+
+export default function ClockPanel({ state, secondsLeft, board = null }: {
+  state: LiveState
+  secondsLeft: number | null
+  // Defect 4's team-name lookup only (see teamNameForSlot), defaulted to
+  // null so an existing caller that hasn't been updated still type-checks.
+  // DraftRoom already holds this from its own /api/live/board poll.
+  board?: LiveBoard | null
+}) {
   // Own ticker, not a prop from DraftRoom: this component's signature is
-  // fixed to {state, secondsLeft} (Task 8/9 are written against it). Its
-  // only real job is `pollAgeLabel`'s "Xs ago" text below, which needs a
-  // per-second re-render to stay current between polls. It does NOT smooth
-  // the countdown itself: `secondsLeft` (sourced from state.ms_remaining by
-  // DraftRoom, see its own comment) only changes when ESPN's own CLOCK
-  // frame updates DraftListener.ms_remaining -- and the real limit there is
-  // ESPN's broadcast interval, not this app's 2.5s poll: observed in the
-  // fixture (tests/fixtures/espn_draft_socket.jsonl), consecutive CLOCK
-  // frames land about 5.0s apart (63696 -> 59762 -> 54755 -> 49747 -> ...,
-  // a steady ~5007ms). So the displayed clock steps down in ~5s jumps, not
-  // ~2.5s ones -- lowering POLL_MS would not smooth it, since the poll was
-  // never the bottleneck. A true 1Hz countdown would need to interpolate
-  // from ms_remaining plus the wall-clock moment it was read -- deliberately
-  // not done here: it would require assuming the browser's clock and the
-  // server's agree (true enough for this tool, which only ever runs on one
-  // machine, but a real assumption worth naming rather than baking in
-  // silently), for a smoothness gain on a personal tool where a ~5s-granular
-  // number over a 30s clock is already legible and honest, and nothing
-  // upstream promises finer resolution than ESPN's own broadcast cadence.
+  // {state, secondsLeft} (Task 8/9 were written against it, and Defect 3
+  // does not need to change it -- everything the interpolation below needs
+  // beyond `secondsLeft` itself is purely local: the wall-clock moment each
+  // new value arrived, and a per-second re-render to count down between
+  // arrivals). Also drives `pollAgeLabel`'s "Xs ago" text below.
   const [nowMs, setNowMs] = useState(() => Date.now())
   useEffect(() => {
     const id = window.setInterval(() => setNowMs(Date.now()), 1000)
     return () => window.clearInterval(id)
   }, [])
+
+  // The interpolation anchor: the last `secondsLeft` value that actually
+  // arrived (a fresh poll's ms_remaining, floor-seconds already applied by
+  // DraftRoom), paired with `Date.now()` at the moment THIS component saw
+  // it change. Re-set only when `secondsLeft` itself changes -- React's own
+  // dependency-array equality check is exactly "a new value arrived," so a
+  // poll that repeats the same rounded second (common: this room polls
+  // every 2.5s, ESPN broadcasts every ~5s) leaves the anchor alone rather
+  // than restarting the countdown from the same number. `secondsLeft` is
+  // already only single-second resolution (Math.round(ms_remaining/1000)
+  // in DraftRoom), so the anchor's own precision is exactly what this
+  // component was ever promised -- it does not assume any finer-grained
+  // clock agreement between browser and server than that.
+  const [anchor, setAnchor] = useState<{ value: number; atMs: number } | null>(
+    secondsLeft !== null ? { value: secondsLeft, atMs: Date.now() } : null,
+  )
+  useEffect(() => {
+    setAnchor(secondsLeft !== null ? { value: secondsLeft, atMs: Date.now() } : null)
+  }, [secondsLeft])
+
+  // The actual per-second countdown: anchor value minus whole seconds
+  // elapsed since it was recorded, never below zero. Null (nothing to
+  // interpolate from) and "stale" (see COUNTDOWN_STALE_AFTER_MS above) both
+  // fall back to `--:--` via formatCountdown, rather than freezing on a
+  // number that may no longer be true -- an explicit "unknown" reads more
+  // honestly on a personal tool than a clock that quietly stopped moving.
+  const staleAnchor = anchor !== null && nowMs - anchor.atMs > COUNTDOWN_STALE_AFTER_MS
+  const displaySeconds = anchor === null || staleAnchor
+    ? null
+    : Math.max(0, anchor.value - Math.floor((nowMs - anchor.atMs) / 1000))
 
   if (!state.active) {
     return (
@@ -127,13 +176,33 @@ export default function ClockPanel({ state, secondsLeft }: { state: LiveState; s
     : null
   const gap = nextPickNo !== null && thisPickNo !== null ? nextPickNo - thisPickNo : null
 
-  const heading = draftDone ? 'Draft complete' : youAreUp ? 'You are on the clock' : 'Waiting on the room'
-  const pct = secondsLeft !== null ? Math.max(0, Math.min(100, (secondsLeft / ASSUMED_CLOCK_SECONDS) * 100)) : null
+  // Defect 4: "the draft hasn't started" and "waiting on someone's pick"
+  // used to render as the identical "Waiting on the room" -- draft_started
+  // (DraftListener.started, off the socket's own STATE frame) tells them
+  // apart. Whose pick it is prefers the team's real name (via `board`,
+  // already polled -- no new fetch) over a bare slot number, falling back
+  // to the slot only when the board hasn't named that column yet.
+  const waitingOnName = teamNameForSlot(board, state.on_the_clock)
+  const heading = draftDone
+    ? 'Draft complete'
+    : !state.draft_started
+      ? 'Draft has not started yet'
+      : youAreUp
+        ? 'You are on the clock'
+        : waitingOnName !== null
+          ? `Waiting on ${waitingOnName}`
+          : `Waiting on slot ${state.on_the_clock}`
+  // Bar and text both driven off the same interpolated value -- displaySeconds,
+  // not the raw (~5s-granular) secondsLeft prop -- so the two never visibly
+  // disagree (a bar frozen in 5s jumps under a number ticking every second).
+  const pct = displaySeconds !== null
+    ? Math.max(0, Math.min(100, (displaySeconds / ASSUMED_CLOCK_SECONDS) * 100))
+    : null
 
   return (
     <div className={`clock-panel${youAreUp ? ' clock-panel-up' : ''}`}>
       <div className="draft-cap">{heading}</div>
-      <div className="clock-countdown mono">{formatCountdown(secondsLeft)}</div>
+      <div className="clock-countdown mono">{formatCountdown(displaySeconds)}</div>
       {pct !== null && (
         // Rendered only when there IS a real clock value -- a `pct: 0` bar
         // sitting under `--:--` used to read as "the clock just ran out,"
