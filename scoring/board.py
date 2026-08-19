@@ -61,7 +61,8 @@ _ADP_TEAM_ALIASES = {"LAR": "LA", "WSH": "WAS", "JAC": "JAX", "SD": "LAC", "OAK"
 
 _BOARD_COLUMNS = [
     "player_id", "name", "position", "team", "bye", "production", "durability",
-    "role", "environment", "schedule", "composite", "vor", "tier", "market_rank",
+    "role", "environment", "schedule", "composite", "proj_points", "vor",
+    "tier", "market_rank",
     "market_spread", "market_sources", "espn_ppr_rank", "espn_id", "ffc_rank", "edge",
     "rookie", "drafted", "rank",
     "stats", "avail_pct", "ev", "ev_se",
@@ -376,9 +377,23 @@ def build_board(conn, weights: dict | None = None,
 
     uni = _merge_adp(uni, adp)
 
+    # `stats` is merged before scoring, not after: projections() falls back
+    # to recency-weighted PPG out of this column when ESPN has no season
+    # projection for a player, and it has to run before the ranking that
+    # depends on it. add_market still runs after, because its `edge` column
+    # is market_rank - rank and needs the rank this block assigns.
+    uni = uni.merge(_latest_season_stats(weekly), on="player_id", how="left")
+
     # -- score --
     uni["composite"] = compute_composite(uni, weights or DEFAULT_WEIGHTS)
-    uni = apply_vor(uni, settings.replacement_ranks)
+    # Projected season points, and VOR as a difference of them. NOT a
+    # difference of composites: composite is a within-position percentile
+    # (factors.normalize_within_position), so differencing it produces a
+    # number with no cross-position meaning -- and this frame is then sorted
+    # across positions. See the spec's section 2.
+    proj = projections(conn, uni)
+    uni["proj_points"] = uni["player_id"].map(proj).astype(float)
+    uni = apply_vor(uni, settings.replacement_ranks, column="proj_points")
     uni = assign_tiers(uni)
     uni = uni.sort_values("vor", ascending=False).reset_index(drop=True)
     uni["rank"] = uni.index + 1
@@ -396,7 +411,6 @@ def build_board(conn, weights: dict | None = None,
     # tested `espn_ppr_rank === null`, which a rank of 1899 passes.
     if "espn_unranked" in uni.columns:
         uni = uni[~uni["espn_unranked"]].drop(columns=["espn_unranked"])
-    uni = uni.merge(_latest_season_stats(weekly), on="player_id", how="left")
 
     drafted_ids = set(drafted["player_id"]) if not drafted.empty else set()
     uni["drafted"] = uni["player_id"].isin(drafted_ids)

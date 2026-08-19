@@ -266,7 +266,13 @@ def _cheatsheet_ranks(conn, ranked: pd.DataFrame, season: int) -> pd.Series:
 
 
 def build_pool(conn, board: pd.DataFrame, settings) -> SimPool:
-    points = projections(conn, board)
+    # The board already carries this (build_board computes it to rank on);
+    # recomputing it here would be a second, silently divergent copy. A bare
+    # fixture board without the column still falls back to computing it.
+    if "proj_points" in board.columns:
+        points = board.set_index("player_id")["proj_points"].astype(float)
+    else:
+        points = projections(conn, board)
     ranked = board.copy()
     ranked["proj"] = ranked["player_id"].map(points)
 

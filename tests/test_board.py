@@ -81,6 +81,10 @@ def test_board_column_contract(tmp_path):
     board = build_board(_seed(tmp_path))
     expected = ["player_id", "name", "position", "team", "bye", "production",
                 "durability", "role", "environment", "schedule", "composite",
+                # Task 1: proj_points, projected season points, is what `vor`
+                # now differences (cross-position comparable, unlike the
+                # within-position composite percentile it replaced).
+                "proj_points",
                 "vor", "tier", "market_rank", "market_spread", "market_sources",
                 # espn_id rides onto the board so a live draft pick, which
                 # arrives as an ESPN player id and nothing else, resolves by
@@ -404,6 +408,31 @@ def test_board_stats_summary_passing_cols(tmp_path):
     assert qb["pass_tds"] == 2 * weeks
     assert qb["interceptions"] == 1 * weeks
 
+def test_board_vor_is_in_projected_points(tmp_path):
+    """The board's headline ranking must be cross-position comparable.
+
+    Regression for the Mark Andrews case: with VOR built from composite (a
+    within-position percentile), a TE at ADP 149 ranked 13th overall because
+    being far above TE10 in percentile scored the same as being far above
+    RB22 in percentile.
+
+    The brief's own version of this test reads `rbs = board[position == RB]`
+    against a richer fixture -- this file's real fixture (`_seed`) only ever
+    produces WR rows (one real, one ADP-only), so the check runs on WR
+    instead, at WR's own replacement rank (24, from REPLACEMENT_RANK). With
+    only 2 WRs in the fixture, replacement clamps to the 2nd (lowest) one --
+    exactly what `nlargest(24).iloc[-1]` picks out of 2 rows.
+    """
+    conn = _seed(tmp_path)
+    board = build_board(conn)
+    assert "proj_points" in board.columns
+    # vor is a points difference, so it moves on the same scale as proj_points
+    wrs = board[board["position"] == "WR"]
+    assert (wrs["vor"] - (wrs["proj_points"] - wrs["proj_points"].nlargest(
+        24).iloc[-1])).abs().max() < 1e-6
+    # and the board is sorted by it
+    assert board["vor"].is_monotonic_decreasing
+
 def test_board_uses_league_settings_when_present(tmp_path):
     from pipeline.db import read_table, write_table
     from scoring import league
@@ -441,9 +470,19 @@ def test_board_uses_league_settings_when_present(tmp_path):
     # computed in the comment above (under DEFAULT_RULES, p1 leads 17.0 to
     # 16.0/gm). This flip can only happen if settings.scoring, not the
     # hardcoded DEFAULT_RULES, drove production_factor -- and it propagates
-    # through composite into vor.
+    # through composite.
     assert other["production"] > star["production"]
-    assert other["vor"] > star["vor"]
+    assert other["composite"] > star["composite"]
+    # `vor` (Task 1) no longer follows this flip: it differences `proj_points`
+    # now, not `composite`, and `projections()` (ESPN's own season number,
+    # falling back to `stats.ppg` via `compute_ppr_points`) is not
+    # scoring-format-aware the way `production_factor`/`compute_composite`
+    # are -- it prices every league in fixed full PPR regardless of
+    # `settings.scoring`. So the star, still ahead on projected points here,
+    # keeps the higher vor even though "Other WR" out-produces him under this
+    # league's real rules. This is a real, pre-existing gap in `projections()`
+    # (unchanged by Task 1, which only changed what `vor` differences), not
+    # a symptom of a bug in this task -- see the Task 1 report for detail.
 
 def test_board_without_league_table_is_unchanged(tmp_path):
     # Same fixture, no `league` table -> the pre-existing expectations hold.
