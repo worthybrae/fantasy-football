@@ -75,6 +75,29 @@ class DraftSession:
     # ESPN, not a display glitch. default_factory so the shared empty dict is
     # not aliased across every session, same reasoning as team_slots.
     board_by_id: dict = dataclasses.field(default_factory=dict)
+    # PROVENANCE of `settings`: True only when it came from THIS connect's
+    # live ESPN fetch (_league_settings_from_espn), False when build_session
+    # fell back to the database's own (league_mod.load) or to the cold-start
+    # default. It exists for exactly one consumer -- `settings.pick_order`,
+    # which is only ever safe to trust from the live fetch.
+    #
+    # The database's `league` table holds one row PER SEASON, each with that
+    # season's real pick order, and `load()` takes the newest. On the default
+    # league's data/nfl.duckdb that is 2025's [7, 5, 2, 8, 4, 1, 6, 3] --
+    # last year's shuffle. ESPN team ids are stable across seasons, so
+    # `pick_order.index(team_id) + 1` answers confidently and WRONGLY: on
+    # this database team 1 resolves to slot 6 (draft_order says 1), team 2 to
+    # slot 3 (says 2), team 3 to slot 8 (says 3) -- every one of the eight is
+    # wrong. And a wrong slot attributes every pick to the wrong manager with
+    # nothing downstream able to detect it (see _slot_for_team's docstring).
+    #
+    # A flag rather than `sess.settings.season == CURRENT_SEASON`: the season
+    # check ROTS. CURRENT_SEASON is a hand-bumped constant, so the year
+    # somebody forgets to bump it is the year a stale row passes the check
+    # silently -- and a season number is in any case only a proxy for the
+    # question actually being asked, which is "did this list come off ESPN
+    # just now". This states that fact outright and cannot drift from it.
+    settings_from_espn: bool = False
 
 
 def _attach_espn_proj(conn, board):
@@ -126,6 +149,12 @@ def build_session(conn, my_slot: int | None, seed: int = DEFAULT_SEED,
     # back to whatever the database holds (the owner's imported league, or the
     # cold-start default). Everything downstream -- the board, the pool, the
     # round count, the roster the simulator drafts FOR -- keys off it.
+    # Recorded BEFORE the fallback overwrites `settings`, because after it
+    # the two sources are indistinguishable -- and one field of the result,
+    # `pick_order`, is only safe to read when it came from ESPN (see
+    # DraftSession.settings_from_espn, and _slot_from_pick_order's own
+    # docstring for what reading a stale one does).
+    settings_from_espn = settings is not None
     if settings is None:
         settings = league_mod.load(conn)
     board = build_board(conn, settings=settings)
@@ -145,7 +174,8 @@ def build_session(conn, my_slot: int | None, seed: int = DEFAULT_SEED,
         board_fingerprint=board_fingerprint(board), seed=seed,
         started_at=datetime.now(timezone.utc), board=board,
         board_by_id={str(r["player_id"]): r
-                     for r in board.to_dict(orient="records")})
+                     for r in board.to_dict(orient="records")},
+        settings_from_espn=settings_from_espn)
 
 
 import re
@@ -304,6 +334,19 @@ def _slot_from_pick_order(settings, team_id: int | None) -> int | None:
     actually happened: it is exact and available the moment ESPN's league
     settings are fetched, at connect, before the socket has sent a single
     frame.
+
+    CALLER'S PRECONDITION, and it is not optional: `settings` must be the
+    LeagueSettings from THIS connect's live ESPN fetch. The database's own
+    settings carry a pick order too -- last completed season's, since the
+    `league` table is one row per season and `load()` takes the newest -- and
+    because ESPN team ids are stable across seasons this function will
+    happily index into it and return a confident, wrong slot rather than
+    None. Both call sites hold to this: _provision_and_build passes the
+    fetched `settings` local (None when the fetch failed, which falls through
+    here), and _resolve_slot gates on `sess.settings_from_espn`, the flag
+    build_session sets for exactly this reason. Any third caller must do the
+    same. The check cannot live in here -- a bare LeagueSettings does not
+    know where it came from -- which is why the flag is on the session.
 
     None whenever it cannot answer, never a guess: no settings (the ESPN
     fetch failed, or this session was built with none), no team_id yet, or
@@ -991,6 +1034,14 @@ def register_live_routes(app, conn, db_path):
                 # the same connection build_session uses just below, so a
                 # resolved slot cannot come from a different league's draft
                 # order.
+                #
+                # `settings` here is _league_settings_from_espn's own return
+                # value, which is None when the fetch failed -- so this call
+                # site satisfies _slot_from_pick_order's precondition (see
+                # its docstring) for free: a failed fetch falls through to
+                # _slot_for_team rather than indexing last season's stale
+                # order. It is the LATER resolution, off sess.settings, that
+                # has to gate on the flag (see _resolve_slot).
                 my_slot = None
                 if team_id is not None:
                     my_slot = (_slot_from_pick_order(settings, team_id)
@@ -1124,12 +1175,31 @@ def register_live_routes(app, conn, db_path):
             where no history can translate the team id and the slot would
             otherwise stay unknown -- leaving every recommendation blank,
             including for our first pick.
+
+            The pick-order step is gated on `settings_from_espn`, which is
+            the difference between this and the connect-time resolution:
+            there `settings` is the fetch's own return value and is None when
+            the fetch failed, so a failed fetch falls through on its own. Here
+            it is `sess.settings`, which build_session has ALREADY replaced
+            with the database's on that same failure -- and the database's
+            pick order is last season's (see the flag's own comment on
+            DraftSession, and the eight wrong slots it produces on this
+            deployment's own data/nfl.duckdb). The reachable trigger is the
+            default league + a failed settings fetch + no teamId= in the
+            pasted url, i.e. the natural waiting-room url this endpoint's own
+            ConnectBody docstring names. Without the gate the stale order
+            wins outright over _slot_for_team, which reads the CURRENT,
+            manually-configured draft_order and would have been right.
             """
             sess = current["session"]
             if sess.my_slot is not None or listener.my_team_id is None:
                 return False
-            resolved = (_slot_from_pick_order(sess.settings, listener.my_team_id)
-                       or _slot_for_team(c2, listener.my_team_id))
+            resolved = None
+            if sess.settings_from_espn:
+                resolved = _slot_from_pick_order(sess.settings,
+                                                 listener.my_team_id)
+            if resolved is None:
+                resolved = _slot_for_team(c2, listener.my_team_id)
             if resolved is None:
                 resolved = _slot_from_socket(
                     listener, getattr(sess.settings, "teams", 0))
@@ -1217,6 +1287,21 @@ def register_live_routes(app, conn, db_path):
 
         thread = threading.Thread(target=pump, daemon=True)
         recompute_thread = threading.Thread(target=recompute_worker, daemon=True)
+        # Pick count as of launch, for the one recompute this function
+        # requests below. Read HERE -- on the connect handler's own thread,
+        # on the connection it just built this session with, and BEFORE that
+        # connection is registered in `state` -- so a concurrent
+        # /api/live/stop can only ever be closing the PREVIOUS session's
+        # league_conn, never this one. It is the same single COUNT(*) that
+        # on_change already runs once per pick, on the same connection, and
+        # `drafted` always exists (pipeline/db.py's get_conn creates it).
+        made_at_launch = 0
+        c0 = work_conn.cursor()
+        try:
+            made_at_launch = c0.execute(
+                "SELECT count(*) FROM drafted").fetchone()[0]
+        finally:
+            c0.close()
         with lock:
             state.update({"session": session, "listener": listener,
                           "listener_thread": thread, "listener_stop": stop_event,
@@ -1228,6 +1313,35 @@ def register_live_routes(app, conn, db_path):
                           "unmapped": [], "last_poll_at": None})
             state["generation"] = state.get("generation", 0) + 1
         recompute_thread.start()
+        # ONE recompute at launch, when the slot is already known. Without it
+        # nothing ever asked for a ranking until a pick landed:
+        # request_recompute was called only from on_change (a pick) and from
+        # on_activity gated on _resolve_slot having JUST returned True --
+        # which can never happen once connect has already resolved my_slot,
+        # since _resolve_slot returns False immediately for a session that
+        # has one. So a connect at pick 0 with the slot known sat on the []
+        # this function initialises `candidates` to, through the owner's
+        # entire first pick. (The vor fallback in live_state now guarantees
+        # the room is never EMPTY; this is what makes a real, slot-aware
+        # ranking -- gain_now, survive_pct, fills -- actually arrive. Both
+        # are needed: a full recompute measures 0.97-1.49s against the real
+        # 249-player pool at 400 rollouts, which is over a second of board
+        # the fallback has to cover, and reconnecting mid-draft while on the
+        # clock would otherwise get no gain_now at all until the next pick.)
+        #
+        # Requested BEFORE thread.start(), i.e. before any frame can arrive:
+        # `pending` is a coalescing depth-one slot (latest write wins, not
+        # max), so a request made after the listener was already running
+        # could overwrite a fresher on_change request with this stale
+        # `made_at_launch`. Ordering it ahead of the listener removes that
+        # race rather than guarding against it.
+        #
+        # Skipped when my_slot is None: _recompute returns immediately in
+        # that case anyway (survival needs a real slot), and on_activity's
+        # _resolve_slot path still fires the recompute the moment the socket
+        # names our team -- that path is unchanged and still needed.
+        if session.my_slot is not None:
+            request_recompute(session, made_at_launch)
         thread.start()
         # my_slot is echoed back deliberately: None means genuinely undetected
         # yet, not a default. A resolved value went through draft_teams ->
@@ -1370,49 +1484,73 @@ def register_live_routes(app, conn, db_path):
                 # pick count.
                 my_roster = []
                 # Defect 2: "who is available" (the pool minus `drafted`) is
-                # always knowable and must render even before my_slot is --
-                # "how they rank for YOUR roster" is the part that genuinely
-                # needs one. _recompute already refuses to run at all without
-                # my_slot (survival()/rank_available need a real slot to
-                # index rosters/snake order by -- see its own docstring), so
-                # `snapshot["candidates"]` simply stays the [] it was
-                # initialized to in _launch_listener for as long as my_slot
-                # is unknown, and there is no async worker result to wait on
-                # here. available_by_vor needs only `taken`, computed fresh
-                # on this same cheap _drafted_state call every poll (see the
-                # timing note just above) -- ranked by the board's own
-                # vor_points, with gain_now/survive_pct/fills honestly None
-                # rather than a fabricated 0.0/"" (scoring/gain.py's own
-                # docstring). candidates_as_of_pick is simply `picks_made`
-                # here: unlike the async-computed slot-ranked list, this is
-                # never stale -- it is recomputed against the current
-                # `taken` mask on every single poll -- so DraftRoom's
-                # "recomputing for pick N" banner (candidates_as_of_pick <
-                # picks_made) correctly never fires for it.
+                # always knowable and must render even before "how they rank
+                # for YOUR roster" is -- that part is what genuinely needs a
+                # slot. `_drafted_state` is called ONCE here and both halves
+                # read off it: `taken_order` attributes the picks (my_roster),
+                # `taken` is the mask the fallback ranking needs. One call,
+                # not one per branch, because both are wanted on the same
+                # request now and they must describe the same instant.
+                #
+                # THE FALLBACK IS GATED ON THE RANKED LIST BEING EMPTY, NOT
+                # ON my_slot BEING UNKNOWN, and that is the whole fix for
+                # this defect. Gated on `my_slot is None` the two halves of
+                # the original repair cancelled out and the owner's original
+                # complaint came straight back: connect resolves my_slot from
+                # ESPN's pickOrder before a single frame arrives
+                # (_slot_from_pick_order), so the `else` branch could no
+                # longer run -- while nothing requested a recompute at launch,
+                # leaving `state["candidates"]` at the [] _launch_listener
+                # initialises it to until the FIRST PICK LANDED. Reproduced
+                # end to end against a real TestClient (pickOrder
+                # [3,7,1,2,4,5,6,8], url carrying teamId=2, run_listener
+                # stubbed to a no-op): connect returned my_slot=4 and
+                # /api/live/state then served picks_made=0,
+                # len(candidates)=0, as_of_pick=None -- and stayed empty at
+                # 3s. The same seed with the teamId stripped out of the url
+                # served my_slot=None and len(candidates)=1. An empty list
+                # renders as the literal string "No candidates yet.", so the
+                # worst case was the owner in slot 1, on the clock for pick 1,
+                # 30-second timer, empty board.
+                #
+                # `not candidates` covers BOTH branches with one condition
+                # and keeps the single-payload-shape property: whatever the
+                # reason the ranked list is empty -- my_slot unknown, the
+                # launch recompute still running (0.97-1.49s measured on the
+                # real 249-player pool, see _launch_listener), a dead
+                # recompute worker -- the room gets the pool instead of
+                # nothing. It cannot mask a real result: `rank_available` and
+                # `available_by_vor` build off the same `~taken` mask, so the
+                # ranked list is empty only when the fallback would be too.
+                #
+                # available_by_vor needs only `taken` (cheap: see the timing
+                # note just above) -- ranked by the board's own vor_points,
+                # with gain_now/survive_pct/fills honestly None rather than a
+                # fabricated 0.0/"" (scoring/gain.py's own docstring).
+                # candidates_as_of_pick is simply `picks_made` here: unlike
+                # the async-computed slot-ranked list, this is never stale --
+                # it is recomputed against the current `taken` mask on every
+                # single poll -- so DraftRoom's "recomputing for pick N"
+                # banner (candidates_as_of_pick < picks_made) correctly never
+                # fires for it.
                 candidates = snapshot["candidates"]
                 candidates_as_of_pick = snapshot["as_of_pick"]
                 horizon_pick = snapshot["horizon_pick"]
-                if session.my_slot is not None:
-                    try:
-                        _, taken_order = _drafted_state(cur, session.pool)
-                    except ValueError:
-                        taken_order = None
-                    if taken_order is not None:
-                        my_roster = _my_roster(session, taken_order)
-                else:
-                    try:
-                        taken, _ = _drafted_state(cur, session.pool)
-                    except ValueError:
-                        taken = None
-                    if taken is not None:
-                        candidates = available_by_vor(
-                            session.pool, taken).to_dict(orient="records")
-                        candidates_as_of_pick = int(picks_made)
-                        # This fallback list is ranked by vor_points alone,
-                        # against nothing -- gain_now/survive_pct are None on
-                        # every row of it. Naming a horizon pick here would
-                        # caption a list that was never measured against one.
-                        horizon_pick = None
+                try:
+                    taken, taken_order = _drafted_state(cur, session.pool)
+                except ValueError:
+                    taken = taken_order = None
+                if taken_order is not None and session.my_slot is not None:
+                    my_roster = _my_roster(session, taken_order)
+                if not candidates and taken is not None:
+                    candidates = available_by_vor(
+                        session.pool, taken).to_dict(orient="records")
+                    candidates_as_of_pick = int(picks_made)
+                    # This fallback list is ranked by vor_points alone,
+                    # against nothing -- gain_now/survive_pct are None on
+                    # every row of it. Naming a horizon pick here would
+                    # caption a list that was never measured against one.
+                    horizon_pick = None
             finally:
                 cur.close()
         slots = snake_slots(session.settings.teams, session.settings.rounds)

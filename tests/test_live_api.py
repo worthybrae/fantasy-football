@@ -560,10 +560,31 @@ def test_state_serves_the_full_pool_by_vor_when_my_slot_is_unknown(tmp_path):
     assert body["candidates_as_of_pick"] == body["picks_made"] == 1
 
 
-def test_state_my_slot_known_behavior_is_unchanged_by_the_vor_fallback(tmp_path):
-    """The known-my_slot path must be untouched: still whatever _recompute
-    actually stored (snapshot["candidates"]/["as_of_pick"]), not silently
-    swapped for the vor-only fallback just because it now exists."""
+def test_the_vor_fallback_fires_on_an_empty_list_not_on_an_unknown_slot(tmp_path):
+    """The gate is "is the ranked list empty", NOT "is my_slot unknown".
+
+    This test used to be called
+    `test_state_my_slot_known_behavior_is_unchanged_by_the_vor_fallback` and
+    asserted `candidates == []` / `candidates_as_of_pick is None` for exactly
+    the state set up below. That was pinning the defect, and it is why the
+    suite stayed green over it: gating the fallback on `my_slot is None`
+    made the two halves of the original repair cancel out. Connect resolves
+    my_slot from ESPN's own pickOrder before a single frame arrives
+    (_slot_from_pick_order), so the unknown-slot branch could no longer run,
+    while nothing requested a recompute at launch -- so the owner's original
+    complaint (an empty Available tab at pick 1, 30-second clock, no undo)
+    was reachable again with the board's own tests passing over it.
+
+    Both halves are asserted here, because the second is the real content of
+    the old test and still has to hold:
+
+      1. my_slot KNOWN and the ranked list empty -- exactly what
+         _launch_listener initialises it to, and what it stays as for the
+         0.97-1.49s a real recompute takes -- must serve the vor-ranked pool,
+         with gain_now/survive_pct/fills honestly None.
+      2. A ranked list that actually exists must be served verbatim, never
+         swapped for the fallback just because the fallback now exists.
+    """
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
@@ -584,8 +605,23 @@ def test_state_my_slot_known_behavior_is_unchanged_by_the_vor_fallback(tmp_path)
 
     body = client.get("/api/live/state").json()
     assert body["my_slot"] == 1
-    assert body["candidates"] == []
-    assert body["candidates_as_of_pick"] is None
+    assert body["candidates"], "an empty board with my_slot known is the defect"
+    assert [c["player_id"] for c in body["candidates"]] == ["p1"]
+    assert body["candidates"][0]["gain_now"] is None
+    assert body["candidates"][0]["survive_pct"] is None
+    assert body["candidates"][0]["fills"] is None
+    assert body["candidates_as_of_pick"] == 0
+    # Never captioned with a horizon: this list was measured against nothing.
+    assert body["horizon_pick"] is None
+
+    # 2. A real ranked list is served as-is.
+    state["candidates"] = _fake_candidates_frame("p1").to_dict(orient="records")
+    state["as_of_pick"] = 7
+    state["horizon_pick"] = 16
+    body = client.get("/api/live/state").json()
+    assert body["candidates"][0]["gain_now"] == 12.5
+    assert body["candidates_as_of_pick"] == 7
+    assert body["horizon_pick"] == 16
 
 
 def test_state_carries_the_pick_clock_league_settings_and_my_roster(tmp_path):
@@ -1025,6 +1061,210 @@ def test_connect_resolves_my_slot_from_espns_pick_order_with_no_frames(
     # connect's own response, and run_listener never delivered a single one.
     assert client.get("/api/live/state").json()["my_slot"] == 4
     client.post("/api/live/stop")
+
+
+def _espn_settings_with_pick_order(order=(3, 7, 1, 2, 4, 5, 6, 8)):
+    """ESPN's raw league-settings payload, parsed, carrying `order` as its
+    draft pickOrder -- the shape `fetch_league_settings` returns on a
+    successful fetch, i.e. what _league_settings_from_espn is handed (it is
+    league_mod.from_espn that turns this dict into a LeagueSettings)."""
+    from pipeline.espn_league import parse_settings
+    return parse_settings({
+        "settings": {
+            "size": 8,
+            "rosterSettings": {"lineupSlotCounts": {
+                "0": 1, "2": 2, "4": 2, "6": 1, "16": 1, "17": 1,
+                "20": 5, "21": 1, "23": 2}},
+            "scoringSettings": {"scoringItems": [{"statId": 53, "points": 1.0}]},
+            "draftSettings": {"type": "SNAKE", "pickOrder": list(order)},
+        }}, 2026)
+
+
+def test_state_is_never_empty_once_connect_has_resolved_my_slot(
+        tmp_path, monkeypatch, _isolated_leagues_root):
+    """The owner's original complaint, reachable again after two fixes that
+    cancelled out. Reproduced exactly as written here before the fix.
+
+    Resolving my_slot at connect (from ESPN's pickOrder) removed the only
+    condition under which live_state's vor fallback could run, and nothing
+    requested a recompute at launch -- request_recompute fires from on_change
+    (a pick landed) and from on_activity gated on _resolve_slot having JUST
+    returned True, which cannot happen for a session that already has a slot.
+    So `state["candidates"]` stayed at the [] _launch_listener initialises it
+    to until the first pick landed, and the room renders an empty list as the
+    literal string "No candidates yet.".
+
+    Before the fix, against this exact setup:
+
+        connect (url has teamId=2): 200  my_slot = 4
+        GET /api/live/state       : my_slot=4 picks_made=0 len(candidates)=0
+        same seed, url WITHOUT teamId: my_slot=None len(candidates)=1
+
+    Both branches are asserted below, in one test, because the defect was
+    precisely that the two disagreed. run_listener is a no-op: not one frame
+    is ever delivered, so nothing but the connect itself can fill the board.
+    """
+    monkeypatch.setattr("api.live.run_listener", lambda *a, **k: None)
+    monkeypatch.setattr("api.live.fetch_league_settings",
+                        lambda *a, **k: _espn_settings_with_pick_order())
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+
+    base = "https://fantasy.espn.com/football/draft?leagueId=1&memberId={X}"
+    for label, url, expect_slot in (("with teamId", base + "&teamId=2", 4),
+                                    ("without teamId", base, None)):
+        path = str(tmp_path / f"live_{expect_slot}.duckdb")
+        _seed_minimal_live_db(path)
+        client = TestClient(create_app(path))
+        assert client.post("/api/live/connect",
+                           json={"url": url}).json()["my_slot"] == expect_slot
+        body = client.get("/api/live/state").json()
+        assert body["my_slot"] == expect_slot
+        assert body["picks_made"] == 0
+        assert body["candidates"], (
+            f"{label}: empty board at pick 0 -- this is the defect")
+        assert body["candidates_as_of_pick"] == 0
+        client.post("/api/live/stop")
+
+
+def test_connect_ranks_once_at_launch_instead_of_waiting_for_a_pick(
+        tmp_path, monkeypatch, _isolated_leagues_root):
+    """The vor fallback keeps the board from being EMPTY; this is what makes
+    a real, slot-aware ranking actually arrive.
+
+    Nothing used to request one until a pick landed, so connecting at pick 0
+    -- or reconnecting mid-draft while already on the clock -- served the
+    pool with gain_now/survive_pct/fills all None for the whole of that turn.
+    A full recompute measures 0.97-1.49s against the real 249-player pool at
+    400 rollouts, so it cannot be done inline on the connect; it is requested
+    on the worker, once, before the listener thread starts.
+
+    The signal asserted is a non-None gain_now, which only rank_available
+    produces: available_by_vor's rows carry None there by construction (see
+    scoring/gain.py). Real survival() and rank_available() run here -- the
+    seeded pool is one player, so the "expensive" part is trivial -- because
+    a mocked ranking could not tell the two payloads apart.
+    """
+    monkeypatch.setattr("api.live.run_listener", lambda *a, **k: None)
+    monkeypatch.setattr("api.live.fetch_league_settings",
+                        lambda *a, **k: _espn_settings_with_pick_order())
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    client = TestClient(create_app(path))
+    assert client.post(
+        "/api/live/connect",
+        json={"url": "https://fantasy.espn.com/football/draft?leagueId=1"
+                     "&teamId=2&memberId={X}"}).json()["my_slot"] == 4
+
+    assert _wait_until(
+        lambda: any(c["gain_now"] is not None for c in
+                    client.get("/api/live/state").json()["candidates"])), \
+        "no ranking was ever requested -- the board waits for the first pick"
+    body = client.get("/api/live/state").json()
+    # Measured against a real horizon pick, which only _recompute writes.
+    assert body["horizon_pick"] is not None
+    assert body["recompute_error"] is None
+    client.post("/api/live/stop")
+
+
+def test_resolve_slot_never_trusts_the_databases_own_pick_order(
+        tmp_path, monkeypatch):
+    """A stale pick order is a CONFIDENT wrong answer, and nothing
+    downstream can detect one (see _slot_for_team's docstring).
+
+    The `league` table holds one row per season, each with that season's real
+    pick order, and league_mod.load() takes the newest -- so on the default
+    league's own database that is LAST season's shuffle. ESPN team ids are
+    stable across seasons, so `pick_order.index(team_id) + 1` answers rather
+    than falling through, and it used to win outright over _slot_for_team,
+    which reads the CURRENT manually-configured draft_order and is right.
+
+    Trigger, all three parts reachable together and reproduced here: the
+    default league (so `load()` sees a real `league` table at all -- a
+    provisioned league file has none), a failed ESPN settings fetch (so
+    build_session falls back to that table), and no teamId= in the pasted url
+    (so the slot is resolved later, from sess.settings, rather than at
+    connect from the fetch's own return value). That last one is the natural
+    waiting-room url ConnectBody's own docstring names.
+
+    The numbers below are this deployment's real ones: data/nfl.duckdb's
+    newest `league` row is 2025 with pick_order [7, 5, 2, 8, 4, 1, 6, 3], and
+    against it team 2 resolves to slot 3 while draft_order says slot 2.
+    """
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+
+    # Last season's real order, on the default league's own database.
+    conn = get_conn(path)
+    stale = league_mod.LeagueSettings(
+        season=2025, teams=8,
+        starters={"QB": 1, "RB": 2, "WR": 3, "TE": 1, "K": 1, "DST": 1},
+        flex_slots=1, bench=6, scoring={"receptions": 0.5},
+        draft_type="SNAKE", pick_order=(7, 5, 2, 8, 4, 1, 6, 3))
+    write_table(conn, "league", pd.DataFrame([
+        {"season": 2025, "league_id": "53929318",
+         "settings_json": league_mod.to_json(stale)}]))
+    conn.close()
+
+    # The autouse fixture already stubs fetch_league_settings to None, which
+    # IS the failed-fetch case -- stated again here because it is a
+    # precondition of the defect, not incidental.
+    monkeypatch.setattr("api.live.fetch_league_settings", lambda *a, **k: None)
+
+    tick = threading.Event()
+
+    def fake_run_listener(listener, url, state_path, on_change=None,
+                          headless=False, stop_event=None):
+        # The socket names our team; no pick has landed, which is the
+        # waiting-room state _resolve_slot exists for.
+        listener.my_team_id = 2
+        while stop_event is None or not stop_event.is_set():
+            if tick.wait(timeout=0.01):
+                tick.clear()
+                on_change()
+
+    monkeypatch.setattr("api.live.run_listener", fake_run_listener)
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    client = TestClient(create_app(path))
+    # The default league id, so the session builds against `path` itself and
+    # league_mod.load() actually sees the stale row above.
+    resp = client.post(
+        "/api/live/connect",
+        json={"url": "https://fantasy.espn.com/football/draft?leagueId=53929318"})
+    assert resp.status_code == 200
+    assert resp.json()["my_slot"] is None      # no teamId= in the url
+
+    tick.set()
+    assert _wait_until(
+        lambda: client.get("/api/live/state").json()["my_slot"] is not None), \
+        "_resolve_slot never ran"
+    # 2, from draft_teams -> draft_order. NOT 3, which is where team 2 sits
+    # in the 2025 pick order sitting in the database.
+    assert client.get("/api/live/state").json()["my_slot"] == 2
+    client.post("/api/live/stop")
+
+
+def test_build_session_records_where_its_settings_came_from(tmp_path):
+    """The provenance flag the gate above depends on. Nothing else can tell
+    the two sources apart after build_session has run: `settings` is a plain
+    LeagueSettings either way."""
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    conn = get_conn(path)
+
+    assert build_session(conn, my_slot=1).settings_from_espn is False
+    fetched = league_mod.from_espn(_espn_settings_with_pick_order())
+    session = build_session(conn, my_slot=1, settings=fetched)
+    assert session.settings_from_espn is True
+    assert session.settings.pick_order == (3, 7, 1, 2, 4, 5, 6, 8)
+    conn.close()
 
 
 def test_connect_resolves_my_slot_from_a_teamid_in_the_url(
@@ -1525,7 +1765,12 @@ def test_a_failing_recompute_is_reported_and_does_not_kill_the_worker(
     def flaky_drafted_state(cur, pool):
         if failing["on"]:
             raise ValueError("2 drafted rows have no pick_no")
-        return (set(), [])
+        # A real pool-aligned mask, not a bare set(): live_state now feeds
+        # this same value to available_by_vor for its fallback list (see
+        # test_the_vor_fallback_fires_on_an_empty_list_not_on_an_unknown_slot),
+        # and `~np.asarray(set())` is a TypeError. Nothing about this test
+        # wanted a fake shape here -- it only ever needed "no picks yet".
+        return (np.zeros(len(pool.player_id), dtype=bool), [])
 
     monkeypatch.setattr("api.live._drafted_state", flaky_drafted_state)
     monkeypatch.setattr("api.live.survival", _fake_survival_frame)
@@ -1562,12 +1807,22 @@ def test_a_failing_recompute_is_reported_and_does_not_kill_the_worker(
     # that existed before.
     assert body["listener_alive"] is True
     assert body["listener_error"] is None
-    assert body["candidates_as_of_pick"] is None
+    # Nothing was ever ranked, so no horizon was ever measured. (Not
+    # `candidates_as_of_pick is None`, which this used to assert: live_state
+    # now serves the vor-ranked pool whenever the ranked list is empty, and
+    # stamps it with the current pick count. That is the point of the
+    # fallback -- a broken recompute worker must not leave the room looking
+    # at "No candidates yet." -- so as_of_pick no longer distinguishes "a
+    # ranking landed" from "a ranking never happened". The horizon does:
+    # only _recompute writes it, and the fallback explicitly nulls it.)
+    assert body["horizon_pick"] is None
+    assert all(c["gain_now"] is None for c in body["candidates"])
 
     failing["on"] = False
     tick.set()
     assert _wait_until(
-        lambda: client.get("/api/live/state").json()["candidates_as_of_pick"] is not None), \
+        lambda: any(c["gain_now"] is not None for c in
+                    client.get("/api/live/state").json()["candidates"])), \
         "the worker died on the first failure instead of surviving it"
     assert client.get("/api/live/state").json()["recompute_error"] is None
 
