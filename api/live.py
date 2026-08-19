@@ -172,10 +172,10 @@ from scoring.gain import available_by_vor, rank_available
 
 class ConnectBody(BaseModel):
     # No my_slot field. A URL carrying teamId= resolves it immediately (see
-    # _team_id_from_url / _slot_for_team); one that doesn't (the natural
-    # waiting-room URL to paste) leaves it None until the socket's TOKEN
-    # frame names our team (see live_connect's on_change) -- there is no
-    # third case left for a human to fill in by hand.
+    # _team_id_from_url / _slot_from_pick_order / _slot_for_team); one that
+    # doesn't (the natural waiting-room URL to paste) leaves it None until
+    # the socket's TOKEN frame names our team (see live_connect's on_change)
+    # -- there is no third case left for a human to fill in by hand.
     url: str
 
 
