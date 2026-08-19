@@ -1,11 +1,12 @@
-import { useEffect, useState } from 'react'
-import { fetchLiveState, fetchPlayers, selectPlayer, type LiveCandidate, type LiveSettings,
-         type LiveState, type Player, type RosterPlayer } from '../api'
+import { useEffect, useRef, useState } from 'react'
+import { fetchBoard, fetchLiveState, fetchPlayers, selectPlayer, type LiveBoard, type LiveCandidate,
+         type LiveSettings, type LiveState, type Player, type RosterPlayer } from '../api'
 import ClockPanel from '../components/draft/ClockPanel'
 import RosterPanel, { type RosterSlot } from '../components/draft/RosterPanel'
 import TopThree from '../components/draft/TopThree'
 import AvailableList from '../components/draft/AvailableList'
 import ConfirmPick, { type PickStatus } from '../components/draft/ConfirmPick'
+import DraftBoardGrid from '../components/DraftBoardGrid'
 
 const POLL_MS = 2500
 
@@ -110,11 +111,38 @@ function nextPickFor(fromPickNo: number, mySlot: number, teams: number): number 
 export default function DraftRoom() {
   const [state, setState] = useState<LiveState | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // The board grid's own poll and error slot, kept apart from `state`/`error`
+  // above -- lifted from the deleted LiveDraft.tsx's own two-slot poll (see
+  // the effect below). A hiccup fetching /api/live/board must not blank the
+  // recommendation (`state`/`candidates`, still fine), and a hiccup fetching
+  // /api/live/state must not blank the board (`board` is only ever written
+  // on a *successful* fetchBoard, never cleared on a failed one -- see the
+  // catch below) -- one slow endpoint should never make the other tab look
+  // broken.
+  const [board, setBoard] = useState<LiveBoard | null>(null)
+  const [boardError, setBoardError] = useState<string | null>(null)
   const [players, setPlayers] = useState<Record<string, Player>>({})
   // Task 7 owns this state and the toggle handlers, since it renders the tab
   // strip -- Task 9 adds only the auto-switch (jumping to Available the
   // moment you come on the clock) on top of what's here.
   const [tab, setTab] = useState<Tab>('available')
+
+  // The on_the_clock slot seen on the *previous* successful poll, so the
+  // auto-switch below can fire on the transition into your turn rather than
+  // on the condition "it's your turn" -- the latter would re-fire on every
+  // 2.5s poll for as long as you stay on the clock and force you back to
+  // Available even if you deliberately switched to the board mid-pick to
+  // check something, which is the worst possible moment to yank the view
+  // away. `undefined` (not `null`) marks "no poll observed yet in this
+  // session" -- distinct from `null`, which is a real value meaning "nobody
+  // is on the clock" -- so the very first poll of a session that happens to
+  // load with you already on the clock (a reload or reconnect mid-turn)
+  // is recorded, not treated as a transition; `tab` already defaults to
+  // 'available' on mount, so that case needs no help from here. Reset to
+  // `undefined` whenever the session goes inactive (see the poll below) so a
+  // slot left over from a *previous* draft can never masquerade as a real
+  // transition in the next one.
+  const prevOnClockRef = useRef<number | null | undefined>(undefined)
 
   // The pick this session is confirming, plus how that confirmation is
   // going -- held here (not inside ConfirmPick) because a poll landing
@@ -147,9 +175,11 @@ export default function DraftRoom() {
     }
   }, [])
 
-  // 2.5s poll of /api/live/state, lifted unchanged from the deleted
-  // LiveDraft.tsx. The board's own poll (fetchBoard/LiveBoard) is Task 9's
-  // to add, alongside the Snake Board tab it feeds.
+  // 2.5s poll of /api/live/state, lifted from the deleted LiveDraft.tsx --
+  // now joined by that same file's /api/live/board poll, in the one loop
+  // (own try/catch per fetch, own state/error slot per fetch, see LiveDraft
+  // git history) so a hiccup in either endpoint can't blank the other's
+  // tab.
   useEffect(() => {
     let cancelled = false
 
@@ -159,9 +189,33 @@ export default function DraftRoom() {
         if (!cancelled) {
           setState(data)
           setError(null)
+          if (!data.active) {
+            // No session: whatever slot was on the clock belonged to a
+            // *previous* draft, if any -- must not be compared against next
+            // session's own on_the_clock as though it were a real edge.
+            prevOnClockRef.current = undefined
+          } else {
+            const prevOnClock = prevOnClockRef.current
+            prevOnClockRef.current = data.on_the_clock
+            if (prevOnClock !== undefined && data.my_slot !== null &&
+                data.on_the_clock === data.my_slot && prevOnClock !== data.my_slot) {
+              setTab((t) => (t === 'board' ? 'available' : t))
+            }
+          }
         }
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load live state')
+      }
+      try {
+        const data = await fetchBoard()
+        if (!cancelled) {
+          setBoard(data)
+          setBoardError(null)
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setBoardError(e instanceof Error ? e.message : 'Failed to load the draft board')
+        }
       }
     }
 
@@ -351,7 +405,32 @@ export default function DraftRoom() {
                   />
                 </>
               )
-              : <div className="draft-main-placeholder">Snake board — Task 9</div>}
+              : board?.active
+                ? (
+                  // `.board-tab` only pads the grid, same padding the mock's
+                  // own snake-board panel uses -- `.board-wrap` itself is
+                  // DraftBoardGrid's own horizontal scroll container (per
+                  // its own CSS comment), and it flows straight in
+                  // `.draft-main`'s existing overflow-y: auto region rather
+                  // than opening a second, nested vertical scroller -- the
+                  // same "no second scroll container" call the ranked
+                  // available table already makes (see App.css, the comment
+                  // above `.avail-col-rank`) so the page itself never
+                  // scrolls and there is exactly one vertical scroll
+                  // container per tab.
+                  <div className="board-tab">
+                    {boardError && <p className="error draft-error-banner">{boardError}</p>}
+                    <DraftBoardGrid board={board} />
+                  </div>
+                )
+                // No board yet: either still loading (boardError null) or
+                // the fetch itself failed before a first board ever landed
+                // (nothing stale to fall back to, unlike the branch above).
+                : (
+                  <p className="rail-empty draft-main-placeholder">
+                    {boardError ?? 'Waiting for the draft board…'}
+                  </p>
+                )}
           </div>
         </div>
 

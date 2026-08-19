@@ -1016,6 +1016,18 @@ td:first-child {
   font-size: var(--text-md);
 }
 
+/* The Snake Board tab's own padding, matching the mock's "padding: 12px
+   14px" around its grid -- `.board-wrap` itself (DraftBoardGrid.tsx) stays
+   unpadded so its sticky corner/round-labels can sit flush against this
+   box's edges rather than a padded one. No height/overflow rule here on
+   purpose: `.board-wrap` is the one horizontal scroller (per its own
+   comment) and this tab flows in `.draft-main`'s existing vertical one,
+   same "no second scroll container" call the ranked-available-table comment
+   below already makes for the Available tab's own table. */
+.board-tab {
+  padding: var(--space-3) var(--space-4);
+}
+
 /* The rail: fixed width, never scrolls out of view (per the task brief) --
    its own children (RosterPanel's list, mainly) scroll internally instead
    of the rail itself moving. */

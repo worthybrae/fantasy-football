@@ -76,7 +76,7 @@ function reasonFor(c: LiveCandidate): string {
     return `He ${slot} -- this pick would not start no matter what, whatever his ${survive}% odds of lasting to your next one are worth.`
   }
   if (c.gain_now <= 0) {
-    return `He ${slot}, but the model expects a stronger option at his position to still be there at your next pick -- taking him now nets ${fmtSigned(c.gain_now)} against that, whatever his own ${survive}% survival odds are worth, so this is not the pick to make yet.`
+    return `He ${slot}, but the model expects an option at least as good at his position to still be there at your next pick -- taking him now nets ${fmtSigned(c.gain_now)} against that, whatever his own ${survive}% survival odds are worth, so this is not the pick to make yet.`
   }
   if (c.vor_points > 0 && c.gain_now / c.vor_points < 0.15) {
     return `He ${slot}, but the next-best option there is nearly as good -- only ${fmtSigned(c.gain_now)} is actually at stake, well short of the ${fmtSigned(c.vor_points)} over replacement he shows on the board.`
