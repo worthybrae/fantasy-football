@@ -7,11 +7,16 @@ from scoring import factors
 from scoring.board import _norm_name, _adapt_depth_charts
 from scoring.board_cache import cached_build_board
 from scoring.config import RECENCY_WEIGHTS
+from scoring.profile_cache import cached_profile_frames, snap_share_by_season
 from scoring.ppr import compute_ppr_points
 from scoring.similarity import (player_season_features, find_twins,
                                 value_neighbors)
 
 _KDST_POSITIONS = {"K", "DST"}
+
+# Distinguishable from an explicit `snap_share=None`, which means "there is
+# no snap data" -- a real, different answer from "work it out yourself".
+_UNSET = object()
 
 
 def _scrub(v):
@@ -97,14 +102,36 @@ def _game_stats(row):
     return {k: int(_num(row, col)) for k, col in _GAME_STAT_COLS.items()}
 
 
-def season_summaries(weekly: pd.DataFrame, snaps: pd.DataFrame, player_id: str) -> list[dict]:
+def season_summaries(weekly: pd.DataFrame, snaps: pd.DataFrame | None, player_id: str,
+                     *, season_features: pd.DataFrame | None = None,
+                     snap_share=_UNSET) -> list[dict]:
+    """Per-season rows for one player.
+
+    Only ONE thing here is league-wide: `pos_finish`, which ranks this
+    player against every other player-season in `season_features`.
+    Everything else reads `weekly[weekly.player_id == player_id]` and
+    `snaps` for this player's name/team/season. So a caller that already
+    holds the two league-wide aggregates -- the features frame and the
+    snap-share aggregate -- may pass them in and hand `weekly` nothing but
+    this player's rows, and `snaps` nothing at all. That is what
+    scoring/profile.py's `build_profile` does now: recomputing them per
+    click cost 0.211s and 0.343s respectively on data/nfl.duckdb (see
+    scoring/profile_cache.py). Pass neither and the behaviour is what it
+    always was, which is what every test here does.
+    """
     if weekly.empty:
         return []
-    feats = player_season_features(weekly)
+    feats = (player_season_features(weekly) if season_features is None
+             else season_features)
     # Positional finish by total season points (the standard "finished RB12"
     # framing), ranked across every player in the weekly table.
-    feats["pos_finish"] = (feats.groupby(["season", "position"])["points"]
-                           .rank(ascending=False, method="min"))
+    # `.assign` rather than `feats["pos_finish"] = ...`: `feats` may now be
+    # a frame owned by the caller (profile_cache's cached aggregate), and
+    # writing a column into it would leave `pos_finish` stuck on the cached
+    # object for every later click. profile_cache hands out copies too --
+    # this is the belt to that braces, and it costs 1.2ms.
+    feats = feats.assign(pos_finish=feats.groupby(["season", "position"])["points"]
+                         .rank(ascending=False, method="min"))
     mine = feats[feats["player_id"] == player_id].copy()
     if mine.empty:
         return []
@@ -116,11 +143,8 @@ def season_summaries(weekly: pd.DataFrame, snaps: pd.DataFrame, player_id: str) 
     mine["team"] = mine["season"].map(team_by_season)
     mine["_norm_name"] = mine["name"].map(_norm_name)
 
-    if snaps is not None and not snaps.empty:
-        s = snaps.copy()
-        s["_norm_name"] = s["player"].map(_norm_name)
-        share = (s.groupby(["_norm_name", "team", "season"], as_index=False)
-                  ["offense_pct"].mean())
+    share = snap_share_by_season(snaps) if snap_share is _UNSET else snap_share
+    if share is not None:
         mine = mine.merge(share, on=["_norm_name", "team", "season"], how="left")
         mine = mine.rename(columns={"offense_pct": "snap_share"})
     else:
@@ -224,7 +248,8 @@ def _espn_projection(conn, player_id: str, name: str, position: str) -> float | 
     return None
 
 
-def game_log(weekly: pd.DataFrame, player_id: str) -> list[dict]:
+def game_log(weekly: pd.DataFrame, player_id: str, *,
+             season_len: pd.Series | None = None) -> list[dict]:
     if weekly.empty:
         return []
     wk = weekly[weekly["player_id"] == player_id].copy()
@@ -236,7 +261,13 @@ def game_log(weekly: pd.DataFrame, player_id: str) -> list[dict]:
     # bye, healthy scratch -- become zeroed `dnp` rows so the log shows the
     # games missed, not just the games played. Consumers computing per-game
     # averages must exclude dnp rows.
-    season_len = weekly.groupby("season")["week"].max()
+    # This is the one thing here that is NOT per-player, so a caller passing
+    # only this player's rows in `weekly` MUST supply it -- derived from
+    # their own rows it would be the last week they played, and every week
+    # they missed at the end of a season would vanish from the log instead
+    # of showing up as a dnp.
+    if season_len is None:
+        season_len = weekly.groupby("season")["week"].max()
     by_week = {(int(r["season"]), int(r["week"])): r for _, r in wk.iterrows()}
     position = wk["position"].iloc[-1] if "position" in wk.columns else None
     zero = pd.Series(0.0, index=wk.columns)
@@ -329,6 +360,17 @@ def weekly_difficulty(schedules: pd.DataFrame, prior_weekly: pd.DataFrame,
 
 def _outlook(weekly: pd.DataFrame, depth: pd.DataFrame, schedules: pd.DataFrame,
              player_row: dict) -> dict:
+    """Depth slot, implied points, strength of schedule and bye week.
+
+    `weekly` is only ever read as `weekly[weekly.season == max(season)]`
+    below, so handing this the latest-season slice instead of the whole
+    table produces the identical frame (the re-slice becomes a no-op that
+    keeps every row, index and order intact) -- which is what
+    `build_profile` does, off profile_cache's `prior_weekly`.
+
+    `depth` likewise is only read as `adapted[adapted.gsis_id == player_id]`,
+    so a slice already narrowed to this player is enough.
+    """
     team = player_row.get("team")
     position = player_row.get("position")
     player_id = player_row.get("player_id")
@@ -387,6 +429,77 @@ def _enrich_twins(twins: dict, board: pd.DataFrame) -> dict:
     return twins
 
 
+def _table_columns(conn, name: str) -> set[str]:
+    """Column names of `name`, or an empty set if the table doesn't exist.
+
+    Same existence check `read_table` (pipeline/db.py) makes, one query
+    later: the filtered reads below have to know a column is there before
+    they can put it in a WHERE clause, and a table that predates a column
+    must fall back to reading the lot rather than raising.
+    """
+    return {r[0] for r in conn.execute(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = ?",
+        [name]).fetchall()}
+
+
+def _player_weekly(conn, player_id: str) -> pd.DataFrame:
+    """This player's weekly rows only.
+
+    `read_table(conn, "weekly")` pulled all 174,373 rows x 145 columns
+    (0.247s) so that `season_summaries` and `game_log` could immediately
+    throw away everything but the ~100 rows belonging to one player. The
+    same filter in SQL costs 36ms.
+
+    VERIFIED, not assumed, because both callers are order-sensitive
+    (`groupby("season")["recent_team"].last()` and `wk["position"].iloc[-1]`
+    both depend on row order, and a differently-ordered scan would quietly
+    change a team or a position): for all 249 board players this returns a
+    frame `assert_frame_equal`-identical -- values, order AND dtypes -- to
+    `read_table(conn, "weekly")[weekly.player_id == player_id]`. The
+    mechanism is DuckDB's `preserve_insertion_order`, which defaults to
+    true and makes a filtered scan yield storage order just as a full scan
+    does. If that setting is ever turned off for this connection, this is
+    the line to revisit.
+    """
+    cols = _table_columns(conn, "weekly")
+    if not cols:
+        return pd.DataFrame()
+    if "player_id" not in cols:
+        return read_table(conn, "weekly")
+    return conn.execute("SELECT * FROM weekly WHERE player_id = ?", [player_id]).df()
+
+
+def _depth_slice(conn, team, player_id: str) -> pd.DataFrame:
+    """The depth-chart rows for this player's team, plus this player's own.
+
+    depth_charts is the biggest table the profile touched -- 416,885 rows
+    over 142 daily snapshots, 0.233s to read, 275 MB in memory -- and the
+    two consumers between them want one team's rows (`team_depth_chart`)
+    and one player's rows (`_outlook`). The union of the two filters is a
+    single query, 18ms, and both consumers then narrow it exactly as they
+    did before: `team_depth_chart` takes `depth.team == team` and the
+    latest `dt` WITHIN that team, which the OR-clause cannot disturb
+    because it never removes a row of that team.
+
+    Verified identical (`assert_frame_equal`, dtypes included) to
+    `read_table(conn, "depth_charts")[(team match) | (gsis_id match)]` for
+    all 249 board players. A schema without both columns -- the fixture in
+    tests/test_profile.py writes depth_charts with no `team` column at all
+    -- falls back to the full read, which is what those rows are sized for.
+    """
+    cols = _table_columns(conn, "depth_charts")
+    if not cols:
+        return pd.DataFrame()
+    if not {"team", "gsis_id"}.issubset(cols):
+        return read_table(conn, "depth_charts")
+    # A NaN/None team must match nothing, which is what `= NULL` does and
+    # what pandas' `depth["team"] == nan` did.
+    team = team if isinstance(team, str) else None
+    return conn.execute(
+        "SELECT * FROM depth_charts WHERE team = ? OR gsis_id = ?",
+        [team, player_id]).df()
+
+
 def build_profile(conn, player_id: str, weights: dict | None = None) -> dict | None:
     # Was `build_board(conn, weights)` -- every profile click rebuilt the
     # whole 249-row board (all factors, composite, VOR, tiers, a five-source
@@ -406,10 +519,21 @@ def build_profile(conn, player_id: str, weights: dict | None = None) -> dict | N
     factors_out = {k: header[k] for k in
                    ("production", "durability", "role", "environment", "schedule")}
 
-    weekly = read_table(conn, "weekly")
-    snaps = read_table(conn, "snap_counts")
-    schedules = read_table(conn, "schedules")
-    depth = read_table(conn, "depth_charts")
+    # Was four full `read_table` calls -- weekly (174,373 rows), snap_counts
+    # (253,106), depth_charts (416,885) and schedules -- 0.614s of reading
+    # 844k rows per click, before a single one of them was filtered down to
+    # one player. cached_profile_frames (scoring/profile_cache.py) holds the
+    # league-wide aggregates that survive the filtering (the season-features
+    # frame, the snap-share aggregate, the latest season's weekly rows,
+    # season lengths, schedules, players) and re-derives them only when
+    # `meta` says a pipeline refresh has happened -- the same signal
+    # scoring/board_cache.py keys on, imported from it rather than
+    # re-invented. The two genuinely per-player reads have their filters
+    # pushed into SQL instead.
+    frames = cached_profile_frames(conn)
+    schedules = frames.schedules
+    wk_mine = _player_weekly(conn, player_id)
+    depth = _depth_slice(conn, header["team"], player_id)
 
     if header["position"] == "K":
         # Kickers have weekly rows, but the PPR formula doesn't score kicking
@@ -420,16 +544,24 @@ def build_profile(conn, player_id: str, weights: dict | None = None) -> dict | N
         seasons = []
         logs = []
     else:
-        seasons = season_summaries(weekly, snaps, player_id)
-        logs = game_log(weekly, player_id)
-    outlook_out = _outlook(weekly, depth, schedules, header)
+        seasons = season_summaries(wk_mine, None, player_id,
+                                   season_features=frames.season_features,
+                                   snap_share=frames.snap_share)
+        logs = game_log(wk_mine, player_id, season_len=frames.season_len)
+    outlook_out = _outlook(frames.prior_weekly, depth, schedules, header)
 
     if header["position"] in _KDST_POSITIONS:
         similar = value_neighbors(board, player_id)
     else:
-        players = read_table(conn, "players")
-        twins = (find_twins(weekly, player_id, players=players)
-                 if not weekly.empty else None)
+        players = frames.players
+        # `wk_mine` is ignored: find_twins' only use of its `weekly`
+        # argument is `player_season_features`, which is what
+        # `season_features` supplies. The guard stays on the FULL table
+        # being empty, which is what it always tested -- `frames`
+        # carries that flag for exactly this line.
+        twins = (find_twins(wk_mine, player_id, players=players,
+                            season_features=frames.season_features)
+                 if not frames.weekly_empty else None)
         similar = (_enrich_twins(twins, board) if twins is not None
                    else value_neighbors(board, player_id))
 
@@ -440,7 +572,11 @@ def build_profile(conn, player_id: str, weights: dict | None = None) -> dict | N
                              if summary["proj_ppg"] is not None and summary["w_ppg"] is not None
                              else None)
 
-    prior = weekly[weekly["season"] == weekly["season"].max()] if not weekly.empty else weekly
+    # Identical frame to the old `weekly[weekly.season == weekly.season.max()]`
+    # -- profile_cache slices it off the full table with that exact
+    # expression, so rows, index and order all match; an empty `weekly`
+    # still yields the empty frame this used to fall back to.
+    prior = frames.prior_weekly
     payload = {
         "header": header,
         "factors": factors_out,

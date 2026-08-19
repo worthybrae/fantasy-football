@@ -56,8 +56,18 @@ def _age_in_season(birth_date, season: int) -> int | None:
 
 
 def find_twins(weekly: pd.DataFrame, player_id: str, top_n: int = 5,
-               players: pd.DataFrame | None = None) -> dict | None:
-    all_feats = player_season_features(weekly)
+               players: pd.DataFrame | None = None, *,
+               season_features: pd.DataFrame | None = None) -> dict | None:
+    """`weekly` is used for exactly one thing -- `player_season_features` --
+    so a caller that already has that frame can hand it over as
+    `season_features` and `weekly` is then ignored entirely. That is not an
+    optimisation detail of this function so much as a measured fact about
+    its caller: scoring/profile.py computed the same 174,373-row aggregate
+    here AND in `season_summaries` on every profile click, 0.211s each,
+    and threw both away. See scoring/profile_cache.py. Passing nothing
+    keeps the old behaviour byte for byte."""
+    all_feats = (player_season_features(weekly) if season_features is None
+                 else season_features)
     feats = all_feats[all_feats["games"] >= MIN_GAMES]
     mine = feats[feats["player_id"] == player_id]
     if mine.empty:

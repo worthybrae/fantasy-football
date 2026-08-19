@@ -556,3 +556,165 @@ def test_cached_build_board_lru_is_bounded(tmp_path):
                    "schedule": 0.2, "durability": 0.2 - i * 1e-4}
         cached_build_board(conn, weights)
     assert len(_cache) <= _MAX_ENTRIES
+
+
+# -- profile frame cache + filtered reads (scoring/profile_cache.py) -------
+#
+# With the board cached, what was left of a profile click was build_profile's
+# own reading: `weekly` (174,373 rows), `snap_counts` (253,106) and
+# `depth_charts` (416,885) pulled whole on every click and then filtered down
+# to one player in pandas, plus `player_season_features` recomputed twice and
+# a 253k-row `_norm_name` map recomputed once, per click. That work now comes
+# from cached_profile_frames, and the two genuinely per-player reads push
+# their filter into SQL. Timing the second call would prove the cache exists,
+# not that it's right; these pin the four ways it could be wrong instead --
+# a cached frame annotated by whoever used it first, a SQL filter that
+# doesn't select what the pandas filter did, a schema the filter can't
+# express, and the one aggregate that is NOT per-player quietly becoming so.
+
+def _seed_with_real_depth_schema(tmp_path):
+    """Like _seed_two_players but with a depth_charts in the live nflverse
+    shape (dt/team/pos_abb/pos_rank/gsis_id), which is the one _depth_slice
+    can actually push a WHERE clause at, and a snap_counts with rows in it."""
+    conn = get_conn(str(tmp_path / "depth.duckdb"))
+    write_table(conn, "weekly", _two_player_weekly_rows())
+    write_table(conn, "schedules", pd.DataFrame([
+        {"home_team": "DET", "away_team": "GB", "week": 1,
+         "total_line": 51.0, "spread_line": 3.0}]))
+    write_table(conn, "adp", pd.DataFrame([
+        {"adp_name": "A Star", "position": "WR", "team": "DET", "adp": 5.1},
+        {"adp_name": "B Steady", "position": "WR", "team": "GB", "adp": 20.0}]))
+    write_table(conn, "depth_charts", pd.DataFrame([
+        # two snapshots, so the "latest dt within the team" narrowing is live
+        {"dt": dt, "team": team, "player_name": name, "gsis_id": pid,
+         "pos_abb": "WR", "pos_rank": rank}
+        for dt in ("2026-08-01T00:00:00Z", "2026-08-02T00:00:00Z")
+        for team, name, pid, rank in (("DET", "A Star", "p1", 1),
+                                      ("DET", "Someone Else", "p3", 2),
+                                      ("GB", "B Steady", "p2", 1))]))
+    write_table(conn, "snap_counts", pd.DataFrame([
+        {"player": "A Star", "team": "DET", "season": s, "offense_pct": 0.8}
+        for s in (2023, 2024, 2025)] + [
+        {"player": "B Steady", "team": "GB", "season": s, "offense_pct": 0.5}
+        for s in (2023, 2024, 2025)]))
+    write_table(conn, "espn_adp", pd.DataFrame(
+        columns=["espn_id", "espn_name", "position", "espn_adp", "espn_ppr_rank"]))
+    write_table(conn, "fp_ecr", pd.DataFrame(
+        columns=["fp_name", "team", "position", "rank_ecr", "rank_ave", "rank_std", "fp_tier"]))
+    write_table(conn, "sleeper_ids", pd.DataFrame(
+        columns=["gsis_id", "espn_id", "sleeper_name", "position", "team"]))
+    return conn
+
+
+def test_profile_frame_cache_is_not_annotated_by_the_player_who_used_it_first(tmp_path):
+    """The trap in handing the same frame to two requests: the first line of
+    season_summaries used to be `feats["pos_finish"] = ...`, which would
+    write a column straight into the cached aggregate and leave it there for
+    every later click. Draft one player's profile, then another's, then the
+    first again -- the first player's payload must be identical to itself,
+    and the cached frame must come back out unmarked."""
+    from scoring import profile_cache
+    conn = _seed_with_real_depth_schema(tmp_path)
+    profile_cache.clear()
+
+    first = build_profile(conn, "p1")
+    build_profile(conn, "p2")
+    again = build_profile(conn, "p1")
+
+    assert first == again
+    assert len(profile_cache._cache) == 1
+    frames = next(iter(profile_cache._cache.values()))
+    assert "pos_finish" not in frames.season_features.columns
+    assert "_norm_name" not in frames.prior_weekly.columns
+
+
+def test_season_summaries_does_not_annotate_the_features_frame_it_is_given(tmp_path):
+    """The other half of the same defence, one layer down. cached_profile_
+    frames hands out a copy, so the cache survives even a mutating
+    season_summaries -- which means the cache test above cannot see this
+    regression at all. Assert it here instead: a features frame passed in
+    must come back out with the columns it went in with, or the belt is
+    doing all the work and the braces are decorative."""
+    from scoring.similarity import player_season_features
+    weekly = _two_player_weekly_rows()
+    feats = player_season_features(weekly)
+    before = list(feats.columns)
+
+    season_summaries(weekly[weekly["player_id"] == "p1"], None, "p1",
+                     season_features=feats, snap_share=None)
+
+    assert list(feats.columns) == before
+
+
+def test_filtered_reads_select_exactly_what_a_full_read_and_filter_did(tmp_path):
+    """`_player_weekly` and `_depth_slice` replace a whole-table read plus a
+    pandas mask. Both downstream consumers are order-sensitive --
+    `groupby("season")["recent_team"].last()` and `wk["position"].iloc[-1]`
+    in one, `sort_values("pos_rank").drop_duplicates(...)` in the other --
+    so this compares values, ROW ORDER and dtypes, not just contents."""
+    from pipeline.db import read_table
+    from scoring.profile import _player_weekly, _depth_slice
+    conn = _seed_with_real_depth_schema(tmp_path)
+    weekly, depth = read_table(conn, "weekly"), read_table(conn, "depth_charts")
+
+    for pid, team in (("p1", "DET"), ("p2", "GB"), ("nobody", "SEA")):
+        pd.testing.assert_frame_equal(
+            _player_weekly(conn, pid),
+            weekly[weekly["player_id"] == pid].reset_index(drop=True))
+        pd.testing.assert_frame_equal(
+            _depth_slice(conn, team, pid),
+            depth[(depth["team"] == team) | (depth["gsis_id"] == pid)]
+            .reset_index(drop=True))
+
+
+def test_depth_slice_falls_back_when_the_schema_has_no_team_column(tmp_path):
+    """_seed writes depth_charts with gsis_id/depth_team and no `team` at
+    all -- an older schema variant the WHERE clause cannot be written
+    against. Falling back to the full read keeps `_outlook`'s depth-slot
+    lookup working; raising, or returning nothing, would silently drop it."""
+    from pipeline.db import read_table
+    from scoring.profile import _depth_slice
+    conn = _seed(tmp_path)
+    pd.testing.assert_frame_equal(_depth_slice(conn, "DET", "p1"),
+                                  read_table(conn, "depth_charts"))
+
+
+def test_game_log_still_zero_fills_weeks_the_player_missed(tmp_path):
+    """build_profile now hands game_log only this player's weekly rows, so
+    the league-wide `season -> last week` map has to be passed in beside
+    them. Derived from the player's own rows instead, a season he left early
+    would simply end early and the games he missed would vanish from the log.
+    p1 played 4 games in 2023; p2 played all 17, so 2023 ran 17 weeks and
+    p1's log must show 13 of them as dnp."""
+    conn = _seed_with_real_depth_schema(tmp_path)
+    log = build_profile(conn, "p1")["game_log"]
+    y2023 = [r for r in log if r["season"] == 2023]
+    assert len(y2023) == 17
+    assert sum(r["dnp"] for r in y2023) == 13
+    assert [r["week"] for r in y2023] == list(range(17, 0, -1))
+
+
+def test_season_summaries_honours_an_explicit_empty_snap_share(tmp_path):
+    """`snap_share=None` means "there is no snap data" and `snap_share`
+    unset means "work it out from `snaps`" -- two different answers, which
+    is why the default is a sentinel and not None. Getting that backwards
+    would either crash on an empty table or silently drop the snap column."""
+    snaps = pd.DataFrame([{"player": "Amon-Ra St. Brown", "team": "DET",
+                           "season": 2025, "offense_pct": 0.9}])
+    from_snaps = season_summaries(_weekly_rows(), snaps, "p1")[0]
+    explicit_none = season_summaries(_weekly_rows(), snaps, "p1", snap_share=None)[0]
+    assert from_snaps["snap_share"] == 0.9
+    assert explicit_none["snap_share"] is None
+
+
+def test_profile_frame_cache_is_bounded(tmp_path):
+    """~40 MB per entry (season_features 6.0, snap_share 3.2, prior_weekly
+    25.7, players 5.2, schedules 0.33 on data/nfl.duckdb). One process
+    serving a database per league -- or a test session making a fresh one
+    per test -- must not accumulate them without limit."""
+    from scoring.profile_cache import _MAX_ENTRIES, cached_profile_frames, _cache, clear
+    clear()
+    for i in range(_MAX_ENTRIES + 5):
+        conn = _seed(tmp_path / f"db{i}")
+        cached_profile_frames(conn)
+    assert len(_cache) <= _MAX_ENTRIES
