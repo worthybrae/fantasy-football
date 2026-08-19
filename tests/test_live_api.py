@@ -1224,6 +1224,85 @@ def test_a_listener_exception_reaches_live_state_instead_of_dying_silently(
     assert body["listener_alive"] is False
 
 
+def test_a_failing_recompute_is_reported_and_does_not_kill_the_worker(
+        tmp_path, monkeypatch):
+    """A dead recompute worker used to be invisible and permanent.
+
+    `_recompute` ran unguarded inside recompute_worker's loop, which is the
+    thread's whole body -- one exception returned from the worker and
+    nothing ranked again for the rest of the draft. Candidates and
+    as_of_pick froze at whatever pick they last reached, and nothing
+    reported it: `listener_alive` tracks the LISTENER thread, which stays
+    perfectly healthy while this happens.
+
+    The failure driven here is a real one: `_drafted_state` raises
+    ValueError on a drafted row with a null `pick_no`, which live_state
+    already wraps in try/except ValueError for exactly that reason. Both
+    halves asserted -- the failure reaches /api/live/state as
+    `recompute_error`, and the worker is still running afterwards, so the
+    next request succeeds and clears it.
+    """
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+
+    # my_slot has to resolve or _recompute returns before it can fail at
+    # all (survival needs a real slot -- see its own docstring).
+    monkeypatch.setattr("api.live._slot_for_team", lambda cur, team_id: 1)
+
+    failing = {"on": True}
+
+    def flaky_drafted_state(cur, pool):
+        if failing["on"]:
+            raise ValueError("2 drafted rows have no pick_no")
+        return (set(), [])
+
+    monkeypatch.setattr("api.live._drafted_state", flaky_drafted_state)
+    monkeypatch.setattr("api.live.survival", _fake_survival_frame)
+    monkeypatch.setattr("api.live.rank_available",
+                        lambda *a, **k: _fake_candidates_frame("p1"))
+
+    tick = threading.Event()
+
+    def fake_run_listener(listener, url, state_path, on_change=None,
+                          headless=False, stop_event=None):
+        # my_team_id is what on_activity's _resolve_slot needs to fire; the
+        # rest is a pick pump the test drives one beat at a time.
+        listener.my_team_id = 1
+        while stop_event is None or not stop_event.is_set():
+            if tick.wait(timeout=0.01):
+                tick.clear()
+                on_change()
+
+    monkeypatch.setattr("api.live.run_listener", fake_run_listener)
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    client = TestClient(create_app(path))
+    assert _connect(client, "1").status_code == 200
+
+    tick.set()
+    assert _wait_until(
+        lambda: client.get("/api/live/state").json()["recompute_error"] is not None), \
+        "a failing recompute never reached /api/live/state"
+    body = client.get("/api/live/state").json()
+    assert "ValueError" in body["recompute_error"]
+    assert "no pick_no" in body["recompute_error"]
+    # The listener is untouched -- this failure is invisible in every field
+    # that existed before.
+    assert body["listener_alive"] is True
+    assert body["listener_error"] is None
+    assert body["candidates_as_of_pick"] is None
+
+    failing["on"] = False
+    tick.set()
+    assert _wait_until(
+        lambda: client.get("/api/live/state").json()["candidates_as_of_pick"] is not None), \
+        "the worker died on the first failure instead of surviving it"
+    assert client.get("/api/live/state").json()["recompute_error"] is None
+
+    client.post("/api/live/stop")
+
+
 def test_a_superseded_listeners_late_callback_cannot_write_drafted(
         tmp_path, monkeypatch, _isolated_leagues_root):
     """Critical #2: on_change called apply_picks unconditionally, with no
@@ -1938,6 +2017,12 @@ class _FakeSocket:
     def alive(self) -> bool:
         return self._alive
 
+    def detach(self) -> None:
+        """What run_socket_listener's `finally` does on every drop, before it
+        reconnects -- SocketHandle.detach clears the socket and alive() goes
+        false while the listener thread stays perfectly healthy."""
+        self._alive = False
+
     def send(self, text: str) -> None:
         if self.send_error is not None:
             raise self.send_error
@@ -2165,3 +2250,82 @@ def test_select_with_a_crosswalk_gap_is_400_and_sends_nothing(live_app_on_clock)
     res = client.post("/api/live/select", json={"player_id": "no_crosswalk"})
     assert res.status_code == 400
     assert ws.sent == []
+
+
+def test_select_a_player_espn_already_confirmed_is_409_not_a_fake_pick_number(
+        live_app_on_clock):
+    """A confirmation that never happened.
+
+    `listener.selected_espn_ids` accumulates for the whole session and is
+    never cleared -- ESPN replays the draft so far on every JOIN, so it holds
+    every SELECTED this socket has ever seen. The wait loop only tests
+    membership, so an id already in the set satisfied it on the FIRST
+    iteration: HTTP 200 with `pick_no: picks_made + 1`, a number belonging to
+    somebody else, for a pick this request never made. The dialog closed
+    saying it landed and the user walked away without a player.
+
+    Reachable whenever `drafted` and `selected_espn_ids` disagree, which is
+    exactly the unmapped-pick case the rest of api/live.py acknowledges is
+    real: ESPN confirmed a player the crosswalk could not resolve, so he is
+    in the set and never reached `drafted`. Reproduced here with a listener
+    whose crosswalk is empty, so the SELECTED frame lands in the set and
+    picks() resolves nothing.
+    """
+    client, state, ws, listener = live_app_on_clock
+    listener.crosswalk = {}
+    listener.on_frame("SELECTED 30 4429795 3 {SWID}\n")
+    assert 4429795 in listener.selected_espn_ids
+    assert _drafted_count(state) == 0     # the crosswalk never resolved him
+
+    res = client.post("/api/live/select", json={"player_id": "00-0039139"})
+
+    assert res.status_code == 409
+    assert "already confirmed" in res.json()["detail"]
+    # Guarded BEFORE the send: nothing reached ESPN, so this cannot double
+    # up on a pick some other team is mid-way through making.
+    assert ws.sent == []
+
+
+def test_state_reports_socket_alive(live_app_on_clock):
+    """Spec section 6: the draft buttons disable while the socket is down and
+    re-enable when the handle reports alive again. `state["socket"]` already
+    gates POST /api/live/select with a 503, but /api/live/state carried no
+    equivalent field, so the room derived `isMyTurn` from `on_the_clock ===
+    my_slot` alone. During a run_socket_listener reconnect the handle is
+    detached while the listener thread is alive and `stale` has not tripped,
+    so the buttons stayed enabled, the pill still read ESPN LIVE, and every
+    click 503'd.
+    """
+    client, state, ws, listener = live_app_on_clock
+    # _select_session carries a teams/rounds-only settings stand-in and no
+    # pool, which is all live_select needs; /api/live/state additionally
+    # serves the league shape and replays the drafted rows for my_roster, so
+    # give it a real LeagueSettings and an empty pool (`drafted` is empty in
+    # this fixture, so nothing is replayed).
+    state["session"] = dataclasses.replace(
+        state["session"],
+        pool=type("P", (), {"player_id": np.array([])})(),
+        settings=league_mod.LeagueSettings(
+            season=2026, teams=8,
+            starters={"QB": 1, "RB": 2, "WR": 2, "TE": 1, "K": 1, "DST": 1},
+            flex_slots=1, bench=6, scoring={"receptions": 1.0},
+            draft_type="SNAKE"))
+    assert client.get("/api/live/state").json()["socket_alive"] is True
+
+    # Exactly what run_socket_listener does in its `finally` on a drop.
+    ws.detach()
+    body = client.get("/api/live/state").json()
+    assert body["socket_alive"] is False
+    # The listener itself is untouched -- this is the state the room could
+    # not see before, not a dead listener.
+    assert body["listener_error"] is None
+
+
+def test_state_reports_socket_alive_false_with_no_session(tmp_path):
+    """Present with a false value on the inactive branch too, never omitted
+    -- the same convention listener_alive follows."""
+    client, state = _live_app(tmp_path)
+    body = client.get("/api/live/state").json()
+    assert body["active"] is False
+    assert body["socket_alive"] is False
+    assert body["recompute_error"] is None

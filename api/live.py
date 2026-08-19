@@ -680,6 +680,19 @@ def register_live_routes(app, conn, db_path):
              # visible on /api/live/state instead of failing silently.
              "listener": None, "listener_thread": None,
              "listener_stop": None, "listener_error": None,
+             # The recompute worker's own last failure, same job
+             # `listener_error` does for the listener thread and separate
+             # from it because they fail independently: the listener can be
+             # perfectly healthy (frames arriving, picks landing, the board
+             # updating) while ranking has stopped dead. `listener_alive`
+             # tracks the listener thread and says nothing about this one,
+             # so without this key a dead worker is invisible -- candidates
+             # and as_of_pick simply freeze at the pick they last reached
+             # and the room keeps presenting them. Set and cleared only in
+             # recompute_worker, under `lock` and identity-guarded like
+             # every other write, so a superseded listener's worker cannot
+             # clobber its replacement's status.
+             "recompute_error": None,
              # The live socket's send path, published by run_socket_listener
              # via its on_socket callback (see pipeline.draft_socket.
              # SocketHandle) exactly once, right after the first successful
@@ -966,7 +979,42 @@ def register_live_routes(app, conn, db_path):
                 with lock:
                     if state["listener"] is not listener:
                         continue
-                _recompute(sess, made)
+                # Guarded, because this loop IS the thread's whole body: an
+                # exception propagating out of _recompute returns from
+                # recompute_worker and nothing ever ranks again for the rest
+                # of the draft. Candidates and as_of_pick freeze at whatever
+                # pick they last reached, the listener stays perfectly
+                # healthy (frames arriving, picks landing, the board
+                # updating), and listener_alive -- which tracks the LISTENER
+                # thread -- keeps reading true. Nothing reported it.
+                #
+                # Both known raisers are real, not hypothetical.
+                # _drafted_state raises ValueError on a drafted row with a
+                # null pick_no; live_state already wraps that same call in
+                # try/except ValueError for exactly this reason.
+                # `rosters[session.my_slot]` in _recompute is a bare dict
+                # index over slots 1..teams and KeyErrors on anything
+                # outside that range.
+                #
+                # Caught broadly on purpose. This is a daemon thread with no
+                # other reporting path, and the failure being closed here is
+                # "ranking stops silently" -- so an exception nobody
+                # anticipated has to be reported too, not lost. It is
+                # recorded rather than re-raised: one bad pick row must cost
+                # the ranking that pick, not the rest of the draft, so the
+                # loop stays alive and the next request self-heals (the
+                # success branch clears the error).
+                try:
+                    _recompute(sess, made)
+                except Exception as exc:      # noqa: BLE001 -- see above
+                    with lock:
+                        if state["listener"] is listener:
+                            state["recompute_error"] = \
+                                f"{type(exc).__name__}: {exc}"
+                else:
+                    with lock:
+                        if state["listener"] is listener:
+                            state["recompute_error"] = None
 
         def _resolve_slot(c2) -> bool:
             """Resolve my_slot from history or the socket if not yet known;
@@ -1076,7 +1124,8 @@ def register_live_routes(app, conn, db_path):
             state.update({"session": session, "listener": listener,
                           "listener_thread": thread, "listener_stop": stop_event,
                           "recompute_thread": recompute_thread,
-                          "listener_error": None, "league_conn": league_conn,
+                          "listener_error": None, "recompute_error": None,
+                          "league_conn": league_conn,
                           "candidates": [], "as_of_pick": None,
                           "unmapped": [], "last_poll_at": None})
             state["generation"] = state.get("generation", 0) + 1
@@ -1106,7 +1155,7 @@ def register_live_routes(app, conn, db_path):
             state["generation"] += 1
             state.update({"session": session, "candidates": [],
                           "as_of_pick": None, "unmapped": [],
-                          "last_poll_at": None})
+                          "last_poll_at": None, "recompute_error": None})
         return {"active": True, "reused": False,
                 "board_fingerprint": session.board_fingerprint,
                 "seed": session.seed}
@@ -1121,7 +1170,14 @@ def register_live_routes(app, conn, db_path):
                         "candidates": [], "candidates_as_of_pick": None,
                         "last_poll_at": None, "stale": True,
                         "unmapped_picks": [], "listener_error": None,
-                        "listener_alive": False,
+                        "listener_alive": False, "recompute_error": None,
+                        # Same "present with a null/false value, never
+                        # omitted" convention listener_alive already
+                        # follows on this branch: the room reads it to
+                        # decide whether the draft buttons are live, and an
+                        # absent key would read as undefined -- falsy by
+                        # luck rather than by contract.
+                        "socket_alive": False,
                         "token_received": state.get("token") is not None,
                         "ms_remaining": None,
                         "settings": _league_settings_payload(None),
@@ -1139,6 +1195,26 @@ def register_live_routes(app, conn, db_path):
             # decayed or interpolated guess, so a genuinely stale value
             # never gets rendered as a live one.
             ms_remaining = listener.ms_remaining if listener is not None else None
+            # Whether a SELECT actually has somewhere to go, read here for
+            # the same reason ms_remaining is: it belongs to this response's
+            # one consistent snapshot. Exactly the condition
+            # /api/live/select's 503 already gates on (`socket is None or
+            # not socket.alive()`), served so the room can gate the draft
+            # buttons on the same fact instead of on `on_the_clock ===
+            # my_slot` alone. Without it, a run_socket_listener reconnect --
+            # where the handle is detached but the listener thread is alive
+            # and `stale` has not tripped, since CLOCK frames stamped
+            # last_poll_at a moment ago -- leaves the buttons enabled and
+            # every click 503s (spec section 6).
+            #
+            # Calling alive() under `lock` is safe: SocketHandle's own lock
+            # is only ever taken in attach/detach/alive/send, and none of
+            # those calls back into anything that takes `lock` (on_socket is
+            # invoked AFTER attach has released it), so there is no lock
+            # ordering to invert. The call itself is a `is not None` under an
+            # uncontended lock.
+            socket_handle = snapshot["socket"]
+            socket_alive = socket_handle is not None and socket_handle.alive()
             # Same connection choice as _recompute: the league this session
             # belongs to, not always the shared `conn`, or the picks-made
             # count (and the on-the-clock slot derived from it) would be
@@ -1206,6 +1282,12 @@ def register_live_routes(app, conn, db_path):
             # exception is still visible even though it sets no error.
             "listener_error": snapshot["listener_error"],
             "listener_alive": thread.is_alive() if thread is not None else False,
+            # The recompute worker fails independently of the listener, and
+            # its failure is quieter: the clock keeps ticking, the board
+            # keeps filling, and only the ranking stops. Reported separately
+            # for that reason -- see the state key's own comment.
+            "recompute_error": snapshot["recompute_error"],
+            "socket_alive": socket_alive,
             "token_received": snapshot.get("token") is not None,
             "ms_remaining": ms_remaining,
             "settings": _league_settings_payload(session.settings),
@@ -1350,6 +1432,30 @@ def register_live_routes(app, conn, db_path):
                 detail=f"no ESPN id for {row.get('name', body.player_id)} -- "
                 "this is a crosswalk gap, pick him in ESPN directly")
 
+        # `selected_espn_ids` accumulates for the whole session and is never
+        # cleared -- ESPN replays the draft so far on every JOIN, so it holds
+        # every SELECTED this socket has ever seen, reconnect replays
+        # included. The wait loop below only tests membership, so an id that
+        # was ALREADY in the set returns on its very first iteration: a 200
+        # carrying `picks_made + 1`, which is a pick number that belongs to
+        # somebody else, for a pick this request never made. The dialog
+        # closes saying it landed and the user walks away without a player.
+        #
+        # It takes `drafted` and `selected_espn_ids` disagreeing to get here,
+        # since the `already` check above would otherwise have caught it --
+        # which is exactly the unmapped-pick case the rest of this file
+        # acknowledges is real (see state["unmapped"]): ESPN confirmed a
+        # player the crosswalk could not resolve, so he is in the set and not
+        # in `drafted`. Checked BEFORE the send, so the guard cannot be
+        # confused by this request's own confirmation arriving.
+        if listener is not None and espn_id in listener.selected_espn_ids:
+            raise HTTPException(
+                status_code=409,
+                detail=f"ESPN has already confirmed a pick of "
+                f"{row.get('name', body.player_id)} -- the board has not "
+                "recorded it (most likely a crosswalk gap), so check the "
+                "ESPN draft room rather than picking him again")
+
         try:
             socket.send(f"SELECT {espn_id}\n")
         except (ConnectionError, OSError, ConnectionClosed) as exc:
@@ -1403,7 +1509,8 @@ def register_live_routes(app, conn, db_path):
                           "as_of_pick": None, "unmapped": [],
                           "last_poll_at": None, "listener": None,
                           "listener_thread": None, "listener_stop": None,
-                          "recompute_thread": None, "listener_error": None})
+                          "recompute_thread": None, "listener_error": None,
+                          "recompute_error": None})
         return {"active": False, "listener_stopped": stopped}
 
     @app.post("/api/live/connect")
