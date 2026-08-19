@@ -63,6 +63,18 @@ class DraftSession:
     # "Team {slot}" for any missing column. default_factory so the shared empty
     # default is not one dict aliased across every session.
     team_slots: dict = dataclasses.field(default_factory=dict)
+    # player_id -> board row (as a dict), for POST /api/live/select's SELECT
+    # payload lookup (see _espn_id_for). Built once in build_session from the
+    # same `board.to_dict(orient="records")` _board_index already reads for
+    # the board grid, and it inherits that call's exact limitation: a board
+    # with a duplicated player_id keeps only the LAST matching row (dict
+    # construction, last key wins), silently. That is not a new risk this
+    # field introduces -- _board_index has always had it -- and build_board
+    # is expected to never emit two rows for one player_id; it is noted here
+    # because a SELECT built off a silently-wrong row is a real pick sent to
+    # ESPN, not a display glitch. default_factory so the shared empty dict is
+    # not aliased across every session, same reasoning as team_slots.
+    board_by_id: dict = dataclasses.field(default_factory=dict)
 
 
 def _attach_espn_proj(conn, board):
@@ -131,19 +143,23 @@ def build_session(conn, my_slot: int | None, seed: int = DEFAULT_SEED,
         settings=settings, pool=pool, betas=betas,
         crosswalk=build_crosswalk(board),
         board_fingerprint=board_fingerprint(board), seed=seed,
-        started_at=datetime.now(timezone.utc), board=board)
+        started_at=datetime.now(timezone.utc), board=board,
+        board_by_id={str(r["player_id"]): r
+                     for r in board.to_dict(orient="records")})
 
 
 import re
 import threading
+import time
 
 from fastapi import HTTPException
 from pydantic import BaseModel
+from websockets.exceptions import ConnectionClosed
 
 from pipeline.draft_listener import DraftListener, run_listener
 from pipeline.draft_socket import run_socket_listener
 from pipeline.espn_league import STATE_PATH, parse_league_id
-from pipeline.espn_live import apply_picks
+from pipeline.espn_live import ESPN_PRO_TEAM_BY_ABBREV, _dst_espn_id, apply_picks
 from pipeline.espn_teams import fetch_league_settings, fetch_team_slots
 from pipeline.espn_teams import http_fetch as _team_view_fetch
 from pipeline import leagues as leagues_mod
@@ -524,6 +540,36 @@ def _is_stale(last_poll_at, now) -> bool:
     return (now - last_poll_at).total_seconds() > STALE_AFTER_SECONDS
 
 
+class SelectBody(BaseModel):
+    player_id: str
+
+
+# How long to wait for ESPN to echo the pick back on SELECTED. Long enough to
+# cover a round trip on a busy draft server, short enough that a wedged
+# request does not eat the pick clock it exists to protect.
+SELECT_TIMEOUT_SECONDS = 8.0
+SELECT_POLL_SECONDS = 0.1
+
+
+def _espn_id_for(board_row) -> int | None:
+    """The ESPN player id to send in a SELECT.
+
+    Board rows carry `espn_id` for everyone ESPN ranks as a player. D/ST rows
+    carry None, because ESPN models a defense as a negative synthetic id
+    derived from the pro team -- the same rule build_crosswalk already reads
+    picks back through (see its docstring), applied here in the other
+    direction.
+    """
+    espn_id = board_row.get("espn_id")
+    if espn_id is not None and not pd.isna(espn_id):
+        return int(espn_id)
+    if board_row.get("position") == "DST":
+        pro = ESPN_PRO_TEAM_BY_ABBREV.get(str(board_row.get("team", "")).upper())
+        if pro is not None:
+            return _dst_espn_id(pro)
+    return None
+
+
 def register_live_routes(app, conn, db_path):
     """Mount live-draft endpoints. In-process state only, same lifetime as
     `create_app`'s connection -- a restart mid-draft means starting again,
@@ -558,6 +604,18 @@ def register_live_routes(app, conn, db_path):
              # visible on /api/live/state instead of failing silently.
              "listener": None, "listener_thread": None,
              "listener_stop": None, "listener_error": None,
+             # The live socket's send path, published by run_socket_listener
+             # via its on_socket callback (see pipeline.draft_socket.
+             # SocketHandle) exactly once, right after the first successful
+             # connect. None whenever no socket session is running -- either
+             # never started, still connecting, or torn down by
+             # _stop_listener -- so /api/live/select can refuse a SELECT
+             # rather than pretend one has somewhere to go. Only ever
+             # non-None for the connect-token (bookmarklet) path;
+             # live_connect's browser observer has no socket of its own to
+             # publish, so a session started that way always finds this None
+             # and /api/live/select correctly refuses with 503.
+             "socket": None,
              # The per-session recompute worker (see _launch_listener):
              # survival/rank_available still take real time (a fraction of a
              # second, see SURVIVAL_ROLLOUTS), so it runs here, off the
@@ -630,6 +688,7 @@ def register_live_routes(app, conn, db_path):
             state["listener_thread"] = None
             state["listener_stop"] = None
             state["recompute_thread"] = None
+            state["socket"] = None
             old_league_conn = state["league_conn"]
             state["league_conn"] = None
         if old_league_conn is not None:
@@ -1072,6 +1131,104 @@ def register_live_routes(app, conn, db_path):
             "cells": cells,
         }
 
+    @app.post("/api/live/select")
+    def live_select(body: SelectBody):
+        """Make the pick: send SELECT on the live draft socket and wait for
+        ESPN's own SELECTED to confirm it landed.
+
+        Writes nothing to `drafted`. `on_change` already records every
+        SELECTED frame this socket sees, including this one (see
+        DraftListener.on_frame / selected_espn_ids) -- a second writer here
+        could let the board claim a pick ESPN did not actually take, and the
+        one table write that must win is ESPN's own confirmation, not a
+        guess made before it arrives.
+
+        `socket.send` is wrapped in `except (ConnectionError, OSError,
+        ConnectionClosed)`, not just the first two. SocketHandle.send (see
+        pipeline/draft_socket.py) raises the builtin ConnectionError only on
+        its "nothing attached" path. In the race where this request reads
+        the socket reference just before the listener thread detaches and
+        closes it, the real websockets.sync.client connection underneath
+        raises websockets.exceptions.ConnectionClosed instead -- and that is
+        NOT a subclass of ConnectionError (its MRO is ConnectionClosed ->
+        WebSocketException -> Exception -> BaseException -> object).
+        Catching only the builtin would let exactly that race leak an
+        unhandled exception into a 500, on the one failure -- a dropped
+        socket -- this endpoint exists to turn into a clean 503 instead.
+        Nothing broader than these three is caught: a real bug here (a
+        TypeError from a malformed payload, say) must still surface as a
+        500, not be laundered into "the socket is down."
+        """
+        with lock:
+            session = state["session"]
+            socket = state["socket"]
+            listener = state["listener"]
+            active_conn = state["league_conn"] or conn
+            if session is None:
+                raise HTTPException(status_code=409, detail="no live draft session")
+            if socket is None or not socket.alive():
+                raise HTTPException(
+                    status_code=503, detail="the draft socket is not connected")
+            cur = active_conn.cursor()
+            try:
+                picks_made = cur.execute(
+                    "SELECT count(*) FROM drafted").fetchone()[0]
+                already = cur.execute(
+                    "SELECT count(*) FROM drafted WHERE player_id = ?",
+                    [body.player_id]).fetchone()[0]
+            finally:
+                cur.close()
+
+        if already:
+            raise HTTPException(
+                status_code=409, detail="that player is already drafted")
+        if session.my_slot is None:
+            raise HTTPException(
+                status_code=409, detail="this session has no draft slot yet")
+        if picks_until_turn(session.settings, session.my_slot, picks_made) != 0:
+            raise HTTPException(status_code=409, detail="it is not your turn")
+
+        row = session.board_by_id.get(body.player_id)
+        if row is None:
+            raise HTTPException(
+                status_code=400, detail=f"unknown player {body.player_id}")
+        espn_id = _espn_id_for(row)
+        if espn_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"no ESPN id for {row.get('name', body.player_id)} -- "
+                "this is a crosswalk gap, pick him in ESPN directly")
+
+        try:
+            socket.send(f"SELECT {espn_id}\n")
+        except (ConnectionError, OSError, ConnectionClosed) as exc:
+            raise HTTPException(
+                status_code=503, detail=f"could not reach ESPN: {exc}") from exc
+
+        # Poll rather than block on a signal: the listener thread fills
+        # selected_espn_ids from its own frame-reading loop with nothing to
+        # notify this request when it happens. `listener` was captured once,
+        # above, under `lock` -- not re-read on every iteration. If the
+        # session restarts mid-wait (a user reconnecting while this request
+        # is still in flight), that stale reference is the SAFE side of the
+        # tradeoff: the old listener's thread has already stopped reading
+        # frames (see _stop_listener, which joins it before a new one
+        # starts), so its selected_espn_ids simply stops changing and this
+        # request correctly times out at 504 -- it never reports a
+        # confirmation on behalf of a listener that no longer speaks for the
+        # active session, even if ESPN's replay-on-reconnect later confirms
+        # the same pick to the NEW listener this request never sees.
+        deadline = time.monotonic() + SELECT_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            if listener is not None and espn_id in listener.selected_espn_ids:
+                return {"player_id": body.player_id, "espn_id": espn_id,
+                        "pick_no": picks_made + 1}
+            time.sleep(SELECT_POLL_SECONDS)
+        raise HTTPException(
+            status_code=504,
+            detail="ESPN did not confirm the pick -- check the ESPN draft room "
+            "before picking again")
+
     @app.post("/api/live/stop")
     def live_stop():
         stopped = _stop_listener()
@@ -1188,9 +1345,23 @@ def register_live_routes(app, conn, db_path):
         session = _attach_team_slots(session, body.leagueId, body.season)
 
         def run_fn(listener, on_change, on_activity, stop_event):
+            def _on_socket(handle):
+                # Published once, right after run_socket_listener's first
+                # successful connect (see SocketHandle's own docstring in
+                # pipeline/draft_socket.py). Identity-guarded exactly like
+                # every other write in this closure family: if a newer
+                # /api/live/connect-token has already superseded this
+                # listener by the time the connect finishes, this callback
+                # must not resurrect a socket for a session that is no
+                # longer the active one.
+                with lock:
+                    if state["listener"] is listener:
+                        state["socket"] = handle
+
             run_socket_listener(listener, body.leagueId, body.teamId, body.swid,
                                 body.token, on_change=on_change,
-                                stop_event=stop_event, on_activity=on_activity)
+                                stop_event=stop_event, on_activity=on_activity,
+                                on_socket=_on_socket)
 
         # Record the token so /api/live/state's token_received stays truthful
         # for the connect screen. In memory only: a draft token is a

@@ -33,6 +33,12 @@ class DraftListener:
         # session's own team, and therefore its own draft slot, is ever
         # learned.
         self.my_team_id = None
+        # Every ESPN player id this socket has confirmed as picked. The
+        # select endpoint waits on this rather than on the crosswalk-resolved
+        # pick rows, because a player ESPN confirmed but the crosswalk cannot
+        # map still went off the board -- and the person who just clicked
+        # DRAFT needs to know it landed either way.
+        self.selected_espn_ids = set()
 
     def on_frame(self, payload: str) -> bool:
         """Fold one frame into accumulated state.
@@ -82,6 +88,17 @@ class DraftListener:
             parsed = _team_id_from_token(event.args[0])
             if parsed is not None:
                 self.my_team_id = parsed
+        elif event.verb == "SELECTED" and len(event.args) > 1:
+            # args[1] is the espn player id (args[0] is the team id -- see
+            # espn_live.picks_from_events, which reads the same frame the
+            # same way and is the evidence this ordering is right: verified
+            # against the real capture's own doc comment, "SELECTED <team>
+            # <espnPlayerId> <lineupSlotId> [<managerSWID>]"). A malformed or
+            # missing id is ignored, same discipline as TOKEN above -- a
+            # garbled frame must not raise out of the listener.
+            espn_id = _as_int(event.args[1], None)
+            if espn_id is not None:
+                self.selected_espn_ids.add(espn_id)
         after_picks = len(self.picks().rows)
         newly_learned_team = self.my_team_id is not None and not had_team
         return after_picks != before_picks or newly_learned_team

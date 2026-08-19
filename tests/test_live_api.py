@@ -1420,12 +1420,15 @@ def test_connect_token_resolves_slot_and_wires_socket_picks(
 
     def fake_run_socket_listener(listener, league_id, team_id, swid, token,
                                  on_change=None, stop_event=None,
-                                 on_activity=None):
+                                 on_activity=None, on_socket=None):
         """Stands in for the real, socket-opening run_socket_listener. Records
         the args it was called with (so the test can prove the token and ids
         reached it) and replays real captured frames, firing on_activity on
         every frame and on_change when the pick count changes -- the same
-        contract the real run_socket_listener holds."""
+        contract the real run_socket_listener holds. Accepts (and ignores)
+        on_socket: live_connect_token now always passes it, and a fake with a
+        narrower signature raises a TypeError the pump() thread swallows into
+        listener_error rather than ever finishing (see run_fn's real caller)."""
         seen_args.update(league_id=league_id, team_id=team_id, swid=swid,
                          token=token)
         prev = 0
@@ -1684,9 +1687,11 @@ def test_unmapped_picks_surface_in_state(tmp_path, monkeypatch, _isolated_league
                         lambda *a, **k: _fake_candidates_frame("x"))
 
     def fake_socket(listener, league_id, team_id, swid, token,
-                    on_change=None, stop_event=None, on_activity=None):
+                    on_change=None, stop_event=None, on_activity=None,
+                    on_socket=None):
         # An ESPN id no board row carries -> picks_from_events routes it to
-        # `unmapped`, not `drafted`.
+        # `unmapped`, not `drafted`. on_socket: see fake_run_socket_listener's
+        # comment above -- live_connect_token always passes it now.
         listener.on_frame("SELECTED 1 99999999 2")
         if on_change is not None:
             on_change()
@@ -1706,3 +1711,223 @@ def test_unmapped_picks_surface_in_state(tmp_path, monkeypatch, _isolated_league
     um = client.get("/api/live/state").json()["unmapped_picks"]
     assert um[0]["espn_player_id"] == 99999999
     client.post("/api/live/stop")
+
+
+# --- POST /api/live/select: makes the pick ------------------------------
+#
+# These build the live app directly off register_live_routes (the same
+# pieces _live_routes_with_conn already uses), rather than through a real
+# /api/live/connect-token, so a session with a known board/socket/listener
+# can be assembled without a network fetch or a real ESPN handshake. The
+# fake socket's `sent` list and `on_send` hook stand in for
+# pipeline.draft_socket.SocketHandle: a real SocketHandle.send writes to a
+# live websocket, which these tests must never open.
+
+from pipeline.draft_listener import DraftListener
+
+
+class _FakeSocket:
+    """Stands in for pipeline.draft_socket.SocketHandle. `send` records the
+    text and, if wired via `on_send`, calls the hook synchronously -- the
+    same turn order a real send-then-ESPN-answers round trip has, letting a
+    test answer its own SELECT before live_select's poll loop ever runs
+    rather than depending on real wall-clock time to pass."""
+
+    def __init__(self, alive: bool = True):
+        self.sent = []
+        self._alive = alive
+        self._on_send = None
+        self.send_error = None
+
+    def on_send(self, fn):
+        self._on_send = fn
+
+    def alive(self) -> bool:
+        return self._alive
+
+    def send(self, text: str) -> None:
+        if self.send_error is not None:
+            raise self.send_error
+        self.sent.append(text)
+        if self._on_send is not None:
+            self._on_send(text)
+
+
+def _select_board():
+    """One ordinary player (a real espn_id) and one D/ST (espn_id null,
+    resolved instead through ESPN_PRO_TEAM_BY_ABBREV/_dst_espn_id) -- the two
+    paths _espn_id_for chooses between."""
+    return pd.DataFrame([
+        {"player_id": "00-0039139", "name": "Test Player", "position": "WR",
+         "team": "DET", "espn_id": 4429795},
+        {"player_id": "dst_bal", "name": "Ravens D/ST", "position": "DST",
+         "team": "BAL", "espn_id": np.nan},
+    ])
+
+
+def _select_session(my_slot):
+    """A DraftSession with a real (small) board/board_by_id and real
+    teams/rounds, so picks_until_turn and _espn_id_for both have what they
+    need. teams=8 matches snake_slots' round-1 order: slot 1 is the very
+    first overall pick, so my_slot=1 is on the clock at picks_made=0 and any
+    other slot is not."""
+    board = _select_board()
+    settings = type("S", (), {"teams": 8, "rounds": 15})()
+    return dataclasses.replace(
+        _fake_session(), my_slot=my_slot, settings=settings, board=board,
+        board_by_id={str(r["player_id"]): r
+                     for r in board.to_dict(orient="records")})
+
+
+def _live_app(tmp_path):
+    """A (client, state) pair wired to a throwaway DuckDB file -- the same
+    register_live_routes plumbing _live_routes_with_conn uses, plus the
+    TestClient test_state_candidates_carry_gain_now already established is
+    fine to build inline. `state["league_conn"]` is pinned to this test's own
+    connection so _drafted_count/_mark_drafted (which only ever see `state`,
+    matching the brief's helper signatures) can reach the same `drafted`
+    table live_select reads -- production only ever populates league_conn
+    this way for a non-default league, but live_select reads
+    `state["league_conn"] or conn` either way, so this is a legitimate stand-
+    in for "the connection this session's data lives on," not a shortcut
+    around it.
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    path = str(tmp_path / "live.duckdb")
+    conn = get_conn(path)
+    app = FastAPI()
+    state, _recompute = register_live_routes(app, conn, path)
+    state["league_conn"] = conn
+    return TestClient(app), state
+
+
+def _drafted_count(state) -> int:
+    cur = state["league_conn"].cursor()
+    try:
+        return cur.execute("SELECT count(*) FROM drafted").fetchone()[0]
+    finally:
+        cur.close()
+
+
+def _mark_drafted(state, player_id: str, pick_no: int = 1) -> None:
+    state["league_conn"].execute(
+        "INSERT INTO drafted VALUES (?, ?)", [player_id, pick_no])
+
+
+@pytest.fixture
+def live_app_on_socket(tmp_path):
+    """A connected socket, but my_slot (4) is not on the clock at
+    picks_made=0 -- slot 1 is."""
+    client, state = _live_app(tmp_path)
+    session = _select_session(my_slot=4)
+    ws = _FakeSocket()
+    state["session"] = session
+    state["socket"] = ws
+    state["listener"] = DraftListener(session.crosswalk)
+    return client, state, ws
+
+
+@pytest.fixture
+def live_app_on_clock(tmp_path):
+    """my_slot=1 -- on the clock at picks_made=0, socket connected."""
+    client, state = _live_app(tmp_path)
+    session = _select_session(my_slot=1)
+    ws = _FakeSocket()
+    listener = DraftListener(session.crosswalk)
+    state["session"] = session
+    state["socket"] = ws
+    state["listener"] = listener
+    return client, state, ws, listener
+
+
+@pytest.fixture
+def live_app_on_clock_no_socket(tmp_path):
+    """On the clock, but no socket session is running -- state["socket"] is
+    None, the same as after _stop_listener or before any connect-token."""
+    client, state = _live_app(tmp_path)
+    session = _select_session(my_slot=1)
+    state["session"] = session
+    state["socket"] = None
+    state["listener"] = DraftListener(session.crosswalk)
+    return client, state
+
+
+def test_select_off_turn_is_rejected_and_sends_nothing(live_app_on_socket):
+    """A SELECT off-turn is at best ignored and at worst a misdraft."""
+    client, state, ws = live_app_on_socket   # my_slot is NOT on the clock
+    body = client.post("/api/live/select", json={"player_id": "p1"})
+    assert body.status_code == 409
+    assert ws.sent == []
+
+
+def test_select_sends_the_espn_id_and_waits_for_confirmation(live_app_on_clock):
+    client, state, ws, listener = live_app_on_clock
+    ws.on_send(lambda text: listener.on_frame("SELECTED 30 4429795 3 {SWID}\n"))
+    res = client.post("/api/live/select", json={"player_id": "00-0039139"})
+    assert res.status_code == 200
+    assert ws.sent == ["SELECT 4429795\n"]
+    body = res.json()
+    assert body["espn_id"] == 4429795
+    assert body["player_id"] == "00-0039139"
+    assert body["pick_no"] == 1
+
+
+def test_select_resolves_a_defense_to_its_negative_espn_id(live_app_on_clock):
+    """Board rows for D/ST carry espn_id None; the real id is -(16000+team)."""
+    client, state, ws, listener = live_app_on_clock
+    ws.on_send(lambda text: listener.on_frame("SELECTED 30 -16033 3 {SWID}\n"))
+    res = client.post("/api/live/select", json={"player_id": "dst_bal"})
+    assert res.status_code == 200
+    assert ws.sent == ["SELECT -16033\n"]
+    assert res.json()["espn_id"] == -16033
+
+
+def test_select_times_out_without_confirmation_and_writes_nothing(
+        live_app_on_clock, monkeypatch):
+    """The one case the tool cannot resolve. The pick may or may not have
+    landed, so the board must not claim either way. SELECT_TIMEOUT_SECONDS/
+    SELECT_POLL_SECONDS are shrunk so this test doesn't burn the real 8s."""
+    monkeypatch.setattr("api.live.SELECT_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr("api.live.SELECT_POLL_SECONDS", 0.01)
+    client, state, ws, listener = live_app_on_clock
+    before = _drafted_count(state)
+    res = client.post("/api/live/select", json={"player_id": "00-0039139"})
+    assert res.status_code == 504
+    assert ws.sent == ["SELECT 4429795\n"]
+    assert _drafted_count(state) == before
+
+
+def test_select_with_no_socket_is_503(live_app_on_clock_no_socket):
+    client, state = live_app_on_clock_no_socket
+    assert client.post("/api/live/select",
+                       json={"player_id": "00-0039139"}).status_code == 503
+
+
+def test_select_an_already_drafted_player_is_409(live_app_on_clock):
+    client, state, ws, listener = live_app_on_clock
+    _mark_drafted(state, "00-0039139")
+    assert client.post("/api/live/select",
+                       json={"player_id": "00-0039139"}).status_code == 409
+    assert ws.sent == []
+
+
+def test_select_send_failure_via_connection_closed_is_503_not_500(live_app_on_clock):
+    """SocketHandle.send raises the builtin ConnectionError only when nothing
+    is attached. In the race where send grabs the socket reference just
+    before the listener thread detaches and closes it, the real
+    websockets.sync.client connection raises websockets.exceptions.
+    ConnectionClosed instead -- an exception whose MRO (ConnectionClosed,
+    WebSocketException, Exception, BaseException, object) does NOT pass
+    through ConnectionError. An endpoint that only caught
+    (ConnectionError, OSError) would let this leak into an unhandled 500 on
+    exactly the failure -- a dropped socket -- it exists to report as a
+    clean 503."""
+    from websockets.exceptions import ConnectionClosed
+
+    client, state, ws, listener = live_app_on_clock
+    ws.send_error = ConnectionClosed(None, None)
+    res = client.post("/api/live/select", json={"player_id": "00-0039139"})
+    assert res.status_code == 503
+    assert ws.sent == []
