@@ -10,7 +10,8 @@ import json
 from dataclasses import dataclass, asdict
 
 from pipeline.db import read_table
-from scoring.config import FLEX_SHARES, LEAGUE_TEAMS, REPLACEMENT_RANK
+from scoring.config import (FLEX_SHARES, LEAGUE_TEAMS, REPLACEMENT_RANK,
+                            STREAMED_REPLACEMENT_RANK)
 from scoring.ppr import DEFAULT_RULES
 
 # ESPN scoring statId -> the nflverse weekly column(s) it scores. ESPN carries
@@ -52,12 +53,24 @@ class LeagueSettings:
         one-player buffer for positions no flex slot accepts -- without it a
         single-slot position like QB would put replacement level at the very
         last startable player, which is a cliff rather than a baseline.
+
+        K and DST do not come from that arithmetic at all. They are a flat
+        calibration (STREAMED_REPLACEMENT_RANK, with the full argument and
+        the measured before/after in scoring/config.py) because a position
+        that is streamed off waivers every week has no "last starter-caliber
+        player" in the sense the rest of this rule means -- two-thirds of
+        both positions is free all season. Deliberately NOT derived from
+        `teams`: the streaming pool is deep at any league size this tool
+        will see, so team count is not what binds. Every other position is
+        untouched by it.
         """
         total_flex = self.teams * self.flex_slots
         out = {}
         for pos, n in self.starters.items():
             base = self.teams * n
-            if pos in _FLEX_POSITIONS:
+            if pos in STREAMED_REPLACEMENT_RANK:
+                out[pos] = STREAMED_REPLACEMENT_RANK[pos]
+            elif pos in _FLEX_POSITIONS:
                 out[pos] = base + round(total_flex * FLEX_SHARES.get(pos, 0.0))
             else:
                 out[pos] = base + 1

@@ -130,7 +130,12 @@ weights every screen uses.
 The composite score converts to **VOR** (value over replacement) by
 subtracting, per position, the composite score of the last starter-caliber
 player at that position (`scoring/config.py: REPLACEMENT_RANK`, calibrated
-to this league's 8-team starting lineup). Players are then bucketed into
+to this league's 8-team starting lineup). Kickers and defenses are the one
+exception: nobody holds them past the week they use them, so their
+replacement is not the last rostered one but whatever is free on waivers,
+and both are pinned to a flat rank instead
+(`scoring/config.py: STREAMED_REPLACEMENT_RANK` — a calibration, argued in
+the comment there, not derived from roster shape). Players are then bucketed into
 **tiers** per position, breaking wherever the VOR gap to the next player is
 unusually large (mean + one standard deviation of that position's gaps).
 The board is ranked by VOR overall.
