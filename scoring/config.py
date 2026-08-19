@@ -18,3 +18,9 @@ REPLACEMENT_RANK = {"QB": 9, "RB": 22, "WR": 24, "TE": 10, "K": 9, "DST": 9}
 # How the league's FLEX slots historically get filled, by position. Used to
 # derive REPLACEMENT_RANK from roster shape instead of hardcoding it.
 FLEX_SHARES = {"RB": 0.375, "WR": 0.5, "TE": 0.125}
+
+# How much a position is worth to a roster that already holds `counts`.
+# Multiplies the value a pick gains over waiting (see scoring/gain.py), so a
+# position at its roster cap contributes nothing however good the player is.
+# Starting values, to calibrate against replayed drafts -- not derived.
+NEED_WEIGHTS = {"starter": 1.0, "flex": 0.75, "bench": 0.35, "capped": 0.0}
