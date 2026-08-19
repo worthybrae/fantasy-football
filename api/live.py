@@ -3,7 +3,8 @@
 `make sim` pays 0.9s building the board, 1.1s building the pool and 14.9s in
 `fit_all` on every invocation. During a draft none of that changes -- the
 coefficients come from history, the board and pool are static -- so the
-session builds them once and every refresh costs only `search_pick`.
+session builds them once and every refresh costs only `survival` plus
+`rank_available` (see SURVIVAL_ROLLOUTS below for why that is cheap).
 """
 import dataclasses
 import hashlib
@@ -42,9 +43,9 @@ class DraftSession:
     crosswalk: dict
     board_fingerprint: str
     # Pinned for the session's lifetime, never derived from a clock or a
-    # counter. `search_pick` already uses common random numbers within a
-    # call; holding the seed fixed ACROSS calls is what makes a changed
-    # recommendation mean a changed board rather than a different sample.
+    # counter. `survival` seeds rollout i from (seed, i); holding the seed
+    # fixed ACROSS calls is what makes a changed recommendation mean a
+    # changed board rather than a different sample.
     seed: int
     started_at: datetime
     # The full board DataFrame build_session already pays to build. It used to
@@ -148,7 +149,9 @@ from pipeline.espn_teams import http_fetch as _team_view_fetch
 from pipeline import leagues as leagues_mod
 from pipeline.leagues import DEFAULT_LEAGUE, provision_league
 from scoring.config import CURRENT_SEASON
-from scoring.draft_sim import _drafted_state, search_pick, snake_slots
+from scoring.draft_sim import (_drafted_state, _seed_rosters, snake_slots,
+                               survival)
+from scoring.gain import rank_available
 
 
 class ConnectBody(BaseModel):
@@ -471,6 +474,18 @@ ROLLOUTS_FAR, ROLLOUTS_NEAR, ROLLOUTS_NOW = 12, 25, 40
 # without a real ten-second wait.
 LISTENER_STOP_TIMEOUT = 10.0
 
+# survival() runs ONE set of rollouts that stop at my next turn, not one full
+# draft per candidate, so the old clock-rationed budget (12/25/40, see
+# rollouts_for below) is no longer the constraint it was priced against.
+# This is the whole recompute cost now, and it buys a materially tighter
+# survival estimate for a fraction of what search_pick cost: measured
+# against the real production pool (data/nfl.duckdb, 249 players, 8 teams),
+# survival(n_rollouts=400) plus rank_available together ran in 0.1-0.8s
+# across picks_made 0/8/50/100 -- an order of magnitude under even the
+# cheapest old ROLLOUTS_FAR budget's ~2.3s (12 rollouts * ~0.19s), let alone
+# the 30-90s pick clock this has to fit inside.
+SURVIVAL_ROLLOUTS = 400
+
 
 def rollouts_for(picks_until: int) -> int:
     """Budget by the time actually available.
@@ -544,7 +559,8 @@ def register_live_routes(app, conn, db_path):
              "listener": None, "listener_thread": None,
              "listener_stop": None, "listener_error": None,
              # The per-session recompute worker (see _launch_listener):
-             # search_pick is seconds-slow, so it runs here, off the
+             # survival/rank_available still take real time (a fraction of a
+             # second, see SURVIVAL_ROLLOUTS), so it runs here, off the
              # frame-reading thread, or a fast draft's frames would pile up
              # unread behind it. Tracked so _stop_listener joins it before
              # closing league_conn -- the worker holds a cursor on that
@@ -598,8 +614,8 @@ def register_live_routes(app, conn, db_path):
             stop_event.set()
         # Both the frame-reading thread AND the recompute worker share this
         # stop_event and must be confirmed exited before league_conn closes:
-        # each may hold a cursor on it (the worker for the whole of a
-        # multi-second search_pick), so closing it under either is a
+        # each may hold a cursor on it (the worker for the whole of one
+        # survival/rank_available ranking), so closing it under either is a
         # use-after-close. A timeout on either means "a thread may still be
         # using the connection" -- refuse the reconnect and leave the
         # connection open rather than corrupt it, exactly as for the listener
@@ -621,18 +637,18 @@ def register_live_routes(app, conn, db_path):
         return True
 
     def _recompute(session, picks_made):
-        """Run one search and store it, unless superseded meanwhile.
+        """Run one ranking and store it, unless superseded meanwhile.
 
         A result computed against a board that has since changed is worse
         than no result -- it recommends a player who may already be gone. So
         the pick count and the session generation are both captured before
-        the search and re-checked after: if either moved, this result is
+        the ranking and re-checked after: if either moved, this result is
         discarded rather than served.
 
         `session.my_slot` can still be None here -- the socket hasn't named
-        our team yet -- and `search_pick` needs a real slot to index into
+        our team yet -- and `survival` needs a real slot to index into
         (rosters, snake order, ...), not something to guess at. Skip the
-        search rather than pass it a fabricated one; candidates stay empty
+        ranking rather than pass it a fabricated one; candidates stay empty
         until my_slot resolves, which /api/live/state already reports
         honestly via session.my_slot being null.
         """
@@ -651,12 +667,22 @@ def register_live_routes(app, conn, db_path):
         cur = active_conn.cursor()
         try:
             taken, taken_order = _drafted_state(cur, session.pool)
-            until = picks_until_turn(session.settings, session.my_slot, picks_made)
-            frame = search_pick(
+            # My own roster so far, so need_weight can see which slots are
+            # still open. _seed_rosters replays every pick to the slot that
+            # was on the clock for it, which is the same attribution the
+            # simulator resumes from.
+            rosters, _ = _seed_rosters(session.pool, session.settings, taken_order)
+            counts = rosters[session.my_slot]["counts"]
+            # survival()'s avail_pct is already a 0-1 probability (see its
+            # docstring and the "counts / max(n_rollouts, 1)" line it
+            # returns) -- rank_available wants exactly that, no rescaling.
+            avail = survival(
                 session.pool, session.settings, session.slot_managers,
                 session.my_slot, taken, session.betas,
-                n_rollouts=rollouts_for(until), seed=session.seed,
-                taken_order=taken_order)
+                n_rollouts=SURVIVAL_ROLLOUTS, seed=session.seed,
+                taken_order=taken_order)["avail_pct"].to_numpy()
+            frame = rank_available(session.pool, session.settings, taken,
+                                   counts, avail)
         finally:
             cur.close()
         with lock:
@@ -741,12 +767,16 @@ def register_live_routes(app, conn, db_path):
         # mutable cell, closed over by the callbacks one-to-one with `listener`.
         current = {"session": session}
 
-        # The recompute request queue -- coalescing, depth one. search_pick is
-        # seconds-slow; running it inline in the frame callback (as this used
-        # to) blocked the socket read loop for its whole duration, so in a fast
-        # draft frames -- picks, CLOCK heartbeats -- piled up unread and the
-        # board fell behind. Now the callback only records "recompute wanted at
-        # pick N" and returns instantly; the worker below does the slow part.
+        # The recompute request queue -- coalescing, depth one. search_pick
+        # (this engine's predecessor) was seconds-slow; running it inline in
+        # the frame callback (as this used to) blocked the socket read loop
+        # for its whole duration, so in a fast draft frames -- picks, CLOCK
+        # heartbeats -- piled up unread and the board fell behind. The
+        # replacement (survival + rank_available) is far cheaper, but the
+        # callback still only records "recompute wanted at pick N" and
+        # returns instantly; the worker below does the ranking, off-thread
+        # regardless of how fast it is, since nothing here depends on it
+        # staying slow to justify the split.
         # Coalescing (a single latest-wins slot, not a queue) is deliberate: a
         # burst of quick picks collapses to one recompute of the final state
         # instead of a backlog of stale ones, and _recompute's own as_of_pick

@@ -307,8 +307,66 @@ def _live_session(seed=DEFAULT_SEED):
 
 
 def _fake_candidates_frame(player_id):
-    return pd.DataFrame({"player_id": [player_id], "ev": [1.0], "se": [0.1],
-                          "applied_pct": [1.0], "rank": [1]})
+    """A stand-in for rank_available's return shape -- gain_now, not EV."""
+    return pd.DataFrame({"player_id": [player_id], "position": ["WR"],
+                          "proj_points": [200.0], "vor_points": [50.0],
+                          "gain_now": [12.5], "survive_pct": [80.0],
+                          "fills": ["WR1"], "rank": [1]})
+
+
+def _fake_survival_frame(*a, **k):
+    """A stand-in for survival()'s return shape, for tests that mock the
+    ranking step entirely (its own contents never reach a mocked
+    rank_available)."""
+    return pd.DataFrame({"player_id": [], "avail_pct": []})
+
+
+def test_state_candidates_carry_gain_now(tmp_path):
+    """The recommendation is gain_now, not simulated end-of-draft EV.
+
+    EV's standard error was larger than the spread between good candidates,
+    so the top slot moved with the sampling seed. gain_now is deterministic
+    given the survival estimate -- and that determinism is exactly what
+    ought to be under test, so this drives the real engine (real pool, real
+    settings, real survival() and rank_available()) through a real
+    /api/live/state GET rather than mocking the ranking step, the way the
+    recompute-guard tests below do.
+
+    `register_live_routes` gives `(state, _recompute)` for exercising
+    _recompute directly (see `_live_routes_with_conn`), but never hands back
+    the FastAPI app it mounted routes on, so there is no existing fixture
+    that also lets a test hit the HTTP layer. Building the app and its
+    TestClient inline here, the same two lines `_live_routes_with_conn`
+    already uses plus wrapping them in a TestClient, isn't a new fixture
+    style -- it's the same pieces already used to reach state/_recompute.
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path, extra_players=[
+        {"player_id": "p2", "name": "B Runner", "position": "RB",
+         "team": "DET", "espn_id": 4430807},
+        {"player_id": "p3", "name": "C Slot", "position": "WR",
+         "team": "GB", "espn_id": 4426515},
+    ])
+    conn = get_conn(path)
+    app = FastAPI()
+    state, _recompute = register_live_routes(app, conn, path)
+    client = TestClient(app)
+
+    session = build_session(conn, my_slot=1)
+    state["session"] = session
+    _recompute(session, picks_made=0)
+
+    body = client.get("/api/live/state").json()
+    assert body["candidates"], "no recommendation produced"
+    row = body["candidates"][0]
+    assert set(row) >= {"player_id", "position", "proj_points", "vor_points",
+                        "gain_now", "survive_pct", "fills", "rank"}
+    assert "ev" not in row
+    gains = [c["gain_now"] for c in body["candidates"]]
+    assert gains == sorted(gains, reverse=True)
 
 
 def test_recompute_discards_a_result_the_pick_count_has_moved_past(tmp_path, monkeypatch):
@@ -318,7 +376,8 @@ def test_recompute_discards_a_result_the_pick_count_has_moved_past(tmp_path, mon
     state, _recompute = _live_routes_with_conn(tmp_path)
     session = _live_session()
     monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
-    monkeypatch.setattr("api.live.search_pick",
+    monkeypatch.setattr("api.live.survival", _fake_survival_frame)
+    monkeypatch.setattr("api.live.rank_available",
                          lambda *a, **k: _fake_candidates_frame("stale"))
 
     # A newer poll landed and recorded picks_made=5 while this computation,
@@ -338,14 +397,17 @@ def test_recompute_stores_its_result_when_nothing_superseded_it(tmp_path, monkey
     state, _recompute = _live_routes_with_conn(tmp_path)
     session = _live_session()
     monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
-    monkeypatch.setattr("api.live.search_pick",
+    monkeypatch.setattr("api.live.survival", _fake_survival_frame)
+    monkeypatch.setattr("api.live.rank_available",
                          lambda *a, **k: _fake_candidates_frame("winner"))
 
     _recompute(session, picks_made=3)
 
     assert state["as_of_pick"] == 3
-    assert state["candidates"] == [{"player_id": "winner", "ev": 1.0, "se": 0.1,
-                                     "applied_pct": 1.0, "rank": 1}]
+    assert state["candidates"] == [{"player_id": "winner", "position": "WR",
+                                     "proj_points": 200.0, "vor_points": 50.0,
+                                     "gain_now": 12.5, "survive_pct": 80.0,
+                                     "fills": "WR1", "rank": 1}]
 
 
 def test_recompute_discards_a_result_from_a_stopped_and_restarted_session(tmp_path, monkeypatch):
@@ -358,17 +420,18 @@ def test_recompute_discards_a_result_from_a_stopped_and_restarted_session(tmp_pa
     state, _recompute = _live_routes_with_conn(tmp_path)
     old_session = _live_session()
     monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
+    monkeypatch.setattr("api.live.survival", _fake_survival_frame)
 
-    def fake_search_pick(*a, **k):
+    def fake_rank_available(*a, **k):
         # Simulate live_stop() followed by live_start() landing while this
-        # search is in flight -- exactly what those handlers do to `state`
+        # ranking is in flight -- exactly what those handlers do to `state`
         # under the lock: bump the generation and reset as_of_pick.
         state["generation"] += 1
         state["as_of_pick"] = None
         state["candidates"] = [{"player_id": "fresh-session"}]
         return _fake_candidates_frame("stale-session")
 
-    monkeypatch.setattr("api.live.search_pick", fake_search_pick)
+    monkeypatch.setattr("api.live.rank_available", fake_rank_available)
 
     _recompute(old_session, picks_made=0)
 
@@ -376,19 +439,21 @@ def test_recompute_discards_a_result_from_a_stopped_and_restarted_session(tmp_pa
     assert state["as_of_pick"] is None
 
 
-def test_recompute_passes_the_session_seed_to_search_pick(tmp_path, monkeypatch):
+def test_recompute_passes_the_session_seed_to_survival(tmp_path, monkeypatch):
     """The seed is pinned for the session's lifetime -- _recompute must hand
-    search_pick session.seed, never a freshly generated value."""
+    survival session.seed, never a freshly generated value."""
     state, _recompute = _live_routes_with_conn(tmp_path)
     session = _live_session(seed=773311)
     monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
+    monkeypatch.setattr("api.live.rank_available",
+                         lambda *a, **k: _fake_candidates_frame("p1"))
     captured = {}
 
-    def fake_search_pick(*a, **k):
+    def fake_survival(*a, **k):
         captured.update(k)
-        return _fake_candidates_frame("p1")
+        return pd.DataFrame({"player_id": [], "avail_pct": []})
 
-    monkeypatch.setattr("api.live.search_pick", fake_search_pick)
+    monkeypatch.setattr("api.live.survival", fake_survival)
 
     _recompute(session, picks_made=0)
 
@@ -673,9 +738,10 @@ def test_connect_wires_the_listener_to_apply_picks_and_recompute(
     through the exact same DraftListener/on_change shape run_listener uses
     (see pipeline/draft_listener.py). Everything downstream is the real
     code: build_session against a real (tiny) database, apply_picks writing
-    real rows to `drafted`, and _recompute. search_pick is stubbed only for
-    speed/determinism, the same way the other _recompute tests in this file
-    already do it -- the thing under test is the wiring, not the search.
+    real rows to `drafted`, and _recompute. survival/rank_available are
+    stubbed only for speed/determinism, the same way the other _recompute
+    tests in this file already do it -- the thing under test is the wiring,
+    not the ranking.
     """
     import threading
 
@@ -718,8 +784,9 @@ def test_connect_wires_the_listener_to_apply_picks_and_recompute(
 
     recompute_calls = []
     monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
+    monkeypatch.setattr("api.live.survival", _fake_survival_frame)
     monkeypatch.setattr(
-        "api.live.search_pick",
+        "api.live.rank_available",
         lambda *a, **k: recompute_calls.append(k) or _fake_candidates_frame("winner"))
 
     done = threading.Event()
@@ -781,8 +848,10 @@ def test_connect_wires_the_listener_to_apply_picks_and_recompute(
         "recompute worker never produced candidates for pick 3"
     assert len(recompute_calls) >= 1
     state = client.get("/api/live/state").json()
-    assert state["candidates"] == [{"player_id": "winner", "ev": 1.0, "se": 0.1,
-                                    "applied_pct": 1.0, "rank": 1}]
+    assert state["candidates"] == [{"player_id": "winner", "position": "WR",
+                                    "proj_points": 200.0, "vor_points": 50.0,
+                                    "gain_now": 12.5, "survive_pct": 80.0,
+                                    "fills": "WR1", "rank": 1}]
 
 
 # --- Listener lifecycle: at most one running, stop really stops it, a dead
@@ -1341,8 +1410,9 @@ def test_connect_token_resolves_slot_and_wires_socket_picks(
 
     recompute_calls = []
     monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
+    monkeypatch.setattr("api.live.survival", _fake_survival_frame)
     monkeypatch.setattr(
-        "api.live.search_pick",
+        "api.live.rank_available",
         lambda *a, **k: recompute_calls.append(k) or _fake_candidates_frame("winner"))
 
     done = threading.Event()
@@ -1400,9 +1470,10 @@ def test_connect_token_resolves_slot_and_wires_socket_picks(
     assert rows == [(crosswalk[4430807], 1), (crosswalk[4429795], 2),
                     (crosswalk[4426515], 3)]
 
-    # search_pick now runs on the background recompute worker, not inline in
-    # the frame callback, so the result arrives shortly AFTER the listener
-    # finishes -- poll for it rather than reading it synchronously.
+    # survival/rank_available now run on the background recompute worker,
+    # not inline in the frame callback, so the result arrives shortly AFTER
+    # the listener finishes -- poll for it rather than reading it
+    # synchronously.
     assert _wait_until(
         lambda: client.get("/api/live/state").json()["candidates_as_of_pick"] == 3), \
         "recompute worker never produced candidates for pick 3"
@@ -1608,7 +1679,8 @@ def test_unmapped_picks_surface_in_state(tmp_path, monkeypatch, _isolated_league
     path = str(tmp_path / "u.duckdb")
     _seed_minimal_live_db(path)
     monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
-    monkeypatch.setattr("api.live.search_pick",
+    monkeypatch.setattr("api.live.survival", _fake_survival_frame)
+    monkeypatch.setattr("api.live.rank_available",
                         lambda *a, **k: _fake_candidates_frame("x"))
 
     def fake_socket(listener, league_id, team_id, swid, token,
