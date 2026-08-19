@@ -133,8 +133,24 @@ def rank_available(pool, settings, taken, counts: dict, survive) -> pd.DataFrame
             "gain_now": weight * (float(pool.vor[idx]) - next_best[pos]),
             "survive_pct": float(survive[idx]) * 100.0,
             "fills": fills_slot(settings, counts, pos),
+            # Not part of the result -- dropped after the sort below.
+            "capped": weight == 0.0,
         })
+    # Capped players sort LAST, not by gain_now alone. NEED_WEIGHTS["capped"]
+    # is 0.0, so `weight * (...)` is identically 0.0 for every one of them --
+    # which puts them above every genuinely useful player whose gain is
+    # negative. Late in a draft, when most positions are full, that is a
+    # block of unpickable rows sitting at the top of the ranked list. `fills`
+    # already labels them "—" so they are visible rather than misleading, but
+    # last is where they belong.
+    #
+    # Sorted on a separate key rather than by pushing gain_now negative: the
+    # spec pins gain_now at zero for a position at its roster cap ("gain_now
+    # is zero for a position at its roster cap", §7), and that zero is the
+    # honest number -- taking a player you cannot roster gains nothing, it
+    # does not cost you points.
     out = pd.DataFrame(rows).sort_values(
-        "gain_now", ascending=False).reset_index(drop=True)
+        ["capped", "gain_now"], ascending=[True, False]).drop(
+            columns="capped").reset_index(drop=True)
     out["rank"] = out.index + 1
     return out

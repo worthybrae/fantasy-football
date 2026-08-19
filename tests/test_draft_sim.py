@@ -259,6 +259,53 @@ def test_build_pool_availability_is_a_games_played_rate_not_a_percentile(tmp_pat
     assert by_id["p2"] == DEFAULT_AVAILABILITY
 
 
+def test_build_pool_survives_a_duplicate_player_id_on_the_board(tmp_path):
+    """Two board rows sharing a `player_id` must not take build_pool down.
+
+    `_add_adp_only_players` synthesizes `player_id = "adp_" + norm` from the
+    normalized name alone, with no position in the key, so one name at two
+    positions in the ADP feed (neither matching the weekly universe) reaches
+    the board twice under one id -- the collision build_board's own
+    drop_duplicates comment documents and tests/test_api.py's
+    `_seed_adp_only` fixture already produces.
+
+    build_board was hardened against this (`uni["proj_points"] =
+    proj.to_numpy(...)`); build_pool, three lines down the same call chain,
+    still did `board.set_index("player_id")` and `.map()`, which raises
+    `InvalidIndexError: Reindexing only valid with uniquely valued Index
+    objects`. api/live.py's build_session calls both in that order, so an
+    ADP-feed name collision meant no live draft could start at all.
+
+    Both branches covered: `proj_points` present (the production path, where
+    the board already carries the column) and absent (a bare fixture board,
+    where projections() computes it).
+    """
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    write_table(conn, "weekly", pd.DataFrame(columns=[
+        "player_id", "player_display_name", "position", "recent_team",
+        "season", "week", "receptions", "receiving_yards", "targets",
+        "carries"]))
+    board = pd.DataFrame([
+        {"player_id": "adp_dup_guy", "name": "Dup Guy", "position": "RB",
+         "team": "SF", "market_rank": 1.0, "durability": 50.0,
+         "stats": {"ppg": 12.0}, "proj_points": 180.0},
+        {"player_id": "adp_dup_guy", "name": "Dup Guy", "position": "TE",
+         "team": "GB", "market_rank": 2.0, "durability": 50.0,
+         "stats": {"ppg": 8.0}, "proj_points": 120.0},
+    ])
+
+    pool = build_pool(conn, board, S)
+    # Each colliding row keeps its OWN projection -- assigned positionally,
+    # so neither row inherits the other's number.
+    assert list(pool.points) == [180.0, 120.0]
+    assert list(pool.position) == ["RB", "TE"]
+
+    bare = build_pool(conn, board.drop(columns=["proj_points"]), S)
+    # projections() falls through to stats.ppg * GAMES for both rows.
+    assert len(bare.points) == 2
+    assert bare.points[0] > bare.points[1]
+
+
 def test_projections_prefer_espn_then_fall_back_to_weighted_ppg(tmp_path):
     conn = get_conn(str(tmp_path / "t.duckdb"))
     write_table(conn, "espn_adp", pd.DataFrame([

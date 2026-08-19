@@ -269,12 +269,26 @@ def build_pool(conn, board: pd.DataFrame, settings) -> SimPool:
     # The board already carries this (build_board computes it to rank on);
     # recomputing it here would be a second, silently divergent copy. A bare
     # fixture board without the column still falls back to computing it.
+    #
+    # Assigned POSITIONALLY, never `.map()`ed on `player_id` -- the same
+    # hazard, and the same fix, as build_board's own `uni["proj_points"] =
+    # proj.to_numpy(...)` (see its comment): `_add_adp_only_players`
+    # synthesizes `player_id` from the normalized name with no position in
+    # the key, so one name at two positions in the ADP feed produces two
+    # board rows sharing an id, and `.map()` against a duplicate-valued
+    # index raises InvalidIndexError. build_board was fixed and this was
+    # not, three lines down the same call chain -- so an ADP-feed name
+    # collision still took `build_session` down and no live draft could
+    # start. Both sides of the branch are one value per board row in board
+    # row order (`projections` builds its Series by iterating
+    # `board.iterrows()`), so positional assignment gives every row -- both
+    # colliding ones included -- its own correct value.
     if "proj_points" in board.columns:
-        points = board.set_index("player_id")["proj_points"].astype(float)
+        points = board["proj_points"].to_numpy(dtype=float)
     else:
-        points = projections(conn, board)
+        points = projections(conn, board).to_numpy(dtype=float)
     ranked = board.copy()
-    ranked["proj"] = ranked["player_id"].map(points)
+    ranked["proj"] = points
 
     # `adp_rank`/`market_rank` (the SimPool fields, not the board column)
     # must land on the scale draft_model's reach/fall coefficients were

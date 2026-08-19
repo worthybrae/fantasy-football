@@ -108,6 +108,33 @@ def test_rank_available_zeroes_a_capped_position():
     assert out.iloc[0]["fills"] == "—"
 
 
+def test_rank_available_sorts_capped_players_last():
+    """A capped player must not outrank a useful one.
+
+    NEED_WEIGHTS["capped"] is 0.0, so gain_now is identically 0.0 for every
+    capped player -- and 0.0 sorts above every useful player whose gain is
+    negative, which is most of the list once the good options at a position
+    are gone. Late in a draft that put a block of rows the roster cannot
+    even hold at the top of the ranked list.
+
+    Here K is capped (one K already rostered, _roster_cap caps K at 1) and
+    the two RBs both fill a real starting slot. The better RB's gain is
+    positive and the worse RB's is negative -- and it is the negative one
+    that the old sort put below the kicker.
+    """
+    pool = _pool(player_id=["k1", "rb1", "rb2"], position=["K", "RB", "RB"],
+                 points=[130.0, 220.0, 180.0], vor=[20.0, 80.0, 40.0])
+    out = rank_available(pool, settings(), np.zeros(3, dtype=bool),
+                         {"K": 1}, np.array([0.9, 0.5, 0.5]))
+    assert list(out["player_id"]) == ["rb1", "rb2", "k1"]
+    # The premise: the kicker's gain really is the larger number.
+    by_id = dict(zip(out["player_id"], out["gain_now"]))
+    assert by_id["k1"] == 0.0
+    assert by_id["rb2"] < 0.0
+    # And `capped` is a sort key, not a served column.
+    assert "capped" not in out.columns
+
+
 class _pool:
     """Minimal stand-in for SimPool: gain.py reads four fields."""
 

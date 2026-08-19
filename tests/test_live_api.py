@@ -194,6 +194,41 @@ def test_build_session_builds_a_usable_crosswalk(tmp_path):
         assert isinstance(player_id, str)
 
 
+def test_build_session_survives_a_duplicate_player_id_from_the_adp_feed(tmp_path):
+    """The whole-branch consequence of the build_pool duplicate-id crash.
+
+    build_session calls build_board and then build_pool. Task 1 hardened
+    build_board against a board row pair sharing a synthesized
+    `player_id` (`_add_adp_only_players` keys it on the normalized name
+    alone, so one name at two positions collides); build_pool, three lines
+    later, still did `board.set_index("player_id")` + `.map()` and raised
+    `InvalidIndexError`. So an ADP-feed name collision took the whole
+    session build down and no live draft could start -- the Critical was
+    fixed at one of two sites on the same call chain.
+    """
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    conn = get_conn(path)
+    # Neither row matches the weekly universe, so both reach the board as
+    # ADP-only players under the one synthesized id `adp_dup_guy`.
+    write_table(conn, "adp", pd.DataFrame([
+        {"adp_name": "A Star", "position": "WR", "team": "DET", "adp": 5.1},
+        {"adp_name": "Dup Guy", "position": "RB", "team": "SF", "adp": 6.0},
+        {"adp_name": "Dup Guy", "position": "TE", "team": "GB", "adp": 7.0},
+    ]))
+
+    session = build_session(conn, my_slot=1)
+
+    ids = list(session.pool.player_id)
+    assert ids.count("adp_dup_guy") == 2, \
+        "the collision never reached the pool -- this no longer tests anything"
+    # Each colliding row keeps its own position and its own projection.
+    dup = [(pos, pts) for pid, pos, pts
+           in zip(ids, session.pool.position, session.pool.points)
+           if pid == "adp_dup_guy"]
+    assert sorted(p for p, _ in dup) == ["RB", "TE"]
+
+
 def test_build_session_default_seed_is_pinned(tmp_path):
     """The default seed must be pinned to a constant, not derived from a clock.
 
