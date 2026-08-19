@@ -173,3 +173,6 @@ data/espn_state.json
 __pycache__/
 web/node_modules/
 web/dist/
+
+# design canvas working files (mockups, not app source)
+.design/
