@@ -1,3 +1,5 @@
+import dataclasses
+
 import pandas as pd
 from pipeline.db import get_conn, record_freshness, write_table
 from scoring.profile import season_summaries, game_log, build_profile, _stat_line
@@ -718,3 +720,246 @@ def test_profile_frame_cache_is_bounded(tmp_path):
         conn = _seed(tmp_path / f"db{i}")
         cached_profile_frames(conn)
     assert len(_cache) <= _MAX_ENTRIES
+
+
+# -- scoring-format awareness of the whole profile ---------------------------
+#
+# `build_profile` never received the league's settings at all before this, so
+# every number it derived was priced in full PPR whatever the league scored:
+# ppg, the week-to-week volatility beside it, the game log, the stat twins AND
+# the `next_ppg` the owner reads as a forecast, the points-allowed schedule,
+# and `proj_ppg`/`proj_delta` (ESPN's PPR season number differenced against a
+# PPR career average). All of it sat next to a header row -- the board row --
+# that had already been priced under the league's real rules.
+
+def _fmt_settings(reception_points):
+    """A COMPLETE rule set with one value moved, so the only thing separating
+    the three leagues under test is the reception value the format is named
+    for. A two-key sketch would also change every number, but for the boring
+    reason that it stopped scoring touchdowns."""
+    from scoring import league
+    from scoring.ppr import DEFAULT_RULES
+    return league.LeagueSettings(
+        season=2026, teams=8,
+        starters={"QB": 1, "RB": 2, "WR": 2, "TE": 1, "K": 1, "DST": 1},
+        flex_slots=2, bench=5,
+        scoring={**DEFAULT_RULES, "receptions": reception_points},
+        draft_type="SNAKE")
+
+
+def _seed_format_fixture(tmp_path):
+    """One receiving-heavy WR with an uneven week-to-week line, plus a twin.
+
+    p1 (2025, 10 games) alternates 4 and 8 catches on a flat 80 yards and one
+    touchdown, so his per-game points are 18/22 in full PPR, 16/18 in half and
+    a flat 14 in standard:
+        ppg      20.0   17.0   14.0
+        ppg_std   2.11   1.05    0.0
+    The volatility collapsing to zero is the whole point: in a standard league
+    the only thing that varied about his weeks was the catch count, and catches
+    stopped being points.
+
+    t1 is a stat twin with a 2023 season (the comp) and a 2024 season (the
+    "what happened next"), so `next_ppg` exists and moves with the rules too:
+        2024 ppg  12.0    9.0    6.0
+    """
+    conn = get_conn(str(tmp_path / "fmt.duckdb"))
+    weekly = pd.DataFrame(
+        [{"player_id": "p1", "player_display_name": "Amon-Ra St. Brown",
+          "position": "WR", "recent_team": "DET", "opponent_team": "GB",
+          "season": 2025, "week": w, "receptions": 4 if w % 2 else 8,
+          "receiving_yards": 80, "receiving_tds": 1, "targets": 10, "carries": 0}
+         for w in range(1, 11)]
+        + [{"player_id": "t1", "player_display_name": "Twin Guy",
+            "position": "WR", "recent_team": "GB", "opponent_team": "DET",
+            "season": 2023, "week": w, "receptions": 3, "receiving_yards": 50,
+            "receiving_tds": 0, "targets": 5, "carries": 0}
+           for w in range(1, 11)]
+        + [{"player_id": "t1", "player_display_name": "Twin Guy",
+            "position": "WR", "recent_team": "GB", "opponent_team": "DET",
+            "season": 2024, "week": w, "receptions": 6, "receiving_yards": 60,
+            "receiving_tds": 0, "targets": 8, "carries": 0}
+           for w in range(1, 11)])
+    write_table(conn, "weekly", weekly)
+    write_table(conn, "schedules", pd.DataFrame([
+        {"home_team": "DET", "away_team": "GB", "week": 1,
+         "total_line": 51.0, "spread_line": 3.0}]))
+    write_table(conn, "adp", pd.DataFrame([
+        {"adp_name": "Amon-Ra St Brown", "position": "WR", "team": "DET",
+         "adp": 5.1}]))
+    write_table(conn, "depth_charts", pd.DataFrame(
+        columns=["gsis_id", "depth_team", "formation", "week", "position"]))
+    write_table(conn, "snap_counts", pd.DataFrame(
+        columns=["player", "team", "season", "offense_pct"]))
+    write_table(conn, "espn_adp", pd.DataFrame([
+        {"espn_id": 501, "espn_name": "Amon-Ra St Brown", "position": "WR",
+         "espn_adp": 1.0, "espn_ppr_rank": 2, "espn_proj": 340.0}]))
+    write_table(conn, "fp_ecr", pd.DataFrame(
+        columns=["fp_name", "team", "position", "rank_ecr", "rank_ave", "rank_std", "fp_tier"]))
+    write_table(conn, "sleeper_ids", pd.DataFrame(
+        columns=["gsis_id", "espn_id", "sleeper_name", "position", "team"]))
+    return conn
+
+
+def _profiles_by_format(conn):
+    from scoring import board_cache, profile_cache
+    out = {}
+    for tag, rec in (("ppr", 1.0), ("half", 0.5), ("std", 0.0)):
+        board_cache.clear()
+        profile_cache.clear()
+        out[tag] = build_profile(conn, "p1", None, _fmt_settings(rec))
+    return out
+
+
+def test_profile_per_game_points_and_volatility_follow_the_leagues_scoring(tmp_path):
+    p = _profiles_by_format(_seed_format_fixture(tmp_path))
+    assert [p[f]["seasons"][0]["ppg"] for f in ("ppr", "half", "std")] == [20.0, 17.0, 14.0]
+    # Sample std of five 18s and five 22s is sqrt(40/9) = 2.108; halving the
+    # reception value halves the spread, and removing it entirely leaves ten
+    # identical weeks.
+    assert p["ppr"]["seasons"][0]["ppg_std"] == 2.11
+    assert p["half"]["seasons"][0]["ppg_std"] == 1.05
+    assert p["std"]["seasons"][0]["ppg_std"] == 0.0
+    # The header (the board row) already agreed with the league; now the body
+    # of the page does too.
+    for f in ("ppr", "half", "std"):
+        assert p[f]["header"]["stats"]["ppg"] == p[f]["seasons"][0]["ppg"]
+
+
+def test_profile_game_log_points_follow_the_leagues_scoring(tmp_path):
+    p = _profiles_by_format(_seed_format_fixture(tmp_path))
+    # Week 10 is an 8-catch week: 8 + 8.0 + 6 = 22.0 PPR, 18.0 half, 14.0 std.
+    for f, expected in (("ppr", 22.0), ("half", 18.0), ("std", 14.0)):
+        top = p[f]["game_log"][0]
+        assert top["week"] == 10
+        assert top["ppr_points"] == expected
+        # The stat line itself is counts, not points -- it must NOT move.
+        assert top["stat_line"] == "10 tgt, 8 rec, 80 yds, 1 TD"
+
+
+def test_stat_twins_are_matched_and_forecast_in_the_leagues_scoring(tmp_path):
+    """The comp's `next_ppg` is the number read as "what happened to players
+    like him", and it was full PPR in every league. Both the ppg shown for
+    the comp season and the following season's ppg move here."""
+    p = _profiles_by_format(_seed_format_fixture(tmp_path))
+    for f, comp_ppg, next_ppg in (("ppr", 8.0, 12.0), ("half", 6.5, 9.0),
+                                  ("std", 5.0, 6.0)):
+        similar = p[f]["similar"]
+        assert similar["mode"] == "stat_twins"
+        twin = similar["players"][0]
+        assert twin["name"] == "Twin Guy" and twin["season"] == 2023
+        assert twin["ppg"] == comp_ppg
+        assert twin["next_ppg"] == next_ppg
+
+
+def test_profile_projection_is_converted_out_of_espns_ppr(tmp_path):
+    """`proj_ppg` and `proj_delta` were the worst of the lot: ESPN's PPR-only
+    season number divided by 17 and then differenced against a career average
+    that this change makes league-scored. Subtracting one currency from
+    another produced a "projected improvement" that was nothing but the
+    missing reception points.
+
+    p1's scale is his own latest season: 17.0/20.0 in half, 14.0/20.0 in
+    standard, so ESPN's 340.0 becomes 289.0 and 238.0.
+    """
+    p = _profiles_by_format(_seed_format_fixture(tmp_path))
+    assert p["ppr"]["summary"]["proj_ppg"] == round(340.0 / 17, 1)
+    assert p["half"]["summary"]["proj_ppg"] == round(340.0 * (17.0 / 20.0) / 17, 1)
+    assert p["std"]["summary"]["proj_ppg"] == round(340.0 * (14.0 / 20.0) / 17, 1)
+    # w_ppg is the league's points too, so the delta stays a like-for-like
+    # comparison in all three.
+    for f in ("ppr", "half", "std"):
+        s = p[f]["summary"]
+        assert s["proj_delta"] == round(s["proj_ppg"] - s["w_ppg"], 1)
+
+
+def test_profile_schedule_difficulty_follows_the_leagues_scoring(tmp_path):
+    """Points ALLOWED is as format-dependent as points scored, and it sits on
+    the same page as the board's `schedule` factor, which has followed the
+    league's rules since the settings work."""
+    p = _profiles_by_format(_seed_format_fixture(tmp_path))
+    fpa = [r["fpa_pg"] for f in ("ppr", "half", "std")
+           for r in p[f]["schedule"] if r["week"] == 1]
+    assert fpa[0] > fpa[1] > fpa[2]
+    assert p["ppr"]["outlook"]["sos_raw"] > p["half"]["outlook"]["sos_raw"]
+    assert p["half"]["outlook"]["sos_raw"] > p["std"]["outlook"]["sos_raw"]
+
+
+def test_profile_frame_cache_does_not_serve_a_ppr_frame_to_a_half_ppr_league(tmp_path):
+    """THE CACHE TRAP, on the profile side.
+
+    scoring/profile_cache.py caches `season_features` -- the frame the stat
+    twins are matched on and `next_ppg` is read from -- keyed only on the
+    database and the pipeline-refresh fingerprint. Now that the frame is
+    priced under the league's rules, a key that does not carry them would
+    hand the second league whichever format asked first, silently, with every
+    other number on the page correctly its own. The order matters: PPR first
+    then half must give half's answer, and half first then PPR must give
+    PPR's.
+    """
+    from scoring import board_cache, profile_cache
+    conn = _seed_format_fixture(tmp_path)
+
+    profile_cache.clear(); board_cache.clear()
+    first_ppr = build_profile(conn, "p1", None, _fmt_settings(1.0))
+    board_cache.clear()
+    then_half = build_profile(conn, "p1", None, _fmt_settings(0.5))
+    assert first_ppr["seasons"][0]["ppg"] == 20.0
+    assert then_half["seasons"][0]["ppg"] == 17.0
+    assert then_half["similar"]["players"][0]["next_ppg"] == 9.0
+
+    profile_cache.clear(); board_cache.clear()
+    first_half = build_profile(conn, "p1", None, _fmt_settings(0.5))
+    board_cache.clear()
+    then_ppr = build_profile(conn, "p1", None, _fmt_settings(1.0))
+    assert first_half["seasons"][0]["ppg"] == 17.0
+    assert then_ppr["seasons"][0]["ppg"] == 20.0
+    assert then_ppr["similar"]["players"][0]["next_ppg"] == 12.0
+    # Two entries, not one: the rules are part of the key.
+    assert len(profile_cache._cache) == 2
+
+
+def test_profile_frame_cache_treats_reordered_ppr_rules_as_one_entry(tmp_path):
+    """The other half of the key's contract. `league.from_espn` emits the same
+    14 PPR rules in ESPN's order, not DEFAULT_RULES'; two dicts that price
+    identically must share one 40 MB entry and, more importantly, produce the
+    identical frame rather than one differing in the last bits of a float."""
+    from scoring import board_cache, profile_cache
+    from scoring.ppr import DEFAULT_RULES
+    conn = _seed_format_fixture(tmp_path)
+    reordered = {k: DEFAULT_RULES[k] for k in reversed(list(DEFAULT_RULES))}
+
+    profile_cache.clear(); board_cache.clear()
+    build_profile(conn, "p1", None, _fmt_settings(1.0))
+    board_cache.clear()
+    build_profile(conn, "p1", None,
+                  dataclasses.replace(_fmt_settings(1.0), scoring=reordered))
+    assert len(profile_cache._cache) == 1
+
+
+def test_board_cache_does_not_serve_a_ppr_board_to_a_half_ppr_league(tmp_path):
+    """THE CACHE TRAP, on the board side.
+
+    scoring/board_cache.py keys on `league.to_json(settings)`, which carries
+    the whole `scoring` dict -- so a format change already invalidates it.
+    That was verified by reading the key, and this pins it: without a scoring
+    component a half-PPR league would be served the PPR league's proj_points,
+    proj_scale and rank, which is the one number the whole board sorts on.
+    """
+    from scoring import board_cache
+    conn = _seed_format_fixture(tmp_path)
+    board_cache.clear()
+    ppr = board_cache.cached_build_board(conn, None, _fmt_settings(1.0))
+    half = board_cache.cached_build_board(conn, None, _fmt_settings(0.5))
+    again = board_cache.cached_build_board(conn, None, _fmt_settings(1.0))
+
+    p_ppr = ppr.set_index("player_id").loc["p1"]
+    p_half = half.set_index("player_id").loc["p1"]
+    assert p_ppr["proj_scale"] == 1.0
+    assert p_half["proj_scale"] == 17.0 / 20.0
+    assert p_ppr["proj_points"] == 340.0
+    assert p_half["proj_points"] == 340.0 * (17.0 / 20.0)
+    # And the PPR board comes back unchanged after the half-PPR build, so the
+    # second call did not overwrite the first league's entry.
+    pd.testing.assert_series_equal(p_ppr, again.set_index("player_id").loc["p1"])
+    assert len(board_cache._cache) == 2

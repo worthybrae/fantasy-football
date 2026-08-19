@@ -52,6 +52,7 @@ from scoring import factors, league
 from scoring.composite import compute_composite, apply_vor, assign_tiers
 from scoring.config import DEFAULT_WEIGHTS, RECENCY_WEIGHTS
 from scoring.market import add_market, select_format
+from scoring.ppr import compute_ppr_points, normalize_rules
 from scoring.similarity import player_season_features
 
 _SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
@@ -62,7 +63,18 @@ _ADP_TEAM_ALIASES = {"LAR": "LA", "WSH": "WAS", "JAC": "JAX", "SD": "LAC", "OAK"
 
 _BOARD_COLUMNS = [
     "player_id", "name", "position", "team", "bye", "production", "durability",
-    "role", "environment", "schedule", "composite", "proj_points", "vor",
+    "role", "environment", "schedule", "composite", "proj_points",
+    # How much this league's scoring rules re-price ESPN's PPR-shaped season
+    # projection for this player: 1.0 in a PPR league, ~0.83 for a
+    # high-reception WR in half-PPR, ~0.67 in standard. On the board rather
+    # than kept inside `projections()` because two other places show a number
+    # derived from the same raw `espn_proj` and would otherwise quote it in
+    # PPR while everything beside it is in the league's currency -- the
+    # profile's `summary.proj_ppg` (scoring/profile.py) and the draft room's
+    # trending icon (api/live.py `_board_cell`). One column, computed once,
+    # so those three cannot disagree. It is also the honest way to SHOW the
+    # estimate rather than bury it: see `projection_scale`.
+    "proj_scale", "vor",
     "tier", "market_rank",
     "market_spread", "market_sources", "espn_ppr_rank", "espn_id", "ffc_rank", "edge",
     "rookie", "drafted", "rank",
@@ -216,11 +228,140 @@ POSITION_FLOOR = {"QB": 180.0, "RB": 80.0, "WR": 80.0, "TE": 60.0,
                   "K": 110.0, "DST": 100.0}
 
 
+# A player needs at least this many full-PPR points per game in his latest
+# season before the ratio of his league-scored to his PPR-scored production is
+# trusted as a re-pricing factor. Below it the denominator is noise -- one
+# garbage-time catch in one game -- and a ratio built on noise is worse than
+# the position median, which is what such a player falls back to. One point a
+# game is far under any player who affects a draft (the 249-row real board's
+# lowest non-zero latest-season PPR ppg is a fraction of a point, from players
+# with a single appearance).
+_MIN_PPG_FOR_SCALE = 1.0
+
+
+def projection_scale(board: pd.DataFrame, rules: dict | None = None) -> np.ndarray:
+    """Per-row factor converting ESPN's PPR projection into league points.
+
+    THE PROBLEM. `projections()`'s first and best rung is `espn_proj`, ESPN's
+    own projected season total. It is computed under ESPN's scoring, and this
+    pipeline asks for it from `.../leaguedefaults/3?view=kona_player_info`
+    (pipeline/sources.py) -- league default 3 is ESPN's full-PPR default, which
+    is also why the same payload's rank is read out of `draftRanksByRankType
+    .PPR`. So it is a full-PPR number, always, for every league. It cannot be
+    re-derived under other rules, because the feed stores only the total:
+    `espn_adp` is (espn_id, espn_name, position, team, espn_adp,
+    espn_ppr_rank, espn_proj) and carries no projected receptions, yards or
+    touchdowns to re-price (verified against data/nfl.duckdb's actual schema).
+
+    WHY IT CANNOT SIMPLY BE LEFT ALONE. The second rung, `stats.ppg * GAMES`,
+    IS league-scored now. A board that priced some players (everyone ESPN
+    projects -- essentially every player who matters) in PPR and the rest in
+    half-PPR would be internally incoherent: `vor` differences `proj_points`
+    ACROSS players, so mixing two currencies in one column is worse than the
+    single wrong currency it replaced. Either both rungs move or neither does.
+
+    WHAT THIS DOES INSTEAD. Re-price ESPN's total by the ratio the player's
+    own most recent season implies:
+
+        scale = (his latest-season points per game under THIS league's rules)
+              / (his latest-season points per game under full PPR)
+
+    and `proj_points = espn_proj * scale`. This is EXACT whenever ESPN's
+    projected stat mix is a uniform scale-up or scale-down of the mix the
+    player actually posted last season -- which is precisely the assumption
+    the `stats.ppg * GAMES` rung already makes about the same player, so the
+    two rungs now rest on one assumption instead of disagreeing. Worked
+    example, a real one: Ja'Marr Chase's 2025 line (125 rec, 1412 rec yds,
+    8 TD, 16 games) is 19.6 ppg PPR and 15.7 half-PPR, a scale of 0.798;
+    ESPN's 336.4 becomes 268.5. Subtracting the reception delta from an exact
+    projected reception count would have given 336.4 - 0.5 x (125 x 336.4/313.6)
+    = 269.4 -- 0.3% away, and that alternative needs a number this database
+    does not have. It also generalises: the ratio carries a league that scores
+    passing touchdowns at 6 or yards at 0.05, which "subtract half a point per
+    catch" cannot.
+
+    WHAT IT IS NOT. It is not ESPN's opinion under this league's rules; ESPN
+    publishes no such number through this endpoint. It is ESPN's opinion,
+    converted using this player's own production mix. That estimate is
+    surfaced, not buried: the factor rides onto the board as `proj_scale` for
+    every consumer to see, and `build_board` warns once per non-PPR build.
+
+    FALLBACKS, in order:
+      * no usable ratio for a player (a rookie or anyone with no latest-season
+        weekly rows, or under `_MIN_PPG_FOR_SCALE`) -> the median scale of the
+        players at his position who do have one. Without this a rookie WR in a
+        standard league would keep a full-PPR projection while every veteran
+        WR was marked down 30%, which is a systematic bias in favour of
+        exactly the players there is least reason to be confident about.
+      * a position with no usable ratio at all -> 1.0. This is K and DST on
+        every real board: nflverse weekly rows carry no kicking or defensive
+        scoring, so both positions score 0 under any rules, PPR and half-PPR
+        alike, and their ESPN projections genuinely do not move between
+        formats. 1.0 is the right answer for them, not a shrug.
+      * `rules` that price exactly full PPR (including None) -> all ones, by
+        the shortest possible path, so a PPR league is untouched.
+    """
+    n = len(board)
+    ones = np.ones(n, dtype=float)
+    rules = normalize_rules(rules)
+    if rules is None or n == 0:
+        return ones
+
+    # `league_ppg`/`ppr_ppg` are put on the frame by `_latest_season_stats`,
+    # the same way and at the same moment as `stats`, which `projections()`
+    # already reads by this same intra-module column contract. A frame without
+    # them (a bare fixture, or a board handed back after `_BOARD_COLUMNS` has
+    # dropped them) cannot produce any ratio at all -- so say so rather than
+    # silently returning ones, which is exactly the kind of quiet PPR fallback
+    # this whole change exists to remove.
+    if not {"league_ppg", "ppr_ppg"}.issubset(board.columns):
+        warnings.warn(
+            "projection_scale: this league does not score full PPR, but the "
+            "frame carries no league_ppg/ppr_ppg columns, so ESPN's "
+            "PPR-shaped season projection cannot be converted and is used "
+            "as-is. Any proj_points taken from ESPN is priced in full PPR.",
+            RuntimeWarning)
+        return ones
+
+    league_ppg = pd.to_numeric(board["league_ppg"], errors="coerce").to_numpy(dtype=float)
+    ppr_ppg = pd.to_numeric(board["ppr_ppg"], errors="coerce").to_numpy(dtype=float)
+
+    usable = np.isfinite(league_ppg) & np.isfinite(ppr_ppg) & (ppr_ppg >= _MIN_PPG_FOR_SCALE)
+    scale = np.full(n, np.nan)
+    scale[usable] = league_ppg[usable] / ppr_ppg[usable]
+
+    # Position medians for everyone else. `np.nanmedian` over an all-NaN slice
+    # warns and returns NaN; the emptiness is tested first so a K/DST position
+    # (never any usable row) is a clean 1.0 rather than a RuntimeWarning.
+    positions = board["position"].to_numpy()
+    for pos in pd.unique(positions):
+        at_pos = positions == pos
+        known = at_pos & usable
+        fill = float(np.median(scale[known])) if known.any() else 1.0
+        gaps = at_pos & ~usable
+        scale[gaps] = fill
+    return scale
+
+
 def projections(conn, board: pd.DataFrame) -> pd.Series:
     """Projected season points per player_id.
 
-    Ladder: ESPN's own season projection, then recency-weighted PPG scaled to
-    a full season, then a per-position floor.
+    Ladder: ESPN's own season projection re-priced into the league's scoring
+    (`proj_scale`, see `projection_scale` for what that conversion is and is
+    not), then the player's latest-season points per game -- already in the
+    league's scoring, via `_latest_season_stats` -- scaled to a full season,
+    then a per-position floor.
+
+    The scale is read off the frame as a column rather than taken as an
+    argument, the same intra-module contract `stats` already uses: both are
+    merged onto `uni` by `build_board` a few lines before this runs. A frame
+    without it (a bare fixture) scales by 1.0, which is what every PPR caller
+    wants anyway.
+
+    (The old docstring said "recency-weighted PPG". It never was: the fallback
+    reads `stats.ppg`, which `_latest_season_stats` builds from the LATEST
+    season alone. `career_summary` in scoring/profile.py is the
+    recency-weighted one, and it feeds nothing here.)
     """
     espn = read_table(conn, "espn_adp")
     lookup = {}
@@ -237,10 +378,29 @@ def projections(conn, board: pd.DataFrame) -> pd.Series:
             if key is not None:
                 lookup[key] = float(row["espn_proj"])
 
+    # Positional, not `board["proj_scale"]` by label: `_add_adp_only_players`
+    # can put two rows on the board with the same synthesized player_id, and
+    # every other per-row array in this function is already built by iterating
+    # `board.iterrows()` in row order (see build_board's own comment on why
+    # `.map()` is unsafe here).
+    scale = (pd.to_numeric(board["proj_scale"], errors="coerce")
+             .fillna(1.0).to_numpy(dtype=float)
+             if "proj_scale" in board.columns else np.ones(len(board)))
+
     values = []
-    for _, row in board.iterrows():
+    for i, (_, row) in enumerate(board.iterrows()):
         key = adp_match_key(row["name"], row["position"], row.get("team"))
         proj = lookup.get(key) if key is not None else None
+        if proj is not None:
+            proj = proj * scale[i]
+            # Same rule the `espn_proj > 0` filter above applies to the raw
+            # feed, applied again after conversion: a scale that lands a
+            # projection at or below zero (a league that scores a player's
+            # whole production mix at nothing) is not a projection, it is a
+            # missing one, and it must fall through to the next rung rather
+            # than pin a real player at 0 and outrank the position floor.
+            if proj <= 0:
+                proj = None
         if proj is None:
             stats = row.get("stats")
             ppg = stats.get("ppg") if isinstance(stats, dict) else None
@@ -251,15 +411,30 @@ def projections(conn, board: pd.DataFrame) -> pd.Series:
     return pd.Series(values, index=board["player_id"].to_numpy(), dtype=float)
 
 
-def _latest_season_stats(weekly: pd.DataFrame) -> pd.DataFrame:
+def _latest_season_stats(weekly: pd.DataFrame,
+                         rules: dict | None = None) -> pd.DataFrame:
     """Per-player latest-season stat summary, one nested dict per row.
 
     Serialized like market_sources: the API's NaN->None pass turns a
     missing merge (rookie/K/DST with no weekly rows) into JSON null.
+
+    `stats.ppg` and `stats.points` are scored under `rules` -- the league's
+    `settings.scoring` -- because this is where `projections()` reads its
+    fallback rung from, and because the same numbers are what the draft room
+    shows as "last year" beside a projection. None is full PPR, unchanged.
+
+    `league_ppg` and `ppr_ppg` ride out alongside: the same latest season in
+    the league's scoring and in full PPR. `projection_scale` divides one by
+    the other to convert ESPN's PPR-shaped projection. Both are the UNROUNDED
+    per-game figures, not `stats.ppg`, which is rounded to one decimal for
+    display -- dividing a rounded number by an unrounded one would put a
+    ratio of 0.997 on a league that scores exactly full PPR. Both are dropped
+    by `_BOARD_COLUMNS` and exist only for that one consumer.
     """
     if weekly.empty:
-        return pd.DataFrame(columns=["player_id", "stats"])
-    feats = player_season_features(weekly)
+        return pd.DataFrame(columns=["player_id", "stats", "league_ppg", "ppr_ppg"])
+    rules = normalize_rules(rules)
+    feats = player_season_features(weekly, rules)
     latest = feats[feats["season"] == feats["season"].max()].copy()
 
     wk = weekly[weekly["season"] == weekly["season"].max()].copy()
@@ -281,7 +456,26 @@ def _latest_season_stats(weekly: pd.DataFrame) -> pd.DataFrame:
         "pass_yards": int(r["pass_yards"]), "pass_tds": int(r["pass_tds"]),
         "interceptions": int(r["interceptions"]),
     }, axis=1)
-    return latest[["player_id", "stats"]]
+
+    latest["league_ppg"] = latest["ppg"]
+    if rules is None:
+        # Same rules, same numbers -- taken from the column already computed
+        # rather than summed a second time, so the two are equal to the bit
+        # and a PPR board's `proj_scale` is exactly 1.0 (see normalize_rules
+        # in scoring/ppr.py for why the last bit matters here).
+        latest["ppr_ppg"] = latest["ppg"]
+    else:
+        # One extra pass over the LATEST season only (`wk`, already sliced
+        # above for the passing aggregates), not a second
+        # player_season_features over the whole recency window: the
+        # arithmetic is identical -- sum of weekly points over distinct weeks
+        # played -- at a fraction of the work, and only a non-PPR league pays
+        # it at all.
+        ppr = wk.assign(_ppr=compute_ppr_points(wk)).groupby(
+            "player_id", as_index=False)["_ppr"].sum()
+        latest = latest.merge(ppr, on="player_id", how="left")
+        latest["ppr_ppg"] = latest["_ppr"] / latest["games"]
+    return latest[["player_id", "stats", "league_ppg", "ppr_ppg"]]
 
 
 def build_board(conn, weights: dict | None = None,
@@ -379,11 +573,17 @@ def build_board(conn, weights: dict | None = None,
     uni = _merge_adp(uni, adp)
 
     # `stats` is merged before scoring, not after: projections() falls back
-    # to recency-weighted PPG out of this column when ESPN has no season
-    # projection for a player, and it has to run before the ranking that
-    # depends on it. add_market still runs after, because its `edge` column
-    # is market_rank - rank and needs the rank this block assigns.
-    uni = uni.merge(_latest_season_stats(weekly), on="player_id", how="left")
+    # to this column's latest-season PPG when ESPN has no season projection
+    # for a player, and it has to run before the ranking that depends on it.
+    # add_market still runs after, because its `edge` column is
+    # market_rank - rank and needs the rank this block assigns.
+    #
+    # `rules`, not full PPR: `stats.ppg`/`stats.points` are the league's own
+    # points now, so the fallback rung prices a half-PPR league in half-PPR
+    # points. `league_ppg`/`ppr_ppg` come along for `projection_scale` and are
+    # dropped by `_BOARD_COLUMNS` at the end.
+    uni = uni.merge(_latest_season_stats(weekly, rules), on="player_id", how="left")
+    uni["proj_scale"] = projection_scale(uni, rules)
 
     # -- score --
     uni["composite"] = compute_composite(uni, weights or DEFAULT_WEIGHTS)
@@ -405,27 +605,33 @@ def build_board(conn, weights: dict | None = None,
     # positionally gives every row -- including both id-colliding rows --
     # its own correct value, without ever reindexing on the id at all.
     uni["proj_points"] = proj.to_numpy(dtype=float)
-    # `projections()` is not scoring-format-aware: its first rung is ESPN's
-    # own season projection (a fixed external number, never per-league), and
-    # its fallback rung reads `stats.ppg`, which is fixed full-PPR
-    # (similarity.player_season_features -> compute_ppr_points), not
-    # `settings.scoring`. So a half-PPR or standard league's `vor` -- the
-    # board's rank -- is priced in full PPR regardless, even though
-    # `production`/`composite` upstream of it correctly follow this league's
-    # rules (see compute_composite, factors.production_factor). Silently
-    # ranking a non-PPR league on PPR-implied points is exactly the kind of
-    # thing this task exists to stop being silent about, so it is a warning,
-    # not a comment -- tracked as a follow-up, not fixed here (making
-    # projections() format-aware needs a decision about the ESPN-projection
-    # rung the spec never asked for, and draft_sim has always been PPR-only
-    # through this same function).
-    if fmt != "ppr":
+    # `proj_points` now follows this league's scoring on both rungs: the
+    # fallback reads `stats.ppg`, scored under `rules` a few lines above, and
+    # ESPN's own season projection is re-priced by `proj_scale`. What is left
+    # is not a PPR-priced board -- it is one number in the ladder that is an
+    # ESTIMATE rather than a measurement, and the warning says exactly that
+    # much and no more. It fires on the scoring rules, not on `fmt`: `fmt` is
+    # a three-way label derived from the reception value alone, so a league
+    # that scores full-point receptions but 6-point passing touchdowns reads
+    # as 'ppr' and still has every ESPN projection converted.
+    #
+    # Why an estimate is unavoidable here: ESPN publishes one number, computed
+    # under its own PPR default (pipeline/sources.py fetches
+    # `leaguedefaults/3`), and `espn_adp` stores only that total -- no
+    # projected receptions, yards or touchdowns to re-price. See
+    # `projection_scale` for the conversion, its error on a real player
+    # (0.3%), and why leaving the rung alone would have been worse than
+    # converting it.
+    if normalize_rules(rules) is not None:
+        n_espn = int((uni["proj_scale"] != 1.0).sum())
         warnings.warn(
-            f"board: league scoring format is '{fmt}', but proj_points (and "
-            "therefore vor, the board's rank) is priced in fixed full PPR "
-            "regardless -- projections() does not read settings.scoring. "
-            "The board's ranking will not reflect this league's real "
-            "scoring rules.",
+            f"board: league scoring format is '{fmt}'. proj_points follows "
+            "this league's rules, but ESPN's season projection -- the first "
+            "rung of the ladder -- is published in full PPR only, so it is "
+            f"CONVERTED, not re-derived: {n_espn} of {len(uni)} players carry "
+            "a proj_scale != 1.0, the ratio of their latest season under this "
+            "league's rules to the same season in full PPR. Exact only if a "
+            "player's projected stat mix matches last season's mix.",
             RuntimeWarning)
     uni = apply_vor(uni, settings.replacement_ranks, column="proj_points")
     uni = assign_tiers(uni)

@@ -1,7 +1,7 @@
 """Cross-year player-season similarity (stat twins) and board value-neighbors."""
 import numpy as np
 import pandas as pd
-from scoring.ppr import compute_ppr_points
+from scoring.ppr import compute_ppr_points, normalize_rules
 
 FEATURES = ["ppg", "games", "target_share", "carry_share",
             "yards_per_opp", "td_per_opp", "rec_pg"]
@@ -14,9 +14,23 @@ DECAY = 2.0
 _STAT_COLS = ["targets", "carries", "receiving_yards", "rushing_yards",
               "receiving_tds", "rushing_tds", "receptions"]
 
-def player_season_features(weekly: pd.DataFrame) -> pd.DataFrame:
+def player_season_features(weekly: pd.DataFrame,
+                           rules: dict | None = None) -> pd.DataFrame:
+    """Per player-season aggregate, scored under `rules` (None = full PPR).
+
+    `rules` is the league's `settings.scoring`, threaded in the same way
+    scoring/factors.py and scoring/player_history.py already take it. It is
+    not decoration: `ppg` is one of the seven FEATURES the stat-twin distance
+    is computed over AND the number `find_twins` reports as `next_ppg`, so in
+    a half-PPR league an unscored frame picks different comparables and
+    attaches a full-PPR forecast to them. `points` is what `pos_finish`
+    ("finished WR4") ranks on, and `ppg` is what the board's `stats.ppg` --
+    the fallback rung of `board.projections` -- reads.
+
+    None keeps every existing caller byte-identical.
+    """
     wk = weekly.copy()
-    wk["ppr_points"] = compute_ppr_points(wk)
+    wk["ppr_points"] = compute_ppr_points(wk, normalize_rules(rules))
     for c in _STAT_COLS:
         wk[c] = (pd.to_numeric(wk[c], errors="coerce").fillna(0)
                  if c in wk.columns else 0.0)
@@ -57,7 +71,8 @@ def _age_in_season(birth_date, season: int) -> int | None:
 
 def find_twins(weekly: pd.DataFrame, player_id: str, top_n: int = 5,
                players: pd.DataFrame | None = None, *,
-               season_features: pd.DataFrame | None = None) -> dict | None:
+               season_features: pd.DataFrame | None = None,
+               rules: dict | None = None) -> dict | None:
     """`weekly` is used for exactly one thing -- `player_season_features` --
     so a caller that already has that frame can hand it over as
     `season_features` and `weekly` is then ignored entirely. That is not an
@@ -65,8 +80,14 @@ def find_twins(weekly: pd.DataFrame, player_id: str, top_n: int = 5,
     its caller: scoring/profile.py computed the same 174,373-row aggregate
     here AND in `season_summaries` on every profile click, 0.211s each,
     and threw both away. See scoring/profile_cache.py. Passing nothing
-    keeps the old behaviour byte for byte."""
-    all_feats = (player_season_features(weekly) if season_features is None
+    keeps the old behaviour byte for byte.
+
+    `rules` is used ONLY on the path that computes the features here; a
+    caller supplying `season_features` has already priced them and this
+    argument is ignored, exactly as `weekly` is. Getting that wrong in the
+    other direction would be silent: a half-PPR profile handing over a
+    PPR-priced cached frame would match twins on PPR and say nothing."""
+    all_feats = (player_season_features(weekly, rules) if season_features is None
                  else season_features)
     feats = all_feats[all_feats["games"] >= MIN_GAMES]
     mine = feats[feats["player_id"] == player_id]

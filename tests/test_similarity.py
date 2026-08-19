@@ -161,3 +161,66 @@ def test_age_counts_full_years_at_september_first():
     assert _age_in_season("2000-08-15", 2025) == 25   # birthday before opening week
     assert _age_in_season("2000-09-15", 2025) == 24   # birthday after Sept 1
     assert _age_in_season(None, 2025) is None
+
+
+def test_features_are_scored_under_the_leagues_rules():
+    """`ppg` here is not a display number: it is one of the seven FEATURES the
+    twin distance is computed over AND what `find_twins` reports as
+    `next_ppg`. Priced in fixed full PPR it picked PPR comparables for a
+    half-PPR league and attached a PPR forecast to them, with nothing on the
+    page saying so."""
+    wk = pd.DataFrame(_wk("p1", "A", 2025, 4, rec=5, yds=50, tgt=8))
+    assert player_season_features(wk).iloc[0]["ppg"] == 10.0          # 5 + 5.0
+    half = player_season_features(wk, {"receptions": 0.5, "receiving_yards": 0.1})
+    assert half.iloc[0]["ppg"] == 7.5                                 # 2.5 + 5.0
+    std = player_season_features(wk, {"receiving_yards": 0.1})
+    assert std.iloc[0]["ppg"] == 5.0
+    # Counting columns are counts, not points -- untouched by any rule set.
+    for frame in (half, std):
+        assert frame.iloc[0]["receptions"] == 20
+        assert frame.iloc[0]["target_share"] == 1.0
+
+
+def test_the_leagues_rules_can_change_which_twin_is_closest():
+    """The match itself moves, not just the number printed beside it.
+
+    The target catches 6 for 80 on 12 targets. `Catcher` (7 for 40) is the
+    closer comp in full PPR -- 11.0 ppg against the target's 14.0, and almost
+    the same catches a game. `Runner` (1 for 90) is the closer comp with
+    receptions worth nothing -- 9.0 against 8.0, and a similar yards per
+    opportunity -- even though he catches five fewer balls a game. Both
+    comps carry an identical following season, so `next_ppg` follows.
+
+    Verified against real data too: Ja'Marr Chase's five comps on
+    data/nfl.duckdb are Keenan Allen / Michael Thomas / Diontae Johnson /
+    Davante Adams / DeAndre Hopkins in PPR and swap in Justin Jefferson at
+    half and Justin Jefferson + Michael Pittman at standard.
+    """
+    rows = (_wk("me", "Me", 2025, 10, rec=6, yds=80, tgt=12, team="AAA")
+            + _wk("catcher", "Catcher", 2023, 10, rec=7, yds=40, tgt=12, team="BBB")
+            + _wk("catcher", "Catcher", 2024, 10, rec=7, yds=40, tgt=12, team="BBB")
+            + _wk("runner", "Runner", 2023, 10, rec=1, yds=90, tgt=12, team="CCC")
+            + _wk("runner", "Runner", 2024, 10, rec=1, yds=90, tgt=12, team="CCC"))
+    wk = pd.DataFrame(rows)
+    ppr = find_twins(wk, "me")["players"][0]
+    assert ppr["name"] == "Catcher"
+    assert ppr["ppg"] == 11.0 and ppr["next_ppg"] == 11.0            # 7 + 4.0
+    std = find_twins(wk, "me", rules={"receiving_yards": 0.1})["players"][0]
+    assert std["name"] == "Runner"
+    assert std["ppg"] == 9.0 and std["next_ppg"] == 9.0              # 90 x 0.1
+
+
+def test_find_twins_ignores_rules_when_the_features_frame_is_supplied():
+    """Documented contract, pinned: `rules` only ever prices the frame this
+    function would otherwise build. A caller handing over `season_features`
+    (which build_profile does, off the rules-keyed profile cache) has already
+    priced it, and a second, disagreeing rule set here would silently rank the
+    comps on one scale and report them on another."""
+    rows = (_wk("me", "Me", 2025, 10, rec=6, yds=80, tgt=9, team="AAA")
+            + _wk("clone", "Clone", 2023, 10, rec=6, yds=80, tgt=9, team="BBB")
+            + _wk("clone", "Clone", 2024, 10, rec=4, yds=50, tgt=6, team="BBB"))
+    wk = pd.DataFrame(rows)
+    feats = player_season_features(wk)                       # full PPR
+    supplied = find_twins(wk, "me", season_features=feats,
+                          rules={"receiving_yards": 0.1})["players"][0]
+    assert supplied["ppg"] == 14.0                           # the frame's, not the rules'

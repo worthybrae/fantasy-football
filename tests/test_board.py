@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 from pipeline.db import get_conn, write_table
 from scoring.board import build_board, _norm_name
 
@@ -85,6 +86,14 @@ def test_board_column_contract(tmp_path):
                 # now differences (cross-position comparable, unlike the
                 # within-position composite percentile it replaced).
                 "proj_points",
+                # The scoring-format work adds proj_scale: how much this
+                # league's rules re-price ESPN's PPR-only season projection
+                # for this player (1.0 in a PPR league). It is on the board,
+                # not private to projections(), because scoring/profile.py's
+                # `summary.proj_ppg` and api/live.py's trending icon derive
+                # numbers from the same raw espn_proj and must use the same
+                # factor. See scoring/board.projection_scale.
+                "proj_scale",
                 "vor", "tier", "market_rank", "market_spread", "market_sources",
                 # espn_id rides onto the board so a live draft pick, which
                 # arrives as an ESPN player id and nothing else, resolves by
@@ -557,16 +566,21 @@ def test_board_uses_league_settings_when_present(tmp_path):
     # through composite.
     assert other["production"] > star["production"]
     assert other["composite"] > star["composite"]
-    # `vor` (Task 1) no longer follows this flip: it differences `proj_points`
-    # now, not `composite`, and `projections()` (ESPN's own season number,
-    # falling back to `stats.ppg` via `compute_ppr_points`) is not
-    # scoring-format-aware the way `production_factor`/`compute_composite`
-    # are -- it prices every league in fixed full PPR regardless of
-    # `settings.scoring`. So the star, still ahead on projected points here,
-    # keeps the higher vor even though "Other WR" out-produces him under this
-    # league's real rules. This is a real, pre-existing gap in `projections()`
-    # (unchanged by Task 1, which only changed what `vor` differences), not
-    # a symptom of a bug in this task -- see the Task 1 report for detail.
+    # `vor` follows the flip too now. It differences `proj_points`, and both
+    # rungs of `projections()` are priced in this league's scoring: this
+    # fixture's espn_adp carries no `espn_proj` column at all, so every row
+    # falls to `stats.ppg * GAMES`, and `stats.ppg` is the league's points.
+    #   p1: 8 x 0.5 + 90 x 0.1 = 13.0/gm -> 221.0
+    #   p2: 2 x 0.5 + 140 x 0.1 = 15.0/gm -> 255.0
+    # Under full PPR it is 17.0 -> 289.0 against 16.0 -> 272.0, the other way
+    # round. This assertion USED to say the opposite, and carried a paragraph
+    # explaining that `projections()` priced every league in fixed full PPR
+    # so the star kept the higher vor while losing on production -- a board
+    # that contradicted itself. That gap is what this change closed.
+    assert star["proj_points"] == 13.0 * 17
+    assert other["proj_points"] == 15.0 * 17
+    assert other["vor"] > star["vor"]
+    assert other["rank"] < star["rank"]
 
 def test_board_without_league_table_is_unchanged(tmp_path):
     # Same fixture, no `league` table -> the pre-existing expectations hold.
@@ -715,3 +729,200 @@ def test_board_consensus_follows_the_league_scoring_format(tmp_path):
     assert std.loc["p1", "market_sources"]["mfl"] == 25.0
     assert ppr.loc["p1", "market_rank"] == 1.0
     assert std.loc["p1", "market_rank"] == 2.0
+
+
+# -- scoring-format awareness of proj_points (scoring.board.projection_scale) --
+#
+# The board's own `production`/`composite` have followed `settings.scoring`
+# since the league-settings work, but `proj_points` -- which is what `vor`,
+# and therefore the whole ranking, differences -- did not: its fallback rung
+# read a fixed full-PPR ppg and its ESPN rung was ESPN's own PPR-only season
+# number. These tests pin BOTH rungs to the league's rules, and pin the one
+# thing that must not move: a full-PPR league.
+
+def _half_ppr(**overrides):
+    """DEFAULT_RULES with half-point receptions -- a complete rule set, not a
+    two-key sketch, so the only thing separating it from full PPR is the one
+    value the format is named for."""
+    from scoring import league
+    from scoring.ppr import DEFAULT_RULES
+    scoring = {**DEFAULT_RULES, "receptions": 0.5}
+    scoring.update(overrides)
+    return league.LeagueSettings(
+        season=2026, teams=8,
+        starters={"QB": 1, "RB": 2, "WR": 2, "TE": 1, "K": 1, "DST": 1},
+        flex_slots=2, bench=5, scoring=scoring, draft_type="SNAKE")
+
+
+def _seed_with_espn_projection(tmp_path):
+    """`_seed` plus a real espn_proj for p1 and a second WR ESPN never
+    projects, so one row exercises the ESPN rung and one the ppg fallback."""
+    from pipeline.db import read_table
+    conn = _seed(tmp_path)
+    extra = pd.DataFrame(
+        [{"player_id": "p2", "player_display_name": "Other WR", "position": "WR",
+          "recent_team": "GB", "opponent_team": "DET", "season": 2025, "week": w,
+          "receptions": 2, "receiving_yards": 140, "targets": 6, "carries": 0}
+         for w in range(1, 18)])
+    write_table(conn, "weekly", pd.concat([read_table(conn, "weekly"), extra],
+                                          ignore_index=True))
+    write_table(conn, "espn_adp", pd.DataFrame([
+        {"espn_id": 501, "espn_name": "Amon-Ra St Brown", "position": "WR",
+         "espn_adp": 1.0, "espn_ppr_rank": 2, "espn_proj": 280.0}]))
+    return conn
+
+
+def test_projections_price_both_rungs_in_the_leagues_scoring(tmp_path):
+    """ESPN's rung is CONVERTED, the ppg rung is scored directly, and the two
+    end up on one scale.
+
+    p1 (8 rec, 90 rec yds a game) is 17.0 ppg in full PPR and 13.0 in
+    half-PPR, so his proj_scale is 13/17 = 0.7647 and ESPN's 280.0 becomes
+    214.1. p2 (2 rec, 140 rec yds) has no ESPN row at all and falls to
+    `stats.ppg * GAMES` = 15.0 x 17 = 255.0.
+
+    The flip is the point: in full PPR p1 leads on projected points
+    (280.0 > 16.0 x 17 = 272.0) and in half-PPR p2 does (255.0 > 214.1),
+    because p1's edge was 6 catches a game and half of it just stopped
+    counting. Before this change p1 kept 280.0 in every league -- ESPN's
+    number, in PPR, next to a fallback rung that was also in PPR.
+    """
+    conn = _seed_with_espn_projection(tmp_path)
+    ppr = build_board(conn).set_index("player_id")
+    assert ppr.loc["p1", "proj_scale"] == 1.0
+    assert ppr.loc["p1", "proj_points"] == 280.0            # ESPN's own number
+    assert ppr.loc["p2", "proj_points"] == 16.0 * 17        # 272.0, full-PPR ppg
+    assert ppr.loc["p1", "vor"] > ppr.loc["p2", "vor"]
+
+    half = build_board(conn, settings=_half_ppr()).set_index("player_id")
+    assert half.loc["p1", "proj_scale"] == pytest.approx(13.0 / 17.0)
+    assert half.loc["p1", "proj_points"] == pytest.approx(280.0 * 13.0 / 17.0)
+    assert half.loc["p2", "proj_scale"] == pytest.approx(15.0 / 16.0)
+    assert half.loc["p2", "proj_points"] == 15.0 * 17       # 255.0, half-PPR ppg
+    assert half.loc["p2", "vor"] > half.loc["p1", "vor"]
+    assert half.loc["p2", "rank"] < half.loc["p1", "rank"]
+
+
+def test_projections_are_unchanged_when_the_leagues_rules_are_ppr_in_another_order(tmp_path):
+    """The ULP guard, and it is not hypothetical.
+
+    `league.from_espn` builds `scoring` in ESPN's `scoring_items` order, which
+    is not DEFAULT_RULES' order -- the owner's own imported league lists the
+    same 14 rules starting at `rushing_tds` instead of `passing_yards`.
+    `compute_ppr_points` accumulates term by term in dict order, so the same
+    rules summed in a different order differ in the last bits of a float:
+    measured on data/nfl.duckdb, 478 of 54,473 weekly rows from 2023 on come
+    out different, by up to 7.1e-15.
+
+    That is invisible in a points column and very visible here, because
+    `projection_scale` DIVIDES two such sums. Without `normalize_rules`
+    (scoring/ppr.py) collapsing a reordered-but-identical rule set back onto
+    None, the scale lands at 0.999999999999999x instead of 1.0, every
+    proj_points shifts in its last bits, and two players who should have tied
+    on vor can swap places -- a re-ranked board for a league whose scoring did
+    not change at all. Exactly, not approximately, is the assertion.
+    """
+    from scoring import league
+    from scoring.ppr import DEFAULT_RULES
+    conn = _seed_with_espn_projection(tmp_path)
+    reordered = {k: DEFAULT_RULES[k] for k in reversed(list(DEFAULT_RULES))}
+    assert list(reordered) != list(DEFAULT_RULES) and reordered == DEFAULT_RULES
+    settings = league.LeagueSettings(
+        season=2026, teams=8,
+        starters={"QB": 1, "RB": 2, "WR": 2, "TE": 1, "K": 1, "DST": 1},
+        flex_slots=2, bench=5, scoring=reordered, draft_type="SNAKE")
+
+    board = build_board(conn, settings=settings).set_index("player_id")
+    assert (board["proj_scale"] == 1.0).all()
+    assert board.loc["p1", "proj_points"] == 280.0
+    assert board.loc["p2", "proj_points"] == 16.0 * 17
+
+
+def test_projection_scale_leaves_kickers_and_defenses_alone(tmp_path):
+    """K and DST never move between scoring formats, and 1.0 says so.
+
+    nflverse weekly rows carry no kicking or defensive scoring, so both
+    positions total zero points under every rule set -- there is no ratio to
+    take. Falling back to a cross-position median would mark a kicker down by
+    a WR's reception share, which is wrong in the arithmetic and wrong in the
+    football: a half-PPR league does not change what a kicker scores.
+    """
+    conn = _seed_with_espn_projection(tmp_path)
+    write_table(conn, "adp", pd.DataFrame([
+        {"adp_name": "Amon-Ra St Brown", "position": "WR", "team": "DET", "adp": 5.1},
+        {"adp_name": "Other WR", "position": "WR", "team": "GB", "adp": 6.0},
+        {"adp_name": "Some Kicker", "position": "PK", "team": "DET", "adp": 150.0},
+        {"adp_name": "Lions", "position": "DST", "team": "DET", "adp": 160.0}]))
+    board = build_board(conn, settings=_half_ppr()).set_index("name")
+    assert board.loc["Some Kicker", "proj_scale"] == 1.0
+    assert board.loc["Lions", "proj_scale"] == 1.0
+    assert board.loc["Amon-Ra St. Brown", "proj_scale"] < 1.0
+
+
+def test_projection_scale_falls_back_to_the_position_median(tmp_path):
+    """A player with no latest-season rows takes his position's median scale.
+
+    "Rookie Guy" enters from the ADP feed with no weekly history, so there is
+    no ratio of his own to take. Left at 1.0 he would keep a full-PPR
+    projection while every WR with a track record was marked down, which
+    systematically favours precisely the players there is least reason to be
+    confident about. The two real WRs here scale by 13/17 and 15/16, so the
+    median of the two is what he gets.
+    """
+    import numpy as np
+    conn = _seed_with_espn_projection(tmp_path)
+    board = build_board(conn, settings=_half_ppr()).set_index("name")
+    expected = float(np.median([13.0 / 17.0, 15.0 / 16.0]))
+    assert board.loc["Rookie Guy", "proj_scale"] == pytest.approx(expected)
+    assert board.loc["Rookie Guy", "proj_scale"] < 1.0
+
+
+def test_projection_scale_warns_when_it_cannot_convert(tmp_path):
+    """Silence is the failure mode this whole change exists to remove.
+
+    A frame with no league_ppg/ppr_ppg columns (a bare fixture, or a board
+    already narrowed to `_BOARD_COLUMNS`) cannot produce a ratio for anybody.
+    Returning ones without a word would leave a non-PPR league ranked on
+    ESPN's PPR projections and nothing on the page would say so.
+    """
+    import warnings as w
+    from scoring.board import projection_scale
+    bare = pd.DataFrame([{"name": "X", "position": "WR", "stats": {"ppg": 10.0}}])
+    with w.catch_warnings(record=True) as caught:
+        w.simplefilter("always")
+        scale = projection_scale(bare, _half_ppr().scoring)
+    assert list(scale) == [1.0]
+    assert any(issubclass(c.category, RuntimeWarning)
+               and "ppr_ppg" in str(c.message) for c in caught)
+    # ...and no warning at all for a league that really is full PPR.
+    with w.catch_warnings(record=True) as caught:
+        w.simplefilter("always")
+        assert list(projection_scale(bare, None)) == [1.0]
+    assert not caught
+
+
+def test_build_board_warns_that_the_espn_rung_is_converted_not_re_derived(tmp_path):
+    """The warning had to change, not go away.
+
+    It used to say proj_points was priced in fixed full PPR regardless of the
+    league -- a description of a bug that is now fixed, which would have been
+    worse than no warning. What is left is narrower and still true: ESPN
+    publishes one season projection, in PPR, and `espn_adp` stores only that
+    total, so converting it is an estimate rather than a re-derivation.
+    """
+    import warnings as w
+    conn = _seed_with_espn_projection(tmp_path)
+    with w.catch_warnings(record=True) as caught:
+        w.simplefilter("always")
+        build_board(conn, settings=_half_ppr())
+    messages = [str(c.message) for c in caught
+                if issubclass(c.category, RuntimeWarning)]
+    assert any("CONVERTED, not re-derived" in m for m in messages)
+    assert not any("priced in fixed full PPR" in m for m in messages)
+
+    # A full-PPR league says nothing, because there is nothing to say.
+    with w.catch_warnings(record=True) as caught:
+        w.simplefilter("always")
+        build_board(conn)
+    assert not [c for c in caught if issubclass(c.category, RuntimeWarning)
+                and "proj_points" in str(c.message)]

@@ -790,6 +790,16 @@ def _board_cell(player_id, pick_no, teams: int, slots: list, by_id: dict) -> dic
         stats = row.get("stats")
         stats = stats if isinstance(stats, dict) else {}
         espn_proj = _float_or_none(row.get("espn_proj"))
+        # Converted into the league's scoring the same way the board's own
+        # proj_points is, using the board's `proj_scale` column
+        # (scoring/board.projection_scale). ESPN publishes this number in full
+        # PPR only. The trending icon compares it against `last_ppg`, which is
+        # `stats.ppg` -- now the league's points -- so leaving the projection
+        # in PPR would have made every high-reception player in a half-PPR
+        # room look like a breakout: two different currencies, one arrow.
+        proj_scale = _float_or_none(row.get("proj_scale"))
+        if espn_proj is not None and proj_scale is not None:
+            espn_proj = espn_proj * proj_scale
         player = {
             "player_id": str(row["player_id"]),
             "name": _str_or_none(row.get("name")),

@@ -466,20 +466,28 @@ export default function DraftRoom() {
             {state.settings.scoring_format && ` · ${SCORING_LABEL[state.settings.scoring_format]}`}
           </span>
         )}
-        {/* scoring/board.py warns about this to server stderr, where nobody
-            drafting in a browser will ever see it: projections() is not
-            scoring-format aware (its first rung is ESPN's own fixed season
-            projection, its fallback reads a fixed full-PPR ppg), so
-            proj_points -- and therefore vor, and therefore every number this
-            room ranks on -- is priced in full PPR whatever the league
-            actually scores. Serving `scoring_format` in the chip above and
-            saying nothing here would be worse than silence: it tells the
-            user "Half PPR" while ranking them on PPR. Making projections()
-            format-aware is a tracked follow-up, not this fix. */}
+        {/* Narrowed, not removed. This used to read "ranked on full-PPR
+            points regardless", which was true: projections() priced every
+            league in full PPR, so proj_points -- and therefore vor, and
+            therefore every number this room ranks on -- ignored the league's
+            scoring. That is fixed; both rungs of the ladder now follow
+            settings.scoring.
+
+            What is left is narrower and still worth saying. ESPN publishes
+            one season projection per player, computed under its own PPR
+            default, and espn_adp stores only the total -- no projected
+            receptions or yards to re-price. So for a non-PPR league that rung
+            is CONVERTED (scoring/board.projection_scale: the ratio of the
+            player's last season under this league's rules to the same season
+            in full PPR), which is exact only if his projected stat mix
+            matches last season's. The chip beside this says "Half PPR"; this
+            says how far to trust it. scoring/board.py carries the same
+            warning to server stderr, where nobody drafting in a browser will
+            ever see it. */}
         {state?.active && state.settings.scoring_format !== null
           && state.settings.scoring_format !== 'ppr' && (
           <span className="draft-topbar-note">
-            ranked on full-PPR points regardless
+            ESPN projections converted from PPR
           </span>
         )}
         <span className="draft-topbar-spacer" />

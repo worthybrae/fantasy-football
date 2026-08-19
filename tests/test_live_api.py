@@ -2444,9 +2444,20 @@ def test_board_returns_the_grid_with_snake_positions_and_stats(tmp_path):
     assert cells[9]["player"]["name"] == "A Star"
     assert cells[9]["player"]["last_ppg"] is not None    # p1 has weekly rows
     # The icon inputs: ESPN's own PPR rank (hype/lame vs market_rank) and this
-    # year's projected ppg (trending vs last_ppg) = espn_proj / 17.
+    # year's projected ppg (trending vs last_ppg).
+    #
+    # proj_ppg is espn_proj RE-PRICED into this league's scoring, not the raw
+    # feed number. This fixture's league scores `{"receptions": 0.5}` and
+    # nothing else, and A Star's weekly line is 8 rec / 90 rec yds a game:
+    # 8x1.0 + 90x0.1 = 17.0 ppg in full PPR against 8x0.5 = 4.0 ppg here, a
+    # proj_scale of 4/17 = 0.2353. ESPN's 210.0 becomes 49.4, or 2.9 a game.
+    # The raw 210/17 = 12.4 would put a full-PPR projection beside a last_ppg
+    # of 4.0 and read as a 3x breakout that is entirely the scoring rules.
+    # See scoring/board.projection_scale.
     assert cells[9]["player"]["espn_ppr_rank"] is not None
-    assert cells[9]["player"]["proj_ppg"] == round(210.0 / 17, 1)
+    assert cells[9]["player"]["last_ppg"] == 4.0
+    assert cells[9]["player"]["proj_ppg"] == round(210.0 * (4.0 / 17.0) / 17, 1)
+    assert cells[9]["player"]["proj_ppg"] == 2.9
 
     # A crosswalk miss (an id the board does not carry) still emits a cell --
     # id as the name, everything else null -- so the grid never drops a pick.

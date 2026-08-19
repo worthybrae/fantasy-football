@@ -67,10 +67,23 @@ one, then checked against the byte-for-byte payload comparison, not assumed:
   * `team_depth_chart` needs one team's rows; `_outlook`'s depth lookup
     needs one player's rows. Neither looks outside those.
 
-INVALIDATION: the key is `board_cache._db_key` + `board_cache._meta_key`,
-imported from scoring/board_cache.py rather than re-implemented, so this
-cache cannot drift away from the board's answer to "has a pipeline refresh
-happened". Every table read here (`weekly`, `snap_counts`, `depth_charts`,
+INVALIDATION: the key is `board_cache._db_key` + `board_cache._meta_key` +
+the league's scoring rules. The first two are imported from
+scoring/board_cache.py rather than re-implemented, so this cache cannot drift
+away from the board's answer to "has a pipeline refresh happened".
+
+The rules component is the newest and the one with teeth. `season_features`
+is the ONLY frame here that depends on them -- `player_season_features` now
+scores every weekly row under the league's `settings.scoring` -- and it is
+what `season_summaries` ranks `pos_finish` on and what `find_twins` matches
+and reports `next_ppg` from. Keyed on the database alone, one process serving
+a PPR league and a half-PPR league (or one test doing both) would hand the
+second league the first one's PPR-priced frame and show it PPR comparables
+with a PPR forecast, silently, with every other number on the page correctly
+half-PPR. The four rules-independent frames (snap_share, prior_weekly,
+season_len, schedules, players) are rebuilt with it rather than split into a
+second cache: the whole set is one dataclass, a second format is one extra
+40 MB entry, and no league changes its scoring mid-draft. Every table read here (`weekly`, `snap_counts`, `depth_charts`,
 `schedules`, `players`) is a UNIVERSAL_TABLES source (pipeline/db.py) that
 `pipeline.refresh.main()` rewrites and then stamps into `meta` via
 `record_freshness`, unconditionally, success or failure -- verified by
@@ -101,6 +114,7 @@ from scoring.board import _norm_name
 # board's -- and it is: two keys that disagree by one table would show a
 # profile assembled half from before a refresh and half from after.
 from scoring.board_cache import _db_key, _meta_key
+from scoring.ppr import normalize_rules
 from scoring.similarity import player_season_features
 
 # One entry per physical database, at ~40 MB each. Unlike the board cache
@@ -187,7 +201,7 @@ def snap_share_by_season(snaps: pd.DataFrame | None) -> pd.DataFrame | None:
              ["offense_pct"].mean())
 
 
-def _build(conn) -> ProfileFrames:
+def _build(conn, rules: dict | None) -> ProfileFrames:
     weekly = read_table(conn, "weekly")
     snaps = read_table(conn, "snap_counts")
 
@@ -202,7 +216,7 @@ def _build(conn) -> ProfileFrames:
         prior = weekly
         season_len = pd.Series(dtype="int64")
     else:
-        feats = player_season_features(weekly)
+        feats = player_season_features(weekly, rules)
         # Sliced exactly the way build_profile and _outlook slice it today,
         # off the same full frame, so the rows AND their original index and
         # order are bit-identical to what the uncached code produced. A
@@ -224,15 +238,26 @@ def _build(conn) -> ProfileFrames:
     )
 
 
-def cached_profile_frames(conn) -> ProfileFrames:
-    """The per-database frames for one `build_profile` call, freshly copied.
+def cached_profile_frames(conn, rules: dict | None = None) -> ProfileFrames:
+    """The per-database, per-scoring-rules frames for one `build_profile` call.
 
     Costs one full read of `weekly` and `snap_counts` on a miss (~1.0s,
     which is what a click used to cost every single time) and 5.7 ms on a
     hit. See the module docstring for the key, and for the one staleness
     gap it shares with scoring/board_cache.py.
+
+    `rules` is the league's `settings.scoring`; None means full PPR.
+    `normalize_rules` collapses a rules dict that IS full PPR (which the
+    owner's ESPN-imported league is, listed in a different order -- see
+    scoring/ppr.py) back onto None, so a PPR league shares one cache entry
+    with every rules-less caller and gets the frame it always got, computed
+    by the identical call.
     """
-    key = (_db_key(conn), _meta_key(conn))
+    rules = normalize_rules(rules)
+    # Sorted items, not the dict: a dict is unhashable, and two dicts with
+    # the same rules in a different order must not be two cache entries.
+    rules_key = None if rules is None else tuple(sorted(rules.items()))
+    key = (_db_key(conn), _meta_key(conn), rules_key)
 
     with _lock:
         hit = _cache.get(key)
@@ -244,7 +269,7 @@ def cached_profile_frames(conn) -> ProfileFrames:
     # its own: two racing requests on a cold cache both do the work and the
     # later one wins the slot, which wastes a build but never serializes
     # concurrent profile clicks behind one mutex.
-    frames = _build(conn)
+    frames = _build(conn, rules)
 
     with _lock:
         _cache[key] = frames
