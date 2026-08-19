@@ -287,6 +287,42 @@ def _league_settings_from_espn(league_id, season):
     return settings
 
 
+def _slot_from_pick_order(settings, team_id: int | None) -> int | None:
+    """My draft slot straight from ESPN's own pick order -- tried before
+    both `_slot_for_team` and `_slot_from_socket` (see their own docstrings
+    for why each of those can come back empty on a mock).
+
+    `settings.draftSettings.pickOrder` (scoring.league.LeagueSettings.
+    pick_order, carried in from `_league_settings_from_espn`) is a list of
+    team ids in draft-slot order -- pickOrder[0] is slot 1's team id, and so
+    on (see pipeline/espn_teams.py's module docstring, which reads the same
+    field for the board's column names). Unlike `_slot_for_team` this needs
+    no imported draft history -- a mock draft's strangers are simply team
+    ids in this list, not managers in a table that has never heard of them
+    -- and unlike `_slot_from_socket` it needs no round of the draft to have
+    actually happened: it is exact and available the moment ESPN's league
+    settings are fetched, at connect, before the socket has sent a single
+    frame.
+
+    None whenever it cannot answer, never a guess: no settings (the ESPN
+    fetch failed, or this session was built with none), no team_id yet, or
+    a team_id ESPN's own pickOrder does not carry -- `().index(...)` would
+    raise ValueError, caught here so the caller falls through to the next
+    resolver instead of the whole connect blowing up. (Verified live against
+    a real mock draft that this league's pickOrder is in fact populated --
+    see the post-merge-fixes report -- but a league that does not publish
+    one at all is exactly this fallthrough case, and both the older
+    resolvers below still cover it.)
+    """
+    if settings is None or team_id is None:
+        return None
+    pick_order = getattr(settings, "pick_order", None) or ()
+    try:
+        return pick_order.index(team_id) + 1
+    except ValueError:
+        return None
+
+
 def _slot_for_team(cur, team_id: int):
     """Translate an ESPN team id to a draft slot, or None if it cannot be.
 
@@ -900,14 +936,23 @@ def register_live_routes(app, conn, db_path):
             cur = work_conn.cursor()
             try:
                 # The socket speaks team ids, not slots (see _slot_for_team's
-                # docstring). A resolvable teamId fixes my_slot immediately;
-                # otherwise it stays None and the socket's TOKEN frame names
-                # our team once it connects (see the my_slot back-fill in
-                # _launch_listener's on_change). Read off `work_conn`, the
-                # same connection build_session uses just below, so a resolved
-                # slot cannot come from a different league's draft order.
-                my_slot = (_slot_for_team(cur, team_id)
-                           if team_id is not None else None)
+                # docstring). ESPN's own pick order (_slot_from_pick_order)
+                # is tried first -- exact, and already known the instant
+                # `settings` was fetched, well before the socket has opened
+                # -- with _slot_for_team (imported draft history) as the
+                # fallback for a league whose settings fetch failed or
+                # published no pickOrder. If neither resolves, my_slot stays
+                # None here and the socket's TOKEN frame names our team once
+                # it connects (see the my_slot back-fill in
+                # _launch_listener's on_change / _resolve_slot, which tries
+                # the same two plus _slot_from_socket). Read off `work_conn`,
+                # the same connection build_session uses just below, so a
+                # resolved slot cannot come from a different league's draft
+                # order.
+                my_slot = None
+                if team_id is not None:
+                    my_slot = (_slot_from_pick_order(settings, team_id)
+                               or _slot_for_team(cur, team_id))
                 session = build_session(cur, my_slot, league_id=league_id,
                                         settings=settings)
             finally:
@@ -1017,22 +1062,32 @@ def register_live_routes(app, conn, db_path):
                             state["recompute_error"] = None
 
         def _resolve_slot(c2) -> bool:
-            """Resolve my_slot from history or the socket if not yet known;
-            return True if it just resolved.
+            """Resolve my_slot from ESPN's pick order, history, or the
+            socket, if not yet known; return True if it just resolved.
 
-            Runs from on_activity (every frame) as well as on_change (every
-            pick), because the moment that matters most -- our own team coming
-            ON the clock -- arrives as a SELECTING frame, which changes no pick
-            count and so never reaches on_change. History (_slot_for_team)
-            first; the socket's round-1 ordering (_slot_from_socket) is the
-            fallback for a mock or an un-imported league, where no history can
-            translate the team id and the slot would otherwise stay unknown --
-            leaving every recommendation blank, including for our first pick.
+            Only reached at all when the connect path could not resolve
+            my_slot up front (see _provision_and_build) -- normally because
+            team_id was not yet known there (the browser-observer path with
+            no teamId= in the pasted URL). Runs from on_activity (every
+            frame) as well as on_change (every pick), because the moment
+            that matters most -- our own team coming ON the clock -- arrives
+            as a SELECTING frame, which changes no pick count and so never
+            reaches on_change.
+
+            Same order as the connect-time resolution: ESPN's pick order
+            (_slot_from_pick_order) first -- exact, no history or socket
+            frame needed; history (_slot_for_team) next; the socket's
+            round-1 ordering (_slot_from_socket) last, for a mock or an
+            un-imported league whose settings also carried no pickOrder,
+            where no history can translate the team id and the slot would
+            otherwise stay unknown -- leaving every recommendation blank,
+            including for our first pick.
             """
             sess = current["session"]
             if sess.my_slot is not None or listener.my_team_id is None:
                 return False
-            resolved = _slot_for_team(c2, listener.my_team_id)
+            resolved = (_slot_from_pick_order(sess.settings, listener.my_team_id)
+                       or _slot_for_team(c2, listener.my_team_id))
             if resolved is None:
                 resolved = _slot_from_socket(
                     listener, getattr(sess.settings, "teams", 0))

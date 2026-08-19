@@ -756,6 +756,93 @@ def test_slot_for_team_returns_none_when_the_chain_breaks(tmp_path):
     conn.close()
 
 
+def test_slot_from_pick_order_resolves_directly_from_espns_own_order():
+    """Defect 1 (post-merge fix): ESPN's draftSettings.pickOrder names the
+    slot exactly, with no imported history and no draft round needed --
+    pickOrder[k] (0-based) is slot k+1's team id."""
+    from api.live import _slot_from_pick_order
+    settings = league_mod.LeagueSettings(
+        season=2026, teams=8, starters={}, flex_slots=0, bench=0, scoring={},
+        draft_type="SNAKE", pick_order=(30, 12, 45, 7, 88, 3, 61, 19))
+    assert _slot_from_pick_order(settings, 45) == 3
+    assert _slot_from_pick_order(settings, 30) == 1
+    assert _slot_from_pick_order(settings, 19) == 8
+
+
+def test_slot_from_pick_order_falls_through_rather_than_raising_or_guessing():
+    """A team id ESPN's own pickOrder does not carry -- tuple.index would
+    raise ValueError -- must fall through to None (so the caller tries
+    _slot_for_team / _slot_from_socket next) rather than raising into a
+    connect or fabricating a slot. Same for no settings at all (the ESPN
+    fetch failed) and no team_id yet."""
+    from api.live import _slot_from_pick_order
+    settings = league_mod.LeagueSettings(
+        season=2026, teams=4, starters={}, flex_slots=0, bench=0, scoring={},
+        draft_type="SNAKE", pick_order=(30, 12, 45, 7))
+    assert _slot_from_pick_order(settings, 999) is None
+    assert _slot_from_pick_order(settings, None) is None
+    assert _slot_from_pick_order(None, 45) is None
+    # No pickOrder published at all (the ordinary case for a league whose
+    # settings fetch failed, or from_espn's default of an empty tuple).
+    no_order = league_mod.LeagueSettings(
+        season=2026, teams=4, starters={}, flex_slots=0, bench=0, scoring={},
+        draft_type="SNAKE")
+    assert _slot_from_pick_order(no_order, 30) is None
+
+
+def test_connect_resolves_my_slot_from_espns_pick_order_with_no_frames(
+        tmp_path, monkeypatch, _isolated_leagues_root):
+    """Defect 1, end to end: the room showed an empty pool at pick 1 of a
+    real mock draft because my_slot stayed None until the user's own team
+    had picked (or come on the clock) in round 1 -- _slot_for_team has no
+    history for a mock's strangers, and _slot_from_socket needs a round-1
+    frame that had not arrived yet. ESPN's own pickOrder answers immediately.
+
+    run_listener is stubbed to a true no-op below -- literally zero socket
+    frames are ever delivered -- and my_slot still resolves, straight out of
+    /api/live/connect's own response, because _provision_and_build now tries
+    _slot_from_pick_order before _slot_for_team and before build_session
+    even runs. Nothing here seeds draft_teams/draft_order on the provisioned
+    league file (provision_league does not copy those -- they are
+    LEAGUE_TABLES, see pipeline/db.py), so _slot_for_team is guaranteed to
+    fail here too -- this is the mock-draft case exactly.
+    """
+    from pipeline.espn_league import parse_settings
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    monkeypatch.setattr("api.live.run_listener", lambda *a, **k: None)
+
+    espn_payload = {
+        "settings": {
+            "size": 8,
+            "rosterSettings": {"lineupSlotCounts": {
+                "0": 1, "2": 2, "4": 2, "6": 1, "16": 1, "17": 1,
+                "20": 5, "21": 1, "23": 2}},
+            "scoringSettings": {"scoringItems": [
+                {"statId": 53, "points": 1.0}]},
+            "draftSettings": {"type": "SNAKE",
+                              "pickOrder": [3, 7, 1, 2, 4, 5, 6, 8]},
+        }}
+    raw = parse_settings(espn_payload, 2026)
+    monkeypatch.setattr("api.live.fetch_league_settings", lambda *a, **k: raw)
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    client = TestClient(create_app(path))
+
+    # teamId=2 sits at pickOrder index 3 (0-based) -> slot 4.
+    resp = client.post(
+        "/api/live/connect",
+        json={"url": "https://fantasy.espn.com/football/draft?leagueId=1"
+                     "&teamId=2&memberId={X}"})
+    assert resp.status_code == 200
+    assert resp.json()["my_slot"] == 4
+    # Confirmed known before any frame -- the state endpoint agrees with
+    # connect's own response, and run_listener never delivered a single one.
+    assert client.get("/api/live/state").json()["my_slot"] == 4
+    client.post("/api/live/stop")
+
+
 def test_connect_resolves_my_slot_from_a_teamid_in_the_url(
         tmp_path, monkeypatch, _isolated_leagues_root):
     """Correction B, end to end: a URL carrying teamId= must resolve my_slot
