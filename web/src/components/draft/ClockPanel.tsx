@@ -62,17 +62,22 @@ export default function ClockPanel({ state, secondsLeft }: { state: LiveState; s
   // fixed to {state, secondsLeft} (Task 8/9 are written against it). Its
   // only real job is `pollAgeLabel`'s "Xs ago" text below, which needs a
   // per-second re-render to stay current between polls. It does NOT smooth
-  // the countdown itself: `secondsLeft` (now sourced from state.ms_remaining
-  // by DraftRoom, see its own comment) only changes when a new poll lands,
-  // roughly every 2.5s, so the displayed clock steps down in ~2.5s jumps
-  // rather than ticking every second. A true 1Hz countdown would need to
-  // interpolate from ms_remaining plus the wall-clock moment it was read --
-  // deliberately not done here: it would require assuming the browser's
-  // clock and the server's agree (true enough for this tool, which only
-  // ever runs on one machine, but a real assumption worth naming rather
-  // than baking in silently), for a smoothness gain on a personal tool
-  // where a 2.5s-granular number is already the honest truth and nothing
-  // upstream promises finer resolution than that poll cadence.
+  // the countdown itself: `secondsLeft` (sourced from state.ms_remaining by
+  // DraftRoom, see its own comment) only changes when ESPN's own CLOCK
+  // frame updates DraftListener.ms_remaining -- and the real limit there is
+  // ESPN's broadcast interval, not this app's 2.5s poll: observed in the
+  // fixture (tests/fixtures/espn_draft_socket.jsonl), consecutive CLOCK
+  // frames land about 5.0s apart (63696 -> 59762 -> 54755 -> 49747 -> ...,
+  // a steady ~5007ms). So the displayed clock steps down in ~5s jumps, not
+  // ~2.5s ones -- lowering POLL_MS would not smooth it, since the poll was
+  // never the bottleneck. A true 1Hz countdown would need to interpolate
+  // from ms_remaining plus the wall-clock moment it was read -- deliberately
+  // not done here: it would require assuming the browser's clock and the
+  // server's agree (true enough for this tool, which only ever runs on one
+  // machine, but a real assumption worth naming rather than baking in
+  // silently), for a smoothness gain on a personal tool where a ~5s-granular
+  // number over a 30s clock is already legible and honest, and nothing
+  // upstream promises finer resolution than ESPN's own broadcast cadence.
   const [nowMs, setNowMs] = useState(() => Date.now())
   useEffect(() => {
     const id = window.setInterval(() => setNowMs(Date.now()), 1000)

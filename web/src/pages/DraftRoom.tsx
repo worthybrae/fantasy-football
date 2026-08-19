@@ -166,6 +166,16 @@ export default function DraftRoom() {
     ? (state.settings.teams as number) * (state.settings.rounds as number)
     : null
 
+  // Same terminal-state rule as ClockPanel's thisPickNo (Task 6+7 review
+  // finding #4): once the draft is over (on_the_clock === null) there is
+  // no "current pick" to name. This sibling counter was left unguarded in
+  // the first pass at this task -- picks_made + 1 rendered unconditionally,
+  // so a finished 120-pick league read "PICK 121 / 120." null here falls
+  // back to the same em dash ClockPanel's own "This pick" figure uses.
+  const thisPickNo = state?.active && state.on_the_clock !== null
+    ? state.picks_made + 1
+    : null
+
   const slots: RosterSlot[] = state?.active
     ? assignRoster(rosterSlotLabels(state.settings), state.my_roster)
     : []
@@ -188,7 +198,7 @@ export default function DraftRoom() {
         <span className="draft-topbar-spacer" />
         {state?.active && totalPicks !== null && (
           <span className="draft-topbar-pick mono">
-            PICK <strong>{state.picks_made + 1}</strong> / {totalPicks}
+            PICK <strong>{thisPickNo ?? '—'}</strong> / {totalPicks}
           </span>
         )}
         <span className={`draft-status-pill draft-status-pill-${connectionTone}`}>
