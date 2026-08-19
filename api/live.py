@@ -1185,6 +1185,21 @@ def register_live_routes(app, conn, db_path):
         if session.my_slot is None:
             raise HTTPException(
                 status_code=409, detail="this session has no draft slot yet")
+        # picks_until_turn falls through to 0 ("my turn") once picks_made
+        # reaches the end of the slot list -- its loop simply has nothing
+        # left to range over, not "it is my turn again." Nothing else in this
+        # endpoint rules that state out on its own: session stays non-None,
+        # the socket can still be alive, and any board player nobody drafted
+        # (there are always more of those than teams*rounds) sails past the
+        # `already` check. live_state and live_board already guard this exact
+        # shape (`picks_made < len(slots)`, api/live.py's on_clock
+        # computation); mirror it here rather than changing
+        # picks_until_turn's own contract, which Task 3's review established
+        # has no other production caller and whose existing tests pin its
+        # current return value.
+        slots = snake_slots(session.settings.teams, session.settings.rounds)
+        if picks_made >= len(slots):
+            raise HTTPException(status_code=409, detail="the draft is over")
         if picks_until_turn(session.settings, session.my_slot, picks_made) != 0:
             raise HTTPException(status_code=409, detail="it is not your turn")
 

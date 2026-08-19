@@ -1754,14 +1754,17 @@ class _FakeSocket:
 
 
 def _select_board():
-    """One ordinary player (a real espn_id) and one D/ST (espn_id null,
-    resolved instead through ESPN_PRO_TEAM_BY_ABBREV/_dst_espn_id) -- the two
-    paths _espn_id_for chooses between."""
+    """One ordinary player (a real espn_id), one D/ST (espn_id null, resolved
+    instead through ESPN_PRO_TEAM_BY_ABBREV/_dst_espn_id), and one player with
+    neither -- a genuine crosswalk gap -- so both of _espn_id_for's success
+    paths and its failure path are all reachable off one board."""
     return pd.DataFrame([
         {"player_id": "00-0039139", "name": "Test Player", "position": "WR",
          "team": "DET", "espn_id": 4429795},
         {"player_id": "dst_bal", "name": "Ravens D/ST", "position": "DST",
          "team": "BAL", "espn_id": np.nan},
+        {"player_id": "no_crosswalk", "name": "Ghost Player", "position": "WR",
+         "team": "ZZZ", "espn_id": np.nan},
     ])
 
 
@@ -1930,4 +1933,42 @@ def test_select_send_failure_via_connection_closed_is_503_not_500(live_app_on_cl
     ws.send_error = ConnectionClosed(None, None)
     res = client.post("/api/live/select", json={"player_id": "00-0039139"})
     assert res.status_code == 503
+    assert ws.sent == []
+
+
+def test_select_after_the_draft_is_over_is_409_and_sends_nothing(live_app_on_clock):
+    """picks_until_turn falls through to 0 ("my turn") once picks_made
+    reaches the end of the slot list -- that is "no turns left," not "my
+    turn again." Nothing else in the endpoint rules a finished draft out on
+    its own: session stays non-None, the socket can still be alive, and a
+    real board carries far more players than teams*rounds picks, so
+    "00-0039139" (never drafted) still clears the `already` check. Fill every
+    one of the session's 8*15 = 120 slots with filler picks and confirm a
+    request for that undrafted board player is refused rather than sent."""
+    client, state, ws, listener = live_app_on_clock
+    total = 8 * 15   # session teams=8, rounds=15 -- see _select_session
+    for i in range(total):
+        _mark_drafted(state, f"filler-{i}", pick_no=i + 1)
+    res = client.post("/api/live/select", json={"player_id": "00-0039139"})
+    assert res.status_code == 409
+    assert ws.sent == []
+
+
+def test_select_unknown_player_id_is_400(live_app_on_clock):
+    """A player_id the board doesn't carry at all -- a typo, a stale id from
+    a rebuilt board -- must be refused before anything is sent, not silently
+    resolved to nothing."""
+    client, state, ws, listener = live_app_on_clock
+    res = client.post("/api/live/select", json={"player_id": "not-on-the-board"})
+    assert res.status_code == 400
+    assert ws.sent == []
+
+
+def test_select_with_a_crosswalk_gap_is_400_and_sends_nothing(live_app_on_clock):
+    """The safety-relevant 400 the brief calls out: a board row that is
+    neither mapped to a real espn_id nor a D/ST _espn_id_for can reconstruct
+    one for. This must be refused by name, not sent with a guessed id."""
+    client, state, ws, listener = live_app_on_clock
+    res = client.post("/api/live/select", json={"player_id": "no_crosswalk"})
+    assert res.status_code == 400
     assert ws.sent == []
