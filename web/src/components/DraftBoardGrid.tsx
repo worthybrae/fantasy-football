@@ -84,6 +84,10 @@ function BoardPopover({ player, style }: { player: BoardPlayer; style: CSSProper
 
 interface DraftBoardGridProps {
   board: LiveBoard
+  // Opens the pick's profile over the room instead of navigating to
+  // /players/:slug. Optional so the grid still stands on its own (and still
+  // navigates) without a room around it; DraftRoom always passes it.
+  onOpenPlayer?: (player: BoardPlayer) => void
 }
 
 // The main-zone canvas: rounds x teams, filling live from `board.cells`.
@@ -94,7 +98,7 @@ interface DraftBoardGridProps {
 // reversal, etc). The one exception is the on-the-clock ring, which the
 // brief hands over pre-computed as a (round, slot) pair for the same
 // reason.
-export default function DraftBoardGrid({ board }: DraftBoardGridProps) {
+export default function DraftBoardGrid({ board, onOpenPlayer }: DraftBoardGridProps) {
   const [hover, setHover] = useState<HoverInfo | null>(null)
 
   // Any scroll -- the grid's own horizontal one, or the page's vertical one
@@ -122,6 +126,29 @@ export default function DraftBoardGrid({ board }: DraftBoardGridProps) {
 
   function showPopover(cell: BoardCell, e: MouseEvent<HTMLAnchorElement> | FocusEvent<HTMLAnchorElement>) {
     setHover({ cell, rect: e.currentTarget.getBoundingClientRect() })
+  }
+
+  // A cell stays a real <a href="/players/:slug"> and this intercepts the
+  // plain left click: the overlay is what the room wants (it keeps the
+  // board, the tab and the clock on screen), but cmd/ctrl-click, middle
+  // click, shift-click and "open in new tab" all still reach the standalone
+  // page, and the browser still shows the target in the status bar. A
+  // <button> here would have thrown all of that away to gain nothing.
+  //
+  // Modifier check before preventDefault, never after: swallowing a
+  // cmd-click would silently break new-tab, which is the one thing the href
+  // is still here for. `e.button !== 0` covers the middle-click that arrives
+  // as a click event in some browsers.
+  function handleCellClick(cell: BoardCell, e: MouseEvent<HTMLAnchorElement>) {
+    if (!onOpenPlayer) return
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return
+    e.preventDefault()
+    // The hover popover is z-index 50 -- above the overlay's own backdrop --
+    // so it would otherwise hang over the dimmed board with no way to
+    // dismiss it (the pointer is about to leave without a mouseleave the
+    // grid can see).
+    setHover(null)
+    onOpenPlayer(cell.player)
   }
 
   return (
@@ -169,6 +196,7 @@ export default function DraftBoardGrid({ board }: DraftBoardGridProps) {
                     col.is_me ? 'board-cell-mine' : '', rowClass.trim()]
                     .filter(Boolean).join(' ')}
                   aria-label={`${cell.player.name}, ${cell.player.position}, pick ${cell.round}.${pickInRound}`}
+                  onClick={(e) => handleCellClick(cell, e)}
                   onMouseEnter={(e) => showPopover(cell, e)}
                   onMouseLeave={() => setHover(null)}
                   onFocus={(e) => showPopover(cell, e)}

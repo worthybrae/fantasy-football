@@ -66,6 +66,12 @@ interface AvailableListProps {
   // one (scoring/draft_sim.horizon_picks skips turns too close to measure),
   // and an unlabelled 0% reads as the wrong claim.
   horizonLabel: string | null
+  // Opens the player's profile over the room (DraftRoom's PlayerOverlay).
+  // The whole row is not the target -- only the name -- because every other
+  // cell in this row is a number the eye is comparing down a column, and the
+  // last cell is the Draft button. One deliberate target, nowhere near the
+  // irreversible one.
+  onOpenPlayer: (c: LiveCandidate) => void
 }
 
 // The ranked available pool: search + position filter above a table sorted
@@ -73,7 +79,9 @@ interface AvailableListProps {
 // Both filters are client-side per the task brief ("the server sends the
 // whole ranked list") -- the pool tops out in the low hundreds, cheap
 // enough to filter on every keystroke without debouncing.
-export default function AvailableList({ candidates, players, onDraft, isMyTurn, horizonLabel }: AvailableListProps) {
+export default function AvailableList({
+  candidates, players, onDraft, isMyTurn, horizonLabel, onOpenPlayer,
+}: AvailableListProps) {
   const [search, setSearch] = useState('')
   const [pos, setPos] = useState('ALL')
 
@@ -140,7 +148,19 @@ export default function AvailableList({ candidates, players, onDraft, isMyTurn, 
                 <td className="avail-col-rank mono">{c.rank}</td>
                 <td>{posBadge(c.position)}</td>
                 <td>
-                  <span className="avail-name">{player?.name ?? c.player_id}</span>
+                  {/* A button, not a link: this opens an overlay over the
+                      room, and an <a href> here would offer a navigation
+                      that no longer happens on click. The board grid keeps
+                      its real href for exactly the opposite reason -- see
+                      DraftBoardGrid.tsx. */}
+                  <button
+                    type="button"
+                    className="avail-name-btn"
+                    onClick={() => onOpenPlayer(c)}
+                    title="Open profile"
+                  >
+                    <span className="avail-name">{player?.name ?? c.player_id}</span>
+                  </button>
                   {player && (
                     <span className="avail-meta mono">
                       {player.team} · BYE {player.bye ?? '—'}

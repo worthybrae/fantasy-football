@@ -1,12 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { fetchBoard, fetchLiveState, fetchPlayers, selectPlayer, type LiveBoard, type LiveCandidate,
-         type LiveSettings, type LiveState, type Player, type RosterPlayer } from '../api'
+import { fetchBoard, fetchLiveState, fetchPlayers, selectPlayer, type BoardPlayer, type LiveBoard,
+         type LiveCandidate, type LiveSettings, type LiveState, type Player,
+         type RosterPlayer } from '../api'
 import ClockPanel from '../components/draft/ClockPanel'
 import RosterPanel, { type RosterSlot } from '../components/draft/RosterPanel'
 import TopThree from '../components/draft/TopThree'
 import AvailableList from '../components/draft/AvailableList'
 import ConfirmPick, { type PickStatus } from '../components/draft/ConfirmPick'
+import PlayerOverlay, { type OverlayTarget } from '../components/draft/PlayerOverlay'
+import { seedFromBoardPlayer, seedFromCandidate, seedFromPlayer } from '../components/draft/playerSeed'
 import DraftBoardGrid from '../components/DraftBoardGrid'
 
 const POLL_MS = 2500
@@ -90,6 +93,41 @@ function assignRoster(labels: string[], myRoster: RosterPlayer[]): RosterSlot[] 
   })
 }
 
+// The order the rail READS in, which is deliberately not the order
+// `rosterSlotLabels` builds: the owner wants FLEX sitting with the RB/WR
+// group it is actually filled from (QB, RB1, RB2, WR1, WR2, FLEX1..n, TE,
+// K, DST, BN1..n), not stranded after DST where the build order leaves it.
+// Note this is also a deliberate departure from .design/Main.dc.html, whose
+// own mock roster lists TE before FLEX -- the owner's stated reading
+// preference wins over the mock here.
+//
+// Kept strictly separate from the build order rather than reordering
+// POSITION_ORDER/rosterSlotLabels, because that list is what assignRoster
+// walks: `openIndexWhere` takes the FIRST open slot matching each
+// predicate, so the array's order decides which slot a player lands in
+// (RB1 before RB2, FLEX1 before FLEX2). Reordering it to taste would be
+// changing an assignment rule to change a display. Sorting the ASSIGNED
+// slots afterwards cannot: the players are already placed by then.
+const SLOT_DISPLAY_ORDER = ['QB', 'RB', 'WR', 'FLEX', 'TE', 'K', 'DST']
+
+// Rank for the sort above. Anything this list doesn't name -- an exotic
+// ESPN starter slot rosterSlotLabels appended for itself -- sorts after the
+// named starters and before the bench, which is where the build order
+// already put it; the bench always sorts last.
+function displayRank(slot: string): number {
+  const base = slot.replace(/\d+$/, '')
+  if (base === 'BN') return SLOT_DISPLAY_ORDER.length + 1
+  const i = SLOT_DISPLAY_ORDER.indexOf(base)
+  return i === -1 ? SLOT_DISPLAY_ORDER.length : i
+}
+
+// Display order only -- see SLOT_DISPLAY_ORDER. Array.prototype.sort is
+// stable (guaranteed since ES2019), so slots that share a rank keep the
+// order assignRoster gave them: RB1 stays above RB2, FLEX1 above FLEX2.
+function orderForDisplay(slots: RosterSlot[]): RosterSlot[] {
+  return [...slots].sort((a, b) => displayRank(a.slot) - displayRank(b.slot))
+}
+
 const SCORING_LABEL: Record<'ppr' | 'half' | 'std', string> = {
   ppr: 'PPR', half: 'Half PPR', std: 'Standard',
 }
@@ -140,6 +178,15 @@ export default function DraftRoom() {
   const [confirming, setConfirming] = useState<LiveCandidate | null>(null)
   const [pickStatus, setPickStatus] = useState<PickStatus>('idle')
   const [pickError, setPickError] = useState<string | null>(null)
+
+  // The player profile open over the room, or null. Held here rather than
+  // in the URL on purpose: a route swap unmounts this whole component --
+  // the board, the tab, the scroll position, the 2.5s poll -- and clicking
+  // a name mid-draft must cost none of those. Nothing below this line
+  // navigates; the /players/:slug page stays for direct links (see
+  // PlayerOverlay's own comment, and DraftBoardGrid, which keeps the href
+  // so cmd-click still opens it).
+  const [openPlayer, setOpenPlayer] = useState<OverlayTarget | null>(null)
 
   // Player identity (name/position/team) is a one-time join table -- it does
   // not change mid-draft. Lifted unchanged from the deleted LiveDraft.tsx.
@@ -256,8 +303,11 @@ export default function DraftRoom() {
     ? state.picks_made + 1
     : null
 
+  // assignRoster first (build order -- it decides WHICH slot each player
+  // fills), then orderForDisplay (reading order -- it only decides which
+  // row each already-assigned slot appears in). Never the other way round.
   const slots: RosterSlot[] = state?.active
-    ? assignRoster(rosterSlotLabels(state.settings), state.my_roster)
+    ? orderForDisplay(assignRoster(rosterSlotLabels(state.settings), state.my_roster))
     : []
 
   // Gates both the top-three and the table's draft buttons. Computed once
@@ -292,6 +342,16 @@ export default function DraftRoom() {
     ? state.candidates_as_of_pick + 1
     : null
 
+  // The same two pick numbers the old banner named, handed to TopThree to
+  // render on its own header row instead of as a strip of its own (see the
+  // comment where that banner used to be). `state.picks_made + 1` rather
+  // than `thisPickNo`, deliberately: `thisPickNo` is null once the draft is
+  // over, and a recompute outstanding at that moment is still recomputing
+  // for a real pick number.
+  const recompute = rankedForPickNo !== null && state?.active
+    ? { forPick: state.picks_made + 1, listedForPick: rankedForPickNo }
+    : null
+
   // The pick the ranked list was actually measured against, named exactly
   // as the server reports it. NOT derived here from `nextPickFor` any more:
   // that answers "which pick do I take next", and since the horizon skips
@@ -319,6 +379,30 @@ export default function DraftRoom() {
   const rosterAfter = state?.active
     ? { filled: state.my_roster.length + 1, total: slots.length }
     : null
+
+  // Three ways in, one overlay. Each seeds from the row that was actually
+  // clicked (see playerSeed.ts) so the profile paints on this frame rather
+  // than after the 3.5s /profile request -- the request is still issued by
+  // PlayerProfile itself and fills the rest in when it lands.
+  function handleOpenCandidate(c: LiveCandidate) {
+    setOpenPlayer({ playerId: c.player_id, seed: seedFromCandidate(c, players[c.player_id]) })
+  }
+
+  function handleOpenBoardPlayer(p: BoardPlayer) {
+    setOpenPlayer({ playerId: p.player_id, seed: seedFromBoardPlayer(p, players[p.player_id]) })
+  }
+
+  // A comp clicked inside the profile. Only swaps for a player this room can
+  // actually name -- the same rule PlayerPage's own onSelectPlayer follows
+  // (it navigates only when the id resolves against the board list), and it
+  // matters more here: SimilarPlayers legitimately lists players who are not
+  // in this season's pool at all, and there is no seed to paint for one. No
+  // seed, no instant open, so the click does nothing rather than opening an
+  // empty box with a spinner in it.
+  function handleSelectPlayer(id: string) {
+    const p = players[id]
+    if (p) setOpenPlayer({ playerId: id, seed: seedFromPlayer(p) })
+  }
 
   function handleDraftClick(c: LiveCandidate) {
     setConfirming(c)
@@ -455,18 +539,14 @@ export default function DraftRoom() {
         </div>
       )}
 
-      {/* The list is for an older pick than the one on the clock: a pick
-          landed and its recompute has not finished (0.1-0.8s of ranking plus
-          up to 2.5s of poll lag). Without this the room presents a
-          superseded list as current, which is the one thing _recompute's own
-          as_of_pick guard exists to prevent server-side. role="status", not
-          "alert": it resolves itself within a poll or two. */}
-      {rankedForPickNo !== null && state?.active && (
-        <p className="draft-notice-banner" role="status">
-          Recomputing for pick {state.picks_made + 1} -- the list below is
-          {' '}still for pick {rankedForPickNo}.
-        </p>
-      )}
+      {/* The "recomputing for pick N -- the list below is still for pick M"
+          banner used to render here, between the alert strip and
+          `.draft-body`. It is now TopThree's own header row (see `recompute`
+          below and TopThree's prop comment): a banner that mounts and
+          unmounts between polls adds a strip of height and takes it away
+          again, and everything below it -- including the Draft button the
+          cursor is already resting on -- moves with it. Same information,
+          same role="status", no reflow. */}
 
       <div className="draft-body">
         <div className="draft-main-col">
@@ -508,6 +588,8 @@ export default function DraftRoom() {
                     onDraft={handleDraftClick}
                     isMyTurn={isMyTurn}
                     horizonLabel={horizonLabel}
+                    recompute={recompute}
+                    onOpenPlayer={handleOpenCandidate}
                   />
                   <AvailableList
                     candidates={state?.candidates ?? []}
@@ -515,6 +597,7 @@ export default function DraftRoom() {
                     onDraft={handleDraftClick}
                     isMyTurn={isMyTurn}
                     horizonLabel={horizonLabel}
+                    onOpenPlayer={handleOpenCandidate}
                   />
                 </>
               )
@@ -533,7 +616,7 @@ export default function DraftRoom() {
                   // container per tab.
                   <div className="board-tab">
                     {boardError && <p className="error draft-error-banner">{boardError}</p>}
-                    <DraftBoardGrid board={board} />
+                    <DraftBoardGrid board={board} onOpenPlayer={handleOpenBoardPlayer} />
                   </div>
                 )
                 // No board yet: either still loading (boardError null) or
@@ -566,6 +649,19 @@ export default function DraftRoom() {
           )}
         </aside>
       </div>
+
+      {/* Before ConfirmPick, deliberately. Both sit on the same z-index tier
+          (`.player-overlay` and `.confirm-overlay` are both 40 -- one modal
+          pattern in this room, per PlayerOverlay's comment), so DOM order is
+          what decides which paints on top, and the answer has to be the
+          dialog that sends an irreversible pick. */}
+      {openPlayer && (
+        <PlayerOverlay
+          target={openPlayer}
+          onClose={() => setOpenPlayer(null)}
+          onSelectPlayer={handleSelectPlayer}
+        />
+      )}
 
       {confirming && (
         <ConfirmPick

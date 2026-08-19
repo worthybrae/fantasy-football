@@ -113,6 +113,13 @@ function reasonFor(c: RankedCandidate, horizonLabel: string | null): string {
   return `He ${slot} and is worth ${fmtSigned(c.gain_now)} over the best replacement there -- only a ${survive}% chance he lasts to ${at}, so this is the one to take now.`
 }
 
+// The list on screen was ranked for an older pick than the one on the clock
+// -- `forPick` is the pick being recomputed for (the one on the clock),
+// `listedForPick` is the pick the cards and table below were actually
+// ranked for. Both spelled by DraftRoom off `candidates_as_of_pick`; null
+// whenever the two agree, which is the overwhelming majority of polls.
+export type RecomputeState = { forPick: number; listedForPick: number }
+
 interface TopThreeProps {
   candidates: LiveCandidate[]
   players: Record<string, Player>
@@ -130,6 +137,20 @@ interface TopThreeProps {
   // whenever no gain-ranked list exists yet -- the hint drops the clause
   // entirely rather than guessing.
   horizonLabel: string | null
+  // Non-null only while a recompute is outstanding -- see RecomputeState.
+  // This used to be a `.draft-notice-banner` paragraph in DraftRoom, mounted
+  // and unmounted between polls: it added a strip of vertical height above
+  // `.draft-body` and took it away again a poll or two later, so the cards
+  // and the whole table under them jumped up and down mid-pick. The Draft
+  // button moving out from under a cursor on a 30-second clock, for a pick
+  // that cannot be undone, is a misdraft risk -- so the same information
+  // now lives on this header row, which is painted whether or not a
+  // recompute is running.
+  recompute: RecomputeState | null
+  // Opens the profile over the room -- same handler and same reasoning as
+  // AvailableList's own field comment. The name only, never the card: the
+  // card's own control is Draft, and that one cannot be undone.
+  onOpenPlayer: (c: LiveCandidate) => void
 }
 
 // Three cards above the ranked table, the same `candidates` prop
@@ -137,8 +158,16 @@ interface TopThreeProps {
 // that component and never touches what shows up here. This always names
 // the three best picks on the board by gain_now, regardless of what the
 // user happens to be searching for below.
-export default function TopThree({ candidates, players, onDraft, isMyTurn, horizonLabel }: TopThreeProps) {
+export default function TopThree({
+  candidates, players, onDraft, isMyTurn, horizonLabel, recompute, onOpenPlayer,
+}: TopThreeProps) {
   const top3 = candidates.slice(0, 3)
+  // No cards means no header row to hang the recompute indicator on either.
+  // Deliberately still `null` rather than growing a header just for the
+  // indicator: a header that appears only while recomputing would be the
+  // exact layout shift this indicator replaced. Unreachable in practice --
+  // `recompute` is derived from `candidates_as_of_pick`, which is only ever
+  // set by a recompute that produced a list.
   if (top3.length === 0) return null
 
   // Defect 2: gain_now is all-or-nothing across the whole list (see
@@ -168,6 +197,27 @@ export default function TopThree({ candidates, players, onDraft, isMyTurn, horiz
         <span className="top3-hint">
           ranked by what you gain now vs. waiting{horizonLabel !== null ? ` until ${horizonLabel}` : ''}
         </span>
+        {/* Always mounted, even with nothing to say -- two reasons, both
+            load-bearing. (1) Layout: an element that comes and goes could
+            still change this row, and this row sits directly above the
+            Draft buttons. Empty, it is a zero-width flex item pushed to the
+            far right by `margin-left: auto`, so neither its arrival nor its
+            departure moves a pixel of anything. (2) Assistive tech: a
+            `role="status"` region announces text that CHANGES inside an
+            already-live region -- mounting the region and its text in the
+            same commit is not reliably announced, which is what mounting
+            the old banner did. The text still names the pick the list below
+            was actually ranked for, because that honesty is the entire
+            reason this indicator exists. */}
+        <span className="top3-recompute" role="status">
+          {recompute !== null && (
+            <>
+              <span className="top3-recompute-dot" aria-hidden="true" />
+              Recomputing for pick {recompute.forPick} — the list below is
+              {' '}still for pick {recompute.listedForPick}
+            </>
+          )}
+        </span>
       </div>
       <div className="top3-grid">
         {ranked.map((c, i) => {
@@ -177,7 +227,14 @@ export default function TopThree({ candidates, players, onDraft, isMyTurn, horiz
               <div className="top3-card-head">
                 <span className="top3-rank mono">#{i + 1}</span>
                 {posBadge(c.position)}
-                <span className="top3-name">{player?.name ?? c.player_id}</span>
+                <button
+                  type="button"
+                  className="top3-name-btn"
+                  onClick={() => onOpenPlayer(c)}
+                  title="Open profile"
+                >
+                  <span className="top3-name">{player?.name ?? c.player_id}</span>
+                </button>
                 <span className="top3-team mono">{player?.team ?? ''}</span>
                 <button
                   type="button"

@@ -130,6 +130,27 @@ td:first-child {
   text-align: left;
 }
 
+/* The same profile, drawn inside PlayerOverlay's panel instead of as the
+   whole page. It gives up exactly two things: the full-viewport height (the
+   panel sizes itself to its content up to the viewport, so a short profile
+   is a short card rather than a screen of empty canvas) and its own scroll
+   container (`.player-overlay-panel` is the scroller -- two nested ones
+   would mean an inner scrollbar that stops at a boundary the eye cannot
+   see). Padding comes down a step: this is a card over a board, not a page.
+   Everything else -- the grid, the cards, the charts -- is unchanged, which
+   is the point of embedding rather than reimplementing. */
+.player-page-embedded {
+  min-height: 0;
+  overflow: visible;
+  padding: var(--space-4);
+}
+
+/* Keeps a long name out from under the overlay's close control, which
+   floats over this corner (see `.player-overlay-close`). */
+.player-page-embedded .pp-header {
+  padding-right: var(--space-6);
+}
+
 .player-page-back {
   background: transparent;
   color: var(--text-2);
@@ -169,6 +190,62 @@ td:first-child {
   margin: 0 0 4px;
   font-size: 28px;
   letter-spacing: -0.01em;
+}
+
+/* The seed's figure row (see ProfileSeed in PlayerProfile.tsx): the handful
+   of numbers the opener already had, painted before the profile request has
+   even been answered. Same geometry as `.confirm-figures` -- caption over
+   value, one rule above and below -- because it is the same kind of row.
+   `flex-wrap` because a candidate seeds seven of these and the overlay is
+   narrower than the standalone page. */
+.pp-seed-figures {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-5);
+  margin-bottom: var(--space-4);
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.pp-seed-figure {
+  font-size: var(--text-md);
+  font-weight: 700;
+  color: var(--text-1);
+  margin-top: 2px;
+}
+
+/* Same rule as `.avail-fills.is-open` / `.top3-figure.is-open` /
+   `.confirm-figure.is-open`: an open starter or flex slot reads in accent
+   wherever it appears. */
+.pp-seed-figure.is-open {
+  color: var(--accent);
+}
+
+/* "loading full profile…" -- the tail of the subhead line that is already on
+   screen, never a block of its own. When the request lands, depth slot and
+   strength of schedule replace it on that same line, so nothing above or
+   below it moves. */
+.pp-loading-tail {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-3);
+}
+
+.pp-loading-dot {
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: landing-spin 0.8s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pp-loading-dot {
+    animation: none;
+  }
 }
 
 .pp-grid {
@@ -958,14 +1035,17 @@ td:first-child {
   font-size: var(--text-sm);
 }
 
-/* Two tiers below the error banner, sharing its geometry so a stack of them
-   reads as one strip rather than three unrelated bars.
+/* One tier below the error banner, sharing its geometry so a stack of the
+   two reads as one strip rather than two unrelated bars. Fail-toned like
+   the error banner but not an error: an unmapped pick means the list below
+   is wrong in a way the user has to know about.
 
-   `alert` is fail-toned like the error banner but is not an error: an
-   unmapped pick means the list below is wrong in a way the user has to know
-   about. `notice` is accent-toned and transient -- a recompute that has not
-   landed yet resolves itself within a poll or two, and painting that red
-   every time a pick lands would make the red mean nothing by round three. */
+   The accent-toned `.draft-notice-banner` that used to sit here (the
+   "recomputing for pick N" strip) is gone on purpose, not by oversight: a
+   banner that mounts and unmounts between polls moves everything below it,
+   Draft button included, mid-pick. That state now renders inside
+   `.top3-head` instead -- see `.top3-recompute` below. Do not reintroduce a
+   banner tier for a transient state. */
 .draft-alert-banner {
   flex-shrink: 0;
   margin: 0;
@@ -974,16 +1054,6 @@ td:first-child {
   border-bottom: 1px solid var(--fail);
   font-size: var(--text-sm);
   color: var(--text-1);
-}
-
-.draft-notice-banner {
-  flex-shrink: 0;
-  margin: 0;
-  padding: var(--space-2) var(--space-4);
-  background: color-mix(in srgb, var(--accent) 10%, var(--bg-1));
-  border-bottom: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
-  font-size: var(--text-sm);
-  color: var(--text-2);
 }
 
 /* The raw ids behind an unmapped pick. They are the only way to work out
@@ -1396,6 +1466,32 @@ td:first-child {
   color: var(--text-1);
 }
 
+/* The name is the profile's open control (AvailableList.tsx). Stripped back
+   to look exactly like the text it replaced -- same font, same colour, no
+   padding, no box -- so the table's rhythm is unchanged and the row is not
+   a pixel taller than it was. The affordance shows on hover/focus only,
+   which is the same bargain `.board-cell` already makes. */
+.avail-name-btn {
+  display: inline-block;
+  vertical-align: baseline;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.avail-name-btn:hover .avail-name,
+.avail-name-btn:focus-visible .avail-name {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.avail-name-btn:focus-visible {
+  outline: 1px solid var(--accent-border);
+  outline-offset: 2px;
+}
+
 .avail-meta {
   margin-left: 7px;
   font-size: var(--text-xs);
@@ -1499,6 +1595,60 @@ td:first-child {
   color: var(--text-3);
 }
 
+/* The recompute indicator, always in the DOM (TopThree.tsx renders it empty
+   when there is nothing to say -- see its comment for why).
+
+   Every rule here exists to guarantee this row's height and its other two
+   items' positions never change when the text appears:
+     - identical font-size/line-height to `.top3-hint`, so a populated
+       indicator can never be the tallest thing in the row;
+     - `margin-left: auto` parks it at the far right, so its own width
+       changes push nothing -- there is nothing to its right;
+     - `min-width: 0` + `nowrap` + ellipsis: without min-width a flex text
+       item refuses to shrink below its content, and a long sentence would
+       either wrap (row grows -- the exact reflow this replaced) or overflow
+       into `.draft-main`, whose `overflow-y: auto` computes overflow-x to
+       auto and would answer with a horizontal scrollbar. */
+.top3-recompute {
+  margin-left: auto;
+  /* Out of `.top3-head`'s baseline group on purpose: a flex container's
+     baseline is its first item's, which here is a bare 9px circle with no
+     text baseline at all. Centering it instead keeps the row's height a
+     function of the caption and hint alone -- the two items that are always
+     there. */
+  align-self: center;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: var(--text-xs);
+  line-height: 1.45;
+  color: var(--accent);
+}
+
+/* Same spinner idiom as `.landing-spinner`, sized to sit inside an 11px
+   line box. `flex-shrink: 0` so the ellipsis eats the sentence, never the
+   spinner -- a spinner squeezed to nothing is a loading indicator that
+   stops indicating. */
+.top3-recompute-dot {
+  flex-shrink: 0;
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: landing-spin 0.8s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .top3-recompute-dot {
+    animation: none;
+  }
+}
+
 /* Defect 2: where the three recommendation cards sit when my_slot is not
    yet resolved and there is nothing ranked to show -- same bottom padding
    and divider `.top3-grid` would otherwise supply, so the section doesn't
@@ -1543,7 +1693,36 @@ td:first-child {
   color: var(--accent);
 }
 
+/* The card's own open-the-profile control (TopThree.tsx). It replaces the
+   name span as `.top3-card-head`'s flex item, so it inherits the two rules
+   that item carried -- `min-width: 0` plus `overflow: hidden`, which are
+   what let a long name ellipsize instead of shoving the Draft button off
+   the card. `.top3-name` keeps the ellipsis itself and is blockified for
+   it: text-overflow does nothing on an inline box, and it is now inside a
+   button rather than being the flex item. */
+.top3-name-btn {
+  min-width: 0;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.top3-name-btn:hover .top3-name,
+.top3-name-btn:focus-visible .top3-name {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.top3-name-btn:focus-visible {
+  outline: 1px solid var(--accent-border);
+  outline-offset: 2px;
+}
+
 .top3-name {
+  display: block;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1715,6 +1894,87 @@ td:first-child {
   background: var(--bg-2);
   color: var(--text-3);
   cursor: not-allowed;
+}
+
+/* -- in-draft player profile overlay (PlayerOverlay.tsx) --
+
+   Same tier and the same dim as `.confirm-overlay` above: one modal
+   pattern in this room. The blur is the one addition -- the board behind
+   stays recognisable as the thing you are coming back to, without
+   competing with a screenful of numbers drawn on top of it.
+
+   `position: fixed` and nothing else: no scroll lock, no class on <body>,
+   no padding compensation. `.draft-room` is `height: 100svh; overflow:
+   hidden` (the document itself never scrolls -- `.draft-main` does), so
+   there is no scrollbar to take away and no way for opening this to move a
+   pixel of the room underneath. */
+.player-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: var(--space-4);
+  background: rgba(10, 11, 14, 0.72);
+  backdrop-filter: blur(6px);
+}
+
+.player-overlay-panel {
+  position: relative;
+  width: min(1180px, 100%);
+  max-height: 100%;
+  /* The panel is the scroll container, not the page and not
+     `.player-page` -- see `.player-page-embedded`, which gives up the
+     `min-height: 100svh` and `overflow-y: auto` the standalone route needs
+     precisely so this box owns both. */
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+}
+
+/* Sticky, not absolute: this panel is a scroll container and a game log
+   plus a season table is a long scroll, so an absolutely-positioned close
+   control would be somewhere above the fold by the time anyone wanted it.
+   The negative bottom margin cancels its own height so it costs the profile
+   below no vertical space -- it floats over the top-right corner, which
+   `embedded` has deliberately left empty (no back button, no manual
+   drafted toggle). Escape and a backdrop press close this too; this is the
+   one that has to stay visible. */
+.player-overlay-close {
+  position: sticky;
+  top: var(--space-3);
+  /* A block with `margin-left: auto` and a fixed width -- right-aligned
+     without making the panel a flex container, which would leave the
+     profile below as a shrinkable flex item inside a scroll container (it
+     would compress instead of scrolling). The bottom margin is its own
+     height plus its top margin, negated. */
+  display: block;
+  margin: var(--space-3) var(--space-3) calc(-26px - var(--space-3)) auto;
+  z-index: 1;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-1);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.player-overlay-close:hover {
+  border-color: var(--accent-border);
+  color: var(--text-1);
+}
+
+.player-overlay-close:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 2px;
 }
 
 /* -- draft board grid (main zone of /draft) -- */
