@@ -10,6 +10,15 @@ function fmtSigned(n: number): string {
   return r > 0 ? `+${r}` : `${r}`
 }
 
+// duplicated from AvailableList.tsx/TopThree.tsx -- same rule, same reason
+// to keep it in sync: an open starter/flex slot reads in accent, `BENCH`
+// and gain.py's `—` read muted. Folded-in review finding: this dialog's
+// own Fills figure was left plain while both other views already applied
+// the rule -- one meaning, drawn the same way everywhere it appears.
+function fillsIsOpenSlot(fills: string): boolean {
+  return fills !== 'BENCH' && fills !== '—'
+}
+
 export type PickStatus = 'idle' | 'sending' | 'done' | 'failed'
 
 interface ConfirmPickProps {
@@ -20,6 +29,13 @@ interface ConfirmPickProps {
   player: Player | null
   status: PickStatus
   error: string | null
+  // The overall pick number this confirmation is for (DraftRoom's own
+  // `thisPickNo`) -- named in the heading ("Confirm pick 30") since this is
+  // an action that can't be undone once ESPN confirms it. null only when
+  // DraftRoom itself has no current pick to name (draft not active, or
+  // already over); the heading falls back to the bare "Confirm pick"
+  // rather than a fabricated number.
+  pickNo: number | null
   // "Roster after": my_roster's count plus this pick, over the room's total
   // slot count -- both numbers DraftRoom already has (my_roster.length and
   // the assigned `slots` array it builds for RosterPanel), computed there
@@ -37,7 +53,7 @@ interface ConfirmPickProps {
 // owns the "is there anything to confirm at all" question, not this
 // component.
 export default function ConfirmPick({
-  candidate, player, status, error, rosterAfter, onConfirm, onCancel,
+  candidate, player, status, error, pickNo, rosterAfter, onConfirm, onCancel,
 }: ConfirmPickProps) {
   const sending = status === 'sending'
 
@@ -65,7 +81,7 @@ export default function ConfirmPick({
   return (
     <div className="confirm-overlay">
       <div className="confirm-dialog" role="dialog" aria-modal="true" aria-label="Confirm pick">
-        <div className="draft-cap confirm-cap">Confirm pick</div>
+        <div className="draft-cap confirm-cap">Confirm pick{pickNo !== null ? ` ${pickNo}` : ''}</div>
         <div className="confirm-player">
           {posBadge(candidate.position)}
           <span className="confirm-player-name">{player?.name ?? candidate.player_id}</span>
@@ -74,7 +90,9 @@ export default function ConfirmPick({
         <div className="confirm-figures">
           <div>
             <div className="draft-cap">Fills</div>
-            <div className="confirm-figure mono">{candidate.fills}</div>
+            <div className={`confirm-figure mono${fillsIsOpenSlot(candidate.fills) ? ' is-open' : ''}`}>
+              {candidate.fills}
+            </div>
           </div>
           <div>
             <div className="draft-cap">Gain now</div>

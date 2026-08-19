@@ -32,19 +32,30 @@ function fillsIsOpenSlot(fills: string): boolean {
 // and the sentence has to say exactly that instead of manufacturing
 // urgency that isn't there.
 //
-// `ratio` (gain_now as a fraction of his own vor_points) is what catches
-// that case without a hardcoded point threshold that would stop meaning
-// anything the moment the league's scoring format or roster shape changes:
-// a low ratio means most of his over-replacement value would survive to
-// the next pick anyway, wherever the absolute numbers land. `survive_pct`
-// is a second, independent signal -- HIS OWN odds of still being there --
-// and gets its own branch since a healthy ratio can still come with a high
-// personal survive_pct (a deep-ish position where he's still clearly the
-// best of the survivors, but unlikely to be gone next time either).
+// The "next-best option is nearly as good" framing below only makes sense
+// as a *fraction of his own vor_points* -- and a fraction is only a
+// coherent idea when that denominator is positive. Reviewed-in bug: the
+// first version of this function defaulted the ratio to 0 whenever
+// `vor_points` was not positive, which routed EVERY such row into that
+// same "nearly as good" branch regardless of how large `gain_now` actually
+// was -- the exact failure this task exists to eliminate, a sentence
+// asserting the opposite of what the numbers say. This is reachable, not
+// hypothetical: NEED_WEIGHTS["starter"] = 1.0 (scoring/config.py), so for a
+// starter need `gain_now` is literally `vor_points - next_best` with no
+// dampening -- a thin, weak position can hand a real starter slot
+// `vor_points = -5` (below replacement in an absolute sense) with
+// `next_best = -30` (the position's replacement level is even worse),
+// giving `gain_now = +25`: a genuine, sizeable gain that the old ratio
+// branch would have called "nearly as good" anyway.
+//
+// Fixed by gating the whole comparison on `vor_points > 0`, not just the
+// division -- a non-positive `vor_points` now falls straight through to
+// the `survive_pct`/default branches below, neither of which mentions
+// `vor_points` at all, only `gain_now` (always literally true: it IS what
+// taking him now gains you, whatever sign it carries) and `survive_pct`
+// (his own odds, independent of vor entirely).
 function reasonFor(c: LiveCandidate): string {
-  const vor = Math.round(c.vor_points)
   const survive = Math.round(c.survive_pct)
-  const ratio = c.vor_points > 0 ? c.gain_now / c.vor_points : 0
 
   const slot =
     c.fills === '—' ? 'has no roster spot open right now'
@@ -54,8 +65,8 @@ function reasonFor(c: LiveCandidate): string {
   if (c.fills === '—') {
     return `He ${slot} -- this pick would not start no matter what, whatever his ${survive}% odds of lasting to your next one are worth.`
   }
-  if (ratio < 0.15) {
-    return `He ${slot}, but the next-best option there is nearly as good -- only ${fmtSigned(c.gain_now)} is actually at stake, well short of the +${vor} over replacement he shows on the board.`
+  if (c.vor_points > 0 && c.gain_now / c.vor_points < 0.15) {
+    return `He ${slot}, but the next-best option there is nearly as good -- only ${fmtSigned(c.gain_now)} is actually at stake, well short of the ${fmtSigned(c.vor_points)} over replacement he shows on the board.`
   }
   if (survive >= 55) {
     return `He ${slot} and is worth ${fmtSigned(c.gain_now)} now, but he is a ${survive}% bet to still be there at your next pick -- fine to wait if you want someone else first.`
@@ -71,6 +82,14 @@ interface TopThreeProps {
   // literal signature, added for the same reason: the draft button has to
   // gate on whose turn it is, and this component has no other way to know.
   isMyTurn: boolean
+  // The overall pick number `gain_now` is actually measured against --
+  // "what you gain by taking him now instead of waiting until pick N."
+  // DraftRoom derives it the same way ClockPanel already does (a
+  // duplicated copy of ClockPanel.tsx's own nextPickFor -- see its
+  // comment there). null whenever DraftRoom can't derive it honestly (no
+  // active session, my_slot not resolved yet, or the draft is over) --
+  // the hint drops the clause entirely rather than guessing a number.
+  nextPickNo: number | null
 }
 
 // Three cards above the ranked table, the same `candidates` prop
@@ -78,7 +97,7 @@ interface TopThreeProps {
 // that component and never touches what shows up here. This always names
 // the three best picks on the board by gain_now, regardless of what the
 // user happens to be searching for below.
-export default function TopThree({ candidates, players, onDraft, isMyTurn }: TopThreeProps) {
+export default function TopThree({ candidates, players, onDraft, isMyTurn, nextPickNo }: TopThreeProps) {
   const top3 = candidates.slice(0, 3)
   if (top3.length === 0) return null
 
@@ -86,7 +105,9 @@ export default function TopThree({ candidates, players, onDraft, isMyTurn }: Top
     <div className="top3">
       <div className="top3-head">
         <span className="draft-cap top3-cap">Take one of these</span>
-        <span className="top3-hint">ranked by what you gain now vs. waiting</span>
+        <span className="top3-hint">
+          ranked by what you gain now vs. waiting{nextPickNo !== null ? ` until pick ${nextPickNo}` : ''}
+        </span>
       </div>
       <div className="top3-grid">
         {top3.map((c, i) => {

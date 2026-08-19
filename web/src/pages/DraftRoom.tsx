@@ -92,6 +92,21 @@ const SCORING_LABEL: Record<'ppr' | 'half' | 'std', string> = {
   ppr: 'PPR', half: 'Half PPR', std: 'Standard',
 }
 
+// Duplicated from ClockPanel.tsx (unexported there too, same precedent as
+// posBadge's own multi-file duplication) -- needed here only so TopThree's
+// hint can name the actual pick number `gain_now` is measured against
+// ("...vs. waiting until pick N"). See ClockPanel.tsx's own comment on
+// pickNumberFor for the verification against scoring/draft_sim.snake_slots.
+function pickNumberFor(round: number, slot: number, teams: number): number {
+  return round * teams + (round % 2 === 0 ? slot : teams - slot + 1)
+}
+
+function nextPickFor(fromPickNo: number, mySlot: number, teams: number): number {
+  const round = Math.floor((fromPickNo - 1) / teams)
+  const thisRound = pickNumberFor(round, mySlot, teams)
+  return thisRound >= fromPickNo ? thisRound : pickNumberFor(round + 1, mySlot, teams)
+}
+
 export default function DraftRoom() {
   const [state, setState] = useState<LiveState | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -201,6 +216,15 @@ export default function DraftRoom() {
   // task brief's original signature listed).
   const isMyTurn = !!state?.active && state.on_the_clock !== null && state.on_the_clock === state.my_slot
 
+  // The pick TopThree's hint names ("...vs. waiting until pick N") --
+  // exactly ClockPanel's own `nextPickNo` (see its comment), recomputed
+  // here since ClockPanel keeps that value private to its own render. null
+  // whenever `thisPickNo` itself is null (draft inactive/over) or my_slot
+  // isn't resolved yet -- TopThree drops the clause rather than guessing.
+  const nextPickNo = state?.active && state.my_slot !== null && thisPickNo !== null
+    ? nextPickFor(thisPickNo, state.my_slot, state.settings.teams as number)
+    : null
+
   // "Roster after" for the confirm dialog: my_roster's current length plus
   // this pick, over the room's own total slot count (`slots`, already built
   // above for RosterPanel) -- both read off state that's already in scope
@@ -301,12 +325,23 @@ export default function DraftRoom() {
           <div className="draft-main">
             {tab === 'available'
               ? (
+                // TopThree ABOVE AvailableList's own filter row/table --
+                // the mock draws the filter row first (search+pills, then
+                // top three, then the table). Deliberately not matched:
+                // under a 30-second clock the recommendation is what the
+                // eye needs first, and the search/position filter is a
+                // browsing tool that belongs attached to the table it
+                // filters, which is where AvailableList already puts it.
+                // Reviewed and confirmed as a conscious deviation from the
+                // mock, not an oversight -- do not "fix" this back to
+                // match the mock's own ordering.
                 <>
                   <TopThree
                     candidates={state?.candidates ?? []}
                     players={players}
                     onDraft={handleDraftClick}
                     isMyTurn={isMyTurn}
+                    nextPickNo={nextPickNo}
                   />
                   <AvailableList
                     candidates={state?.candidates ?? []}
@@ -342,6 +377,7 @@ export default function DraftRoom() {
           player={players[confirming.player_id] ?? null}
           status={pickStatus}
           error={pickError}
+          pickNo={thisPickNo}
           rosterAfter={rosterAfter}
           onConfirm={handleConfirmPick}
           onCancel={handleCancelConfirm}

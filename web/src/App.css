@@ -1277,7 +1277,23 @@ td:first-child {
    this table gets to scroll away with the top three instead of fighting a
    sticky header for the same 38px of the tab strip. */
 
-.avail-col-rank { width: 40px; text-align: right; }
+/* `.avail-col-rank` is on the table's first column, which collides with
+   the global `td:first-child`/`th:first-child` rule above (padding-right:
+   0, width: 1%, meant for the main board's drawer-opening rank column).
+   That rule's specificity (0,1,1 -- one pseudo-class plus the `td`/`th`
+   type) beats a bare class selector's (0,1,0) regardless of source order,
+   so `.avail-col-rank { width: 40px }` alone was silently overridden back
+   to shrink-to-content with no right padding -- a real rendering bug
+   (caught in review, not by reading the CSS: the rank crowded against the
+   position badge). Scoped under `.avail-table` with the element type named
+   explicitly to win outright: (0,2,1) beats (0,1,1) on the class count
+   alone. */
+.avail-table th.avail-col-rank,
+.avail-table td.avail-col-rank {
+  width: 40px;
+  text-align: right;
+  padding-right: 10px;
+}
 .avail-col-pos { width: 52px; }
 .avail-col-num { width: 78px; text-align: right; }
 .avail-col-fills { width: 96px; }
@@ -1537,6 +1553,13 @@ td:first-child {
   font-weight: 700;
   color: var(--text-1);
   margin-top: 2px;
+}
+
+/* Same rule as `.avail-fills.is-open`/`.top3-figure.is-open` -- an open
+   starter/flex slot reads in accent here too (folded-in review finding:
+   this dialog's own Fills figure was the one place still left plain). */
+.confirm-figure.is-open {
+  color: var(--accent);
 }
 
 .confirm-note {
