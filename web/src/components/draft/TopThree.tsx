@@ -32,28 +32,38 @@ function fillsIsOpenSlot(fills: string): boolean {
 // and the sentence has to say exactly that instead of manufacturing
 // urgency that isn't there.
 //
-// The "next-best option is nearly as good" framing below only makes sense
-// as a *fraction of his own vor_points* -- and a fraction is only a
-// coherent idea when that denominator is positive. Reviewed-in bug: the
-// first version of this function defaulted the ratio to 0 whenever
-// `vor_points` was not positive, which routed EVERY such row into that
-// same "nearly as good" branch regardless of how large `gain_now` actually
-// was -- the exact failure this task exists to eliminate, a sentence
-// asserting the opposite of what the numbers say. This is reachable, not
-// hypothetical: NEED_WEIGHTS["starter"] = 1.0 (scoring/config.py), so for a
-// starter need `gain_now` is literally `vor_points - next_best` with no
-// dampening -- a thin, weak position can hand a real starter slot
-// `vor_points = -5` (below replacement in an absolute sense) with
-// `next_best = -30` (the position's replacement level is even worse),
-// giving `gain_now = +25`: a genuine, sizeable gain that the old ratio
-// branch would have called "nearly as good" anyway.
+// `gain_now = weight * (vor_points - next_best[pos])` (scoring/gain.py) can
+// itself be negative or zero -- not just small -- whenever this player's
+// own vor_points sits below the survivor-weighted expectation for his
+// position (two QBs at vor 90/70 with survival .85/.90 give the weaker one
+// roughly gain_now = -16). That is reachable at any weight, not only a
+// capped one: NEED_WEIGHTS["starter"] = 1.0 (scoring/config.py) applies no
+// dampening at all for a starter need. A second reviewed-in bug: neither
+// the "nearly as good" ratio branch nor the plain take-now default checked
+// the SIGN of `gain_now` before this fix -- `gain_now / vor_points < 0.15`
+// is trivially true for any negative `gain_now` (a QB at vor=70, gain=-16
+// used to read as "nearly as good," when the honest reading is "worse"),
+// and the take-now default asserted "this is the one to take now" for a
+// literally negative gain with no check at all. Both were sentences
+// asserting the opposite of their own numbers -- the exact failure this
+// task exists to eliminate.
 //
-// Fixed by gating the whole comparison on `vor_points > 0`, not just the
-// division -- a non-positive `vor_points` now falls straight through to
-// the `survive_pct`/default branches below, neither of which mentions
-// `vor_points` at all, only `gain_now` (always literally true: it IS what
-// taking him now gains you, whatever sign it carries) and `survive_pct`
-// (his own odds, independent of vor entirely).
+// Fixed by handling `gain_now <= 0` as its own branch, checked before
+// either of those: it is real, useful information for a top-three slot to
+// carry ("none of these is worth taking for this position yet" is a
+// legitimate thing to tell the user, not a failure to recommend someone).
+// Every branch below it can now assume `gain_now > 0` reached it, so
+// neither "nearly as good" nor "take him now" can fire for a player the
+// model rates as a net-negative pick right now.
+//
+// The "next-best option is nearly as good" branch further requires
+// `vor_points > 0`, since it reads `gain_now` as a *fraction of his own
+// vor_points* -- a fraction with a non-positive denominator has no
+// coherent reading. A non-positive `vor_points` (with `gain_now > 0`,
+// having already passed the branch above -- e.g. vor_points=-5,
+// gain_now=+25 for a thin, weak position whose replacement level is even
+// worse) instead falls through to the `survive_pct`/default branches,
+// neither of which mentions `vor_points` at all.
 function reasonFor(c: LiveCandidate): string {
   const survive = Math.round(c.survive_pct)
 
@@ -64,6 +74,9 @@ function reasonFor(c: LiveCandidate): string {
 
   if (c.fills === '—') {
     return `He ${slot} -- this pick would not start no matter what, whatever his ${survive}% odds of lasting to your next one are worth.`
+  }
+  if (c.gain_now <= 0) {
+    return `He ${slot}, but the model expects a stronger option at his position to still be there at your next pick -- taking him now nets ${fmtSigned(c.gain_now)} against that, whatever his own ${survive}% survival odds are worth, so this is not the pick to make yet.`
   }
   if (c.vor_points > 0 && c.gain_now / c.vor_points < 0.15) {
     return `He ${slot}, but the next-best option there is nearly as good -- only ${fmtSigned(c.gain_now)} is actually at stake, well short of the ${fmtSigned(c.vor_points)} over replacement he shows on the board.`
