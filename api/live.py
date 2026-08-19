@@ -3,7 +3,8 @@
 `make sim` pays 0.9s building the board, 1.1s building the pool and 14.9s in
 `fit_all` on every invocation. During a draft none of that changes -- the
 coefficients come from history, the board and pool are static -- so the
-session builds them once and every refresh costs only `search_pick`.
+session builds them once and every refresh costs only `survival` plus
+`rank_available` (see SURVIVAL_ROLLOUTS below for why that is cheap).
 """
 import dataclasses
 import hashlib
@@ -42,9 +43,9 @@ class DraftSession:
     crosswalk: dict
     board_fingerprint: str
     # Pinned for the session's lifetime, never derived from a clock or a
-    # counter. `search_pick` already uses common random numbers within a
-    # call; holding the seed fixed ACROSS calls is what makes a changed
-    # recommendation mean a changed board rather than a different sample.
+    # counter. `survival` seeds rollout i from (seed, i); holding the seed
+    # fixed ACROSS calls is what makes a changed recommendation mean a
+    # changed board rather than a different sample.
     seed: int
     started_at: datetime
     # The full board DataFrame build_session already pays to build. It used to
@@ -62,6 +63,18 @@ class DraftSession:
     # "Team {slot}" for any missing column. default_factory so the shared empty
     # default is not one dict aliased across every session.
     team_slots: dict = dataclasses.field(default_factory=dict)
+    # player_id -> board row (as a dict), for POST /api/live/select's SELECT
+    # payload lookup (see _espn_id_for). Built once in build_session from the
+    # same `board.to_dict(orient="records")` _board_index already reads for
+    # the board grid, and it inherits that call's exact limitation: a board
+    # with a duplicated player_id keeps only the LAST matching row (dict
+    # construction, last key wins), silently. That is not a new risk this
+    # field introduces -- _board_index has always had it -- and build_board
+    # is expected to never emit two rows for one player_id; it is noted here
+    # because a SELECT built off a silently-wrong row is a real pick sent to
+    # ESPN, not a display glitch. default_factory so the shared empty dict is
+    # not aliased across every session, same reasoning as team_slots.
+    board_by_id: dict = dataclasses.field(default_factory=dict)
 
 
 def _attach_espn_proj(conn, board):
@@ -130,25 +143,31 @@ def build_session(conn, my_slot: int | None, seed: int = DEFAULT_SEED,
         settings=settings, pool=pool, betas=betas,
         crosswalk=build_crosswalk(board),
         board_fingerprint=board_fingerprint(board), seed=seed,
-        started_at=datetime.now(timezone.utc), board=board)
+        started_at=datetime.now(timezone.utc), board=board,
+        board_by_id={str(r["player_id"]): r
+                     for r in board.to_dict(orient="records")})
 
 
 import re
 import threading
+import time
 
 from fastapi import HTTPException
 from pydantic import BaseModel
+from websockets.exceptions import ConnectionClosed
 
 from pipeline.draft_listener import DraftListener, run_listener
 from pipeline.draft_socket import run_socket_listener
 from pipeline.espn_league import STATE_PATH, parse_league_id
-from pipeline.espn_live import apply_picks
+from pipeline.espn_live import ESPN_PRO_TEAM_BY_ABBREV, _dst_espn_id, apply_picks
 from pipeline.espn_teams import fetch_league_settings, fetch_team_slots
 from pipeline.espn_teams import http_fetch as _team_view_fetch
 from pipeline import leagues as leagues_mod
 from pipeline.leagues import DEFAULT_LEAGUE, provision_league
 from scoring.config import CURRENT_SEASON
-from scoring.draft_sim import _drafted_state, search_pick, snake_slots
+from scoring.draft_sim import (_drafted_state, _seed_rosters, snake_slots,
+                               survival)
+from scoring.gain import rank_available
 
 
 class ConnectBody(BaseModel):
@@ -399,6 +418,82 @@ def _board_cell(player_id, pick_no, teams: int, slots: list, by_id: dict) -> dic
     return {"overall": overall, "round": rnd, "slot": slot, "player": player}
 
 
+def _league_settings_payload(settings) -> dict:
+    """The session's real league shape, as /api/live/state's `settings` key
+    serves it -- the rail's RosterPanel/ClockPanel read teams/rounds/starter
+    counts off this instead of the two hardcoded 8-team/15-round constants
+    they used to carry (LEAGUE_TEAMS, duplicated once in ClockPanel.tsx and
+    once in DraftRoom.tsx, each commented as cross-referencing the other).
+
+    `settings=None` (the inactive response, no session at all) returns the
+    same five keys with null/empty values rather than omitting them, so the
+    client never has to branch on whether the key exists -- only on whether
+    its values are null, the same convention `listener_error`/
+    `listener_alive` already use below.
+    """
+    if settings is None:
+        return {"teams": None, "rounds": None, "starters": {},
+                "flex_slots": None, "bench": None, "scoring_format": None}
+    return {
+        "teams": settings.teams,
+        "rounds": settings.rounds,
+        "starters": dict(settings.starters),
+        "flex_slots": settings.flex_slots,
+        "bench": settings.bench,
+        # scoring.league.scoring_format reads settings.scoring's own
+        # receptions value into one of ppr/half/std -- the same three-way
+        # call scoring.market's consensus already makes (see its own
+        # docstring). Not a new rule, just the first place this session's
+        # format reaches the UI, for the topbar's league-identity line.
+        "scoring_format": league_mod.scoring_format(settings),
+    }
+
+
+def _my_roster(session, taken_order) -> list:
+    """This session's own roster so far, in pick order -- the payload
+    /api/live/state's `my_roster` key serves the rail's RosterPanel.
+
+    Replays `taken_order` with `_seed_rosters`, the exact same replay
+    `_recompute` already pays for on every poll (see its own docstring) to
+    seed `need_weight`'s roster counts -- nothing new is computed here, only
+    read back. `rosters[my_slot]["indices"]` holds pool indices in the order
+    they were drafted (see `_seed_rosters`'s own docstring: a `None` entry in
+    `taken_order` -- a pick whose player fell out of the pool -- still
+    consumes a turn but is never added to any roster's `indices`, so it
+    needs no handling here).
+
+    Each index is mapped back to a board row the same way `_board_cell`
+    does: `session.pool.player_id[idx]` to a player id, then
+    `session.board_by_id` to the row. A miss (`row is None`) should not
+    happen -- `pool` and `board_by_id` are both built from the same `board`
+    DataFrame in `build_session`, so every pool index's player_id is
+    expected to resolve -- but it is skipped rather than raised, so a
+    genuine discrepancy costs one roster row rather than the whole
+    /api/live/state response.
+
+    Empty, not an error, when `session.my_slot` is still None: the socket
+    has not yet named our team (see `DraftSession.my_slot`'s own docstring),
+    so there is genuinely no "my roster" to report -- an empty list is the
+    honest answer, not a guess at which slot is ours.
+    """
+    if session.my_slot is None:
+        return []
+    rosters, _ = _seed_rosters(session.pool, session.settings, taken_order)
+    roster = []
+    for idx in rosters[session.my_slot]["indices"]:
+        pid = str(session.pool.player_id[idx])
+        row = session.board_by_id.get(pid)
+        if row is None:
+            continue
+        roster.append({
+            "player_id": pid,
+            "name": _str_or_none(row.get("name")),
+            "position": _str_or_none(row.get("position")),
+            "proj_points": _float_or_none(row.get("proj_points")),
+        })
+    return roster
+
+
 def _slot_from_socket(listener, teams: int):
     """Derive my draft slot from the socket alone, when history cannot.
 
@@ -471,6 +566,18 @@ ROLLOUTS_FAR, ROLLOUTS_NEAR, ROLLOUTS_NOW = 12, 25, 40
 # without a real ten-second wait.
 LISTENER_STOP_TIMEOUT = 10.0
 
+# survival() runs ONE set of rollouts that stop at my next turn, not one full
+# draft per candidate, so the old clock-rationed budget (12/25/40, see
+# rollouts_for below) is no longer the constraint it was priced against.
+# This is the whole recompute cost now, and it buys a materially tighter
+# survival estimate for a fraction of what search_pick cost: measured
+# against the real production pool (data/nfl.duckdb, 249 players, 8 teams),
+# survival(n_rollouts=400) plus rank_available together ran in 0.1-0.8s
+# across picks_made 0/8/50/100 -- an order of magnitude under even the
+# cheapest old ROLLOUTS_FAR budget's ~2.3s (12 rollouts * ~0.19s), let alone
+# the 30-90s pick clock this has to fit inside.
+SURVIVAL_ROLLOUTS = 400
+
 
 def rollouts_for(picks_until: int) -> int:
     """Budget by the time actually available.
@@ -509,6 +616,36 @@ def _is_stale(last_poll_at, now) -> bool:
     return (now - last_poll_at).total_seconds() > STALE_AFTER_SECONDS
 
 
+class SelectBody(BaseModel):
+    player_id: str
+
+
+# How long to wait for ESPN to echo the pick back on SELECTED. Long enough to
+# cover a round trip on a busy draft server, short enough that a wedged
+# request does not eat the pick clock it exists to protect.
+SELECT_TIMEOUT_SECONDS = 8.0
+SELECT_POLL_SECONDS = 0.1
+
+
+def _espn_id_for(board_row) -> int | None:
+    """The ESPN player id to send in a SELECT.
+
+    Board rows carry `espn_id` for everyone ESPN ranks as a player. D/ST rows
+    carry None, because ESPN models a defense as a negative synthetic id
+    derived from the pro team -- the same rule build_crosswalk already reads
+    picks back through (see its docstring), applied here in the other
+    direction.
+    """
+    espn_id = board_row.get("espn_id")
+    if espn_id is not None and not pd.isna(espn_id):
+        return int(espn_id)
+    if board_row.get("position") == "DST":
+        pro = ESPN_PRO_TEAM_BY_ABBREV.get(str(board_row.get("team", "")).upper())
+        if pro is not None:
+            return _dst_espn_id(pro)
+    return None
+
+
 def register_live_routes(app, conn, db_path):
     """Mount live-draft endpoints. In-process state only, same lifetime as
     `create_app`'s connection -- a restart mid-draft means starting again,
@@ -543,8 +680,34 @@ def register_live_routes(app, conn, db_path):
              # visible on /api/live/state instead of failing silently.
              "listener": None, "listener_thread": None,
              "listener_stop": None, "listener_error": None,
+             # The recompute worker's own last failure, same job
+             # `listener_error` does for the listener thread and separate
+             # from it because they fail independently: the listener can be
+             # perfectly healthy (frames arriving, picks landing, the board
+             # updating) while ranking has stopped dead. `listener_alive`
+             # tracks the listener thread and says nothing about this one,
+             # so without this key a dead worker is invisible -- candidates
+             # and as_of_pick simply freeze at the pick they last reached
+             # and the room keeps presenting them. Set and cleared only in
+             # recompute_worker, under `lock` and identity-guarded like
+             # every other write, so a superseded listener's worker cannot
+             # clobber its replacement's status.
+             "recompute_error": None,
+             # The live socket's send path, published by run_socket_listener
+             # via its on_socket callback (see pipeline.draft_socket.
+             # SocketHandle) exactly once, right after the first successful
+             # connect. None whenever no socket session is running -- either
+             # never started, still connecting, or torn down by
+             # _stop_listener -- so /api/live/select can refuse a SELECT
+             # rather than pretend one has somewhere to go. Only ever
+             # non-None for the connect-token (bookmarklet) path;
+             # live_connect's browser observer has no socket of its own to
+             # publish, so a session started that way always finds this None
+             # and /api/live/select correctly refuses with 503.
+             "socket": None,
              # The per-session recompute worker (see _launch_listener):
-             # search_pick is seconds-slow, so it runs here, off the
+             # survival/rank_available still take real time (a fraction of a
+             # second, see SURVIVAL_ROLLOUTS), so it runs here, off the
              # frame-reading thread, or a fast draft's frames would pile up
              # unread behind it. Tracked so _stop_listener joins it before
              # closing league_conn -- the worker holds a cursor on that
@@ -598,8 +761,8 @@ def register_live_routes(app, conn, db_path):
             stop_event.set()
         # Both the frame-reading thread AND the recompute worker share this
         # stop_event and must be confirmed exited before league_conn closes:
-        # each may hold a cursor on it (the worker for the whole of a
-        # multi-second search_pick), so closing it under either is a
+        # each may hold a cursor on it (the worker for the whole of one
+        # survival/rank_available ranking), so closing it under either is a
         # use-after-close. A timeout on either means "a thread may still be
         # using the connection" -- refuse the reconnect and leave the
         # connection open rather than corrupt it, exactly as for the listener
@@ -614,6 +777,7 @@ def register_live_routes(app, conn, db_path):
             state["listener_thread"] = None
             state["listener_stop"] = None
             state["recompute_thread"] = None
+            state["socket"] = None
             old_league_conn = state["league_conn"]
             state["league_conn"] = None
         if old_league_conn is not None:
@@ -621,18 +785,18 @@ def register_live_routes(app, conn, db_path):
         return True
 
     def _recompute(session, picks_made):
-        """Run one search and store it, unless superseded meanwhile.
+        """Run one ranking and store it, unless superseded meanwhile.
 
         A result computed against a board that has since changed is worse
         than no result -- it recommends a player who may already be gone. So
         the pick count and the session generation are both captured before
-        the search and re-checked after: if either moved, this result is
+        the ranking and re-checked after: if either moved, this result is
         discarded rather than served.
 
         `session.my_slot` can still be None here -- the socket hasn't named
-        our team yet -- and `search_pick` needs a real slot to index into
+        our team yet -- and `survival` needs a real slot to index into
         (rosters, snake order, ...), not something to guess at. Skip the
-        search rather than pass it a fabricated one; candidates stay empty
+        ranking rather than pass it a fabricated one; candidates stay empty
         until my_slot resolves, which /api/live/state already reports
         honestly via session.my_slot being null.
         """
@@ -651,12 +815,43 @@ def register_live_routes(app, conn, db_path):
         cur = active_conn.cursor()
         try:
             taken, taken_order = _drafted_state(cur, session.pool)
-            until = picks_until_turn(session.settings, session.my_slot, picks_made)
-            frame = search_pick(
+            # My own roster so far, so need_weight can see which slots are
+            # still open. _seed_rosters replays every pick to the slot that
+            # was on the clock for it, which is the same attribution the
+            # simulator resumes from.
+            rosters, _ = _seed_rosters(session.pool, session.settings, taken_order)
+            counts = rosters[session.my_slot]["counts"]
+            # Is the pick on the clock RIGHT NOW our own? survival() cannot
+            # work this out from the pick count alone -- `_next_pick_for`
+            # scans inclusively, so "my pick is now" and "my pick is next"
+            # look identical to it and it answers "now", which pins every
+            # available player's survival at 1.0 and makes gain_now
+            # identically zero for the leader at every position (see
+            # survival's own docstring). This is the only caller that is
+            # ever asked WHILE the user is on the clock, and it is the one
+            # whose answer is read at exactly that moment, so it is the one
+            # that has to say which turn it means.
+            #
+            # Derived from `len(taken_order)`, not the `picks_made`
+            # argument: `taken_order` is what survival() itself counts
+            # `already` from, and picks_made was read on the listener
+            # thread before this ranking was queued, so a pick landing in
+            # between would leave the two disagreeing by one -- exactly the
+            # off-by-one this is here to close.
+            snake = snake_slots(session.settings.teams, session.settings.rounds)
+            on_the_clock = (len(taken_order) < len(snake)
+                            and snake[len(taken_order)] == session.my_slot)
+            # survival()'s avail_pct is already a 0-1 probability (see its
+            # docstring and the "counts / max(n_rollouts, 1)" line it
+            # returns) -- rank_available wants exactly that, no rescaling.
+            avail = survival(
                 session.pool, session.settings, session.slot_managers,
                 session.my_slot, taken, session.betas,
-                n_rollouts=rollouts_for(until), seed=session.seed,
-                taken_order=taken_order)
+                n_rollouts=SURVIVAL_ROLLOUTS, seed=session.seed,
+                taken_order=taken_order,
+                on_the_clock=on_the_clock)["avail_pct"].to_numpy()
+            frame = rank_available(session.pool, session.settings, taken,
+                                   counts, avail)
         finally:
             cur.close()
         with lock:
@@ -741,12 +936,16 @@ def register_live_routes(app, conn, db_path):
         # mutable cell, closed over by the callbacks one-to-one with `listener`.
         current = {"session": session}
 
-        # The recompute request queue -- coalescing, depth one. search_pick is
-        # seconds-slow; running it inline in the frame callback (as this used
-        # to) blocked the socket read loop for its whole duration, so in a fast
-        # draft frames -- picks, CLOCK heartbeats -- piled up unread and the
-        # board fell behind. Now the callback only records "recompute wanted at
-        # pick N" and returns instantly; the worker below does the slow part.
+        # The recompute request queue -- coalescing, depth one. search_pick
+        # (this engine's predecessor) was seconds-slow; running it inline in
+        # the frame callback (as this used to) blocked the socket read loop
+        # for its whole duration, so in a fast draft frames -- picks, CLOCK
+        # heartbeats -- piled up unread and the board fell behind. The
+        # replacement (survival + rank_available) is far cheaper, but the
+        # callback still only records "recompute wanted at pick N" and
+        # returns instantly; the worker below does the ranking, off-thread
+        # regardless of how fast it is, since nothing here depends on it
+        # staying slow to justify the split.
         # Coalescing (a single latest-wins slot, not a queue) is deliberate: a
         # burst of quick picks collapses to one recompute of the final state
         # instead of a backlog of stale ones, and _recompute's own as_of_pick
@@ -780,7 +979,42 @@ def register_live_routes(app, conn, db_path):
                 with lock:
                     if state["listener"] is not listener:
                         continue
-                _recompute(sess, made)
+                # Guarded, because this loop IS the thread's whole body: an
+                # exception propagating out of _recompute returns from
+                # recompute_worker and nothing ever ranks again for the rest
+                # of the draft. Candidates and as_of_pick freeze at whatever
+                # pick they last reached, the listener stays perfectly
+                # healthy (frames arriving, picks landing, the board
+                # updating), and listener_alive -- which tracks the LISTENER
+                # thread -- keeps reading true. Nothing reported it.
+                #
+                # Both known raisers are real, not hypothetical.
+                # _drafted_state raises ValueError on a drafted row with a
+                # null pick_no; live_state already wraps that same call in
+                # try/except ValueError for exactly this reason.
+                # `rosters[session.my_slot]` in _recompute is a bare dict
+                # index over slots 1..teams and KeyErrors on anything
+                # outside that range.
+                #
+                # Caught broadly on purpose. This is a daemon thread with no
+                # other reporting path, and the failure being closed here is
+                # "ranking stops silently" -- so an exception nobody
+                # anticipated has to be reported too, not lost. It is
+                # recorded rather than re-raised: one bad pick row must cost
+                # the ranking that pick, not the rest of the draft, so the
+                # loop stays alive and the next request self-heals (the
+                # success branch clears the error).
+                try:
+                    _recompute(sess, made)
+                except Exception as exc:      # noqa: BLE001 -- see above
+                    with lock:
+                        if state["listener"] is listener:
+                            state["recompute_error"] = \
+                                f"{type(exc).__name__}: {exc}"
+                else:
+                    with lock:
+                        if state["listener"] is listener:
+                            state["recompute_error"] = None
 
         def _resolve_slot(c2) -> bool:
             """Resolve my_slot from history or the socket if not yet known;
@@ -890,7 +1124,8 @@ def register_live_routes(app, conn, db_path):
             state.update({"session": session, "listener": listener,
                           "listener_thread": thread, "listener_stop": stop_event,
                           "recompute_thread": recompute_thread,
-                          "listener_error": None, "league_conn": league_conn,
+                          "listener_error": None, "recompute_error": None,
+                          "league_conn": league_conn,
                           "candidates": [], "as_of_pick": None,
                           "unmapped": [], "last_poll_at": None})
             state["generation"] = state.get("generation", 0) + 1
@@ -920,7 +1155,7 @@ def register_live_routes(app, conn, db_path):
             state["generation"] += 1
             state.update({"session": session, "candidates": [],
                           "as_of_pick": None, "unmapped": [],
-                          "last_poll_at": None})
+                          "last_poll_at": None, "recompute_error": None})
         return {"active": True, "reused": False,
                 "board_fingerprint": session.board_fingerprint,
                 "seed": session.seed}
@@ -935,9 +1170,51 @@ def register_live_routes(app, conn, db_path):
                         "candidates": [], "candidates_as_of_pick": None,
                         "last_poll_at": None, "stale": True,
                         "unmapped_picks": [], "listener_error": None,
-                        "listener_alive": False,
-                        "token_received": state.get("token") is not None}
+                        "listener_alive": False, "recompute_error": None,
+                        # Same "present with a null/false value, never
+                        # omitted" convention listener_alive already
+                        # follows on this branch: the room reads it to
+                        # decide whether the draft buttons are live, and an
+                        # absent key would read as undefined -- falsy by
+                        # luck rather than by contract.
+                        "socket_alive": False,
+                        "token_received": state.get("token") is not None,
+                        "ms_remaining": None,
+                        "settings": _league_settings_payload(None),
+                        "my_roster": []}
             snapshot = dict(state)
+            listener = snapshot["listener"]
+            # Straight off the listener, read here rather than after `lock`
+            # releases: not because a single int attribute read is unsafe
+            # (pipeline/draft_listener.py sets it with a plain assignment,
+            # effectively atomic under the GIL) but so this value is drawn
+            # from the same consistent snapshot as everything else below --
+            # the same reasoning the picks_made query already follows. None
+            # until the first CLOCK or SELECTING frame has landed (see
+            # DraftListener.ms_remaining's own field comment) -- never a
+            # decayed or interpolated guess, so a genuinely stale value
+            # never gets rendered as a live one.
+            ms_remaining = listener.ms_remaining if listener is not None else None
+            # Whether a SELECT actually has somewhere to go, read here for
+            # the same reason ms_remaining is: it belongs to this response's
+            # one consistent snapshot. Exactly the condition
+            # /api/live/select's 503 already gates on (`socket is None or
+            # not socket.alive()`), served so the room can gate the draft
+            # buttons on the same fact instead of on `on_the_clock ===
+            # my_slot` alone. Without it, a run_socket_listener reconnect --
+            # where the handle is detached but the listener thread is alive
+            # and `stale` has not tripped, since CLOCK frames stamped
+            # last_poll_at a moment ago -- leaves the buttons enabled and
+            # every click 503s (spec section 6).
+            #
+            # Calling alive() under `lock` is safe: SocketHandle's own lock
+            # is only ever taken in attach/detach/alive/send, and none of
+            # those calls back into anything that takes `lock` (on_socket is
+            # invoked AFTER attach has released it), so there is no lock
+            # ordering to invert. The call itself is a `is not None` under an
+            # uncontended lock.
+            socket_handle = snapshot["socket"]
+            socket_alive = socket_handle is not None and socket_handle.alive()
             # Same connection choice as _recompute: the league this session
             # belongs to, not always the shared `conn`, or the picks-made
             # count (and the on-the-clock slot derived from it) would be
@@ -959,6 +1236,27 @@ def register_live_routes(app, conn, db_path):
             cur = (snapshot["league_conn"] or conn).cursor()
             try:
                 picks_made = cur.execute("SELECT count(*) FROM drafted").fetchone()[0]
+                # My own roster so far. Only queried when my_slot is known --
+                # _my_roster returns [] unconditionally otherwise, so the
+                # extra read would be wasted -- and wrapped against the one
+                # documented failure of _drafted_state: a drafted row with no
+                # pick_no cannot be attributed to a slot at all (see its own
+                # docstring), which must cost this response its roster, not
+                # the clock and listener health the rest of it still owes.
+                # Measured against the real production pool (data/nfl.duckdb,
+                # 249 players, 8 teams): _drafted_state + _seed_rosters
+                # together run in ~0.5-0.6ms even at picks_made=120 -- three
+                # orders of magnitude under the 2.5s poll cadence, so this
+                # runs on every poll rather than being cached against the
+                # pick count.
+                my_roster = []
+                if session.my_slot is not None:
+                    try:
+                        _, taken_order = _drafted_state(cur, session.pool)
+                    except ValueError:
+                        taken_order = None
+                    if taken_order is not None:
+                        my_roster = _my_roster(session, taken_order)
             finally:
                 cur.close()
         slots = snake_slots(session.settings.teams, session.settings.rounds)
@@ -984,7 +1282,16 @@ def register_live_routes(app, conn, db_path):
             # exception is still visible even though it sets no error.
             "listener_error": snapshot["listener_error"],
             "listener_alive": thread.is_alive() if thread is not None else False,
+            # The recompute worker fails independently of the listener, and
+            # its failure is quieter: the clock keeps ticking, the board
+            # keeps filling, and only the ranking stops. Reported separately
+            # for that reason -- see the state key's own comment.
+            "recompute_error": snapshot["recompute_error"],
+            "socket_alive": socket_alive,
             "token_received": snapshot.get("token") is not None,
+            "ms_remaining": ms_remaining,
+            "settings": _league_settings_payload(session.settings),
+            "my_roster": my_roster,
         }
 
     @app.get("/api/live/board")
@@ -1042,6 +1349,143 @@ def register_live_routes(app, conn, db_path):
             "cells": cells,
         }
 
+    @app.post("/api/live/select")
+    def live_select(body: SelectBody):
+        """Make the pick: send SELECT on the live draft socket and wait for
+        ESPN's own SELECTED to confirm it landed.
+
+        Writes nothing to `drafted`. `on_change` already records every
+        SELECTED frame this socket sees, including this one (see
+        DraftListener.on_frame / selected_espn_ids) -- a second writer here
+        could let the board claim a pick ESPN did not actually take, and the
+        one table write that must win is ESPN's own confirmation, not a
+        guess made before it arrives.
+
+        `socket.send` is wrapped in `except (ConnectionError, OSError,
+        ConnectionClosed)`, not just the first two. SocketHandle.send (see
+        pipeline/draft_socket.py) raises the builtin ConnectionError only on
+        its "nothing attached" path. In the race where this request reads
+        the socket reference just before the listener thread detaches and
+        closes it, the real websockets.sync.client connection underneath
+        raises websockets.exceptions.ConnectionClosed instead -- and that is
+        NOT a subclass of ConnectionError (its MRO is ConnectionClosed ->
+        WebSocketException -> Exception -> BaseException -> object).
+        Catching only the builtin would let exactly that race leak an
+        unhandled exception into a 500, on the one failure -- a dropped
+        socket -- this endpoint exists to turn into a clean 503 instead.
+        Nothing broader than these three is caught: a real bug here (a
+        TypeError from a malformed payload, say) must still surface as a
+        500, not be laundered into "the socket is down."
+        """
+        with lock:
+            session = state["session"]
+            socket = state["socket"]
+            listener = state["listener"]
+            active_conn = state["league_conn"] or conn
+            if session is None:
+                raise HTTPException(status_code=409, detail="no live draft session")
+            if socket is None or not socket.alive():
+                raise HTTPException(
+                    status_code=503, detail="the draft socket is not connected")
+            cur = active_conn.cursor()
+            try:
+                picks_made = cur.execute(
+                    "SELECT count(*) FROM drafted").fetchone()[0]
+                already = cur.execute(
+                    "SELECT count(*) FROM drafted WHERE player_id = ?",
+                    [body.player_id]).fetchone()[0]
+            finally:
+                cur.close()
+
+        if already:
+            raise HTTPException(
+                status_code=409, detail="that player is already drafted")
+        if session.my_slot is None:
+            raise HTTPException(
+                status_code=409, detail="this session has no draft slot yet")
+        # picks_until_turn falls through to 0 ("my turn") once picks_made
+        # reaches the end of the slot list -- its loop simply has nothing
+        # left to range over, not "it is my turn again." Nothing else in this
+        # endpoint rules that state out on its own: session stays non-None,
+        # the socket can still be alive, and any board player nobody drafted
+        # (there are always more of those than teams*rounds) sails past the
+        # `already` check. live_state and live_board already guard this exact
+        # shape (`picks_made < len(slots)`, api/live.py's on_clock
+        # computation); mirror it here rather than changing
+        # picks_until_turn's own contract, which Task 3's review established
+        # has no other production caller and whose existing tests pin its
+        # current return value.
+        slots = snake_slots(session.settings.teams, session.settings.rounds)
+        if picks_made >= len(slots):
+            raise HTTPException(status_code=409, detail="the draft is over")
+        if picks_until_turn(session.settings, session.my_slot, picks_made) != 0:
+            raise HTTPException(status_code=409, detail="it is not your turn")
+
+        row = session.board_by_id.get(body.player_id)
+        if row is None:
+            raise HTTPException(
+                status_code=400, detail=f"unknown player {body.player_id}")
+        espn_id = _espn_id_for(row)
+        if espn_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"no ESPN id for {row.get('name', body.player_id)} -- "
+                "this is a crosswalk gap, pick him in ESPN directly")
+
+        # `selected_espn_ids` accumulates for the whole session and is never
+        # cleared -- ESPN replays the draft so far on every JOIN, so it holds
+        # every SELECTED this socket has ever seen, reconnect replays
+        # included. The wait loop below only tests membership, so an id that
+        # was ALREADY in the set returns on its very first iteration: a 200
+        # carrying `picks_made + 1`, which is a pick number that belongs to
+        # somebody else, for a pick this request never made. The dialog
+        # closes saying it landed and the user walks away without a player.
+        #
+        # It takes `drafted` and `selected_espn_ids` disagreeing to get here,
+        # since the `already` check above would otherwise have caught it --
+        # which is exactly the unmapped-pick case the rest of this file
+        # acknowledges is real (see state["unmapped"]): ESPN confirmed a
+        # player the crosswalk could not resolve, so he is in the set and not
+        # in `drafted`. Checked BEFORE the send, so the guard cannot be
+        # confused by this request's own confirmation arriving.
+        if listener is not None and espn_id in listener.selected_espn_ids:
+            raise HTTPException(
+                status_code=409,
+                detail=f"ESPN has already confirmed a pick of "
+                f"{row.get('name', body.player_id)} -- the board has not "
+                "recorded it (most likely a crosswalk gap), so check the "
+                "ESPN draft room rather than picking him again")
+
+        try:
+            socket.send(f"SELECT {espn_id}\n")
+        except (ConnectionError, OSError, ConnectionClosed) as exc:
+            raise HTTPException(
+                status_code=503, detail=f"could not reach ESPN: {exc}") from exc
+
+        # Poll rather than block on a signal: the listener thread fills
+        # selected_espn_ids from its own frame-reading loop with nothing to
+        # notify this request when it happens. `listener` was captured once,
+        # above, under `lock` -- not re-read on every iteration. If the
+        # session restarts mid-wait (a user reconnecting while this request
+        # is still in flight), that stale reference is the SAFE side of the
+        # tradeoff: the old listener's thread has already stopped reading
+        # frames (see _stop_listener, which joins it before a new one
+        # starts), so its selected_espn_ids simply stops changing and this
+        # request correctly times out at 504 -- it never reports a
+        # confirmation on behalf of a listener that no longer speaks for the
+        # active session, even if ESPN's replay-on-reconnect later confirms
+        # the same pick to the NEW listener this request never sees.
+        deadline = time.monotonic() + SELECT_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            if listener is not None and espn_id in listener.selected_espn_ids:
+                return {"player_id": body.player_id, "espn_id": espn_id,
+                        "pick_no": picks_made + 1}
+            time.sleep(SELECT_POLL_SECONDS)
+        raise HTTPException(
+            status_code=504,
+            detail="ESPN did not confirm the pick -- check the ESPN draft room "
+            "before picking again")
+
     @app.post("/api/live/stop")
     def live_stop():
         stopped = _stop_listener()
@@ -1065,7 +1509,8 @@ def register_live_routes(app, conn, db_path):
                           "as_of_pick": None, "unmapped": [],
                           "last_poll_at": None, "listener": None,
                           "listener_thread": None, "listener_stop": None,
-                          "recompute_thread": None, "listener_error": None})
+                          "recompute_thread": None, "listener_error": None,
+                          "recompute_error": None})
         return {"active": False, "listener_stopped": stopped}
 
     @app.post("/api/live/connect")
@@ -1158,9 +1603,23 @@ def register_live_routes(app, conn, db_path):
         session = _attach_team_slots(session, body.leagueId, body.season)
 
         def run_fn(listener, on_change, on_activity, stop_event):
+            def _on_socket(handle):
+                # Published once, right after run_socket_listener's first
+                # successful connect (see SocketHandle's own docstring in
+                # pipeline/draft_socket.py). Identity-guarded exactly like
+                # every other write in this closure family: if a newer
+                # /api/live/connect-token has already superseded this
+                # listener by the time the connect finishes, this callback
+                # must not resurrect a socket for a session that is no
+                # longer the active one.
+                with lock:
+                    if state["listener"] is listener:
+                        state["socket"] = handle
+
             run_socket_listener(listener, body.leagueId, body.teamId, body.swid,
                                 body.token, on_change=on_change,
-                                stop_event=stop_event, on_activity=on_activity)
+                                stop_event=stop_event, on_activity=on_activity,
+                                on_socket=_on_socket)
 
         # Record the token so /api/live/state's token_received stays truthful
         # for the connect screen. In memory only: a draft token is a

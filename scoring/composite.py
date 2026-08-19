@@ -15,7 +15,17 @@ def compute_composite(df: pd.DataFrame, weights: dict) -> pd.Series:
         score = score + df[name] * (w / total)
     return score
 
-def apply_vor(df: pd.DataFrame, replacement_ranks: dict | None = None) -> pd.DataFrame:
+def apply_vor(df: pd.DataFrame, replacement_ranks: dict | None = None,
+              column: str = "composite") -> pd.DataFrame:
+    """Value over replacement, as a difference within `column`.
+
+    `column` exists because the two callers want different units. The board
+    ranks across positions and must difference `proj_points` -- a difference
+    of two within-position percentiles (which is what `composite` is, see
+    factors.normalize_within_position) has no cross-position meaning, and
+    ranking on one put a TE at ADP 149 thirteenth overall. Callers that only
+    compare within a position can keep the composite default.
+    """
     # `replacement_ranks or REPLACEMENT_RANK` would be wrong: an empty dict is
     # falsy, so a league that genuinely derives no replacement ranks would
     # silently revert to this repo's hardcoded 8-team ones. None means "not
@@ -25,10 +35,10 @@ def apply_vor(df: pd.DataFrame, replacement_ranks: dict | None = None) -> pd.Dat
     out = df.copy()
     out["vor"] = 0.0
     for pos, grp in out.groupby("position"):
-        ranked = grp.sort_values("composite", ascending=False)
+        ranked = grp.sort_values(column, ascending=False)
         idx = min(ranks.get(pos, 9), len(ranked)) - 1
-        replacement = ranked.iloc[idx]["composite"]
-        out.loc[grp.index, "vor"] = grp["composite"] - replacement
+        replacement = ranked.iloc[idx][column]
+        out.loc[grp.index, "vor"] = grp[column] - replacement
     return out
 
 def assign_tiers(df: pd.DataFrame) -> pd.DataFrame:

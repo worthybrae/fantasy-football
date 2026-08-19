@@ -120,7 +120,17 @@ def test_players_custom_weights_change_output(tmp_path):
     """Different weight profiles must actually change the board -- a
     regression here would mean the weight query params are silently ignored.
     p1 has high per-game production but low career durability; p2 is the
-    opposite, so weighting one factor at 100% flips who ranks first."""
+    opposite, so weighting one factor at 100% flips who has the higher
+    composite.
+
+    This used to also assert the flip in board ORDER (`players[0]`). Task 1
+    moved the board's sort key from `composite`-derived `vor` to
+    `proj_points`-derived `vor`, and `proj_points` (scoring.board.projections)
+    is not a function of these weights at all -- so order no longer moves
+    with them, by design (same reasoning as
+    test_board_uses_league_settings_when_present in test_board.py). Weights
+    still drive `composite` exactly as before; that's what this now checks.
+    """
     path = str(tmp_path / "two.duckdb")
     _seed_two_players(path)
     c = TestClient(create_app(path))
@@ -132,10 +142,13 @@ def test_players_custom_weights_change_output(tmp_path):
         "w_production": 0.0, "w_role": 0.0, "w_environment": 0.0,
         "w_schedule": 0.0, "w_durability": 1.0}).json()["players"]
 
-    assert production_only[0]["player_id"] == "p1"
-    assert durability_only[0]["player_id"] == "p2"
     composite_by_id_prod = {p["player_id"]: p["composite"] for p in production_only}
     composite_by_id_dura = {p["player_id"]: p["composite"] for p in durability_only}
+    # production-only: p1 (high per-game production) leads on composite.
+    assert composite_by_id_prod["p1"] > composite_by_id_prod["p2"]
+    # durability-only: p2 (full 3-season workload) leads on composite --
+    # the flip this test exists to catch.
+    assert composite_by_id_dura["p2"] > composite_by_id_dura["p1"]
     assert composite_by_id_prod["p1"] != composite_by_id_dura["p1"]
 
 def test_players_all_zero_weights_returns_422(tmp_path):

@@ -44,6 +44,8 @@ with the *old* nflverse schema):
 """
 import re
 import unicodedata
+import warnings
+import numpy as np
 import pandas as pd
 from pipeline.db import read_table
 from scoring import factors, league
@@ -60,7 +62,8 @@ _ADP_TEAM_ALIASES = {"LAR": "LA", "WSH": "WAS", "JAC": "JAX", "SD": "LAC", "OAK"
 
 _BOARD_COLUMNS = [
     "player_id", "name", "position", "team", "bye", "production", "durability",
-    "role", "environment", "schedule", "composite", "vor", "tier", "market_rank",
+    "role", "environment", "schedule", "composite", "proj_points", "vor",
+    "tier", "market_rank",
     "market_spread", "market_sources", "espn_ppr_rank", "espn_id", "ffc_rank", "edge",
     "rookie", "drafted", "rank",
     "stats", "avail_pct", "ev", "ev_se",
@@ -206,6 +209,48 @@ _PASS_COLS = {
 }
 
 
+GAMES = 17
+# Floor for players with no projection and no stat history, per position, so
+# a K or a rookie DST never lands as NaN inside the lineup optimizer.
+POSITION_FLOOR = {"QB": 180.0, "RB": 80.0, "WR": 80.0, "TE": 60.0,
+                  "K": 110.0, "DST": 100.0}
+
+
+def projections(conn, board: pd.DataFrame) -> pd.Series:
+    """Projected season points per player_id.
+
+    Ladder: ESPN's own season projection, then recency-weighted PPG scaled to
+    a full season, then a per-position floor.
+    """
+    espn = read_table(conn, "espn_adp")
+    lookup = {}
+    if not espn.empty and "espn_proj" in espn.columns:
+        valid = espn.dropna(subset=["espn_proj"])
+        valid = valid[valid["espn_proj"] > 0]
+        teams = (valid["team"] if "team" in valid.columns
+                 else pd.Series([None] * len(valid), index=valid.index))
+        # DSTs key on team, not name: ESPN says "Ravens D/ST" and the board
+        # says whatever the ADP feed's nickname is, so a name join never hit
+        # and every defense fell through to POSITION_FLOOR.
+        for (_, row), team in zip(valid.iterrows(), teams):
+            key = adp_match_key(row["espn_name"], row["position"], team)
+            if key is not None:
+                lookup[key] = float(row["espn_proj"])
+
+    values = []
+    for _, row in board.iterrows():
+        key = adp_match_key(row["name"], row["position"], row.get("team"))
+        proj = lookup.get(key) if key is not None else None
+        if proj is None:
+            stats = row.get("stats")
+            ppg = stats.get("ppg") if isinstance(stats, dict) else None
+            proj = float(ppg) * GAMES if ppg else None
+        if proj is None or not np.isfinite(proj):
+            proj = POSITION_FLOOR.get(row["position"], 80.0)
+        values.append(proj)
+    return pd.Series(values, index=board["player_id"].to_numpy(), dtype=float)
+
+
 def _latest_season_stats(weekly: pd.DataFrame) -> pd.DataFrame:
     """Per-player latest-season stat summary, one nested dict per row.
 
@@ -333,9 +378,56 @@ def build_board(conn, weights: dict | None = None,
 
     uni = _merge_adp(uni, adp)
 
+    # `stats` is merged before scoring, not after: projections() falls back
+    # to recency-weighted PPG out of this column when ESPN has no season
+    # projection for a player, and it has to run before the ranking that
+    # depends on it. add_market still runs after, because its `edge` column
+    # is market_rank - rank and needs the rank this block assigns.
+    uni = uni.merge(_latest_season_stats(weekly), on="player_id", how="left")
+
     # -- score --
     uni["composite"] = compute_composite(uni, weights or DEFAULT_WEIGHTS)
-    uni = apply_vor(uni, settings.replacement_ranks)
+    # Projected season points, and VOR as a difference of them. NOT a
+    # difference of composites: composite is a within-position percentile
+    # (factors.normalize_within_position), so differencing it produces a
+    # number with no cross-position meaning -- and this frame is then sorted
+    # across positions. See the spec's section 2.
+    proj = projections(conn, uni)
+    # `.to_numpy()`, not `.map(proj)`: `_add_adp_only_players` synthesizes
+    # `player_id` from the normalized name alone (no position), so two
+    # ADP-only players who share a normalized name at different positions
+    # (e.g. a name collision between an unmatched RB and an unmatched TE)
+    # reach `uni` with the SAME id before any dedup runs. `.map()` against a
+    # duplicate-valued index raises `InvalidIndexError: Reindexing only
+    # valid with uniquely valued Index objects`, taking the whole board down
+    # with it. `projections()` builds `proj`'s values by iterating
+    # `board.iterrows()` in the same row order as `uni`, so assigning
+    # positionally gives every row -- including both id-colliding rows --
+    # its own correct value, without ever reindexing on the id at all.
+    uni["proj_points"] = proj.to_numpy(dtype=float)
+    # `projections()` is not scoring-format-aware: its first rung is ESPN's
+    # own season projection (a fixed external number, never per-league), and
+    # its fallback rung reads `stats.ppg`, which is fixed full-PPR
+    # (similarity.player_season_features -> compute_ppr_points), not
+    # `settings.scoring`. So a half-PPR or standard league's `vor` -- the
+    # board's rank -- is priced in full PPR regardless, even though
+    # `production`/`composite` upstream of it correctly follow this league's
+    # rules (see compute_composite, factors.production_factor). Silently
+    # ranking a non-PPR league on PPR-implied points is exactly the kind of
+    # thing this task exists to stop being silent about, so it is a warning,
+    # not a comment -- tracked as a follow-up, not fixed here (making
+    # projections() format-aware needs a decision about the ESPN-projection
+    # rung the spec never asked for, and draft_sim has always been PPR-only
+    # through this same function).
+    if fmt != "ppr":
+        warnings.warn(
+            f"board: league scoring format is '{fmt}', but proj_points (and "
+            "therefore vor, the board's rank) is priced in fixed full PPR "
+            "regardless -- projections() does not read settings.scoring. "
+            "The board's ranking will not reflect this league's real "
+            "scoring rules.",
+            RuntimeWarning)
+    uni = apply_vor(uni, settings.replacement_ranks, column="proj_points")
     uni = assign_tiers(uni)
     uni = uni.sort_values("vor", ascending=False).reset_index(drop=True)
     uni["rank"] = uni.index + 1
@@ -353,7 +445,6 @@ def build_board(conn, weights: dict | None = None,
     # tested `espn_ppr_rank === null`, which a rank of 1899 passes.
     if "espn_unranked" in uni.columns:
         uni = uni[~uni["espn_unranked"]].drop(columns=["espn_unranked"])
-    uni = uni.merge(_latest_season_stats(weekly), on="player_id", how="left")
 
     drafted_ids = set(drafted["player_id"]) if not drafted.empty else set()
     uni["drafted"] = uni["player_id"].isin(drafted_ids)

@@ -194,6 +194,41 @@ def test_build_session_builds_a_usable_crosswalk(tmp_path):
         assert isinstance(player_id, str)
 
 
+def test_build_session_survives_a_duplicate_player_id_from_the_adp_feed(tmp_path):
+    """The whole-branch consequence of the build_pool duplicate-id crash.
+
+    build_session calls build_board and then build_pool. Task 1 hardened
+    build_board against a board row pair sharing a synthesized
+    `player_id` (`_add_adp_only_players` keys it on the normalized name
+    alone, so one name at two positions collides); build_pool, three lines
+    later, still did `board.set_index("player_id")` + `.map()` and raised
+    `InvalidIndexError`. So an ADP-feed name collision took the whole
+    session build down and no live draft could start -- the Critical was
+    fixed at one of two sites on the same call chain.
+    """
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    conn = get_conn(path)
+    # Neither row matches the weekly universe, so both reach the board as
+    # ADP-only players under the one synthesized id `adp_dup_guy`.
+    write_table(conn, "adp", pd.DataFrame([
+        {"adp_name": "A Star", "position": "WR", "team": "DET", "adp": 5.1},
+        {"adp_name": "Dup Guy", "position": "RB", "team": "SF", "adp": 6.0},
+        {"adp_name": "Dup Guy", "position": "TE", "team": "GB", "adp": 7.0},
+    ]))
+
+    session = build_session(conn, my_slot=1)
+
+    ids = list(session.pool.player_id)
+    assert ids.count("adp_dup_guy") == 2, \
+        "the collision never reached the pool -- this no longer tests anything"
+    # Each colliding row keeps its own position and its own projection.
+    dup = [(pos, pts) for pid, pos, pts
+           in zip(ids, session.pool.position, session.pool.points)
+           if pid == "adp_dup_guy"]
+    assert sorted(p for p, _ in dup) == ["RB", "TE"]
+
+
 def test_build_session_default_seed_is_pinned(tmp_path):
     """The default seed must be pinned to a constant, not derived from a clock.
 
@@ -307,8 +342,180 @@ def _live_session(seed=DEFAULT_SEED):
 
 
 def _fake_candidates_frame(player_id):
-    return pd.DataFrame({"player_id": [player_id], "ev": [1.0], "se": [0.1],
-                          "applied_pct": [1.0], "rank": [1]})
+    """A stand-in for rank_available's return shape -- gain_now, not EV."""
+    return pd.DataFrame({"player_id": [player_id], "position": ["WR"],
+                          "proj_points": [200.0], "vor_points": [50.0],
+                          "gain_now": [12.5], "survive_pct": [80.0],
+                          "fills": ["WR1"], "rank": [1]})
+
+
+def _fake_survival_frame(*a, **k):
+    """A stand-in for survival()'s return shape, for tests that mock the
+    ranking step entirely (its own contents never reach a mocked
+    rank_available)."""
+    return pd.DataFrame({"player_id": [], "avail_pct": []})
+
+
+def test_state_candidates_carry_gain_now(tmp_path):
+    """The recommendation is gain_now, not simulated end-of-draft EV.
+
+    EV's standard error was larger than the spread between good candidates,
+    so the top slot moved with the sampling seed. gain_now is deterministic
+    given the survival estimate -- and that determinism is exactly what
+    ought to be under test, so this drives the real engine (real pool, real
+    settings, real survival() and rank_available()) through a real
+    /api/live/state GET rather than mocking the ranking step, the way the
+    recompute-guard tests below do.
+
+    `register_live_routes` gives `(state, _recompute)` for exercising
+    _recompute directly (see `_live_routes_with_conn`), but never hands back
+    the FastAPI app it mounted routes on, so there is no existing fixture
+    that also lets a test hit the HTTP layer. Building the app and its
+    TestClient inline here, the same two lines `_live_routes_with_conn`
+    already uses plus wrapping them in a TestClient, isn't a new fixture
+    style -- it's the same pieces already used to reach state/_recompute.
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path, extra_players=[
+        {"player_id": "p2", "name": "B Runner", "position": "RB",
+         "team": "DET", "espn_id": 4430807},
+        {"player_id": "p3", "name": "C Slot", "position": "WR",
+         "team": "GB", "espn_id": 4426515},
+    ])
+    conn = get_conn(path)
+    app = FastAPI()
+    state, _recompute = register_live_routes(app, conn, path)
+    client = TestClient(app)
+
+    session = build_session(conn, my_slot=1)
+    state["session"] = session
+    _recompute(session, picks_made=0)
+
+    body = client.get("/api/live/state").json()
+    assert body["candidates"], "no recommendation produced"
+    row = body["candidates"][0]
+    assert set(row) >= {"player_id", "position", "proj_points", "vor_points",
+                        "gain_now", "survive_pct", "fills", "rank"}
+    assert "ev" not in row
+    gains = [c["gain_now"] for c in body["candidates"]]
+    assert gains == sorted(gains, reverse=True)
+
+
+def test_state_carries_the_pick_clock_league_settings_and_my_roster(tmp_path):
+    """Task 7b: the rail's three missing feeds. `/api/live/state` must serve
+    `ms_remaining` straight off the listener, `settings` off the session's
+    real LeagueSettings (not the frontend's old hardcoded 8/15 constants),
+    and `my_roster` -- this slot's own picks, replayed with _seed_rosters the
+    same way _recompute already does, mapped back to board rows.
+
+    Pick #1 in an 8-team snake belongs to slot 1: p1 goes to me, p2 to slot
+    2 (not mine), so my_roster must carry exactly p1's board row rather than
+    every drafted player.
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from pipeline.draft_listener import DraftListener
+
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path, extra_players=[
+        {"player_id": "p2", "name": "B Runner", "position": "RB",
+         "team": "DET", "espn_id": 4430807},
+    ])
+    conn = get_conn(path)
+    app = FastAPI()
+    state, _recompute = register_live_routes(app, conn, path)
+    client = TestClient(app)
+
+    session = build_session(conn, my_slot=1)
+    state["session"] = session
+    # A listener with no socket/thread wired up -- live_state only reads its
+    # ms_remaining attribute, the same field pipeline/draft_listener.py sets
+    # from CLOCK/SELECTING frames.
+    state["listener"] = DraftListener(session.crosswalk)
+    state["listener"].ms_remaining = 23000
+
+    write_table(conn, "drafted", pd.DataFrame([
+        {"player_id": "p1", "pick_no": 1},
+        {"player_id": "p2", "pick_no": 2},
+    ]))
+
+    body = client.get("/api/live/state").json()
+
+    assert body["ms_remaining"] == 23000
+    assert body["settings"] == {
+        "teams": session.settings.teams,
+        "rounds": session.settings.rounds,
+        "starters": dict(session.settings.starters),
+        "flex_slots": session.settings.flex_slots,
+        "bench": session.settings.bench,
+        "scoring_format": "half",       # scoring={"receptions": 0.5}
+    }
+    assert body["my_roster"] == [{
+        "player_id": "p1", "name": "A Star", "position": "WR",
+        "proj_points": session.board_by_id["p1"]["proj_points"],
+    }]
+
+
+def test_state_inactive_carries_null_clock_settings_and_empty_roster(tmp_path):
+    """The client should never have to branch on whether these keys exist
+    (see api/live.py's live_state docstring/comments) -- the inactive
+    response carries the same three keys this task adds, with null/empty
+    values rather than omitting them."""
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    body = TestClient(create_app(str(tmp_path / "t.duckdb"))).get("/api/live/state").json()
+    assert body["ms_remaining"] is None
+    assert body["settings"] == {
+        "teams": None, "rounds": None, "starters": {},
+        "flex_slots": None, "bench": None, "scoring_format": None,
+    }
+    assert body["my_roster"] == []
+
+
+def test_my_roster_replays_picks_in_order_including_a_pool_miss(tmp_path):
+    """Direct unit test of the _my_roster helper (not the HTTP layer): slot
+    8 of an 8-team snake picks twice in a row, at the turn (overall picks 8
+    and 9) -- p2 first, then p3 -- and picks 1-7 (someone else's turns) are
+    unattributable (`_seed_rosters` documents a None taken_order entry as
+    "drafted, then dropped off the board" -- still consumes a turn, adds
+    nothing to any roster). If my_roster silently re-sorted by anything
+    other than pick order (player_id, board rank, ...) this would catch it,
+    since p2/p3 are deliberately NOT in alphabetical or board order.
+    """
+    from api.live import _my_roster
+
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path, extra_players=[
+        {"player_id": "p2", "name": "B Runner", "position": "RB",
+         "team": "DET", "espn_id": 4430807},
+        {"player_id": "p3", "name": "C Slot", "position": "WR",
+         "team": "GB", "espn_id": 4426515},
+    ])
+    conn = get_conn(path)
+    session = build_session(conn, my_slot=8)
+    pool_index = {pid: i for i, pid in enumerate(session.pool.player_id)}
+
+    taken_order = [None] * 7 + [pool_index["p2"], pool_index["p3"]]
+    roster = _my_roster(session, taken_order)
+
+    assert [r["player_id"] for r in roster] == ["p2", "p3"]
+    assert roster[0]["position"] == "RB"
+    assert roster[1]["position"] == "WR"
+
+
+def test_my_roster_is_empty_when_my_slot_is_not_known_yet(tmp_path):
+    """Honest, not a guess: with no my_slot the socket hasn't named our team
+    (see DraftSession.my_slot's own docstring), so there is genuinely no
+    roster to attribute anything to."""
+    from api.live import _my_roster
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    session = build_session(get_conn(path), my_slot=None)
+    assert _my_roster(session, [0]) == []
 
 
 def test_recompute_discards_a_result_the_pick_count_has_moved_past(tmp_path, monkeypatch):
@@ -318,7 +525,8 @@ def test_recompute_discards_a_result_the_pick_count_has_moved_past(tmp_path, mon
     state, _recompute = _live_routes_with_conn(tmp_path)
     session = _live_session()
     monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
-    monkeypatch.setattr("api.live.search_pick",
+    monkeypatch.setattr("api.live.survival", _fake_survival_frame)
+    monkeypatch.setattr("api.live.rank_available",
                          lambda *a, **k: _fake_candidates_frame("stale"))
 
     # A newer poll landed and recorded picks_made=5 while this computation,
@@ -338,14 +546,17 @@ def test_recompute_stores_its_result_when_nothing_superseded_it(tmp_path, monkey
     state, _recompute = _live_routes_with_conn(tmp_path)
     session = _live_session()
     monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
-    monkeypatch.setattr("api.live.search_pick",
+    monkeypatch.setattr("api.live.survival", _fake_survival_frame)
+    monkeypatch.setattr("api.live.rank_available",
                          lambda *a, **k: _fake_candidates_frame("winner"))
 
     _recompute(session, picks_made=3)
 
     assert state["as_of_pick"] == 3
-    assert state["candidates"] == [{"player_id": "winner", "ev": 1.0, "se": 0.1,
-                                     "applied_pct": 1.0, "rank": 1}]
+    assert state["candidates"] == [{"player_id": "winner", "position": "WR",
+                                     "proj_points": 200.0, "vor_points": 50.0,
+                                     "gain_now": 12.5, "survive_pct": 80.0,
+                                     "fills": "WR1", "rank": 1}]
 
 
 def test_recompute_discards_a_result_from_a_stopped_and_restarted_session(tmp_path, monkeypatch):
@@ -358,17 +569,18 @@ def test_recompute_discards_a_result_from_a_stopped_and_restarted_session(tmp_pa
     state, _recompute = _live_routes_with_conn(tmp_path)
     old_session = _live_session()
     monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
+    monkeypatch.setattr("api.live.survival", _fake_survival_frame)
 
-    def fake_search_pick(*a, **k):
+    def fake_rank_available(*a, **k):
         # Simulate live_stop() followed by live_start() landing while this
-        # search is in flight -- exactly what those handlers do to `state`
+        # ranking is in flight -- exactly what those handlers do to `state`
         # under the lock: bump the generation and reset as_of_pick.
         state["generation"] += 1
         state["as_of_pick"] = None
         state["candidates"] = [{"player_id": "fresh-session"}]
         return _fake_candidates_frame("stale-session")
 
-    monkeypatch.setattr("api.live.search_pick", fake_search_pick)
+    monkeypatch.setattr("api.live.rank_available", fake_rank_available)
 
     _recompute(old_session, picks_made=0)
 
@@ -376,23 +588,69 @@ def test_recompute_discards_a_result_from_a_stopped_and_restarted_session(tmp_pa
     assert state["as_of_pick"] is None
 
 
-def test_recompute_passes_the_session_seed_to_search_pick(tmp_path, monkeypatch):
+def test_recompute_passes_the_session_seed_to_survival(tmp_path, monkeypatch):
     """The seed is pinned for the session's lifetime -- _recompute must hand
-    search_pick session.seed, never a freshly generated value."""
+    survival session.seed, never a freshly generated value."""
     state, _recompute = _live_routes_with_conn(tmp_path)
     session = _live_session(seed=773311)
     monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
+    monkeypatch.setattr("api.live.rank_available",
+                         lambda *a, **k: _fake_candidates_frame("p1"))
     captured = {}
 
-    def fake_search_pick(*a, **k):
+    def fake_survival(*a, **k):
         captured.update(k)
-        return _fake_candidates_frame("p1")
+        return pd.DataFrame({"player_id": [], "avail_pct": []})
 
-    monkeypatch.setattr("api.live.search_pick", fake_search_pick)
+    monkeypatch.setattr("api.live.survival", fake_survival)
 
     _recompute(session, picks_made=0)
 
     assert captured["seed"] == 773311
+
+
+def test_recompute_tells_survival_when_the_pick_on_the_clock_is_mine(
+        tmp_path, monkeypatch):
+    """The whole-branch Critical, at the seam it actually lived in.
+
+    `survival` cannot tell "my pick is now" from "my pick is next" on its
+    own (`_next_pick_for` scans inclusively), and this is the caller that
+    is invoked at exactly the moment the distinction matters: `made` is
+    `count(*) FROM drafted`, i.e. picks_made, so the last recompute before
+    the user's turn is the one served while they pick. Left to infer, it
+    returned 1.0 for every available player and `gain_now` came back
+    identically zero for the leader at every position.
+
+    Both directions asserted: three picks made in an 8-team snake puts slot
+    4 on the clock (snake_slots(8, 15)[3] == 4) and must set
+    `on_the_clock=True`; nothing drafted puts slot 1 on the clock, not slot
+    4, and must leave it False. `taken_order` is all None -- `_seed_rosters`
+    counts a None pick as a turn consumed without touching the pool (which
+    is None in this fixture), which is exactly the "advance the snake"
+    behaviour needed here.
+    """
+    state, _recompute = _live_routes_with_conn(tmp_path)
+    session = _live_session()
+    assert session.my_slot == 4
+    monkeypatch.setattr("api.live.rank_available",
+                         lambda *a, **k: _fake_candidates_frame("p1"))
+    captured = {}
+
+    def fake_survival(*a, **k):
+        captured.update(k)
+        return pd.DataFrame({"player_id": [], "avail_pct": []})
+
+    monkeypatch.setattr("api.live.survival", fake_survival)
+
+    monkeypatch.setattr("api.live._drafted_state",
+                        lambda cur, pool: (set(), [None, None, None]))
+    _recompute(session, picks_made=3)
+    assert captured["on_the_clock"] is True
+
+    captured.clear()
+    monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
+    _recompute(session, picks_made=0)
+    assert captured["on_the_clock"] is False
 
 
 def test_live_start_success_path_builds_and_stores_a_session(tmp_path):
@@ -673,9 +931,10 @@ def test_connect_wires_the_listener_to_apply_picks_and_recompute(
     through the exact same DraftListener/on_change shape run_listener uses
     (see pipeline/draft_listener.py). Everything downstream is the real
     code: build_session against a real (tiny) database, apply_picks writing
-    real rows to `drafted`, and _recompute. search_pick is stubbed only for
-    speed/determinism, the same way the other _recompute tests in this file
-    already do it -- the thing under test is the wiring, not the search.
+    real rows to `drafted`, and _recompute. survival/rank_available are
+    stubbed only for speed/determinism, the same way the other _recompute
+    tests in this file already do it -- the thing under test is the wiring,
+    not the ranking.
     """
     import threading
 
@@ -718,8 +977,9 @@ def test_connect_wires_the_listener_to_apply_picks_and_recompute(
 
     recompute_calls = []
     monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
+    monkeypatch.setattr("api.live.survival", _fake_survival_frame)
     monkeypatch.setattr(
-        "api.live.search_pick",
+        "api.live.rank_available",
         lambda *a, **k: recompute_calls.append(k) or _fake_candidates_frame("winner"))
 
     done = threading.Event()
@@ -781,8 +1041,10 @@ def test_connect_wires_the_listener_to_apply_picks_and_recompute(
         "recompute worker never produced candidates for pick 3"
     assert len(recompute_calls) >= 1
     state = client.get("/api/live/state").json()
-    assert state["candidates"] == [{"player_id": "winner", "ev": 1.0, "se": 0.1,
-                                    "applied_pct": 1.0, "rank": 1}]
+    assert state["candidates"] == [{"player_id": "winner", "position": "WR",
+                                    "proj_points": 200.0, "vor_points": 50.0,
+                                    "gain_now": 12.5, "survive_pct": 80.0,
+                                    "fills": "WR1", "rank": 1}]
 
 
 # --- Listener lifecycle: at most one running, stop really stops it, a dead
@@ -960,6 +1222,85 @@ def test_a_listener_exception_reaches_live_state_instead_of_dying_silently(
     assert body["active"] is True
     assert "simulated: ESPN unreachable" in body["listener_error"]
     assert body["listener_alive"] is False
+
+
+def test_a_failing_recompute_is_reported_and_does_not_kill_the_worker(
+        tmp_path, monkeypatch):
+    """A dead recompute worker used to be invisible and permanent.
+
+    `_recompute` ran unguarded inside recompute_worker's loop, which is the
+    thread's whole body -- one exception returned from the worker and
+    nothing ranked again for the rest of the draft. Candidates and
+    as_of_pick froze at whatever pick they last reached, and nothing
+    reported it: `listener_alive` tracks the LISTENER thread, which stays
+    perfectly healthy while this happens.
+
+    The failure driven here is a real one: `_drafted_state` raises
+    ValueError on a drafted row with a null `pick_no`, which live_state
+    already wraps in try/except ValueError for exactly that reason. Both
+    halves asserted -- the failure reaches /api/live/state as
+    `recompute_error`, and the worker is still running afterwards, so the
+    next request succeeds and clears it.
+    """
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+
+    # my_slot has to resolve or _recompute returns before it can fail at
+    # all (survival needs a real slot -- see its own docstring).
+    monkeypatch.setattr("api.live._slot_for_team", lambda cur, team_id: 1)
+
+    failing = {"on": True}
+
+    def flaky_drafted_state(cur, pool):
+        if failing["on"]:
+            raise ValueError("2 drafted rows have no pick_no")
+        return (set(), [])
+
+    monkeypatch.setattr("api.live._drafted_state", flaky_drafted_state)
+    monkeypatch.setattr("api.live.survival", _fake_survival_frame)
+    monkeypatch.setattr("api.live.rank_available",
+                        lambda *a, **k: _fake_candidates_frame("p1"))
+
+    tick = threading.Event()
+
+    def fake_run_listener(listener, url, state_path, on_change=None,
+                          headless=False, stop_event=None):
+        # my_team_id is what on_activity's _resolve_slot needs to fire; the
+        # rest is a pick pump the test drives one beat at a time.
+        listener.my_team_id = 1
+        while stop_event is None or not stop_event.is_set():
+            if tick.wait(timeout=0.01):
+                tick.clear()
+                on_change()
+
+    monkeypatch.setattr("api.live.run_listener", fake_run_listener)
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    client = TestClient(create_app(path))
+    assert _connect(client, "1").status_code == 200
+
+    tick.set()
+    assert _wait_until(
+        lambda: client.get("/api/live/state").json()["recompute_error"] is not None), \
+        "a failing recompute never reached /api/live/state"
+    body = client.get("/api/live/state").json()
+    assert "ValueError" in body["recompute_error"]
+    assert "no pick_no" in body["recompute_error"]
+    # The listener is untouched -- this failure is invisible in every field
+    # that existed before.
+    assert body["listener_alive"] is True
+    assert body["listener_error"] is None
+    assert body["candidates_as_of_pick"] is None
+
+    failing["on"] = False
+    tick.set()
+    assert _wait_until(
+        lambda: client.get("/api/live/state").json()["candidates_as_of_pick"] is not None), \
+        "the worker died on the first failure instead of surviving it"
+    assert client.get("/api/live/state").json()["recompute_error"] is None
+
+    client.post("/api/live/stop")
 
 
 def test_a_superseded_listeners_late_callback_cannot_write_drafted(
@@ -1341,8 +1682,9 @@ def test_connect_token_resolves_slot_and_wires_socket_picks(
 
     recompute_calls = []
     monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
+    monkeypatch.setattr("api.live.survival", _fake_survival_frame)
     monkeypatch.setattr(
-        "api.live.search_pick",
+        "api.live.rank_available",
         lambda *a, **k: recompute_calls.append(k) or _fake_candidates_frame("winner"))
 
     done = threading.Event()
@@ -1350,12 +1692,15 @@ def test_connect_token_resolves_slot_and_wires_socket_picks(
 
     def fake_run_socket_listener(listener, league_id, team_id, swid, token,
                                  on_change=None, stop_event=None,
-                                 on_activity=None):
+                                 on_activity=None, on_socket=None):
         """Stands in for the real, socket-opening run_socket_listener. Records
         the args it was called with (so the test can prove the token and ids
         reached it) and replays real captured frames, firing on_activity on
         every frame and on_change when the pick count changes -- the same
-        contract the real run_socket_listener holds."""
+        contract the real run_socket_listener holds. Accepts (and ignores)
+        on_socket: live_connect_token now always passes it, and a fake with a
+        narrower signature raises a TypeError the pump() thread swallows into
+        listener_error rather than ever finishing (see run_fn's real caller)."""
         seen_args.update(league_id=league_id, team_id=team_id, swid=swid,
                          token=token)
         prev = 0
@@ -1400,9 +1745,10 @@ def test_connect_token_resolves_slot_and_wires_socket_picks(
     assert rows == [(crosswalk[4430807], 1), (crosswalk[4429795], 2),
                     (crosswalk[4426515], 3)]
 
-    # search_pick now runs on the background recompute worker, not inline in
-    # the frame callback, so the result arrives shortly AFTER the listener
-    # finishes -- poll for it rather than reading it synchronously.
+    # survival/rank_available now run on the background recompute worker,
+    # not inline in the frame callback, so the result arrives shortly AFTER
+    # the listener finishes -- poll for it rather than reading it
+    # synchronously.
     assert _wait_until(
         lambda: client.get("/api/live/state").json()["candidates_as_of_pick"] == 3), \
         "recompute worker never produced candidates for pick 3"
@@ -1608,13 +1954,16 @@ def test_unmapped_picks_surface_in_state(tmp_path, monkeypatch, _isolated_league
     path = str(tmp_path / "u.duckdb")
     _seed_minimal_live_db(path)
     monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
-    monkeypatch.setattr("api.live.search_pick",
+    monkeypatch.setattr("api.live.survival", _fake_survival_frame)
+    monkeypatch.setattr("api.live.rank_available",
                         lambda *a, **k: _fake_candidates_frame("x"))
 
     def fake_socket(listener, league_id, team_id, swid, token,
-                    on_change=None, stop_event=None, on_activity=None):
+                    on_change=None, stop_event=None, on_activity=None,
+                    on_socket=None):
         # An ESPN id no board row carries -> picks_from_events routes it to
-        # `unmapped`, not `drafted`.
+        # `unmapped`, not `drafted`. on_socket: see fake_run_socket_listener's
+        # comment above -- live_connect_token always passes it now.
         listener.on_frame("SELECTED 1 99999999 2")
         if on_change is not None:
             on_change()
@@ -1634,3 +1983,349 @@ def test_unmapped_picks_surface_in_state(tmp_path, monkeypatch, _isolated_league
     um = client.get("/api/live/state").json()["unmapped_picks"]
     assert um[0]["espn_player_id"] == 99999999
     client.post("/api/live/stop")
+
+
+# --- POST /api/live/select: makes the pick ------------------------------
+#
+# These build the live app directly off register_live_routes (the same
+# pieces _live_routes_with_conn already uses), rather than through a real
+# /api/live/connect-token, so a session with a known board/socket/listener
+# can be assembled without a network fetch or a real ESPN handshake. The
+# fake socket's `sent` list and `on_send` hook stand in for
+# pipeline.draft_socket.SocketHandle: a real SocketHandle.send writes to a
+# live websocket, which these tests must never open.
+
+from pipeline.draft_listener import DraftListener
+
+
+class _FakeSocket:
+    """Stands in for pipeline.draft_socket.SocketHandle. `send` records the
+    text and, if wired via `on_send`, calls the hook synchronously -- the
+    same turn order a real send-then-ESPN-answers round trip has, letting a
+    test answer its own SELECT before live_select's poll loop ever runs
+    rather than depending on real wall-clock time to pass."""
+
+    def __init__(self, alive: bool = True):
+        self.sent = []
+        self._alive = alive
+        self._on_send = None
+        self.send_error = None
+
+    def on_send(self, fn):
+        self._on_send = fn
+
+    def alive(self) -> bool:
+        return self._alive
+
+    def detach(self) -> None:
+        """What run_socket_listener's `finally` does on every drop, before it
+        reconnects -- SocketHandle.detach clears the socket and alive() goes
+        false while the listener thread stays perfectly healthy."""
+        self._alive = False
+
+    def send(self, text: str) -> None:
+        if self.send_error is not None:
+            raise self.send_error
+        self.sent.append(text)
+        if self._on_send is not None:
+            self._on_send(text)
+
+
+def _select_board():
+    """One ordinary player (a real espn_id), one D/ST (espn_id null, resolved
+    instead through ESPN_PRO_TEAM_BY_ABBREV/_dst_espn_id), and one player with
+    neither -- a genuine crosswalk gap -- so both of _espn_id_for's success
+    paths and its failure path are all reachable off one board."""
+    return pd.DataFrame([
+        {"player_id": "00-0039139", "name": "Test Player", "position": "WR",
+         "team": "DET", "espn_id": 4429795},
+        {"player_id": "dst_bal", "name": "Ravens D/ST", "position": "DST",
+         "team": "BAL", "espn_id": np.nan},
+        {"player_id": "no_crosswalk", "name": "Ghost Player", "position": "WR",
+         "team": "ZZZ", "espn_id": np.nan},
+    ])
+
+
+def _select_session(my_slot):
+    """A DraftSession with a real (small) board/board_by_id and real
+    teams/rounds, so picks_until_turn and _espn_id_for both have what they
+    need. teams=8 matches snake_slots' round-1 order: slot 1 is the very
+    first overall pick, so my_slot=1 is on the clock at picks_made=0 and any
+    other slot is not."""
+    board = _select_board()
+    settings = type("S", (), {"teams": 8, "rounds": 15})()
+    return dataclasses.replace(
+        _fake_session(), my_slot=my_slot, settings=settings, board=board,
+        board_by_id={str(r["player_id"]): r
+                     for r in board.to_dict(orient="records")})
+
+
+def _live_app(tmp_path):
+    """A (client, state) pair wired to a throwaway DuckDB file -- the same
+    register_live_routes plumbing _live_routes_with_conn uses, plus the
+    TestClient test_state_candidates_carry_gain_now already established is
+    fine to build inline. `state["league_conn"]` is pinned to this test's own
+    connection so _drafted_count/_mark_drafted (which only ever see `state`,
+    matching the brief's helper signatures) can reach the same `drafted`
+    table live_select reads -- production only ever populates league_conn
+    this way for a non-default league, but live_select reads
+    `state["league_conn"] or conn` either way, so this is a legitimate stand-
+    in for "the connection this session's data lives on," not a shortcut
+    around it.
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    path = str(tmp_path / "live.duckdb")
+    conn = get_conn(path)
+    app = FastAPI()
+    state, _recompute = register_live_routes(app, conn, path)
+    state["league_conn"] = conn
+    return TestClient(app), state
+
+
+def _drafted_count(state) -> int:
+    cur = state["league_conn"].cursor()
+    try:
+        return cur.execute("SELECT count(*) FROM drafted").fetchone()[0]
+    finally:
+        cur.close()
+
+
+def _mark_drafted(state, player_id: str, pick_no: int = 1) -> None:
+    state["league_conn"].execute(
+        "INSERT INTO drafted VALUES (?, ?)", [player_id, pick_no])
+
+
+@pytest.fixture
+def live_app_on_socket(tmp_path):
+    """A connected socket, but my_slot (4) is not on the clock at
+    picks_made=0 -- slot 1 is."""
+    client, state = _live_app(tmp_path)
+    session = _select_session(my_slot=4)
+    ws = _FakeSocket()
+    state["session"] = session
+    state["socket"] = ws
+    state["listener"] = DraftListener(session.crosswalk)
+    return client, state, ws
+
+
+@pytest.fixture
+def live_app_on_clock(tmp_path):
+    """my_slot=1 -- on the clock at picks_made=0, socket connected."""
+    client, state = _live_app(tmp_path)
+    session = _select_session(my_slot=1)
+    ws = _FakeSocket()
+    listener = DraftListener(session.crosswalk)
+    state["session"] = session
+    state["socket"] = ws
+    state["listener"] = listener
+    return client, state, ws, listener
+
+
+@pytest.fixture
+def live_app_on_clock_no_socket(tmp_path):
+    """On the clock, but no socket session is running -- state["socket"] is
+    None, the same as after _stop_listener or before any connect-token."""
+    client, state = _live_app(tmp_path)
+    session = _select_session(my_slot=1)
+    state["session"] = session
+    state["socket"] = None
+    state["listener"] = DraftListener(session.crosswalk)
+    return client, state
+
+
+def test_select_off_turn_is_rejected_and_sends_nothing(live_app_on_socket):
+    """A SELECT off-turn is at best ignored and at worst a misdraft."""
+    client, state, ws = live_app_on_socket   # my_slot is NOT on the clock
+    body = client.post("/api/live/select", json={"player_id": "p1"})
+    assert body.status_code == 409
+    assert ws.sent == []
+
+
+def test_select_sends_the_espn_id_and_waits_for_confirmation(live_app_on_clock):
+    client, state, ws, listener = live_app_on_clock
+    ws.on_send(lambda text: listener.on_frame("SELECTED 30 4429795 3 {SWID}\n"))
+    res = client.post("/api/live/select", json={"player_id": "00-0039139"})
+    assert res.status_code == 200
+    assert ws.sent == ["SELECT 4429795\n"]
+    body = res.json()
+    assert body["espn_id"] == 4429795
+    assert body["player_id"] == "00-0039139"
+    assert body["pick_no"] == 1
+
+
+def test_select_resolves_a_defense_to_its_negative_espn_id(live_app_on_clock):
+    """Board rows for D/ST carry espn_id None; the real id is -(16000+team)."""
+    client, state, ws, listener = live_app_on_clock
+    ws.on_send(lambda text: listener.on_frame("SELECTED 30 -16033 3 {SWID}\n"))
+    res = client.post("/api/live/select", json={"player_id": "dst_bal"})
+    assert res.status_code == 200
+    assert ws.sent == ["SELECT -16033\n"]
+    assert res.json()["espn_id"] == -16033
+
+
+def test_select_times_out_without_confirmation_and_writes_nothing(
+        live_app_on_clock, monkeypatch):
+    """The one case the tool cannot resolve. The pick may or may not have
+    landed, so the board must not claim either way. SELECT_TIMEOUT_SECONDS/
+    SELECT_POLL_SECONDS are shrunk so this test doesn't burn the real 8s."""
+    monkeypatch.setattr("api.live.SELECT_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr("api.live.SELECT_POLL_SECONDS", 0.01)
+    client, state, ws, listener = live_app_on_clock
+    before = _drafted_count(state)
+    res = client.post("/api/live/select", json={"player_id": "00-0039139"})
+    assert res.status_code == 504
+    assert ws.sent == ["SELECT 4429795\n"]
+    assert _drafted_count(state) == before
+
+
+def test_select_with_no_socket_is_503(live_app_on_clock_no_socket):
+    client, state = live_app_on_clock_no_socket
+    assert client.post("/api/live/select",
+                       json={"player_id": "00-0039139"}).status_code == 503
+
+
+def test_select_an_already_drafted_player_is_409(live_app_on_clock):
+    client, state, ws, listener = live_app_on_clock
+    _mark_drafted(state, "00-0039139")
+    assert client.post("/api/live/select",
+                       json={"player_id": "00-0039139"}).status_code == 409
+    assert ws.sent == []
+
+
+def test_select_send_failure_via_connection_closed_is_503_not_500(live_app_on_clock):
+    """SocketHandle.send raises the builtin ConnectionError only when nothing
+    is attached. In the race where send grabs the socket reference just
+    before the listener thread detaches and closes it, the real
+    websockets.sync.client connection raises websockets.exceptions.
+    ConnectionClosed instead -- an exception whose MRO (ConnectionClosed,
+    WebSocketException, Exception, BaseException, object) does NOT pass
+    through ConnectionError. An endpoint that only caught
+    (ConnectionError, OSError) would let this leak into an unhandled 500 on
+    exactly the failure -- a dropped socket -- it exists to report as a
+    clean 503."""
+    from websockets.exceptions import ConnectionClosed
+
+    client, state, ws, listener = live_app_on_clock
+    ws.send_error = ConnectionClosed(None, None)
+    res = client.post("/api/live/select", json={"player_id": "00-0039139"})
+    assert res.status_code == 503
+    assert ws.sent == []
+
+
+def test_select_after_the_draft_is_over_is_409_and_sends_nothing(live_app_on_clock):
+    """picks_until_turn falls through to 0 ("my turn") once picks_made
+    reaches the end of the slot list -- that is "no turns left," not "my
+    turn again." Nothing else in the endpoint rules a finished draft out on
+    its own: session stays non-None, the socket can still be alive, and a
+    real board carries far more players than teams*rounds picks, so
+    "00-0039139" (never drafted) still clears the `already` check. Fill every
+    one of the session's 8*15 = 120 slots with filler picks and confirm a
+    request for that undrafted board player is refused rather than sent."""
+    client, state, ws, listener = live_app_on_clock
+    total = 8 * 15   # session teams=8, rounds=15 -- see _select_session
+    for i in range(total):
+        _mark_drafted(state, f"filler-{i}", pick_no=i + 1)
+    res = client.post("/api/live/select", json={"player_id": "00-0039139"})
+    assert res.status_code == 409
+    assert ws.sent == []
+
+
+def test_select_unknown_player_id_is_400(live_app_on_clock):
+    """A player_id the board doesn't carry at all -- a typo, a stale id from
+    a rebuilt board -- must be refused before anything is sent, not silently
+    resolved to nothing."""
+    client, state, ws, listener = live_app_on_clock
+    res = client.post("/api/live/select", json={"player_id": "not-on-the-board"})
+    assert res.status_code == 400
+    assert ws.sent == []
+
+
+def test_select_with_a_crosswalk_gap_is_400_and_sends_nothing(live_app_on_clock):
+    """The safety-relevant 400 the brief calls out: a board row that is
+    neither mapped to a real espn_id nor a D/ST _espn_id_for can reconstruct
+    one for. This must be refused by name, not sent with a guessed id."""
+    client, state, ws, listener = live_app_on_clock
+    res = client.post("/api/live/select", json={"player_id": "no_crosswalk"})
+    assert res.status_code == 400
+    assert ws.sent == []
+
+
+def test_select_a_player_espn_already_confirmed_is_409_not_a_fake_pick_number(
+        live_app_on_clock):
+    """A confirmation that never happened.
+
+    `listener.selected_espn_ids` accumulates for the whole session and is
+    never cleared -- ESPN replays the draft so far on every JOIN, so it holds
+    every SELECTED this socket has ever seen. The wait loop only tests
+    membership, so an id already in the set satisfied it on the FIRST
+    iteration: HTTP 200 with `pick_no: picks_made + 1`, a number belonging to
+    somebody else, for a pick this request never made. The dialog closed
+    saying it landed and the user walked away without a player.
+
+    Reachable whenever `drafted` and `selected_espn_ids` disagree, which is
+    exactly the unmapped-pick case the rest of api/live.py acknowledges is
+    real: ESPN confirmed a player the crosswalk could not resolve, so he is
+    in the set and never reached `drafted`. Reproduced here with a listener
+    whose crosswalk is empty, so the SELECTED frame lands in the set and
+    picks() resolves nothing.
+    """
+    client, state, ws, listener = live_app_on_clock
+    listener.crosswalk = {}
+    listener.on_frame("SELECTED 30 4429795 3 {SWID}\n")
+    assert 4429795 in listener.selected_espn_ids
+    assert _drafted_count(state) == 0     # the crosswalk never resolved him
+
+    res = client.post("/api/live/select", json={"player_id": "00-0039139"})
+
+    assert res.status_code == 409
+    assert "already confirmed" in res.json()["detail"]
+    # Guarded BEFORE the send: nothing reached ESPN, so this cannot double
+    # up on a pick some other team is mid-way through making.
+    assert ws.sent == []
+
+
+def test_state_reports_socket_alive(live_app_on_clock):
+    """Spec section 6: the draft buttons disable while the socket is down and
+    re-enable when the handle reports alive again. `state["socket"]` already
+    gates POST /api/live/select with a 503, but /api/live/state carried no
+    equivalent field, so the room derived `isMyTurn` from `on_the_clock ===
+    my_slot` alone. During a run_socket_listener reconnect the handle is
+    detached while the listener thread is alive and `stale` has not tripped,
+    so the buttons stayed enabled, the pill still read ESPN LIVE, and every
+    click 503'd.
+    """
+    client, state, ws, listener = live_app_on_clock
+    # _select_session carries a teams/rounds-only settings stand-in and no
+    # pool, which is all live_select needs; /api/live/state additionally
+    # serves the league shape and replays the drafted rows for my_roster, so
+    # give it a real LeagueSettings and an empty pool (`drafted` is empty in
+    # this fixture, so nothing is replayed).
+    state["session"] = dataclasses.replace(
+        state["session"],
+        pool=type("P", (), {"player_id": np.array([])})(),
+        settings=league_mod.LeagueSettings(
+            season=2026, teams=8,
+            starters={"QB": 1, "RB": 2, "WR": 2, "TE": 1, "K": 1, "DST": 1},
+            flex_slots=1, bench=6, scoring={"receptions": 1.0},
+            draft_type="SNAKE"))
+    assert client.get("/api/live/state").json()["socket_alive"] is True
+
+    # Exactly what run_socket_listener does in its `finally` on a drop.
+    ws.detach()
+    body = client.get("/api/live/state").json()
+    assert body["socket_alive"] is False
+    # The listener itself is untouched -- this is the state the room could
+    # not see before, not a dead listener.
+    assert body["listener_error"] is None
+
+
+def test_state_reports_socket_alive_false_with_no_session(tmp_path):
+    """Present with a false value on the inactive branch too, never omitted
+    -- the same convention listener_alive follows."""
+    client, state = _live_app(tmp_path)
+    body = client.get("/api/live/state").json()
+    assert body["active"] is False
+    assert body["socket_alive"] is False
+    assert body["recompute_error"] is None

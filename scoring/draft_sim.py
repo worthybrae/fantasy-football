@@ -28,7 +28,8 @@ import pandas as pd
 
 from pipeline.db import read_table, write_table
 from scoring import factors
-from scoring.board import FANTASY_POSITIONS, _norm_name, adp_match_key
+from scoring.board import (FANTASY_POSITIONS, GAMES, POSITION_FLOOR,
+                           _norm_name, adp_match_key, projections)
 from scoring.config import CURRENT_SEASON, RECENCY_WEIGHTS
 from scoring.draft_model import (EARLY_ROUNDS, FEATURE_NAMES, FFC_BLEND_WEIGHT,
                                  HYPE_SCALE, RUN_WINDOW, _ATTRIBUTE_DEFAULTS,
@@ -36,52 +37,12 @@ from scoring.draft_model import (EARLY_ROUNDS, FEATURE_NAMES, FFC_BLEND_WEIGHT,
 from scoring.player_history import assert_no_column_collision, attributes_as_of
 
 FLEX_POSITIONS = ("RB", "WR", "TE")
-GAMES = 17
-# Floor for players with no projection and no stat history, per position, so
-# a K or a rookie DST never lands as NaN inside the lineup optimizer.
-POSITION_FLOOR = {"QB": 180.0, "RB": 80.0, "WR": 80.0, "TE": 60.0,
-                  "K": 110.0, "DST": 100.0}
 # Availability (0-100) for a player with no weekly history to compute one
 # from: rookies, kickers, and every DST. A realistic full-season availability
 # rate, not the neutral 50 the board uses for a missing *percentile* -- 50
 # here would mean "expected to miss half the season", which is a claim about
 # the player, not an admission of ignorance.
 DEFAULT_AVAILABILITY = 90.0
-
-
-def projections(conn, board: pd.DataFrame) -> pd.Series:
-    """Projected season points per player_id.
-
-    Ladder: ESPN's own season projection, then recency-weighted PPG scaled to
-    a full season, then a per-position floor.
-    """
-    espn = read_table(conn, "espn_adp")
-    lookup = {}
-    if not espn.empty and "espn_proj" in espn.columns:
-        valid = espn.dropna(subset=["espn_proj"])
-        valid = valid[valid["espn_proj"] > 0]
-        teams = (valid["team"] if "team" in valid.columns
-                 else pd.Series([None] * len(valid), index=valid.index))
-        # DSTs key on team, not name: ESPN says "Ravens D/ST" and the board
-        # says whatever the ADP feed's nickname is, so a name join never hit
-        # and every defense fell through to POSITION_FLOOR.
-        for (_, row), team in zip(valid.iterrows(), teams):
-            key = adp_match_key(row["espn_name"], row["position"], team)
-            if key is not None:
-                lookup[key] = float(row["espn_proj"])
-
-    values = []
-    for _, row in board.iterrows():
-        key = adp_match_key(row["name"], row["position"], row.get("team"))
-        proj = lookup.get(key) if key is not None else None
-        if proj is None:
-            stats = row.get("stats")
-            ppg = stats.get("ppg") if isinstance(stats, dict) else None
-            proj = float(ppg) * GAMES if ppg else None
-        if proj is None or not np.isfinite(proj):
-            proj = POSITION_FLOOR.get(row["position"], 80.0)
-        values.append(proj)
-    return pd.Series(values, index=board["player_id"].to_numpy(), dtype=float)
 
 
 def _lineup_assignment(by_position: dict, settings):
@@ -305,9 +266,29 @@ def _cheatsheet_ranks(conn, ranked: pd.DataFrame, season: int) -> pd.Series:
 
 
 def build_pool(conn, board: pd.DataFrame, settings) -> SimPool:
-    points = projections(conn, board)
+    # The board already carries this (build_board computes it to rank on);
+    # recomputing it here would be a second, silently divergent copy. A bare
+    # fixture board without the column still falls back to computing it.
+    #
+    # Assigned POSITIONALLY, never `.map()`ed on `player_id` -- the same
+    # hazard, and the same fix, as build_board's own `uni["proj_points"] =
+    # proj.to_numpy(...)` (see its comment): `_add_adp_only_players`
+    # synthesizes `player_id` from the normalized name with no position in
+    # the key, so one name at two positions in the ADP feed produces two
+    # board rows sharing an id, and `.map()` against a duplicate-valued
+    # index raises InvalidIndexError. build_board was fixed and this was
+    # not, three lines down the same call chain -- so an ADP-feed name
+    # collision still took `build_session` down and no live draft could
+    # start. Both sides of the branch are one value per board row in board
+    # row order (`projections` builds its Series by iterating
+    # `board.iterrows()`), so positional assignment gives every row -- both
+    # colliding ones included -- its own correct value.
+    if "proj_points" in board.columns:
+        points = board["proj_points"].to_numpy(dtype=float)
+    else:
+        points = projections(conn, board).to_numpy(dtype=float)
     ranked = board.copy()
-    ranked["proj"] = ranked["player_id"].map(points)
+    ranked["proj"] = points
 
     # `adp_rank`/`market_rank` (the SimPool fields, not the board column)
     # must land on the scale draft_model's reach/fall coefficients were
@@ -947,7 +928,7 @@ def search_pick(pool, settings, slot_managers, my_slot, taken, betas,
 
 def survival(pool, settings, slot_managers, my_slot, taken, betas,
              n_rollouts: int = DEFAULT_ROLLOUTS, seed: int = 0,
-             taken_order=None):
+             taken_order=None, on_the_clock: bool = False):
     """Probability each player is still available when my next turn arrives.
 
     Counted from the same rollout machinery, but stopping at my next pick
@@ -958,6 +939,36 @@ def survival(pool, settings, slot_managers, my_slot, taken, betas,
     for the same reason: without it every opponent between now and my turn
     resumes with an empty roster, so `need` reads 1.0 everywhere and the
     caps re-arm from zero.
+
+    `on_the_clock` names WHICH turn is being measured, because the pick
+    count alone cannot say. `_next_pick_for` scans from `already`
+    INCLUSIVELY, so when the pick about to be made is my own it answers
+    "my next turn is this pick", the rollout loop below has nothing to
+    range over, and every available player comes back at exactly 1.0.
+
+    That is the right answer for `search_pick`/`run_sim`, which value the
+    pick they are about to make: a player who is on the board right now is
+    there with certainty, and `_run_draft(forced=idx)` forces him at that
+    same pick. It is the WRONG answer for the live ranking, whose whole
+    question is what will still be there AFTER this pick -- with survival
+    pinned at 1.0, `gain.expected_best_next` collapses to the position's
+    own leader and `gain_now` is identically 0.0 for the best player at
+    every position, so which of six position leaders (a kicker as readily
+    as a running back) reaches the top three is decided by pandas' unstable
+    sort rather than by any number. So the live caller passes
+    `on_the_clock=True` and gets the turn after this one; the default keeps
+    the offline callers unchanged.
+
+    The measured turn is then found from `already + 1`, which leaves the
+    player about to be taken with this very pick in the pool: survival is
+    over-estimated by exactly one player, since one of the survivors
+    counted here is the one I am about to remove myself. That is the
+    deliberate choice -- the alternative is guessing which player that is,
+    and a guess would be wrong far more often than one player in a
+    position's tail matters. At the wheel (my two picks back to back, no
+    opponent in between) the range is empty again and survival is a
+    truthful 1.0: waiting from the first of a pair to the second genuinely
+    costs nothing but the one player I take.
     """
     if taken_order is None and taken.any():
         warnings.warn(
@@ -965,7 +976,8 @@ def survival(pool, settings, slot_managers, my_slot, taken, betas,
             "was given; opponents resume with empty rosters, so their needs "
             "and roster caps are wrong", RuntimeWarning, stacklevel=2)
     already = len(taken_order) if taken_order is not None else int(taken.sum())
-    target = _next_pick_for(settings, my_slot, already)
+    start = already + 1 if on_the_clock else already
+    target = _next_pick_for(settings, my_slot, start)
     slots = snake_slots(settings.teams, settings.rounds)
     caps = _roster_cap(settings)
     counts = np.zeros(len(pool.player_id))
@@ -976,7 +988,7 @@ def survival(pool, settings, slot_managers, my_slot, taken, betas,
         seeded, seeded_recent = _seed_rosters(pool, settings, taken_order)
         rosters = {slot: state["counts"] for slot, state in seeded.items()}
         recent = list(seeded_recent)
-        for offset in range(already, min(target - 1, len(slots))):
+        for offset in range(start, min(target - 1, len(slots))):
             slot = slots[offset]
             available = np.flatnonzero(~gone)
             if len(available) == 0:

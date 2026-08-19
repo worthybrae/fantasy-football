@@ -104,6 +104,34 @@ def test_apply_vor_accepts_custom_replacement_ranks():
     assert out.sort_values("composite", ascending=False)["vor"].tolist() == [
         10.0, 0.0, -10.0, -20.0, -30.0]
 
+def test_apply_vor_differences_the_named_column():
+    """VOR must be expressible in projected points, not just composite.
+
+    The board ranks across positions on this number, and a difference of
+    two within-position percentiles has no cross-position meaning -- that
+    is what put a TE at ADP 149 thirteenth overall.
+    """
+    df = pd.DataFrame({
+        "player_id": ["a", "b", "c", "d"],
+        "position": ["RB", "RB", "TE", "TE"],
+        "composite": [90.0, 50.0, 90.0, 50.0],
+        "proj_points": [280.0, 150.0, 140.0, 100.0],
+    })
+    out = apply_vor(df, {"RB": 2, "TE": 2}, column="proj_points")
+    assert list(out["vor"]) == [130.0, 0.0, 40.0, 0.0]
+
+
+def test_apply_vor_still_defaults_to_composite():
+    df = pd.DataFrame({
+        "player_id": ["a", "b"],
+        "position": ["RB", "RB"],
+        "composite": [90.0, 50.0],
+        "proj_points": [280.0, 150.0],
+    })
+    out = apply_vor(df, {"RB": 2})
+    assert list(out["vor"]) == [40.0, 0.0]
+
+
 def test_an_empty_replacement_ranks_dict_does_not_revert_to_the_hardcoded_ranks():
     """`replacement_ranks or REPLACEMENT_RANK` treats {} as "unspecified", so
     a league that derives no per-position ranks would silently be scored

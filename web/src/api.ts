@@ -151,16 +151,24 @@ export function ageLabel(createdAt: string): string {
 
 // -- live draft mode --
 
-// One recommendation from the running search. Sorted by `ev` descending on
-// arrival -- `candidates[0]` is the call. No name/position/team here: the
-// live loop is cheap by design (see api/live.py's DraftSession docstring)
-// and joining against the full board is the caller's job, via `player_id`
-// against `fetchPlayers()`'s one-time-fetched list.
-export interface LiveCandidate {
+// One row of the ranked available list. Sorted by `gain_now` descending on
+// the server (scoring/gain.py) -- the value this pick gains over the best
+// player at the same position expected to survive to your next pick,
+// weighted by whether your roster can start him. `vor_points` is the raw
+// value over replacement it is derived from; the two differ most exactly
+// where the old EV ranking used to reach. No name/position/team here beyond
+// `position` itself: the live loop is cheap by design (see api/live.py's
+// DraftSession docstring) and joining the rest against the full board is
+// the caller's job, via `player_id` against `fetchPlayers()`'s
+// one-time-fetched list.
+export type LiveCandidate = {
   player_id: string
-  ev: number
-  se: number
-  applied_pct: number
+  position: string
+  proj_points: number
+  vor_points: number
+  gain_now: number
+  survive_pct: number
+  fills: string
   rank: number
 }
 
@@ -173,6 +181,36 @@ export interface UnmappedPick {
   overall_pick: number
 }
 
+// The session's real league shape, straight off session.settings
+// (scoring.league.LeagueSettings) -- see api/live.py's _league_settings_payload.
+// Present with the same five keys on the inactive response too (same
+// convention as listener_error/listener_alive below): null scalars and an
+// empty `starters`, never an omitted key, so the rail never has to branch
+// on whether `settings` exists, only on whether its values are null.
+export interface LiveSettings {
+  teams: number | null
+  rounds: number | null
+  starters: Record<string, number>
+  flex_slots: number | null
+  bench: number | null
+  // scoring.league.scoring_format's own three values. Null only on the
+  // inactive response, where there is no session's settings to derive it
+  // from -- never a guessed default.
+  scoring_format: 'ppr' | 'half' | 'std' | null
+}
+
+// One player on this session's own roster, in the order it drafted them --
+// straight off /api/live/state's `my_roster` (api/live.py's _my_roster).
+// `proj_points`, not `ev`: this is a plain replay of what was actually
+// drafted, not a rerun of the simulator's end-of-draft valuation, so there
+// is no `ev` here to report honestly.
+export interface RosterPlayer {
+  player_id: string
+  name: string
+  position: string
+  proj_points: number | null
+}
+
 export interface LiveState {
   active: boolean
   picks_made: number
@@ -183,18 +221,51 @@ export interface LiveState {
   // already treats "no slot" and "not this slot" the same way.
   my_slot: number | null
   candidates: LiveCandidate[]
-  // The pick count `candidates` was computed against. Compare against
-  // `picks_made` to tell a current list from one a newer pick has already
-  // outrun -- see `isRecomputing` in LiveDraft.tsx.
+  // The pick COUNT `candidates` was computed against, so the pick they are
+  // for is that + 1 -- the same +1 the room applies to `picks_made`. Less
+  // than `picks_made` means a newer pick has already outrun this list and
+  // the recompute for it has not landed yet; DraftRoom says so rather than
+  // presenting a superseded list as current. (The old pointer here was to
+  // `isRecomputing` in LiveDraft.tsx, a file this branch deleted -- and
+  // with it, for a while, the indicator itself.)
   candidates_as_of_pick: number | null
   last_poll_at: string | null
   // True whenever the listener hasn't successfully polled in the last 15s
   // (api/live.py's STALE_AFTER_SECONDS) -- including "never polled."
   stale: boolean
   unmapped_picks: UnmappedPick[]
+  // A dead listener is the worst failure mode this system has -- the board
+  // looks current and simply stops updating. `listener_error` carries the
+  // exception that killed the thread (null if it never had one), and
+  // `listener_alive` is the thread's live status, so a hang with no
+  // exception is still visible even though it sets no error. Present (never
+  // optional) in both the active and inactive responses -- see
+  // api/live.py's `live_state`, which sets `listener_alive: false` on the
+  // no-session branch rather than omitting the key.
+  listener_error: string | null
+  listener_alive: boolean
+  // The recompute worker's own last failure, separate from the listener's
+  // because they fail independently: the listener can be perfectly healthy
+  // -- frames arriving, the board filling, `listener_alive` true -- while
+  // ranking has stopped dead and `candidates` is frozen at an old pick.
+  // Present (never optional) on both responses, same as the two above.
+  recompute_error: string | null
+  // Whether a SELECT actually has somewhere to go -- exactly the condition
+  // POST /api/live/select's 503 gates on. Whose turn it is is not enough on
+  // its own: during a socket reconnect the handle is detached while the
+  // listener thread is alive and `stale` has not tripped, so the draft
+  // buttons have to read this too or every click 503s (spec section 6).
+  socket_alive: boolean
   // The bookmarklet has delivered a draft token. The onboarding gate flips
   // from "open your draft and click Draft Helper" to the live board on this.
   token_received?: boolean
+  // The live pick clock, straight off DraftListener.ms_remaining
+  // (pipeline/draft_listener.py) -- null until the first CLOCK or SELECTING
+  // frame has been seen. Never decayed or interpolated client-side between
+  // polls -- see ClockPanel.tsx's own comment on why not.
+  ms_remaining: number | null
+  settings: LiveSettings
+  my_roster: RosterPlayer[]
 }
 
 export async function fetchLiveState(): Promise<LiveState> {
@@ -203,6 +274,58 @@ export async function fetchLiveState(): Promise<LiveState> {
     throw new Error(`Failed to load live state (${res.status}): ${await detailText(res)}`)
   }
   return res.json()
+}
+
+export type SelectResult = { player_id: string; espn_id: number; pick_no: number }
+
+// Makes the pick on ESPN. Resolves only once ESPN echoed it back, so a
+// resolved promise means the pick is real -- there is no optimistic state
+// anywhere above this. Relative path, matching every other call in this
+// file: there is no base-URL constant here (the dev server proxies /api to
+// the backend -- see vite.config.ts -- and the build serves both from the
+// same origin), so there is no `API` to substitute for the task brief's
+// `${API}` snippet.
+//
+// Aborted client-side at 15s. The server's own bound (api/live.py's
+// SELECT_TIMEOUT_SECONDS, 8s) covers a slow ESPN, not a hung connection --
+// a fetch that never settles leaves ConfirmPick stuck on 'sending', where
+// Escape and Cancel are both correctly disabled (the SELECT has already
+// left the tab, so there is nothing left to cancel), for the rest of the
+// pick clock with no way out. 15s sits comfortably past the server's 8s
+// plus its round trip, so a genuinely slow confirmation still lands here
+// rather than being cut off; the only thing this catches is a request that
+// is never coming back.
+const SELECT_ABORT_MS = 15000
+
+export async function selectPlayer(playerId: string): Promise<SelectResult> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), SELECT_ABORT_MS)
+  try {
+    const res = await fetch('/api/live/select', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ player_id: playerId }),
+      signal: controller.signal,
+    })
+    if (!res.ok) {
+      const detail = await res.json().catch(() => null)
+      throw new Error(detail?.detail ?? `Pick failed (${res.status})`)
+    }
+    return await res.json()
+  } catch (e) {
+    // Deliberately the server's own 504 wording: an aborted request is the
+    // same situation as ESPN not answering -- the SELECT may or may not have
+    // landed, and the only thing that can resolve it is looking at ESPN.
+    // Anything else (a real HTTP error, a network failure) is rethrown
+    // untouched so ConfirmPick still renders the server's own message.
+    if (controller.signal.aborted) {
+      throw new Error('ESPN did not confirm the pick -- check the ESPN draft '
+        + 'room before picking again')
+    }
+    throw e
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 // -- live draft board (the round x team grid, GET /api/live/board) --
