@@ -44,6 +44,7 @@ with the *old* nflverse schema):
 """
 import re
 import unicodedata
+import numpy as np
 import pandas as pd
 from pipeline.db import read_table
 from scoring import factors, league
@@ -204,6 +205,48 @@ _PASS_COLS = {
     "pass_yards": "passing_yards", "pass_tds": "passing_tds",
     "interceptions": "passing_interceptions",
 }
+
+
+GAMES = 17
+# Floor for players with no projection and no stat history, per position, so
+# a K or a rookie DST never lands as NaN inside the lineup optimizer.
+POSITION_FLOOR = {"QB": 180.0, "RB": 80.0, "WR": 80.0, "TE": 60.0,
+                  "K": 110.0, "DST": 100.0}
+
+
+def projections(conn, board: pd.DataFrame) -> pd.Series:
+    """Projected season points per player_id.
+
+    Ladder: ESPN's own season projection, then recency-weighted PPG scaled to
+    a full season, then a per-position floor.
+    """
+    espn = read_table(conn, "espn_adp")
+    lookup = {}
+    if not espn.empty and "espn_proj" in espn.columns:
+        valid = espn.dropna(subset=["espn_proj"])
+        valid = valid[valid["espn_proj"] > 0]
+        teams = (valid["team"] if "team" in valid.columns
+                 else pd.Series([None] * len(valid), index=valid.index))
+        # DSTs key on team, not name: ESPN says "Ravens D/ST" and the board
+        # says whatever the ADP feed's nickname is, so a name join never hit
+        # and every defense fell through to POSITION_FLOOR.
+        for (_, row), team in zip(valid.iterrows(), teams):
+            key = adp_match_key(row["espn_name"], row["position"], team)
+            if key is not None:
+                lookup[key] = float(row["espn_proj"])
+
+    values = []
+    for _, row in board.iterrows():
+        key = adp_match_key(row["name"], row["position"], row.get("team"))
+        proj = lookup.get(key) if key is not None else None
+        if proj is None:
+            stats = row.get("stats")
+            ppg = stats.get("ppg") if isinstance(stats, dict) else None
+            proj = float(ppg) * GAMES if ppg else None
+        if proj is None or not np.isfinite(proj):
+            proj = POSITION_FLOOR.get(row["position"], 80.0)
+        values.append(proj)
+    return pd.Series(values, index=board["player_id"].to_numpy(), dtype=float)
 
 
 def _latest_season_stats(weekly: pd.DataFrame) -> pd.DataFrame:

@@ -28,7 +28,8 @@ import pandas as pd
 
 from pipeline.db import read_table, write_table
 from scoring import factors
-from scoring.board import FANTASY_POSITIONS, _norm_name, adp_match_key
+from scoring.board import (FANTASY_POSITIONS, GAMES, POSITION_FLOOR,
+                           _norm_name, adp_match_key, projections)
 from scoring.config import CURRENT_SEASON, RECENCY_WEIGHTS
 from scoring.draft_model import (EARLY_ROUNDS, FEATURE_NAMES, FFC_BLEND_WEIGHT,
                                  HYPE_SCALE, RUN_WINDOW, _ATTRIBUTE_DEFAULTS,
@@ -36,52 +37,12 @@ from scoring.draft_model import (EARLY_ROUNDS, FEATURE_NAMES, FFC_BLEND_WEIGHT,
 from scoring.player_history import assert_no_column_collision, attributes_as_of
 
 FLEX_POSITIONS = ("RB", "WR", "TE")
-GAMES = 17
-# Floor for players with no projection and no stat history, per position, so
-# a K or a rookie DST never lands as NaN inside the lineup optimizer.
-POSITION_FLOOR = {"QB": 180.0, "RB": 80.0, "WR": 80.0, "TE": 60.0,
-                  "K": 110.0, "DST": 100.0}
 # Availability (0-100) for a player with no weekly history to compute one
 # from: rookies, kickers, and every DST. A realistic full-season availability
 # rate, not the neutral 50 the board uses for a missing *percentile* -- 50
 # here would mean "expected to miss half the season", which is a claim about
 # the player, not an admission of ignorance.
 DEFAULT_AVAILABILITY = 90.0
-
-
-def projections(conn, board: pd.DataFrame) -> pd.Series:
-    """Projected season points per player_id.
-
-    Ladder: ESPN's own season projection, then recency-weighted PPG scaled to
-    a full season, then a per-position floor.
-    """
-    espn = read_table(conn, "espn_adp")
-    lookup = {}
-    if not espn.empty and "espn_proj" in espn.columns:
-        valid = espn.dropna(subset=["espn_proj"])
-        valid = valid[valid["espn_proj"] > 0]
-        teams = (valid["team"] if "team" in valid.columns
-                 else pd.Series([None] * len(valid), index=valid.index))
-        # DSTs key on team, not name: ESPN says "Ravens D/ST" and the board
-        # says whatever the ADP feed's nickname is, so a name join never hit
-        # and every defense fell through to POSITION_FLOOR.
-        for (_, row), team in zip(valid.iterrows(), teams):
-            key = adp_match_key(row["espn_name"], row["position"], team)
-            if key is not None:
-                lookup[key] = float(row["espn_proj"])
-
-    values = []
-    for _, row in board.iterrows():
-        key = adp_match_key(row["name"], row["position"], row.get("team"))
-        proj = lookup.get(key) if key is not None else None
-        if proj is None:
-            stats = row.get("stats")
-            ppg = stats.get("ppg") if isinstance(stats, dict) else None
-            proj = float(ppg) * GAMES if ppg else None
-        if proj is None or not np.isfinite(proj):
-            proj = POSITION_FLOOR.get(row["position"], 80.0)
-        values.append(proj)
-    return pd.Series(values, index=board["player_id"].to_numpy(), dtype=float)
 
 
 def _lineup_assignment(by_position: dict, settings):
