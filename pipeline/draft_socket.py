@@ -270,6 +270,21 @@ class SocketHandle:
     `self._ws` after the listener thread has decided to detach it but before
     the assignment lands (or vice versa), and write to a socket the listener
     already considers gone.
+
+    `send` holds the lock only long enough to copy the current `self._ws`
+    reference, then calls `ws.send(text)` outside it. This is deliberate:
+    ESPN dropping the socket without a TCP RST -- a stalled write, not an
+    immediate `ConnectionClosed` -- can block a plain `send()` for an
+    unbounded time, and if that block happened while holding the lock, the
+    listener thread's own `detach()` in its `finally` would queue up behind
+    it, delaying the very reconnect this class exists to keep timely. The
+    cost of releasing the lock first is a narrow race: a send can grab the
+    reference just before the listener detaches it, and then write to a
+    socket the listener already considers gone. That is still not a silent
+    failure -- writing to a socket already mid-close raises there instead of
+    at the `None` check above -- so the loud-failure guarantee holds either
+    way; only the exact exception, not whether one happens, is timing
+    dependent.
     """
 
     def __init__(self):
@@ -291,11 +306,11 @@ class SocketHandle:
     def send(self, text: str) -> None:
         with self._lock:
             ws = self._ws
-            if ws is None:
-                raise ConnectionError(
-                    "the draft socket is not connected -- click the Draft "
-                    "Helper bookmark again to reconnect")
-            ws.send(text)
+        if ws is None:
+            raise ConnectionError(
+                "the draft socket is not connected -- click the Draft "
+                "Helper bookmark again to reconnect")
+        ws.send(text)
 
 
 def run_socket_listener(listener, league_id, team_id, swid, token,
