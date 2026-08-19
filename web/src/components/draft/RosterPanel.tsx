@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import type { Player } from '../../api'
+import type { RosterPlayer } from '../../api'
 
 // duplicated from LiveDraft.tsx / DraftBoardGrid.tsx (unexported in both) --
 // same precedent as PlayerCard.tsx's depthSlotLabel/sosLabel: a four-line
@@ -9,7 +9,11 @@ function posBadge(position: string | undefined): ReactNode {
   return <span className={`pos-badge pos-badge-${position.toLowerCase()}`}>{position}</span>
 }
 
-export type RosterSlot = { slot: string; player: Player | null; urgent: boolean }
+// `player` is `RosterPlayer` (api/live.py's my_roster shape), not the
+// board's full `Player` -- DraftRoom builds this list straight off
+// /api/live/state now, and my_roster carries only player_id/name/position/
+// proj_points, not the whole board row.
+export type RosterSlot = { slot: string; player: RosterPlayer | null; urgent: boolean }
 
 export default function RosterPanel({ slots }: { slots: RosterSlot[] }) {
   const filled = slots.filter((s) => s.player !== null).length
@@ -33,7 +37,9 @@ export default function RosterPanel({ slots }: { slots: RosterSlot[] }) {
                 <>
                   {posBadge(s.player.position)}
                   <span className="roster-row-name">{s.player.name}</span>
-                  <span className="roster-row-proj mono">{s.player.ev !== null ? Math.round(s.player.ev) : '—'}</span>
+                  <span className="roster-row-proj mono">
+                    {s.player.proj_points !== null ? Math.round(s.player.proj_points) : '—'}
+                  </span>
                 </>
               ) : (
                 <span className={`roster-row-open${s.urgent ? ' roster-row-open-urgent' : ''}`}>

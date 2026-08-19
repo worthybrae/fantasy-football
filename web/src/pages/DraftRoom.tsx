@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { fetchLiveState, fetchPlayers, type LiveState, type Player } from '../api'
+import { fetchLiveState, fetchPlayers, type LiveSettings, type LiveState, type Player,
+         type RosterPlayer } from '../api'
 import ClockPanel from '../components/draft/ClockPanel'
 import RosterPanel, { type RosterSlot } from '../components/draft/RosterPanel'
 
@@ -7,24 +8,86 @@ const POLL_MS = 2500
 
 type Tab = 'available' | 'board'
 
-// The one roster shape this personal tool drafts: scoring/league.py's
-// default_settings() (1 QB, 2 RB, 2 WR, 1 TE, 2 FLEX, 1 K, 1 DST, 5 bench --
-// 15 rounds total, matching ClockPanel's LEAGUE_TEAMS=8 * 15 = 120 picks).
-// Pinned here rather than fetched, same reasoning as ClockPanel's team
-// count: no endpoint this room's Task 7 scope consumes returns a session's
-// actual starter/flex/bench breakdown.
-const STARTER_SLOTS = ['QB', 'RB1', 'RB2', 'WR1', 'WR2', 'TE', 'FLEX1', 'FLEX2', 'K', 'DST']
-const BENCH_SLOTS = ['BN1', 'BN2', 'BN3', 'BN4', 'BN5']
-const ALL_ROSTER_SLOTS = [...STARTER_SLOTS, ...BENCH_SLOTS]
+// Canonical display order for the starter positions ESPN's own settings
+// dict (session.settings.starters, api/live.py's `settings` key) carries no
+// guaranteed order for -- fixes one so the roster panel always reads QB
+// before RB before WR, matching the design mock and ordinary fantasy
+// convention, regardless of the order the server's dict happened to build
+// its keys in.
+const POSITION_ORDER = ['QB', 'RB', 'WR', 'TE', 'K', 'DST']
 
-// Same 8 as ClockPanel's own LEAGUE_TEAMS (scoring/config.py's
-// LEAGUE_TEAMS) -- duplicated rather than imported so ClockPanel.tsx stays a
-// single component export (a second export there would hit the same
-// react/only-export-components fast-refresh warning RosterPanel.tsx's
-// ALL_ROSTER_SLOTS used to trigger, before it moved here). This is the top
-// bar's only use of it, for "PICK n / total".
-const LEAGUE_TEAMS = 8
-const TOTAL_PICKS = ALL_ROSTER_SLOTS.length * LEAGUE_TEAMS
+// FLEX-eligible positions, matching scoring/draft_sim.py's FLEX_POSITIONS
+// exactly. Not a new rule: a flex slot can only ever be filled by one of
+// these three server-side (see LeagueSettings.replacement_ranks and
+// _lineup_assignment); mirrored here because /api/live/state's my_roster
+// carries only a flat, pick-order list of drafted players, not the
+// session's own lineup assignment, so the rail has to make the same call
+// itself to decide which open slot a given pick fills.
+const FLEX_ELIGIBLE = new Set(['RB', 'WR', 'TE'])
+
+// This session's real roster shape, as slot labels: `QB`, `RB1`/`RB2` for a
+// 2-RB league, `FLEX1..FLEXn`, then `BN1..BNn`. Replaces the two hardcoded
+// 8-team/15-round shapes this file and ClockPanel.tsx used to each carry
+// (STARTER_SLOTS/BENCH_SLOTS here, LEAGUE_TEAMS in both) -- both were wrong
+// the moment a real ESPN league's settings differed from the cold-start
+// default, which is the whole defect this task closes. Any starters
+// position outside POSITION_ORDER (an exotic ESPN slot this room doesn't
+// specifically name) still gets its own labelled slot, appended after the
+// ones this list does know about, so the roster's total slot count always
+// matches settings.rounds -- an unlabelled position is a display gap, not a
+// missing roster spot.
+function rosterSlotLabels(settings: LiveSettings): string[] {
+  const order = [...POSITION_ORDER,
+    ...Object.keys(settings.starters).filter((p) => !POSITION_ORDER.includes(p))]
+  const starters: string[] = []
+  for (const pos of order) {
+    const n = settings.starters[pos] ?? 0
+    for (let i = 1; i <= n; i++) starters.push(n > 1 ? `${pos}${i}` : pos)
+  }
+  const flex = Array.from({ length: settings.flex_slots ?? 0 }, (_, i) => `FLEX${i + 1}`)
+  const bench = Array.from({ length: settings.bench ?? 0 }, (_, i) => `BN${i + 1}`)
+  return [...starters, ...flex, ...bench]
+}
+
+// Fills each drafted player (my_roster, already in pick order per
+// api/live.py's _my_roster) into the first open slot his position can take:
+// his own position's dedicated slot(s) first, then a FLEX slot if he is
+// FLEX-eligible and none of his own remain, then the bench. This is a
+// display-only greedy assignment for the rail, not the optimal starting
+// lineup scoring/draft_sim.py's _lineup_assignment computes server-side
+// (which assigns by highest points, not draft order) -- the rail only needs
+// to show which slots are spoken for, not which lineup scores best.
+function assignRoster(labels: string[], myRoster: RosterPlayer[]): RosterSlot[] {
+  const filled: (RosterPlayer | null)[] = labels.map(() => null)
+  const openIndexWhere = (test: (label: string) => boolean) =>
+    labels.findIndex((label, i) => filled[i] === null && test(label))
+
+  for (const player of myRoster) {
+    let target = openIndexWhere((label) => label.replace(/\d+$/, '') === player.position)
+    if (target === -1 && FLEX_ELIGIBLE.has(player.position)) {
+      target = openIndexWhere((label) => label.startsWith('FLEX'))
+    }
+    if (target === -1) {
+      target = openIndexWhere((label) => label.startsWith('BN'))
+    }
+    // No open slot left at all: my_roster and this session's own roster
+    // shape disagree (should not happen -- both are read off the same
+    // session), skipped rather than crashing the rail over a display gap.
+    if (target !== -1) filled[target] = player
+  }
+
+  return labels.map((label, i) => {
+    const bench = label.startsWith('BN')
+    // A slot the roster still needs a starter for reads in accent (see the
+    // design mock) -- bench slots never do, whether empty or not, since an
+    // empty bench spot is not a gap in anyone's starting lineup.
+    return { slot: label, player: filled[i], urgent: filled[i] === null && !bench }
+  })
+}
+
+const SCORING_LABEL: Record<'ppr' | 'half' | 'std', string> = {
+  ppr: 'PPR', half: 'Half PPR', std: 'Standard',
+}
 
 export default function DraftRoom() {
   const [state, setState] = useState<LiveState | null>(null)
@@ -57,9 +120,7 @@ export default function DraftRoom() {
 
   // 2.5s poll of /api/live/state, lifted unchanged from the deleted
   // LiveDraft.tsx. The board's own poll (fetchBoard/LiveBoard) is Task 9's
-  // to add, alongside the Snake Board tab it feeds -- this room does not
-  // fetch it, so RosterPanel below has no way yet to know which of my
-  // roster slots are actually filled (see the comment at `slots`).
+  // to add, alongside the Snake Board tab it feeds.
   useEffect(() => {
     let cancelled = false
 
@@ -95,15 +156,19 @@ export default function DraftRoom() {
   const connectionLabel = !state?.active ? 'NOT CONNECTED' : listenerOk ? 'ESPN LIVE' : 'LISTENER DOWN'
   const connectionTone = !state?.active ? 'off' : listenerOk ? 'ok' : 'fail'
 
-  // No source for "which players are on my roster" in this task's scope --
-  // that lives in /api/live/board's cells (BoardCell.slot vs. my_slot),
-  // which Task 7 does not fetch (see the poll effect's comment above). Every
-  // slot therefore renders open. `urgent` stays false rather than flagging
-  // every starter slot as a need: with no fill data at all, marking all ten
-  // "needs a starter" would overstate the gap on slots that may well already
-  // be filled -- an honest "empty" beats a confident-looking wrong one, in
-  // the same spirit as ClockPanel never fabricating a countdown.
-  const slots: RosterSlot[] = ALL_ROSTER_SLOTS.map((slot) => ({ slot, player: null, urgent: false }))
+  // ms_remaining straight off state -- never decayed or interpolated
+  // between polls, see ClockPanel.tsx's own comment on the ticker for why
+  // not. null (state not loaded yet, session inactive, or no CLOCK/SELECTING
+  // frame seen) reaches ClockPanel unchanged, which renders it as `--:--`.
+  const secondsLeft = state?.ms_remaining != null ? Math.round(state.ms_remaining / 1000) : null
+
+  const totalPicks = state?.active
+    ? (state.settings.teams as number) * (state.settings.rounds as number)
+    : null
+
+  const slots: RosterSlot[] = state?.active
+    ? assignRoster(rosterSlotLabels(state.settings), state.my_roster)
+    : []
 
   return (
     <div className="draft-room">
@@ -115,11 +180,17 @@ export default function DraftRoom() {
         <span className="draft-topbar-title">Draft Helper</span>
         <span className="draft-topbar-sep" aria-hidden="true" />
         {state?.active && (
-          <span className="draft-topbar-pick mono">
-            PICK <strong>{state.picks_made + 1}</strong> / {TOTAL_PICKS}
+          <span className="draft-topbar-league">
+            {state.settings.teams} teams
+            {state.settings.scoring_format && ` · ${SCORING_LABEL[state.settings.scoring_format]}`}
           </span>
         )}
         <span className="draft-topbar-spacer" />
+        {state?.active && totalPicks !== null && (
+          <span className="draft-topbar-pick mono">
+            PICK <strong>{state.picks_made + 1}</strong> / {totalPicks}
+          </span>
+        )}
         <span className={`draft-status-pill draft-status-pill-${connectionTone}`}>
           <span className="draft-status-dot" aria-hidden="true" />
           {connectionLabel}
@@ -158,8 +229,12 @@ export default function DraftRoom() {
         <aside className="draft-rail">
           {state ? (
             <>
-              <ClockPanel state={state} secondsLeft={null} />
-              <RosterPanel slots={slots} />
+              <ClockPanel state={state} secondsLeft={secondsLeft} />
+              {state.active ? (
+                <RosterPanel slots={slots} />
+              ) : (
+                <p className="rail-empty draft-rail-loading">No roster to show.</p>
+              )}
             </>
           ) : (
             <p className="rail-empty draft-rail-loading">{error ?? 'Loading…'}</p>

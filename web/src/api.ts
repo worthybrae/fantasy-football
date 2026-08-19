@@ -181,6 +181,36 @@ export interface UnmappedPick {
   overall_pick: number
 }
 
+// The session's real league shape, straight off session.settings
+// (scoring.league.LeagueSettings) -- see api/live.py's _league_settings_payload.
+// Present with the same five keys on the inactive response too (same
+// convention as listener_error/listener_alive below): null scalars and an
+// empty `starters`, never an omitted key, so the rail never has to branch
+// on whether `settings` exists, only on whether its values are null.
+export interface LiveSettings {
+  teams: number | null
+  rounds: number | null
+  starters: Record<string, number>
+  flex_slots: number | null
+  bench: number | null
+  // scoring.league.scoring_format's own three values. Null only on the
+  // inactive response, where there is no session's settings to derive it
+  // from -- never a guessed default.
+  scoring_format: 'ppr' | 'half' | 'std' | null
+}
+
+// One player on this session's own roster, in the order it drafted them --
+// straight off /api/live/state's `my_roster` (api/live.py's _my_roster).
+// `proj_points`, not `ev`: this is a plain replay of what was actually
+// drafted, not a rerun of the simulator's end-of-draft valuation, so there
+// is no `ev` here to report honestly.
+export interface RosterPlayer {
+  player_id: string
+  name: string
+  position: string
+  proj_points: number | null
+}
+
 export interface LiveState {
   active: boolean
   picks_made: number
@@ -213,6 +243,13 @@ export interface LiveState {
   // The bookmarklet has delivered a draft token. The onboarding gate flips
   // from "open your draft and click Draft Helper" to the live board on this.
   token_received?: boolean
+  // The live pick clock, straight off DraftListener.ms_remaining
+  // (pipeline/draft_listener.py) -- null until the first CLOCK or SELECTING
+  // frame has been seen. Never decayed or interpolated client-side between
+  // polls -- see ClockPanel.tsx's own comment on why not.
+  ms_remaining: number | null
+  settings: LiveSettings
+  my_roster: RosterPlayer[]
 }
 
 export async function fetchLiveState(): Promise<LiveState> {

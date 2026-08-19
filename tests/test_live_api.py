@@ -369,6 +369,120 @@ def test_state_candidates_carry_gain_now(tmp_path):
     assert gains == sorted(gains, reverse=True)
 
 
+def test_state_carries_the_pick_clock_league_settings_and_my_roster(tmp_path):
+    """Task 7b: the rail's three missing feeds. `/api/live/state` must serve
+    `ms_remaining` straight off the listener, `settings` off the session's
+    real LeagueSettings (not the frontend's old hardcoded 8/15 constants),
+    and `my_roster` -- this slot's own picks, replayed with _seed_rosters the
+    same way _recompute already does, mapped back to board rows.
+
+    Pick #1 in an 8-team snake belongs to slot 1: p1 goes to me, p2 to slot
+    2 (not mine), so my_roster must carry exactly p1's board row rather than
+    every drafted player.
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from pipeline.draft_listener import DraftListener
+
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path, extra_players=[
+        {"player_id": "p2", "name": "B Runner", "position": "RB",
+         "team": "DET", "espn_id": 4430807},
+    ])
+    conn = get_conn(path)
+    app = FastAPI()
+    state, _recompute = register_live_routes(app, conn, path)
+    client = TestClient(app)
+
+    session = build_session(conn, my_slot=1)
+    state["session"] = session
+    # A listener with no socket/thread wired up -- live_state only reads its
+    # ms_remaining attribute, the same field pipeline/draft_listener.py sets
+    # from CLOCK/SELECTING frames.
+    state["listener"] = DraftListener(session.crosswalk)
+    state["listener"].ms_remaining = 23000
+
+    write_table(conn, "drafted", pd.DataFrame([
+        {"player_id": "p1", "pick_no": 1},
+        {"player_id": "p2", "pick_no": 2},
+    ]))
+
+    body = client.get("/api/live/state").json()
+
+    assert body["ms_remaining"] == 23000
+    assert body["settings"] == {
+        "teams": session.settings.teams,
+        "rounds": session.settings.rounds,
+        "starters": dict(session.settings.starters),
+        "flex_slots": session.settings.flex_slots,
+        "bench": session.settings.bench,
+        "scoring_format": "half",       # scoring={"receptions": 0.5}
+    }
+    assert body["my_roster"] == [{
+        "player_id": "p1", "name": "A Star", "position": "WR",
+        "proj_points": session.board_by_id["p1"]["proj_points"],
+    }]
+
+
+def test_state_inactive_carries_null_clock_settings_and_empty_roster(tmp_path):
+    """The client should never have to branch on whether these keys exist
+    (see api/live.py's live_state docstring/comments) -- the inactive
+    response carries the same three keys this task adds, with null/empty
+    values rather than omitting them."""
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    body = TestClient(create_app(str(tmp_path / "t.duckdb"))).get("/api/live/state").json()
+    assert body["ms_remaining"] is None
+    assert body["settings"] == {
+        "teams": None, "rounds": None, "starters": {},
+        "flex_slots": None, "bench": None, "scoring_format": None,
+    }
+    assert body["my_roster"] == []
+
+
+def test_my_roster_replays_picks_in_order_including_a_pool_miss(tmp_path):
+    """Direct unit test of the _my_roster helper (not the HTTP layer): slot
+    8 of an 8-team snake picks twice in a row, at the turn (overall picks 8
+    and 9) -- p2 first, then p3 -- and picks 1-7 (someone else's turns) are
+    unattributable (`_seed_rosters` documents a None taken_order entry as
+    "drafted, then dropped off the board" -- still consumes a turn, adds
+    nothing to any roster). If my_roster silently re-sorted by anything
+    other than pick order (player_id, board rank, ...) this would catch it,
+    since p2/p3 are deliberately NOT in alphabetical or board order.
+    """
+    from api.live import _my_roster
+
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path, extra_players=[
+        {"player_id": "p2", "name": "B Runner", "position": "RB",
+         "team": "DET", "espn_id": 4430807},
+        {"player_id": "p3", "name": "C Slot", "position": "WR",
+         "team": "GB", "espn_id": 4426515},
+    ])
+    conn = get_conn(path)
+    session = build_session(conn, my_slot=8)
+    pool_index = {pid: i for i, pid in enumerate(session.pool.player_id)}
+
+    taken_order = [None] * 7 + [pool_index["p2"], pool_index["p3"]]
+    roster = _my_roster(session, taken_order)
+
+    assert [r["player_id"] for r in roster] == ["p2", "p3"]
+    assert roster[0]["position"] == "RB"
+    assert roster[1]["position"] == "WR"
+
+
+def test_my_roster_is_empty_when_my_slot_is_not_known_yet(tmp_path):
+    """Honest, not a guess: with no my_slot the socket hasn't named our team
+    (see DraftSession.my_slot's own docstring), so there is genuinely no
+    roster to attribute anything to."""
+    from api.live import _my_roster
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    session = build_session(get_conn(path), my_slot=None)
+    assert _my_roster(session, [0]) == []
+
+
 def test_recompute_discards_a_result_the_pick_count_has_moved_past(tmp_path, monkeypatch):
     """The pick-count guard: a search captured at picks_made=3 must not
     overwrite a poll that already recorded picks_made=5 by the time the

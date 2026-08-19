@@ -418,6 +418,82 @@ def _board_cell(player_id, pick_no, teams: int, slots: list, by_id: dict) -> dic
     return {"overall": overall, "round": rnd, "slot": slot, "player": player}
 
 
+def _league_settings_payload(settings) -> dict:
+    """The session's real league shape, as /api/live/state's `settings` key
+    serves it -- the rail's RosterPanel/ClockPanel read teams/rounds/starter
+    counts off this instead of the two hardcoded 8-team/15-round constants
+    they used to carry (LEAGUE_TEAMS, duplicated once in ClockPanel.tsx and
+    once in DraftRoom.tsx, each commented as cross-referencing the other).
+
+    `settings=None` (the inactive response, no session at all) returns the
+    same five keys with null/empty values rather than omitting them, so the
+    client never has to branch on whether the key exists -- only on whether
+    its values are null, the same convention `listener_error`/
+    `listener_alive` already use below.
+    """
+    if settings is None:
+        return {"teams": None, "rounds": None, "starters": {},
+                "flex_slots": None, "bench": None, "scoring_format": None}
+    return {
+        "teams": settings.teams,
+        "rounds": settings.rounds,
+        "starters": dict(settings.starters),
+        "flex_slots": settings.flex_slots,
+        "bench": settings.bench,
+        # scoring.league.scoring_format reads settings.scoring's own
+        # receptions value into one of ppr/half/std -- the same three-way
+        # call scoring.market's consensus already makes (see its own
+        # docstring). Not a new rule, just the first place this session's
+        # format reaches the UI, for the topbar's league-identity line.
+        "scoring_format": league_mod.scoring_format(settings),
+    }
+
+
+def _my_roster(session, taken_order) -> list:
+    """This session's own roster so far, in pick order -- the payload
+    /api/live/state's `my_roster` key serves the rail's RosterPanel.
+
+    Replays `taken_order` with `_seed_rosters`, the exact same replay
+    `_recompute` already pays for on every poll (see its own docstring) to
+    seed `need_weight`'s roster counts -- nothing new is computed here, only
+    read back. `rosters[my_slot]["indices"]` holds pool indices in the order
+    they were drafted (see `_seed_rosters`'s own docstring: a `None` entry in
+    `taken_order` -- a pick whose player fell out of the pool -- still
+    consumes a turn but is never added to any roster's `indices`, so it
+    needs no handling here).
+
+    Each index is mapped back to a board row the same way `_board_cell`
+    does: `session.pool.player_id[idx]` to a player id, then
+    `session.board_by_id` to the row. A miss (`row is None`) should not
+    happen -- `pool` and `board_by_id` are both built from the same `board`
+    DataFrame in `build_session`, so every pool index's player_id is
+    expected to resolve -- but it is skipped rather than raised, so a
+    genuine discrepancy costs one roster row rather than the whole
+    /api/live/state response.
+
+    Empty, not an error, when `session.my_slot` is still None: the socket
+    has not yet named our team (see `DraftSession.my_slot`'s own docstring),
+    so there is genuinely no "my roster" to report -- an empty list is the
+    honest answer, not a guess at which slot is ours.
+    """
+    if session.my_slot is None:
+        return []
+    rosters, _ = _seed_rosters(session.pool, session.settings, taken_order)
+    roster = []
+    for idx in rosters[session.my_slot]["indices"]:
+        pid = str(session.pool.player_id[idx])
+        row = session.board_by_id.get(pid)
+        if row is None:
+            continue
+        roster.append({
+            "player_id": pid,
+            "name": _str_or_none(row.get("name")),
+            "position": _str_or_none(row.get("position")),
+            "proj_points": _float_or_none(row.get("proj_points")),
+        })
+    return roster
+
+
 def _slot_from_socket(listener, teams: int):
     """Derive my draft slot from the socket alone, when history cannot.
 
@@ -1025,8 +1101,23 @@ def register_live_routes(app, conn, db_path):
                         "last_poll_at": None, "stale": True,
                         "unmapped_picks": [], "listener_error": None,
                         "listener_alive": False,
-                        "token_received": state.get("token") is not None}
+                        "token_received": state.get("token") is not None,
+                        "ms_remaining": None,
+                        "settings": _league_settings_payload(None),
+                        "my_roster": []}
             snapshot = dict(state)
+            listener = snapshot["listener"]
+            # Straight off the listener, read here rather than after `lock`
+            # releases: not because a single int attribute read is unsafe
+            # (pipeline/draft_listener.py sets it with a plain assignment,
+            # effectively atomic under the GIL) but so this value is drawn
+            # from the same consistent snapshot as everything else below --
+            # the same reasoning the picks_made query already follows. None
+            # until the first CLOCK or SELECTING frame has landed (see
+            # DraftListener.ms_remaining's own field comment) -- never a
+            # decayed or interpolated guess, so a genuinely stale value
+            # never gets rendered as a live one.
+            ms_remaining = listener.ms_remaining if listener is not None else None
             # Same connection choice as _recompute: the league this session
             # belongs to, not always the shared `conn`, or the picks-made
             # count (and the on-the-clock slot derived from it) would be
@@ -1048,6 +1139,27 @@ def register_live_routes(app, conn, db_path):
             cur = (snapshot["league_conn"] or conn).cursor()
             try:
                 picks_made = cur.execute("SELECT count(*) FROM drafted").fetchone()[0]
+                # My own roster so far. Only queried when my_slot is known --
+                # _my_roster returns [] unconditionally otherwise, so the
+                # extra read would be wasted -- and wrapped against the one
+                # documented failure of _drafted_state: a drafted row with no
+                # pick_no cannot be attributed to a slot at all (see its own
+                # docstring), which must cost this response its roster, not
+                # the clock and listener health the rest of it still owes.
+                # Measured against the real production pool (data/nfl.duckdb,
+                # 249 players, 8 teams): _drafted_state + _seed_rosters
+                # together run in ~0.5-0.6ms even at picks_made=120 -- three
+                # orders of magnitude under the 2.5s poll cadence, so this
+                # runs on every poll rather than being cached against the
+                # pick count.
+                my_roster = []
+                if session.my_slot is not None:
+                    try:
+                        _, taken_order = _drafted_state(cur, session.pool)
+                    except ValueError:
+                        taken_order = None
+                    if taken_order is not None:
+                        my_roster = _my_roster(session, taken_order)
             finally:
                 cur.close()
         slots = snake_slots(session.settings.teams, session.settings.rounds)
@@ -1074,6 +1186,9 @@ def register_live_routes(app, conn, db_path):
             "listener_error": snapshot["listener_error"],
             "listener_alive": thread.is_alive() if thread is not None else False,
             "token_received": snapshot.get("token") is not None,
+            "ms_remaining": ms_remaining,
+            "settings": _league_settings_payload(session.settings),
+            "my_roster": my_roster,
         }
 
     @app.get("/api/live/board")

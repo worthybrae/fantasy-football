@@ -866,6 +866,17 @@ td:first-child {
   background: var(--border);
 }
 
+/* The league-identity line between the title separator and the pick
+   counter (the design mock's "Bragging Rights Only · 8 teams · PPR") --
+   only the team count and scoring format, never a league name: no endpoint
+   this room fetches carries one, and inventing one would fail the same
+   "never show something it does not know" rule everything else in the rail
+   already follows. */
+.draft-topbar-league {
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+
 .draft-topbar-pick {
   font-size: var(--text-sm);
   color: var(--text-3);
