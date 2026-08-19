@@ -926,3 +926,66 @@ def test_build_board_warns_that_the_espn_rung_is_converted_not_re_derived(tmp_pa
         build_board(conn)
     assert not [c for c in caught if issubclass(c.category, RuntimeWarning)
                 and "proj_points" in str(c.message)]
+
+
+def test_a_kickers_factors_stay_neutral_until_the_league_prices_kicking():
+    """`_neutral_factors` is the one place that decides this, and the
+    condition is the league's rules rather than the position.
+
+    Production, durability and schedule become real signal for a kicker the
+    moment his kicks are worth points; `role` never does, because
+    `factors.role_factor` blends depth-chart rank with share of team
+    targets+carries and the second half is structurally zero for every
+    kicker. A defense gets nothing back under any rules -- there is no
+    team-defense row in `weekly` to compute one from.
+    """
+    from scoring.board import _neutral_factors, _NEUTRAL_FACTORS_FOR_KDST
+    from scoring.ppr import DEFAULT_RULES
+    kicking = {**DEFAULT_RULES, "fg_made_30_39": 3.0, "pat_made": 1.0}
+
+    assert _neutral_factors("K", None) == _NEUTRAL_FACTORS_FOR_KDST
+    assert _neutral_factors("K", DEFAULT_RULES) == _NEUTRAL_FACTORS_FOR_KDST
+    assert _neutral_factors("K", kicking) == ["role"]
+
+    assert _neutral_factors("DST", None) == _NEUTRAL_FACTORS_FOR_KDST
+    assert _neutral_factors("DST", kicking) == _NEUTRAL_FACTORS_FOR_KDST
+
+
+def test_a_kicker_needs_most_of_a_season_before_his_ppg_is_extrapolated():
+    """The regression that scoring kickers introduced, pinned.
+
+    `projections()`'s second rung multiplies a player's per-game points by a
+    full season. ESPN publishes no projection for a fringe kicker, so that
+    rung became the normal path for them -- and on the real 249-row board it
+    put Ben Sauls (three games) and Spencer Shrader (five) ahead of Brandon
+    Aubrey's full 17-game season. K's replacement rank is 3, so those two
+    undraftable kickers became the baseline every kicker was priced against
+    and the whole position fell about thirty places.
+
+    Below the threshold a kicker falls to POSITION_FLOOR, which is exactly
+    where every unprojected kicker sat before kicking was scorable.
+    """
+    import pandas as pd
+    from scoring.board import (projections, POSITION_FLOOR, GAMES,
+                               _MIN_GAMES_FOR_KICKER_PPG)
+
+    class _NoEspn:
+        def execute(self, *a, **k):
+            raise AssertionError("should not be reached")
+
+    def _board(games, ppg):
+        return pd.DataFrame([{
+            "player_id": "k1", "name": "Kick Guy", "position": "K",
+            "team": "DAL", "proj_scale": 1.0,
+            "stats": {"season": 2025, "games": games, "ppg": ppg}}])
+
+    from unittest.mock import patch
+    with patch("scoring.board.read_table", return_value=pd.DataFrame()):
+        short = _board(_MIN_GAMES_FOR_KICKER_PPG - 1, 11.2)
+        assert projections(_NoEspn(), short).iloc[0] == POSITION_FLOOR["K"]
+        full = _board(_MIN_GAMES_FOR_KICKER_PPG, 11.2)
+        assert projections(_NoEspn(), full).iloc[0] == 11.2 * GAMES
+        # A skill player on the same tiny sample is deliberately NOT guarded:
+        # changing him would move a board the owner is drafting from.
+        wr = short.assign(position="WR", name="WR Guy")
+        assert projections(_NoEspn(), wr).iloc[0] == 11.2 * GAMES

@@ -56,9 +56,23 @@ def test_game_log_includes_structured_stats():
     assert s["rec_yards"] == 80 and s["rec_tds"] == 1
     # columns absent from the weekly frame zero-fill
     assert s["pass_yards"] == 0 and s["completions"] == 0 and s["carries"] == 0
+    # ...including the kicking keys, which is the point of them being on
+    # every row rather than only a kicker's: the client indexes a uniform
+    # shape. A receiver's game carries them at zero, exactly as he has
+    # always carried `pass_yards` at zero.
+    assert s["fg_made"] == 0 and s["fg_att"] == 0 and s["fg_long"] == 0
+    assert s["pat_made"] == 0 and s["pat_att"] == 0
+    # The original twelve keys are still exactly the original twelve; the
+    # kicking keys are additive. Asserted as two sets rather than one so a
+    # future change that DROPS one of the twelve cannot be hidden by a
+    # change that adds another.
+    assert {"completions", "attempts", "pass_yards", "pass_tds",
+            "interceptions", "carries", "rush_yards", "rush_tds",
+            "targets", "receptions", "rec_yards", "rec_tds"}.issubset(s)
     assert set(s) == {"completions", "attempts", "pass_yards", "pass_tds",
                       "interceptions", "carries", "rush_yards", "rush_tds",
-                      "targets", "receptions", "rec_yards", "rec_tds"}
+                      "targets", "receptions", "rec_yards", "rec_tds",
+                      "fg_made", "fg_att", "fg_long", "pat_made", "pat_att"}
 
 def test_game_log_structured_passing_stats_nonzero():
     s = game_log(_qb_weekly_rows(), "q1")[0]["stats"]
@@ -963,3 +977,172 @@ def test_board_cache_does_not_serve_a_ppr_board_to_a_half_ppr_league(tmp_path):
     # second call did not overwrite the first league's entry.
     pd.testing.assert_series_equal(p_ppr, again.set_index("player_id").loc["p1"])
     assert len(board_cache._cache) == 2
+
+
+# ---------------------------------------------------------------------------
+# Kickers: the history that was deliberately blanked, and when it stays that way
+# ---------------------------------------------------------------------------
+
+def _kicker_rules():
+    """The owner's real kicking values, through the real ESPN map."""
+    from pipeline.espn_league import parse_settings
+    from scoring import league
+    return league.from_espn(parse_settings({"settings": {
+        "size": 8,
+        "rosterSettings": {"lineupSlotCounts": {
+            "0": 1, "2": 2, "4": 2, "6": 1, "16": 1, "17": 1, "20": 5, "23": 2}},
+        "scoringSettings": {"scoringItems": [
+            {"statId": 3, "points": 0.04}, {"statId": 4, "points": 4.0},
+            {"statId": 19, "points": 2.0}, {"statId": 20, "points": -2.0},
+            {"statId": 24, "points": 0.1}, {"statId": 25, "points": 6.0},
+            {"statId": 26, "points": 2.0}, {"statId": 42, "points": 0.1},
+            {"statId": 43, "points": 6.0}, {"statId": 44, "points": 2.0},
+            {"statId": 53, "points": 1.0}, {"statId": 72, "points": -2.0},
+            {"statId": 77, "points": 4.0}, {"statId": 80, "points": 3.0},
+            {"statId": 85, "points": -1.0}, {"statId": 86, "points": 1.0},
+            {"statId": 198, "points": 5.0}, {"statId": 201, "points": 6.0}]},
+        "draftSettings": {"type": "SNAKE", "pickOrder": [1, 2, 3, 4, 5, 6, 7, 8]},
+    }}, 2025)).scoring
+
+
+def _kicker_settings(scoring):
+    from scoring import league
+    return league.LeagueSettings(
+        season=2025, teams=8,
+        starters={"QB": 1, "RB": 2, "WR": 2, "TE": 1, "K": 1, "DST": 1},
+        flex_slots=2, bench=5, scoring=scoring, draft_type="SNAKE")
+
+
+def _seed_kicker_fixture(tmp_path):
+    """One kicker with ten identical real-shaped weeks, plus a WR to rank against.
+
+    Each of k1's weeks is 2 field goals from 30-39 and 3 extra points, which
+    under the owner's scoring is 2 x 3 + 3 x 1 = 9.0 points a game, 90.0 for
+    the season -- and 0.0 under full PPR, which scores no kicking at all.
+    """
+    conn = get_conn(str(tmp_path / "kick.duckdb"))
+    weekly = pd.DataFrame(
+        [{"player_id": "k1", "player_display_name": "Kick Guy",
+          "position": "K", "recent_team": "DAL", "opponent_team": "PHI",
+          "season": 2025, "week": w, "fg_made": 2, "fg_att": 2, "fg_long": 38,
+          "fg_made_30_39": 2, "fg_missed": 0, "fg_blocked": 0,
+          "pat_made": 3, "pat_att": 3, "pat_missed": 0, "pat_blocked": 0,
+          "receptions": 0, "receiving_yards": 0, "receiving_tds": 0,
+          "targets": 0, "carries": 0}
+         for w in range(1, 11)]
+        + [{"player_id": "p1", "player_display_name": "Amon-Ra St. Brown",
+            "position": "WR", "recent_team": "DET", "opponent_team": "GB",
+            "season": 2025, "week": w, "receptions": 6, "receiving_yards": 80,
+            "receiving_tds": 1, "targets": 9, "carries": 0, "fg_made": 0,
+            "fg_att": 0, "fg_long": 0, "pat_made": 0, "pat_att": 0,
+            "fg_missed": 0, "fg_blocked": 0, "fg_made_30_39": 0,
+            "pat_missed": 0, "pat_blocked": 0}
+           for w in range(1, 11)])
+    write_table(conn, "weekly", weekly)
+    write_table(conn, "schedules", pd.DataFrame([
+        {"home_team": "DAL", "away_team": "PHI", "week": 1,
+         "total_line": 47.0, "spread_line": 2.0},
+        {"home_team": "DET", "away_team": "GB", "week": 1,
+         "total_line": 51.0, "spread_line": 3.0}]))
+    write_table(conn, "adp", pd.DataFrame([
+        {"adp_name": "Kick Guy", "position": "PK", "team": "DAL", "adp": 140.0},
+        {"adp_name": "Amon-Ra St Brown", "position": "WR", "team": "DET",
+         "adp": 5.1}]))
+    write_table(conn, "depth_charts", pd.DataFrame(
+        columns=["gsis_id", "depth_team", "formation", "week", "position"]))
+    write_table(conn, "snap_counts", pd.DataFrame(
+        columns=["player", "team", "season", "offense_pct"]))
+    write_table(conn, "espn_adp", pd.DataFrame(
+        columns=["espn_id", "espn_name", "position", "espn_adp",
+                 "espn_ppr_rank", "espn_proj"]))
+    write_table(conn, "fp_ecr", pd.DataFrame(
+        columns=["fp_name", "team", "position", "rank_ecr", "rank_ave",
+                 "rank_std", "fp_tier"]))
+    write_table(conn, "sleeper_ids", pd.DataFrame(
+        columns=["gsis_id", "espn_id", "sleeper_name", "position", "team"]))
+    return conn
+
+
+def _kicker_profile(conn, scoring):
+    from scoring import board_cache, profile_cache
+    board_cache.clear()
+    profile_cache.clear()
+    return build_profile(conn, "k1", None, _kicker_settings(scoring))
+
+
+def test_a_kickers_history_is_still_blanked_when_the_league_prices_no_kicking(tmp_path):
+    """The original reasoning, preserved rather than deleted.
+
+    Under full PPR every one of this kicker's weeks is worth 0.0, so a
+    history would be ten rows of zero -- misleading, not informative, which
+    is exactly why scoring/profile.py collapsed it in the first place. That
+    is still the right answer, and it is now reached by asking the RULES
+    rather than by testing the position.
+    """
+    from scoring.ppr import DEFAULT_RULES
+    p = _kicker_profile(_seed_kicker_fixture(tmp_path), dict(DEFAULT_RULES))
+    assert p["header"]["position"] == "K"
+    assert p["seasons"] == []
+    assert p["game_log"] == []
+
+
+def test_a_kickers_history_is_real_once_the_league_prices_kicking(tmp_path):
+    """Ten weeks of 2 FG from 30-39 (3 points each) and 3 PATs (1 each).
+
+    9.0 a game, 90.0 for the season, and every week identical so the
+    volatility is exactly 0.0.
+    """
+    p = _kicker_profile(_seed_kicker_fixture(tmp_path), _kicker_rules())
+    assert len(p["seasons"]) == 1
+    season = p["seasons"][0]
+    assert season["season"] == 2025 and season["games"] == 10
+    assert season["ppg"] == 9.0
+    assert season["ppg_std"] == 0.0
+    # He is the only kicker in the fixture, so he finished K1.
+    assert season["pos_finish"] == 1
+    # The kicking counts behind those points ride on the season row.
+    assert season["fg_made"] == 20 and season["fg_att"] == 20
+    assert season["pat_made"] == 30 and season["pat_att"] == 30
+    assert season["fg_long"] == 38          # a season maximum, not a sum
+
+    assert len(p["game_log"]) == 10
+    top = p["game_log"][0]
+    assert top["ppr_points"] == 9.0
+    # The line that used to read "0 tgt, 0 rec, 0 yds, 0 TD" for every kicker.
+    assert top["stat_line"] == "2/2 FG, long 38 · 3/3 XP"
+    assert top["stats"]["fg_made"] == 2 and top["stats"]["pat_made"] == 3
+    # And the recency-weighted career summary now has something to average.
+    assert p["summary"]["w_ppg"] == 9.0
+
+
+def test_a_kickers_stat_line_survives_a_week_with_no_field_goal(tmp_path):
+    """`fg_long` is a maximum, so a kick-less week has none -- the line must
+    not claim "long 0"."""
+    row = {"fg_made": 0, "fg_att": 0, "fg_long": 0, "pat_made": 4, "pat_att": 4}
+    assert _stat_line(row, "K") == "0/0 FG · 4/4 XP"
+
+
+def test_a_defenses_profile_is_unchanged_because_nothing_can_score_one(tmp_path):
+    """DST has no weekly rows at all, so there is nothing to price however
+    the league scores. This pins that the kicking work did not quietly
+    invent a defensive history."""
+    conn = _seed_kicker_fixture(tmp_path)
+    write_table(conn, "adp", pd.DataFrame([
+        {"adp_name": "Kick Guy", "position": "PK", "team": "DAL", "adp": 140.0},
+        {"adp_name": "Amon-Ra St Brown", "position": "WR", "team": "DET",
+         "adp": 5.1},
+        {"adp_name": "Cowboys", "position": "DST", "team": "DAL", "adp": 150.0}]))
+    from scoring import board_cache, profile_cache
+    from scoring.board import build_board
+    board_cache.clear()
+    profile_cache.clear()
+    settings = _kicker_settings(_kicker_rules())
+    board = build_board(conn, settings=settings)
+    dst = board[board["position"] == "DST"].iloc[0]
+    profile = build_profile(conn, dst["player_id"], None, settings)
+    assert profile["seasons"] == [] and profile["game_log"] == []
+    assert profile["similar"]["mode"] == "value_neighbors"
+    # Every factor but environment stays neutral for a defense, whatever the
+    # league scores.
+    for factor in ("production", "durability", "role", "schedule"):
+        assert profile["factors"][factor] == 50.0

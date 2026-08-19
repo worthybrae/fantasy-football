@@ -8,7 +8,7 @@ from scoring.board import _norm_name, _adapt_depth_charts
 from scoring.board_cache import cached_build_board
 from scoring.config import RECENCY_WEIGHTS
 from scoring.profile_cache import cached_profile_frames, snap_share_by_season
-from scoring.ppr import compute_ppr_points, normalize_rules
+from scoring.ppr import compute_ppr_points, normalize_rules, prices_kicking
 from scoring.similarity import (player_season_features, find_twins,
                                 value_neighbors)
 
@@ -72,7 +72,25 @@ def _stat_line(row, position):
             line += (f" · {int(_num(row, 'receptions'))} rec, "
                       f"{int(_num(row, 'receiving_yards'))} yds")
         return line
-    # WR/TE (and fallback for K/other positions)
+    if position == "K":
+        # Before kicking was scorable a kicker fell through to the WR/TE
+        # branch below and rendered "0 tgt, 0 rec, 0 yds, 0 TD" -- true of
+        # every kicker who ever played, and information about none of them.
+        # The bands are the ones the league actually prices
+        # (scoring.league.ESPN_STAT_COLUMNS), so the line reads as the points
+        # beside it were earned. `fg_long` is the one number a kicker is
+        # actually discussed in terms of, and it is a per-game maximum rather
+        # than a count, so it is shown only when there was a kick to have a
+        # long.
+        fgm = int(_num(row, "fg_made"))
+        fga = int(_num(row, "fg_att"))
+        line = f"{fgm}/{fga} FG"
+        long = int(_num(row, "fg_long"))
+        if long > 0:
+            line += f", long {long}"
+        line += f" · {int(_num(row, 'pat_made'))}/{int(_num(row, 'pat_att'))} XP"
+        return line
+    # WR/TE (and fallback for other positions)
     tgt = int(_num(row, "targets"))
     rec = int(_num(row, "receptions"))
     yds = int(_num(row, "receiving_yards"))
@@ -84,9 +102,9 @@ def _stat_line(row, position):
     return line
 
 
-# Payload key -> weekly-table column. Every game_log row carries all 12 keys
-# (zero-filled when the column is absent) so the frontend's position-aware
-# column configs can index into a uniform shape.
+# Payload key -> weekly-table column. Every game_log row carries all of these
+# keys (zero-filled when the column is absent) so the frontend's
+# position-aware column configs can index into a uniform shape.
 _GAME_STAT_COLS = {
     "completions": "completions", "attempts": "attempts",
     "pass_yards": "passing_yards", "pass_tds": "passing_tds",
@@ -96,6 +114,20 @@ _GAME_STAT_COLS = {
     "receptions": "receptions", "rec_yards": "receiving_yards",
     "rec_tds": "receiving_tds",
 }
+
+# The kicking half of the same contract, kept separate so the twelve keys
+# above stay exactly the twelve keys they were. Additive on purpose: an
+# existing client indexes the keys it knows by name and ignores the rest, so
+# a QB's row growing five zero-valued kicking keys changes nothing it renders,
+# while a kicker's row finally carries the numbers behind its points. There
+# is no frontend column config for these yet -- `stat_line` is what shows a
+# kicker's game today; these are here so the client can be given one without
+# a second pass over the backend.
+_KICK_STAT_COLS = {
+    "fg_made": "fg_made", "fg_att": "fg_att", "fg_long": "fg_long",
+    "pat_made": "pat_made", "pat_att": "pat_att",
+}
+_GAME_STAT_COLS = {**_GAME_STAT_COLS, **_KICK_STAT_COLS}
 
 
 def _game_stats(row):
@@ -173,6 +205,24 @@ def season_summaries(weekly: pd.DataFrame, snaps: pd.DataFrame | None, player_id
     for out in pass_cols:
         mine[out] = mine[out].fillna(0)
 
+    # Kicking, aggregated here for the same reason as passing: it is not part
+    # of player_season_features, which feeds twin matching and must not
+    # change shape. Every season row carries these keys whatever the
+    # position, matching how the passing keys already behave -- a WR's row
+    # has carried `pass_yards: 0` since this function was written. `fg_long`
+    # is a season MAXIMUM, not a sum; summing per-game longs would produce a
+    # number with no meaning at all.
+    for out, col in _KICK_STAT_COLS.items():
+        wk_mine[out] = (pd.to_numeric(wk_mine[col], errors="coerce").fillna(0)
+                        if col in wk_mine.columns else 0.0)
+    kick_sums = [k for k in _KICK_STAT_COLS if k != "fg_long"]
+    kicking = wk_mine.groupby("season", as_index=False)[kick_sums].sum()
+    kicking["fg_long"] = (wk_mine.groupby("season")["fg_long"].max()
+                          .reindex(kicking["season"]).to_numpy())
+    mine = mine.merge(kicking, on="season", how="left")
+    for out in _KICK_STAT_COLS:
+        mine[out] = mine[out].fillna(0)
+
     # Week-to-week volatility for the consistency chart. Weekly rows are
     # games played by definition (dnp zero-fill exists only in game_log), so
     # no exclusion is needed; sample std is NaN -> None for 1-game seasons.
@@ -202,6 +252,11 @@ def season_summaries(weekly: pd.DataFrame, snaps: pd.DataFrame | None, player_id
             "receptions": int(r["receptions"]),
             "yards_per_opp": _round_or_none(r["yards_per_opp"], 1),
             "snap_share": _round_or_none(r["snap_share"], 3),
+            "fg_made": int(r["fg_made"]),
+            "fg_att": int(r["fg_att"]),
+            "fg_long": int(r["fg_long"]),
+            "pat_made": int(r["pat_made"]),
+            "pat_att": int(r["pat_att"]),
         })
     return rows
 
@@ -352,10 +407,24 @@ def weekly_difficulty(schedules: pd.DataFrame, prior_weekly: pd.DataFrame,
     of the same reader.
 
     pct = its percentile among all teams (high = allows a lot = soft
-    matchup). Weeks without a game (bye) carry a null opponent. K/DST
-    have no meaningful positional FPA -- empty list, card hidden.
+    matchup). Weeks without a game (bye) carry a null opponent.
+
+    K is included exactly when the league prices kicking, and for the same
+    reason scoring/board.py stops neutralising a kicker's `schedule` factor
+    then: both numbers are the same quantity -- prior-season points allowed
+    to this position, under these rules -- and the board already shows its
+    percentile on the header of this very page. Leaving this list empty for a
+    league that DOES score kicking would put a schedule percentile on the
+    card with nothing behind it; filling it for a league that does NOT would
+    be seventeen weeks of "0.0 points allowed".
+
+    DST has no positional FPA at all (no weekly rows to allow points to), so
+    it is always an empty list and the card stays hidden.
     """
-    if schedules.empty or prior_weekly.empty or position not in _DEPTH_POSITIONS:
+    positions = set(_DEPTH_POSITIONS)
+    if prices_kicking(rules):
+        positions.add("K")
+    if schedules.empty or prior_weekly.empty or position not in positions:
         return []
     wk = prior_weekly.copy()
     wk["ppr_points"] = compute_ppr_points(wk, normalize_rules(rules))
@@ -584,12 +653,27 @@ def build_profile(conn, player_id: str, weights: dict | None = None,
     wk_mine = _player_weekly(conn, player_id)
     depth = _depth_slice(conn, header["team"], player_id)
 
-    if header["position"] == "K":
-        # Kickers have weekly rows, but the PPR formula doesn't score kicking
-        # stats, so every one of those rows nets 0 points -- a "history" of
-        # zeros is misleading, not informative. Collapse it the same way a
-        # rookie's genuinely-empty history collapses (DST never has weekly
-        # rows at all, so it already returns empty here).
+    if header["position"] == "K" and not prices_kicking(rules):
+        # Kickers have weekly rows, and this branch STILL blanks them -- but
+        # on the league's scoring rather than on the position, which is what
+        # the original reasoning was actually about.
+        #
+        # It read: "the PPR formula doesn't score kicking stats, so every one
+        # of those rows nets 0 points -- a history of zeros is misleading,
+        # not informative." Every word of that is still true of a league that
+        # prices no kicking, and every word of it stops being true the moment
+        # one does. Deleting the branch outright would have been wrong in the
+        # other direction: `scoring.league.ESPN_STAT_COLUMNS` only teaches
+        # this app to READ a league's kicking rules, it does not give a
+        # league that has none. A database whose `league` table predates that
+        # map, and any league that genuinely scores kicking at nothing, still
+        # produces exactly the column of zeros this was written to hide -- so
+        # the test is `prices_kicking(rules)`, not `position == "K"`.
+        #
+        # DST is not mentioned because it does not reach here: it has no
+        # weekly rows at all, so `season_summaries` and `game_log` return
+        # empty on their own. Defensive scoring is not derivable from this
+        # database (see scoring/league.py's `from_espn`), so that stays true.
         seasons = []
         logs = []
     else:

@@ -48,7 +48,11 @@ def test_scoring_maps_espn_stat_ids_to_nflverse_columns():
     assert s.scoring["receiving_fumbles_lost"] == -2.0
 
 def test_unmapped_scoring_items_are_reported_not_dropped_silently():
-    # 101 is a kick-return TD, which nflverse weekly player stats do not carry.
+    # 101 is a kickoff-return TD. The reason it stays unmapped is NOT that
+    # nflverse lacks it, which is what this comment used to say: nflverse
+    # carries it in `special_teams_tds`, but that one column also covers the
+    # punt-return TD (statId 102), so pricing both would score every return
+    # touchdown twice. See scoring/league.ESPN_STAT_COLUMNS.
     assert "101" in _settings().unmapped_scoring
 
 def test_default_settings_reproduce_config_constants():
@@ -103,3 +107,87 @@ def test_scoring_format_defaults_to_ppr_for_unknown_settings():
     assert league.scoring_format(replace(league.default_settings(), scoring={})) == "ppr"
     # default_settings is full PPR (DEFAULT_RULES scores receptions 1.0).
     assert league.scoring_format(league.default_settings()) == "ppr"
+
+
+# 8 teams, PPR, plus the kicking half of the owner's real ESPN scoring and a
+# representative slice of the team-defense items -- including the
+# `pointsOverrides` shape ESPN really uses for them, which is what a naive
+# defensive mapping would silently price at zero.
+ESPN_SETTINGS_WITH_KICKING = {
+    "settings": {
+        "size": 8,
+        "rosterSettings": {"lineupSlotCounts": {
+            "0": 1, "2": 2, "4": 2, "6": 1, "16": 1, "17": 1,
+            "20": 5, "21": 1, "23": 2,
+        }},
+        "scoringSettings": {"scoringItems": [
+            {"statId": 3, "points": 0.04}, {"statId": 4, "points": 4.0},
+            {"statId": 19, "points": 2.0}, {"statId": 20, "points": -2.0},
+            {"statId": 24, "points": 0.1}, {"statId": 25, "points": 6.0},
+            {"statId": 26, "points": 2.0}, {"statId": 42, "points": 0.1},
+            {"statId": 43, "points": 6.0}, {"statId": 44, "points": 2.0},
+            {"statId": 53, "points": 1.0}, {"statId": 72, "points": -2.0},
+            # kicking
+            {"statId": 77, "points": 4.0}, {"statId": 80, "points": 3.0},
+            {"statId": 85, "points": -1.0}, {"statId": 86, "points": 1.0},
+            {"statId": 198, "points": 5.0}, {"statId": 201, "points": 6.0},
+            # team defense, exactly as ESPN publishes it
+            {"statId": 99, "points": 0.0, "pointsOverrides": {"16": 1.0}},
+            {"statId": 95, "points": 0.0, "pointsOverrides": {"16": 2.0}},
+            {"statId": 89, "points": 0.0, "pointsOverrides": {"16": 5.0}},
+            {"statId": 128, "points": 0.0, "pointsOverrides": {"16": 5.0}},
+            {"statId": 101, "points": 6.0, "pointsOverrides": {"16": 6.0}},
+            {"statId": 102, "points": 6.0, "pointsOverrides": {"16": 6.0}},
+        ]},
+        "draftSettings": {"type": "SNAKE", "pickOrder": [3, 7, 1, 2, 4, 5, 6, 8]},
+    }
+}
+
+
+def _kicking_settings():
+    from pipeline.espn_league import parse_settings
+    return league.from_espn(parse_settings(ESPN_SETTINGS_WITH_KICKING, 2026))
+
+
+def test_espn_kicking_stat_ids_reach_the_weekly_columns_they_score():
+    """Each id's meaning was established by joining ESPN's own 2025 actuals
+    to this database's weekly table for 40 kickers (see
+    scoring/league.ESPN_STAT_COLUMNS); this pins the resulting map."""
+    s = _kicking_settings().scoring
+    assert s["fg_made_40_49"] == 4.0                       # 77
+    assert s["fg_made_50_59"] == 5.0                       # 198
+    assert s["fg_made_60_"] == 6.0                         # 201
+    assert s["pat_made"] == 1.0                            # 86
+    # 80 is a single ESPN item covering everything under 40 yards; nflverse
+    # splits it three ways, so it fans out and each band gets the same value.
+    assert (s["fg_made_0_19"], s["fg_made_20_29"], s["fg_made_30_39"]) == (3.0, 3.0, 3.0)
+    # ESPN counts a blocked field goal as a missed one; nflverse does not.
+    assert s["fg_missed"] == -1.0 and s["fg_blocked"] == -1.0
+
+
+def test_reading_kicking_leaves_the_skill_positions_scoring_untouched():
+    """The guarantee the live board rests on: this league is still exactly
+    full PPR everywhere DEFAULT_RULES has an opinion."""
+    from scoring.ppr import DEFAULT_RULES
+    s = _kicking_settings().scoring
+    assert {k: v for k, v in s.items() if k in DEFAULT_RULES} == DEFAULT_RULES
+
+
+def test_team_defense_items_stay_unmapped_rather_than_being_priced_wrong():
+    """Every defensive id is identified in scoring/league.py and mapped by
+    none of them, for reasons recorded there. Two failure modes are pinned:
+
+      * their real value lives in `pointsOverrides`, keyed by the D/ST
+        lineup slot, and `points` is 0.0 -- so a mapping that read `points`
+        would price a whole position at nothing and say so nowhere;
+      * 101 and 102 are the kickoff- and punt-return touchdown, and nflverse
+        carries one `special_teams_tds` column covering both, so pricing
+        the pair would score every return touchdown twice.
+    """
+    s = _kicking_settings()
+    for stat_id in ("99", "95", "89", "128", "101", "102"):
+        assert stat_id in s.unmapped_scoring
+    assert "special_teams_tds" not in s.scoring
+    assert "def_sacks" not in s.scoring and "def_interceptions" not in s.scoring
+    # Nothing was priced at zero by reading `points` off an override item.
+    assert all(v != 0.0 for v in s.scoring.values())

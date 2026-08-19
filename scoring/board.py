@@ -14,9 +14,12 @@ Universe construction:
      universe becomes a new row -- this is how rookies and K/DST enter the
      board. DST joins to its environment/schedule/bye via `team` rather than
      a name match.
-  3. K/DST get every factor neutral (50) except `environment`, since the PPR
-     scoring formula does not score kicking/defense stats, so production,
-     durability, role and schedule computed from real data would be noise.
+  3. K/DST get every factor neutral (50) except `environment`, since a
+     factor computed from stats the league does not score would be noise.
+     A league that DOES price kicking (scoring/league.py maps ESPN's kicking
+     stat ids) gets a kicker's production, durability and schedule back --
+     see `_neutral_factors` for the argument factor by factor. DST is
+     unconditional: nothing in this database can compute a defense.
      `rookie` is also forced False for K/DST: the flag means "skill player
      with no NFL history," and K/DST enter from ADP by design, so it would
      otherwise be meaningless noise on every K/DST row.
@@ -52,12 +55,15 @@ from scoring import factors, league
 from scoring.composite import compute_composite, apply_vor, assign_tiers
 from scoring.config import DEFAULT_WEIGHTS, RECENCY_WEIGHTS
 from scoring.market import add_market, select_format
-from scoring.ppr import compute_ppr_points, normalize_rules
+from scoring.ppr import compute_ppr_points, normalize_rules, prices_kicking
 from scoring.similarity import player_season_features
 
 _SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
 FANTASY_POSITIONS = {"QB", "RB", "WR", "TE", "K", "DST"}
 _NEUTRAL_FACTORS_FOR_KDST = ["production", "durability", "role", "schedule"]
+# The subset of those a kicker gets back once the league actually prices
+# kicking -- see `_neutral_factors` for the argument, factor by factor.
+_KICKER_FACTORS_THAT_BECOME_REAL = ["production", "durability", "schedule"]
 _ADP_POSITION_ALIASES = {"PK": "K"}
 _ADP_TEAM_ALIASES = {"LAR": "LA", "WSH": "WAS", "JAC": "JAX", "SD": "LAC", "OAK": "LV", "STL": "LA"}
 
@@ -116,6 +122,55 @@ def adp_match_key(name, position, team=None):
         abbrev = str(team).upper()
         return f"DST|{_ADP_TEAM_ALIASES.get(abbrev, abbrev)}"
     return f"{position}|{_norm_name(name)}"
+
+
+def _neutral_factors(position: str, rules: dict | None) -> list:
+    """Which factors this position must have pinned to 50 under `rules`.
+
+    DST: all four, always. There is no team-defense row in `weekly` to
+    compute production, durability or schedule from, and no defensive
+    scoring this app can express (scoring/league.py's `from_espn` gives the
+    measurements). A defense's numbers here would be fabricated, not
+    computed, so nothing changes for DST and nothing should.
+
+    K under a league that prices no kicking: all four, unchanged. Every
+    kicking column is unscored, so `production` is a recency-weighted
+    average of zero and `schedule` is points allowed to kickers of zero.
+    This is today's behaviour for the owner's live board and it is bit for
+    bit what it was.
+
+    K under a league that DOES price kicking -- three of the four come back:
+
+      * production: a recency-weighted per-game average of the league's own
+        kicking points. Real signal, and the one number that separates
+        kickers.
+      * schedule: prior-season kicking points allowed per game by each
+        opponent. The profile's schedule card shows the same quantity
+        (scoring/profile.py `weekly_difficulty`) and is released on the same
+        condition, so the two cannot disagree.
+      * durability: games played over games possible. This one was NEVER a
+        scoring artefact -- `factors.durability_factor` counts weeks, and
+        counts them identically whatever the rules say -- so a kicker's
+        durability has been real data thrown away all along. It is released
+        WITH the other two rather than unconditionally, deliberately: an
+        unconditional release would move the live PPR board's K rows in the
+        middle of the owner's draft, for a factor nobody asked about. The
+        condition is the safety property, not the argument.
+
+      * role stays neutral. `factors.role_factor` blends depth-chart rank
+        with share of team targets+carries, and the second half is
+        structurally zero for every kicker who ever played -- so half the
+        blend is not "missing" (which the skipna mean would handle) but a
+        real zero that drags every kicker's role toward the floor. That is
+        the same kind of noise the neutral existed to suppress, and scoring
+        kicking does not touch it.
+    """
+    if position == "DST":
+        return _NEUTRAL_FACTORS_FOR_KDST
+    if position == "K" and prices_kicking(rules):
+        return [f for f in _NEUTRAL_FACTORS_FOR_KDST
+                if f not in _KICKER_FACTORS_THAT_BECOME_REAL]
+    return _NEUTRAL_FACTORS_FOR_KDST
 
 
 def _adapt_depth_charts(depth: pd.DataFrame) -> pd.DataFrame:
@@ -239,6 +294,42 @@ POSITION_FLOOR = {"QB": 180.0, "RB": 80.0, "WR": 80.0, "TE": 60.0,
 _MIN_PPG_FOR_SCALE = 1.0
 
 
+# Games a KICKER must have played before `projections()`'s second rung will
+# extrapolate his per-game rate to a full season. More than half of a
+# 17-game year: the rung's claim is "this is what he would do over a
+# season", and a kicker who has not played half of one has not shown that.
+#
+# WHY ONLY KICKERS, AND WHY THIS EXISTS AT ALL. The rung is
+# `stats.ppg * GAMES`, reached only by players ESPN publishes no season
+# projection for. ESPN projects every skill player who matters, so for
+# QB/RB/WR/TE that rung is a rare edge case. It projects almost no fringe
+# kicker, so the moment kicking became scorable the rung went from
+# unreachable for kickers (an unscored kicker's ppg is 0.0, which is falsy,
+# so every one of them fell straight to POSITION_FLOOR) to the normal path
+# for everyone outside ESPN's top twenty -- fed by whatever partial season
+# they happened to play.
+#
+# That is not theoretical. On the real 249-row board it put Ben Sauls (THREE
+# games, 8/8 FG) at 181.9 projected points and Spencer Shrader (five games)
+# at 190.4, ahead of Brandon Aubrey's 171.6 off a full 17-game season. K's
+# replacement rank is 3 (scoring/config.STREAMED_REPLACEMENT_RANK), so those
+# two undraftable kickers became the baseline every kicker is valued
+# against: the best real kicker in the league landed at exactly 0.0 VOR and
+# the whole position dropped ~30 places. The guard puts a kicker with too
+# small a sample back on POSITION_FLOOR -- which is precisely where every
+# unprojected kicker sat before kicking was scorable, so this restores the
+# old treatment for the players whose sample cannot support a new one, and
+# only for them.
+#
+# NOT widened to every position, deliberately. The same extrapolation is
+# just as questionable for a skill player -- Anthony Richardson reaches this
+# rung on TWO games and is projected 18.7 points for a season -- but fixing
+# that would move a real skill player's projection, rank and VOR on a board
+# the owner is drafting from right now, which a kicker-and-defense change
+# has no business doing. It is written up as a follow-up instead.
+_MIN_GAMES_FOR_KICKER_PPG = 9
+
+
 def projection_scale(board: pd.DataFrame, rules: dict | None = None) -> np.ndarray:
     """Per-row factor converting ESPN's PPR projection into league points.
 
@@ -294,10 +385,13 @@ def projection_scale(board: pd.DataFrame, rules: dict | None = None) -> np.ndarr
         WR was marked down 30%, which is a systematic bias in favour of
         exactly the players there is least reason to be confident about.
       * a position with no usable ratio at all -> 1.0. This is K and DST on
-        every real board: nflverse weekly rows carry no kicking or defensive
-        scoring, so both positions score 0 under any rules, PPR and half-PPR
-        alike, and their ESPN projections genuinely do not move between
-        formats. 1.0 is the right answer for them, not a shrug.
+        every real board, and it stays true now that kicking is scorable,
+        though for a sharper reason: the ratio's DENOMINATOR is full-PPR
+        points per game, and full PPR scores no kicking at all, so a kicker's
+        `ppr_ppg` is 0 and never clears `_MIN_PPG_FOR_SCALE` however well the
+        league pays him. DST has no weekly rows to score either way. A
+        conversion out of PPR is meaningless for a position PPR does not
+        price, so 1.0 is the right answer for them, not a shrug.
       * `rules` that price exactly full PPR (including None) -> all ones, by
         the shortest possible path, so a PPR league is untouched.
     """
@@ -404,6 +498,13 @@ def projections(conn, board: pd.DataFrame) -> pd.Series:
         if proj is None:
             stats = row.get("stats")
             ppg = stats.get("ppg") if isinstance(stats, dict) else None
+            games = stats.get("games") if isinstance(stats, dict) else None
+            if row["position"] == "K" and (games or 0) < _MIN_GAMES_FOR_KICKER_PPG:
+                # Too little of a season to extrapolate -- fall to the floor,
+                # which is where this kicker sat before kicking was scorable.
+                # See _MIN_GAMES_FOR_KICKER_PPG for the two real kickers that
+                # made this necessary and why it stops at kickers.
+                ppg = None
             proj = float(ppg) * GAMES if ppg else None
         if proj is None or not np.isfinite(proj):
             proj = POSITION_FLOOR.get(row["position"], 80.0)
@@ -561,14 +662,17 @@ def build_board(conn, weights: dict | None = None,
 
     uni["rookie"] = ~uni["player_id"].isin(set(weekly.get("player_id", pd.Series(dtype=str))))
 
-    # K/DST: the PPR formula doesn't score kicking/defense, so real
-    # production/durability/role/schedule signals would just be noise --
-    # only environment (team implied points) is a meaningful factor for them.
-    # `rookie` is also meaningless for them (they enter from ADP by design,
-    # not because they lack NFL history), so force it False.
-    kdst_mask = uni["position"].isin(["K", "DST"])
-    uni.loc[kdst_mask, _NEUTRAL_FACTORS_FOR_KDST] = 50.0
-    uni.loc[kdst_mask, "rookie"] = False
+    # K/DST: factors computed from data the league does not score are noise,
+    # not signal, so they are pinned neutral -- see `_neutral_factors` for
+    # which ones, for which position, and why that now depends on `rules`.
+    # `rookie` is meaningless for both regardless (they enter from ADP by
+    # design, not because they lack NFL history), so force it False.
+    for pos, neutral in (("K", _neutral_factors("K", rules)),
+                         ("DST", _neutral_factors("DST", rules))):
+        mask = uni["position"] == pos
+        if neutral:
+            uni.loc[mask, neutral] = 50.0
+    uni.loc[uni["position"].isin(["K", "DST"]), "rookie"] = False
 
     uni = _merge_adp(uni, adp)
 
@@ -622,8 +726,16 @@ def build_board(conn, weights: dict | None = None,
     # `projection_scale` for the conversion, its error on a real player
     # (0.3%), and why leaving the rung alone would have been worse than
     # converting it.
-    if normalize_rules(rules) is not None:
-        n_espn = int((uni["proj_scale"] != 1.0).sum())
+    # `n_espn > 0` as well as non-PPR rules: a league whose rules differ from
+    # full PPR only in ways that cannot move an ESPN projection converts
+    # nothing, and warning that projections were "CONVERTED, not re-derived"
+    # when every scale is exactly 1.0 is a false alarm. That is not
+    # hypothetical -- it is the owner's own league the moment its kicking
+    # rules are read: 20 rules instead of 14, every skill player's scale
+    # still exactly 1.0, and no kicker convertible at all (see
+    # `projection_scale`).
+    n_espn = int((uni["proj_scale"] != 1.0).sum())
+    if normalize_rules(rules) is not None and n_espn:
         warnings.warn(
             f"board: league scoring format is '{fmt}'. proj_points follows "
             "this league's rules, but ESPN's season projection -- the first "
