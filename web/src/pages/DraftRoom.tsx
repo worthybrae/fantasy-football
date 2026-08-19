@@ -1,8 +1,11 @@
 import { useEffect, useState } from 'react'
-import { fetchLiveState, fetchPlayers, type LiveSettings, type LiveState, type Player,
-         type RosterPlayer } from '../api'
+import { fetchLiveState, fetchPlayers, selectPlayer, type LiveCandidate, type LiveSettings,
+         type LiveState, type Player, type RosterPlayer } from '../api'
 import ClockPanel from '../components/draft/ClockPanel'
 import RosterPanel, { type RosterSlot } from '../components/draft/RosterPanel'
+import TopThree from '../components/draft/TopThree'
+import AvailableList from '../components/draft/AvailableList'
+import ConfirmPick, { type PickStatus } from '../components/draft/ConfirmPick'
 
 const POLL_MS = 2500
 
@@ -98,6 +101,17 @@ export default function DraftRoom() {
   // moment you come on the clock) on top of what's here.
   const [tab, setTab] = useState<Tab>('available')
 
+  // The pick this session is confirming, plus how that confirmation is
+  // going -- held here (not inside ConfirmPick) because a poll landing
+  // mid-confirm must not lose track of what's being sent, and because the
+  // 'sending' request itself (selectPlayer) has to survive whatever
+  // AvailableList/TopThree re-render around it. null means no dialog is
+  // open at all; ConfirmPick only ever mounts while this is non-null (see
+  // the render below), so it never has to handle a null candidate itself.
+  const [confirming, setConfirming] = useState<LiveCandidate | null>(null)
+  const [pickStatus, setPickStatus] = useState<PickStatus>('idle')
+  const [pickError, setPickError] = useState<string | null>(null)
+
   // Player identity (name/position/team) is a one-time join table -- it does
   // not change mid-draft. Lifted unchanged from the deleted LiveDraft.tsx.
   useEffect(() => {
@@ -180,6 +194,61 @@ export default function DraftRoom() {
     ? assignRoster(rosterSlotLabels(state.settings), state.my_roster)
     : []
 
+  // Same test as ClockPanel's own `youAreUp` -- gates both the top-three and
+  // the table's draft buttons. Computed once here rather than inside either
+  // component, which have no access to `state` at all (see
+  // AvailableList.tsx's own comment on why this prop exists beyond what the
+  // task brief's original signature listed).
+  const isMyTurn = !!state?.active && state.on_the_clock !== null && state.on_the_clock === state.my_slot
+
+  // "Roster after" for the confirm dialog: my_roster's current length plus
+  // this pick, over the room's own total slot count (`slots`, already built
+  // above for RosterPanel) -- both read off state that's already in scope
+  // here, so ConfirmPick never has to reconstruct them itself.
+  const rosterAfter = state?.active
+    ? { filled: state.my_roster.length + 1, total: slots.length }
+    : null
+
+  function handleDraftClick(c: LiveCandidate) {
+    setConfirming(c)
+    setPickStatus('idle')
+    setPickError(null)
+  }
+
+  function handleCancelConfirm() {
+    setConfirming(null)
+    setPickStatus('idle')
+    setPickError(null)
+  }
+
+  async function handleConfirmPick() {
+    if (!confirming) return
+    setPickStatus('sending')
+    setPickError(null)
+    try {
+      await selectPlayer(confirming.player_id)
+      // Confirmed by ESPN. No optimistic mutation of `state.candidates`
+      // anywhere in this room (per the task brief) -- clear the dialog
+      // outright and let the next 2.5s poll of /api/live/state bring the
+      // real pick back, the same path a pick made directly in ESPN's own
+      // UI would take. Both state updates land together so ConfirmPick's
+      // own 'done' branch (see its comment) never actually has a frame to
+      // paint.
+      setPickStatus('done')
+      setConfirming(null)
+    } catch (e) {
+      // A 504 here is api/live.py's own "ESPN did not confirm the pick --
+      // check the ESPN draft room before picking again" -- it means "we
+      // could not confirm it," not "it failed," and the pick may or may not
+      // have actually landed. selectPlayer's Error already carries that
+      // exact message (or a 409's "already drafted" / "not your turn", or a
+      // 503's "draft socket is not connected") -- rendered verbatim by
+      // ConfirmPick rather than replaced with a generic message here.
+      setPickStatus('failed')
+      setPickError(e instanceof Error ? e.message : 'Pick failed')
+    }
+  }
+
   return (
     <div className="draft-room">
       <div className="sr-only" aria-live="polite">
@@ -231,7 +300,22 @@ export default function DraftRoom() {
           </div>
           <div className="draft-main">
             {tab === 'available'
-              ? <div className="draft-main-placeholder">Available list — Task 8</div>
+              ? (
+                <>
+                  <TopThree
+                    candidates={state?.candidates ?? []}
+                    players={players}
+                    onDraft={handleDraftClick}
+                    isMyTurn={isMyTurn}
+                  />
+                  <AvailableList
+                    candidates={state?.candidates ?? []}
+                    players={players}
+                    onDraft={handleDraftClick}
+                    isMyTurn={isMyTurn}
+                  />
+                </>
+              )
               : <div className="draft-main-placeholder">Snake board — Task 9</div>}
           </div>
         </div>
@@ -251,6 +335,18 @@ export default function DraftRoom() {
           )}
         </aside>
       </div>
+
+      {confirming && (
+        <ConfirmPick
+          candidate={confirming}
+          player={players[confirming.player_id] ?? null}
+          status={pickStatus}
+          error={pickError}
+          rosterAfter={rosterAfter}
+          onConfirm={handleConfirmPick}
+          onCancel={handleCancelConfirm}
+        />
+      )}
     </div>
   )
 }
