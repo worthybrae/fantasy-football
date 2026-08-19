@@ -826,291 +826,377 @@ td:first-child {
   margin-top: 10px;
 }
 
-/* -- live draft room (/draft) -- */
+/* -- draft room (/draft) -- */
 
-.live-page {
-  width: 100%;
-  min-height: 100svh;
-  overflow-y: auto;
-  overflow-x: hidden;
+/* The page itself never scrolls (per the task brief) -- everything that can
+   overflow (the main list, the roster rail) scrolls inside its own region
+   instead, so the rail and the tab strip stay put under a 30-second clock. */
+.draft-room {
+  height: 100svh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   background: var(--bg-0);
   color: var(--text-2);
   text-align: left;
 }
 
-/* Status strip: the topbar's job on this page, but built for a 30-second
-   decision loop rather than search/nav -- whose turn, pick number, and how
-   fresh the numbers below it are. */
-.live-strip {
-  position: sticky;
-  top: 0;
-  z-index: 10;
+.draft-topbar {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: var(--space-4);
-  padding: var(--space-3) var(--space-4);
+  height: 44px;
+  padding: 0 var(--space-4);
   background: var(--bg-1);
   border-bottom: 1px solid var(--border);
 }
 
-.live-strip-turn {
-  font-size: var(--text-lg, 18px);
+.draft-topbar-title {
   font-weight: 700;
+  font-size: var(--text-base);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   color: var(--text-1);
 }
 
-.live-strip-you .live-strip-turn {
-  color: var(--accent);
-  animation: live-pulse 1.6s ease-in-out infinite;
+.draft-topbar-sep {
+  width: 1px;
+  height: 18px;
+  background: var(--border);
 }
 
-@keyframes live-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.6; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .live-strip-you .live-strip-turn { animation: none; }
-}
-
-.live-strip-meta {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-4);
-  font-size: var(--text-sm);
-  color: var(--text-2);
-  white-space: nowrap;
-}
-
-/* Banners: staleness, recompute-in-flight, and unmapped picks. Each reads as
-   its own kind of warning rather than three shades of the same gray -- see
-   the task brief's "must never blur together." */
-.live-banner {
-  margin: var(--space-3) var(--space-4) 0;
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius);
-  font-size: var(--text-sm);
-  border: 1px solid var(--border);
-  background: var(--bg-1);
-  color: var(--text-2);
-}
-
-.live-banner-stale {
-  border-color: var(--fail);
-  color: var(--text-1);
-}
-
-.live-banner-recompute {
-  border-color: var(--accent-border);
-  background: var(--accent-bg);
-  color: var(--text-1);
-}
-
-.live-banner-unmapped {
-  border-color: var(--fail);
-  background: color-mix(in srgb, var(--fail) 10%, var(--bg-1));
-  color: var(--text-1);
-}
-
-.live-unmapped-list {
-  list-style: none;
-  margin: 6px 0 0;
-  padding: 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 14px;
-  font-size: var(--text-xs);
-  color: var(--text-2);
-}
-
-/* Two-zone layout: the board grid (main, flex-grow, its own horizontal
-   scroll) and the recommendation sidebar (fixed ~320px). Below ~900px there
-   isn't room for both side by side, so the sidebar drops under the board
-   instead of forcing the page itself to scroll sideways. */
-.live-layout {
-  display: grid;
-  grid-template-columns: 1fr 320px;
-  gap: var(--space-5);
-  padding: var(--space-4);
-  align-items: start;
-}
-
-@media (max-width: 900px) {
-  .live-layout { grid-template-columns: 1fr; }
-}
-
-.live-main {
-  min-width: 0;
-}
-
-.live-sidebar {
-  min-width: 0;
-  background: var(--bg-1);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: var(--space-4);
-}
-
-.live-sidebar-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-3);
-  padding-bottom: var(--space-3);
-  margin-bottom: var(--space-3);
-  border-bottom: 1px solid var(--border);
-}
-
-.live-sidebar-turn {
-  font-size: var(--text-md);
-  font-weight: 600;
-  color: var(--text-1);
-}
-
-.live-sidebar-slot {
+.draft-topbar-pick {
   font-size: var(--text-sm);
   color: var(--text-3);
 }
 
-/* Recomputing or stale: the numbers are real but not current -- dimmed
-   rather than hidden, with the banner above carrying the explanation. */
-.live-decision.is-uncertain {
-  opacity: 0.6;
+.draft-topbar-pick strong {
+  color: var(--text-1);
+  font-weight: 700;
 }
 
-.live-call {
-  padding: var(--space-4) 0 var(--space-5);
+.draft-topbar-spacer {
+  flex-grow: 1;
+}
+
+/* Connection health, not the recommendation -- this is "is the socket even
+   listening," separate from ClockPanel's listener_error detail below it.
+   Tone follows the same fixed --ok/--fail vocabulary as everywhere else in
+   the app; "off" (not connected at all) reads neutral, not alarming -- a
+   fresh page load with no session is not a failure. */
+.draft-status-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: 10px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.draft-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.draft-status-pill-ok {
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+  color: var(--ok);
+}
+.draft-status-pill-ok .draft-status-dot { background: var(--ok); }
+
+.draft-status-pill-fail {
+  background: color-mix(in srgb, var(--fail) 14%, transparent);
+  color: var(--fail);
+}
+.draft-status-pill-fail .draft-status-dot { background: var(--fail); }
+
+.draft-status-pill-off {
+  background: var(--bg-2);
+  color: var(--text-3);
+}
+.draft-status-pill-off .draft-status-dot { background: var(--text-3); }
+
+.draft-error-banner {
+  flex-shrink: 0;
+  margin: 0;
+  padding: var(--space-2) var(--space-4);
+  background: color-mix(in srgb, var(--fail) 10%, var(--bg-1));
+  border-bottom: 1px solid var(--fail);
+  font-size: var(--text-sm);
+}
+
+.draft-body {
+  display: flex;
+  flex-grow: 1;
+  min-height: 0;
+}
+
+.draft-main-col {
+  display: flex;
+  flex-direction: column;
+  flex-grow: 1;
+  min-width: 0;
+}
+
+.draft-tabs {
+  flex-shrink: 0;
+  display: flex;
+  align-items: stretch;
+  height: 38px;
+  background: var(--bg-1);
   border-bottom: 1px solid var(--border);
-  margin-bottom: var(--space-4);
 }
 
-/* The call: the single largest thing on the page, per the brief. */
-.live-call-name {
-  display: block;
+.draft-tab {
+  display: flex;
+  align-items: center;
+  padding: 0 var(--space-5);
   background: none;
   border: 0;
-  padding: 0;
-  margin: 0 0 6px;
+  border-bottom: 2px solid transparent;
   font: inherit;
-  font-size: 40px;
-  font-weight: 700;
-  line-height: 1.1;
-  color: var(--text-1);
-  text-align: left;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-3);
   cursor: pointer;
 }
 
-.live-call-name:hover {
+.draft-tab:hover {
+  color: var(--text-2);
+}
+
+.draft-tab.is-active {
+  background: var(--bg-2);
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.draft-tab-spacer {
+  flex-grow: 1;
+}
+
+.draft-tab-hint {
+  display: flex;
+  align-items: center;
+  padding-right: var(--space-4);
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+.draft-main {
+  flex-grow: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.draft-main-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-3);
+  font-size: var(--text-md);
+}
+
+/* The rail: fixed width, never scrolls out of view (per the task brief) --
+   its own children (RosterPanel's list, mainly) scroll internally instead
+   of the rail itself moving. */
+.draft-rail {
+  flex-shrink: 0;
+  width: 340px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-1);
+  border-left: 1px solid var(--border);
+}
+
+.draft-rail-loading {
+  padding: var(--space-4);
+}
+
+/* -- clock panel -- */
+
+/* Shared eyebrow label -- ClockPanel's headings and figure captions,
+   RosterPanel's "My roster" heading. One rule so a section label always
+   reads the same size/weight/tracking across the rail. */
+.draft-cap {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.clock-panel {
+  flex-shrink: 0;
+  padding: var(--space-4) var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--border);
+}
+
+/* On the clock: the one state this whole rail exists to make unmissable. */
+.clock-panel-up {
+  background: var(--accent-bg);
+}
+
+.clock-panel-up .draft-cap {
   color: var(--accent);
 }
 
-.live-call-meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: var(--space-3);
-  color: var(--text-2);
-  font-size: var(--text-md);
+.clock-panel-down {
+  background: color-mix(in srgb, var(--fail) 10%, transparent);
 }
 
-.live-call-reason {
-  max-width: 62ch;
-  font-size: var(--text-md);
+.clock-panel-down .draft-cap {
+  color: var(--fail);
+}
+
+.clock-down-message {
+  margin-top: var(--space-2);
+  font-size: var(--text-sm);
   color: var(--text-1);
   line-height: 1.5;
 }
 
-.live-alts h2 {
-  font-size: var(--text-sm);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-3);
-  margin: 0 0 var(--space-3);
+.clock-countdown {
+  font-size: 48px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  color: var(--text-1);
+  margin-top: var(--space-2);
 }
 
-.live-alts-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
+.clock-bar-track {
+  height: 4px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  margin-top: var(--space-3);
+  overflow: hidden;
+}
+
+.clock-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+}
+
+.clock-stale {
+  margin: var(--space-2) 0 0;
+  padding: var(--space-2) var(--space-2);
+  border: 1px solid var(--fail);
+  border-radius: var(--radius);
+  font-size: var(--text-xs);
+  color: var(--text-1);
+}
+
+.clock-figures {
+  display: flex;
+  gap: var(--space-5);
+  margin-top: var(--space-3);
+}
+
+.clock-figure {
+  font-size: var(--text-md);
+  font-weight: 700;
+  color: var(--text-1);
+  margin-top: 2px;
+}
+
+.clock-updated {
+  margin-top: var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+/* -- roster panel -- */
+
+.roster-panel {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  flex-grow: 1;
+  min-height: 0;
 }
 
-.live-alt {
-  display: grid;
-  grid-template-columns: 1fr 52px 90px 40px;
+.roster-panel-head {
+  flex-shrink: 0;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: var(--space-3) var(--space-4) var(--space-2);
+}
+
+.roster-panel-count {
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+.roster-panel-list {
+  flex-grow: 1;
+  min-height: 0;
+  overflow-y: auto;
+  list-style: none;
+  margin: 0;
+  padding: 0 var(--space-2) var(--space-2);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.roster-row {
+  display: flex;
   align-items: center;
-  gap: var(--space-3);
-  padding: 6px 4px;
+  gap: var(--space-2);
+  height: 28px;
+  padding: 0 6px;
   border-radius: var(--radius);
 }
 
-.live-alt:hover {
-  background: var(--bg-2);
+.roster-row-urgent {
+  background: var(--accent-bg);
 }
 
-.live-alt-btn {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
+.roster-row-slot {
+  width: 40px;
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+  font-weight: 700;
+  color: var(--text-2);
+}
+
+.roster-row-slot-bench {
+  color: var(--text-3);
+}
+
+.roster-row-name {
   min-width: 0;
-  background: none;
-  border: 0;
-  padding: 0;
-  font: inherit;
-  color: var(--text-1);
-  text-align: left;
-  cursor: pointer;
-}
-
-.live-alt-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.live-alt-team {
-  flex-shrink: 0;
-  color: var(--text-3);
   font-size: var(--text-sm);
-}
-
-.live-alt-cost {
-  color: var(--text-2);
-  text-align: right;
-}
-
-/* The point: a long bar means you can wait on him. Same track/fill geometry
-   as .rankings-row-bar so a percentage-bar always reads the same way across
-   the app. Fill color is risk, not brand -- set inline per-candidate by
-   riskTone() in LiveDraft.tsx (red gone-soon -> amber -> green lasts), so the
-   fallback here only matters before that style attribute lands. */
-.live-alt-bar-track {
-  display: block;
-  height: 8px;
-  background: var(--bg-2);
-  border-radius: 4px;
-  overflow: hidden;
-}
-
-.live-alt-bar-fill {
-  display: block;
-  height: 100%;
-  border-radius: 4px;
-  background: var(--fail);
-}
-
-.live-alt-pct {
-  text-align: right;
   color: var(--text-1);
 }
 
-.live-call-name:focus-visible,
-.live-alt-btn:focus-visible {
-  outline: 2px solid var(--accent-border);
-  outline-offset: 2px;
+.roster-row-proj {
+  margin-left: auto;
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+.roster-row-open {
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+
+.roster-row-open-urgent {
+  color: var(--accent);
 }
 @keyframes connect-spin { to { transform: rotate(360deg); } }
 
@@ -1374,8 +1460,7 @@ td:first-child {
    tint/border below -- and always reads as the single strongest highlight on
    the board, without disturbing the fixed 62px cell height. Reduced motion:
    a solid tint, no pulse -- still unmistakably the active cell without
-   relying on motion to say so (same split as .live-strip-you's own pulse
-   above). */
+   relying on motion to say so. */
 .board-cell-clock::before {
   content: '';
   position: absolute;
