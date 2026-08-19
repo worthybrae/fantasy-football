@@ -25,6 +25,7 @@ exactly like `run_listener` does, just from a socket this process opened
 itself instead of one it observed.
 """
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -251,8 +252,55 @@ def _wait_or_stopped(stop_event, seconds: float) -> bool:
     return stop_event.wait(seconds)
 
 
+class SocketHandle:
+    """The live draft socket, as much of it as a sender needs.
+
+    `run_socket_listener` owns the connection and swaps it on every
+    reconnect -- ESPN ends even a pinged draft socket after a few minutes.
+    A sender holding the raw socket would keep writing into a dead one, and
+    a SELECT that lands there is a pick that silently never happened, on a
+    clock. So the socket lives behind this handle: the listener attaches and
+    detaches as it reconnects, senders only ever see the current one, and a
+    send with nothing attached is a loud ConnectionError rather than a
+    no-op.
+
+    The lock is not about the socket's own thread-safety. It is about the
+    swap: attach/detach run on the listener thread while send runs on
+    whatever thread FastAPI hands the request. Without it, a send could read
+    `self._ws` after the listener thread has decided to detach it but before
+    the assignment lands (or vice versa), and write to a socket the listener
+    already considers gone.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._ws = None
+
+    def attach(self, ws) -> None:
+        with self._lock:
+            self._ws = ws
+
+    def detach(self) -> None:
+        with self._lock:
+            self._ws = None
+
+    def alive(self) -> bool:
+        with self._lock:
+            return self._ws is not None
+
+    def send(self, text: str) -> None:
+        with self._lock:
+            ws = self._ws
+            if ws is None:
+                raise ConnectionError(
+                    "the draft socket is not connected -- click the Draft "
+                    "Helper bookmark again to reconnect")
+            ws.send(text)
+
+
 def run_socket_listener(listener, league_id, team_id, swid, token,
-                        on_change=None, stop_event=None, on_activity=None) -> None:
+                        on_change=None, stop_event=None, on_activity=None,
+                        on_socket=None) -> None:
     """Connect directly to ESPN's draft socket and feed it into `listener`.
 
     Blocking -- the caller runs it on a thread. Matches `run_listener`'s
@@ -262,6 +310,16 @@ def run_socket_listener(listener, league_id, team_id, swid, token,
     the same `pump()` shape. `on_activity`, if given, fires on every frame
     successfully received -- the liveness heartbeat api/live.py stamps
     last_poll_at from, so a healthy socket never looks stale between picks.
+
+    `on_socket`, if given, receives a `SocketHandle` exactly once, right
+    after the first successful connect -- not before, since a handle handed
+    out before any connection exists would report `alive() is False` for as
+    long as the first connect takes (or forever, if the token is bad), and
+    there is no reason to publish a stand-in when the real thing is one
+    successful `_connect` away. It is not re-invoked on later reconnects:
+    the handle is a single stable object that keeps attaching to whatever
+    socket is current, which is the whole reason a caller only needs it
+    once. That handle is this module's send path -- see `SocketHandle`.
 
     Reconnects on drop. ESPN ends even a pinged connection with "no close
     frame received or sent" after a few minutes, so a single drop must not
@@ -287,6 +345,8 @@ def run_socket_listener(listener, league_id, team_id, swid, token,
 
     cookie_header = f"SWID={swid}"
     url = socket_url(league_id, team_id, swid, token)
+    handle = SocketHandle()
+    handle_published = False
     empty_reconnects = 0
     while stop_event is None or not stop_event.is_set():
         got_frame = False
@@ -306,6 +366,10 @@ def run_socket_listener(listener, league_id, team_id, swid, token,
             if _wait_or_stopped(stop_event, RECONNECT_BACKOFF_SECONDS):
                 return
             continue
+        handle.attach(ws)
+        if on_socket is not None and not handle_published:
+            on_socket(handle)
+            handle_published = True
         try:
             last_ping = time.monotonic()
             while stop_event is None or not stop_event.is_set():
@@ -325,6 +389,10 @@ def run_socket_listener(listener, league_id, team_id, swid, token,
                 if listener.on_frame(frame) and on_change is not None:
                     on_change()
         finally:
+            # Detach before closing: once this returns, a concurrent sender
+            # must see "not connected" rather than a socket that is about to
+            # error out from under it.
+            handle.detach()
             # Best effort: a socket the server already dropped cannot be
             # closed twice without complaint, and failing to close it is not
             # worth losing whatever picks were already collected over.
