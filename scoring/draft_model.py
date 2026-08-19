@@ -687,7 +687,27 @@ def cold_start_fits() -> dict:
     return {"__pooled__": COLD_START_PRIOR.copy()}
 
 
-def fit_all(conn, settings=None) -> dict:
+def fit_all(conn, settings=None, on_manager=None) -> dict:
+    """Every manager's pick model, plus the pooled one they shrink toward.
+
+    `on_manager(done, total, seasons)`, if given, is called once with done=0
+    as soon as the manager set is known and again after each manager is
+    fitted -- `seasons` being the sorted list of seasons the history spans.
+    It exists for one caller: the connect screen, which otherwise shows a
+    spinner for the 27.5-30.7s this function takes against the owner's own
+    league (measured on data/nfl.duckdb: build_observations 9.9s, the pooled
+    fit 3.3s, then eight per-manager fits at 1.5-3.1s each). That is 79-88%
+    of a connect, and the per-manager loop is the only place in the whole
+    connect where a REAL fraction exists to report -- everything else is one
+    indivisible step, and a percentage invented for it would be a lie.
+
+    Called before the pooled fit rather than after, so the first tick lands
+    as soon as the manager set is known (about 10s in, once
+    build_observations and prepare are done) instead of after the pooled fit
+    adds another three seconds of silence. Never called at all on the
+    cold-start path, which is how the caller tells "no history" apart from
+    "no managers fitted yet".
+    """
     settings = settings or league_mod.load(conn)
     observations = build_observations(conn)
     if not observations:
@@ -695,15 +715,21 @@ def fit_all(conn, settings=None) -> dict:
         # nothing, which left the simulator with no opponents at all.
         return cold_start_fits()
     X_list, chosen, managers, seasons = prepare(observations, settings)
+    names = sorted(set(managers))
+    span = sorted(set(seasons))
+    if on_manager is not None:
+        on_manager(0, len(names), span)
     pooled = fit(X_list, chosen)
     fits = {"__pooled__": pooled}
-    for manager in sorted(set(managers)):
+    for done, manager in enumerate(names, start=1):
         idx = [i for i, m in enumerate(managers) if m == manager]
         Xm = [X_list[i] for i in idx]
         cm = [chosen[i] for i in idx]
         sm = [seasons[i] for i in idx]
         lam = select_lambda(Xm, cm, sm, prior=pooled)
         fits[manager] = fit(Xm, cm, prior=pooled, lam=lam)
+        if on_manager is not None:
+            on_manager(done, len(names), span)
     return fits
 
 

@@ -1567,6 +1567,7 @@ def test_connect_wires_the_listener_to_apply_picks_and_recompute(
 # correspond one to one with the four review criticals.
 
 import threading
+import re
 import time
 
 
@@ -2921,3 +2922,242 @@ def test_state_inactive_reports_draft_started_false(tmp_path):
     from api.main import create_app
     body = TestClient(create_app(str(tmp_path / "t.duckdb"))).get("/api/live/state").json()
     assert body["draft_started"] is False
+
+
+# --- The connect screen's progress record -------------------------------------
+#
+# GET /api/live/connect-progress, written stage by stage as the connect runs.
+# Its whole reason for existing is that a connect is not fast: measured
+# against the real database, 32-35s against the owner's own league (fit_all
+# 27.5-30.7s of it) and 8.6s against a fresh mock. All of that used to happen
+# behind one spinner. Every assertion below is on a value the connect actually
+# discovered -- there is nothing on this endpoint that is not measured or read.
+
+def test_connect_progress_is_idle_before_any_connect(tmp_path):
+    """Present with an empty value, never a 404 -- the same convention
+    /api/live/state's inactive branch follows, so the screen never has to
+    branch on whether the key exists."""
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    body = TestClient(create_app(str(tmp_path / "t.duckdb"))).get(
+        "/api/live/connect-progress").json()
+    assert body == {"phase": "idle", "stages": [], "facts": {},
+                    "error": None, "elapsed_ms": 0}
+
+
+def test_connect_records_every_stage_with_the_value_it_discovered(
+        tmp_path, monkeypatch, _isolated_leagues_root):
+    """The screen's whole claim: each line names real work and carries what
+    that step found. Asserted against the values, not just the statuses --
+    a stage that reports "done" with nothing to show is the spinner this
+    replaces."""
+    monkeypatch.setattr("api.live.run_listener", lambda *a, **k: None)
+    monkeypatch.setattr("api.live.fetch_league_settings",
+                        lambda *a, **k: _espn_settings_with_pick_order())
+    monkeypatch.setattr("api.live.fetch_team_slots",
+                        lambda *a, **k: {1: "Alpha", 2: "Bravo", 3: "Charlie",
+                                         4: "Delta", 5: "Echo", 6: "Fox",
+                                         7: "Golf", 8: "Hotel"})
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    client = TestClient(create_app(path))
+
+    assert client.post(
+        "/api/live/connect",
+        json={"url": "https://fantasy.espn.com/football/draft?leagueId=1"
+                     "&teamId=2&memberId={X}"}).status_code == 200
+
+    body = client.get("/api/live/connect-progress").json()
+    stages = {s["key"]: s for s in body["stages"]}
+    # No `reset` row: nothing was listening, so there was nothing to stop and
+    # the connect must not draw a step it did not take. No `socket` row
+    # either -- this is the browser-observer path, which has no handle of its
+    # own (see state["socket"]).
+    assert [s["key"] for s in body["stages"]] == [
+        "token", "settings", "league", "slot", "board", "pool", "history",
+        "teams", "ranking"]
+
+    # ESPN's own settings, read off the fetch this connect actually made:
+    # 8 teams, receptions 1.0 -> PPR, and 8 starters + 2 flex + 5 bench.
+    assert stages["settings"]["value"] == "8 teams · PPR · 15 rounds"
+    # teamId=2 sits at index 3 of pickOrder [3,7,1,2,4,5,6,8] -> slot 4.
+    assert stages["slot"]["value"] == "you pick 4th of 8"
+    assert re.fullmatch(r"\d+ players", stages["board"]["value"])
+    assert stages["teams"]["value"] == "8 of 8"
+    assert stages["league"]["value"] == "new file · seeded from the shared database"
+    assert all(s["status"] == "ok" for s in body["stages"]
+               if s["key"] != "ranking"), body["stages"]
+    # Every finished stage carries its own real duration.
+    assert all(isinstance(s["ms"], int) for s in body["stages"]
+               if s["status"] == "ok")
+
+    # The facts the handoff screen draws, all of them read rather than assumed.
+    facts = body["facts"]
+    assert facts["teams"] == 8 and facts["rounds"] == 15
+    assert facts["scoring_format"] == "ppr"
+    assert facts["settings_source"] == "espn"
+    assert facts["my_slot"] == 4
+    assert facts["my_team"] == "Delta"
+    assert facts["players"] == int(stages["board"]["value"].split()[0])
+
+    # The ranking lands on the worker, after the connect returned -- so the
+    # record keeps being written after the POST is over, which is the point.
+    assert _wait_until(
+        lambda: client.get("/api/live/connect-progress")
+        .json()["phase"] == "ready"), "the connect never settled"
+    final = client.get("/api/live/connect-progress").json()
+    assert re.fullmatch(r"\d+ ranked", final["stages"][-1]["value"])
+    assert final["elapsed_ms"] > 0
+    client.post("/api/live/stop")
+
+
+def test_connect_progress_surfaces_the_silent_settings_fallback(
+        tmp_path, monkeypatch, _isolated_leagues_root):
+    """_league_settings_from_espn returns None on ANY failure -- no network,
+    an unpublished league, a mock that has already been torn down (verified:
+    the owner's own mock id 1132152457 now 404s) -- and build_session then
+    quietly uses the database's own roster. That roster decides the round
+    count and every replacement level, so a draft shaped differently is
+    wrong everywhere downstream and nothing told the owner.
+
+    Now it is a warned stage, and the fallback's actual shape is published
+    with it, so the screen can say which roster it is about to draft for."""
+    monkeypatch.setattr("api.live.run_listener", lambda *a, **k: None)
+    monkeypatch.setattr("api.live.fetch_league_settings", lambda *a, **k: None)
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    client = TestClient(create_app(path))
+    assert _connect(client, "1").status_code == 200
+
+    body = client.get("/api/live/connect-progress").json()
+    stages = {s["key"]: s for s in body["stages"]}
+    assert stages["settings"]["status"] == "warn"
+    assert stages["settings"]["value"] == "unavailable"
+    # And WHICH fallback, which is the part that was invisible: league "1" is
+    # provisioned fresh, `league` is a LEAGUE_TABLE that provisioning does not
+    # copy, so this is not the owner's saved roster at all -- it is the
+    # built-in cold-start default (8 teams, full PPR, 15 rounds), a league
+    # they have never seen. The seeded database's own half-PPR settings live
+    # on the shared file and never reach this session.
+    assert body["facts"]["settings_source"] == "default"
+    assert body["facts"]["teams"] == 8
+    assert body["facts"]["scoring_format"] == "ppr"
+    assert body["facts"]["rounds"] == 15
+    # Warned, not failed: the connect carried on and the room works.
+    assert body["phase"] in ("connecting", "ready")
+    assert body["error"] is None
+    client.post("/api/live/stop")
+
+
+def test_a_rejected_connect_names_the_stage_it_died_on(tmp_path):
+    """A connect that fails must still surface a real error -- and now it
+    also says how far it got. The url below carries no league id, which is
+    refused before any listener is touched (see live_connect)."""
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    client = TestClient(create_app(str(tmp_path / "t.duckdb")))
+    assert client.post("/api/live/connect",
+                       json={"url": "https://example.com/nothing"}).status_code == 422
+
+    body = client.get("/api/live/connect-progress").json()
+    assert body["phase"] == "failed"
+    assert body["error"]["stage"] == "token"
+    assert "league id" in body["error"]["detail"]
+    # Nothing after the failure claims to have run.
+    assert all(s["status"] == "pending" for s in body["stages"]
+               if s["key"] != "token")
+
+
+def test_an_expired_token_fails_the_socket_stage_after_the_connect_returned(
+        tmp_path, monkeypatch, _isolated_leagues_root):
+    """The failure the connect screen exists to name. run_socket_listener
+    raises after MAX_EMPTY_RECONNECTS frameless attempts -- the signature of
+    an expired draft token -- and it happens on the listener thread, AFTER
+    the endpoint has already answered 200. Before this, the only place that
+    surfaced was a red pill inside a draft room the user had already been
+    handed."""
+    def boom(*a, **k):
+        raise RuntimeError("could not reconnect to the draft socket -- the "
+                           "draft token may have expired")
+
+    monkeypatch.setattr("api.live.run_socket_listener", boom)
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    client = TestClient(create_app(path))
+
+    assert client.post("/api/live/connect-token", json={
+        "leagueId": "1", "teamId": "2", "swid": "{X}",
+        "token": "99", "season": "2026"}).status_code == 200
+
+    assert _wait_until(
+        lambda: client.get("/api/live/connect-progress")
+        .json()["phase"] == "failed"), "the socket failure never surfaced"
+    body = client.get("/api/live/connect-progress").json()
+    assert body["error"]["stage"] == "socket"
+    assert "token may have expired" in body["error"]["detail"]
+    assert "click the Draft Helper bookmark again" in body["error"]["hint"]
+    # Everything it did manage is still on screen, with its values.
+    stages = {s["key"]: s for s in body["stages"]}
+    assert stages["board"]["status"] == "ok"
+    assert stages["token"]["value"] == "team 2 · season 2026"
+    client.post("/api/live/stop")
+
+
+def test_progress_is_readable_while_the_connect_is_still_blocked(
+        tmp_path, monkeypatch, _isolated_leagues_root):
+    """THE ARCHITECTURAL CLAIM, tested rather than assumed: the connect
+    endpoint keeps its synchronous contract (and every existing test of it),
+    and the progress is carried by a second request served concurrently.
+
+    Both endpoints are plain `def` handlers, so Starlette runs them in the
+    threadpool and one blocking connect does not stop the other from
+    answering. Verified separately against a real uvicorn (a 5s blocking sync
+    POST, GETs answering in 2-18ms throughout); this pins the same property
+    in-process, where the settings fetch is slowed to hold the connect open
+    long enough to poll it.
+    """
+    import threading
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_settings(*a, **k):
+        started.set()
+        release.wait(timeout=5)
+        return None
+
+    monkeypatch.setattr("api.live.run_listener", lambda *a, **k: None)
+    monkeypatch.setattr("api.live.fetch_league_settings", slow_settings)
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    client = TestClient(create_app(path))
+
+    done = threading.Event()
+    thread = threading.Thread(target=lambda: (_connect(client, "1"), done.set()))
+    thread.start()
+    try:
+        assert started.wait(timeout=5), "the connect never reached the fetch"
+        # The POST is still blocked here -- and the record already reads.
+        body = client.get("/api/live/connect-progress").json()
+        assert body["phase"] == "connecting"
+        assert not done.is_set(), "the connect finished before it was polled"
+        stages = {s["key"]: s for s in body["stages"]}
+        assert stages["token"]["status"] == "ok"
+        assert stages["settings"]["status"] == "running"
+        assert stages["board"]["status"] == "pending"
+        assert body["elapsed_ms"] > 0
+    finally:
+        release.set()
+        thread.join(timeout=30)
+    assert done.is_set()
+    client.post("/api/live/stop")

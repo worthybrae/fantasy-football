@@ -8,6 +8,7 @@ session builds them once and every refresh costs only `survival` plus
 """
 import dataclasses
 import hashlib
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -134,8 +135,9 @@ def board_fingerprint(board: pd.DataFrame) -> str:
 
 
 def build_session(conn, my_slot: int | None, seed: int = DEFAULT_SEED,
-                  league_id: str = "", settings=None) -> DraftSession:
-    """Everything expensive, once. Roughly 17s against a real database.
+                  league_id: str = "", settings=None,
+                  progress=None) -> DraftSession:
+    """Everything expensive, once. 4.1-34.8s against a real database.
 
     `league_id` is passed in rather than looked up, because the database has
     no record of it: the `league` table is `(season, settings_json)` and no
@@ -143,7 +145,22 @@ def build_session(conn, my_slot: int | None, seed: int = DEFAULT_SEED,
     `league["league_id"]` and raised KeyError the first time a real connect
     ran. The caller already has it -- parsed from the URL the user pasted,
     which is the only place it exists.
+
+    `progress` (a ConnectProgress, or None for the no-op) is how the connect
+    screen learns what this function is doing WHILE it does it. Three of its
+    stages live in here because all three of the expensive steps do:
+    measured against data/nfl.duckdb, build_board 1.5-1.9s, build_pool
+    2.2-3.6s, and fit_all either 6-13ms (a league with no history: cold
+    start) or 27.5-30.7s (the owner's own league: 696 picks over six
+    seasons, eight per-manager fits). That last number is why fit_all is
+    reported per manager rather than as one opaque wait -- it is 79-88% of
+    the whole connect, and it is the one stage with a real fraction to show.
+
+    The docstring's old figure ("roughly 17s") was the module docstring's
+    make-sim measurement and predated the board and pool getting slower; the
+    range above is measured, per stage, and is in the report.
     """
+    progress = progress or _NO_PROGRESS
     # `settings` is passed in when the connect flow fetched the league's real
     # roster/scoring from ESPN (see _league_settings_from_espn); None falls
     # back to whatever the database holds (the owner's imported league, or the
@@ -156,11 +173,66 @@ def build_session(conn, my_slot: int | None, seed: int = DEFAULT_SEED,
     # docstring for what reading a stale one does).
     settings_from_espn = settings is not None
     if settings is None:
+        # WHICH fallback, because they are not the same thing and the connect
+        # screen has to be able to say. `league_mod.load` returns the
+        # database's own settings if the `league` table has a row and the
+        # built-in cold-start default if it does not -- and for any league
+        # provisioned by this app the table is ALWAYS absent, since `league`
+        # is a LEAGUE_TABLE and provision_league copies only the universal
+        # ones. So "we fell back to what you imported" and "we fell back to a
+        # generic 8-team PPR league you have never seen" both looked
+        # identical, and the second is the one that is actually reached for
+        # every non-default league. One extra read of a table that holds at
+        # most one row per season, only on this path.
+        progress.fact(settings_source="saved" if not read_table(conn, "league").empty
+                      else "default")
         settings = league_mod.load(conn)
+
+    progress.begin("board")
     board = build_board(conn, settings=settings)
     board = _attach_espn_proj(conn, board)
+    progress.ok("board", f"{len(board)} players")
+    progress.fact(players=int(len(board)))
+
+    progress.begin("pool")
     pool = build_pool(conn, board, settings)
-    fits = fit_all(conn, settings)
+    # The value this step actually discovers: where replacement level sits.
+    # That is the whole point of pricing a pool -- every vor number the room
+    # shows is measured from these two ranks -- and it is read off the
+    # league's own settings, so a 12-team league genuinely reads differently
+    # from an 8-team one. `.get` with a dash: a league with no RB or WR
+    # starter slot at all is absurd but not impossible, and inventing a
+    # baseline for a position nobody starts would be inventing a value.
+    ranks = settings.replacement_ranks
+    progress.ok("pool", f"RB{ranks.get('RB', '-')} · WR{ranks.get('WR', '-')} "
+                        "baseline")
+
+    progress.begin("history")
+    # Ticked per manager, because this is the stage the owner actually waits
+    # on and it is the only one with a real fraction to report. `seen` is
+    # written by fit_all's callback on this same thread (fit_all is
+    # synchronous), so no synchronisation is needed for it.
+    seen = {"done": 0, "total": 0, "seasons": ()}
+
+    def _on_manager(done, total, seasons):
+        seen.update(done=done, total=total, seasons=tuple(seasons))
+        progress.value("history", f"{done} of {total} managers"
+                       if done else f"{total} managers to fit")
+
+    fits = fit_all(conn, settings, on_manager=_on_manager)
+    if seen["total"]:
+        progress.ok("history", f"{seen['total']} managers · "
+                               f"{len(seen['seasons'])} seasons")
+        progress.fact(managers=int(seen["total"]),
+                      seasons=len(seen["seasons"]))
+    else:
+        # cold_start_fits: no imported draft history for this league at all,
+        # which is the normal case for a mock and for anyone's first connect.
+        # Said outright rather than left as a silent "0 managers": the market
+        # prior IS the model in that case, and it is a different tool than
+        # the one that has read six of your drafts.
+        progress.ok("history", "none · market prior")
+        progress.fact(managers=0, seasons=0)
     pooled = fits.get("__pooled__", np.zeros(len(FEATURE_NAMES)))
     betas = {m: fits.get(m, pooled) for m in fits if m != "__pooled__"}
 
@@ -199,6 +271,251 @@ from scoring.draft_sim import (_drafted_state, _horizon_pick_for,
                                _seed_rosters, horizon_picks, snake_slots,
                                survival)
 from scoring.gain import available_by_vor, rank_available
+
+
+def _ordinal(n: int) -> str:
+    """1 -> '1st'. For the one sentence the connect screen exists to say --
+    "you pick 2nd of 8" -- which reads as a seat, not as a field value."""
+    if 10 <= n % 100 <= 20:
+        return f"{n}th"
+    return f"{n}{ {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
+
+
+# The connect's stage list, in the order the connect ACTUALLY runs them --
+# measured, not assumed (see .superpowers/sdd/connect-experience-report.md for
+# the per-stage timings against the real database). Two rows are conditional
+# (see _connect_plan): `reset` only exists when a listener was actually
+# running, and `socket` only on the bookmarklet path, which is the only one
+# that owns a socket handle of its own.
+#
+# The two rows the task brief's own stage list did not have are here because
+# they are measured to be the second and third most expensive things a
+# connect does: `pool` (build_pool, 2.2-3.6s) and `league` (provisioning a new
+# league's file is a 33MB table-by-table copy, 2.9s). Hiding three seconds
+# inside another row's spinner is the dead-screen problem this task exists to
+# fix, one row further down.
+_STAGE_LABELS = (
+    ("token", "Reading your draft token"),
+    ("reset", "Clearing the previous session"),
+    ("settings", "Reading league settings"),
+    ("league", "Opening this league's database"),
+    ("slot", "Finding your slot"),
+    ("board", "Building the player board"),
+    ("pool", "Pricing the pool against replacement"),
+    ("history", "Loading draft history"),
+    ("teams", "Naming the teams"),
+    ("socket", "Opening the draft socket"),
+    ("ranking", "Ranking the board"),
+)
+
+
+def _connect_plan(token_path: bool, had_listener: bool):
+    """The stages THIS connect will actually run, published up front so the
+    screen can draw the ones still to come as pending rather than growing a
+    list a row at a time.
+
+    Conditional rows are dropped, never rendered as a stage that then never
+    runs: `reset` when nothing was listening (the overwhelmingly common case
+    -- a first connect has nothing to stop, and _stop_listener returns in
+    microseconds), and `socket` on the browser-observer path, which watches a
+    socket a real ESPN tab holds and so has no handle of its own to open (see
+    state["socket"]).
+    """
+    skip = set()
+    if not had_listener:
+        skip.add("reset")
+    if not token_path:
+        skip.add("socket")
+    return [(k, "Reading the draft URL"
+             if (k == "token" and not token_path) else lbl)
+            for k, lbl in _STAGE_LABELS if k not in skip]
+
+
+class ConnectProgress:
+    """One connect's own progress record: what it has done, what it is doing,
+    and the real value each step discovered.
+
+    Exists because the work is genuinely slow and genuinely interesting, and
+    until now all of it happened behind a spinner. Measured against the real
+    database (data/nfl.duckdb, 249 players, 8 teams, six seasons of history):
+    a connect to the owner's own league blocks for 32-35s, of which fit_all is
+    27.5-30.7s; a connect to a fresh mock league blocks for 8.6s, of which
+    provisioning the league file is 2.9s and build_pool 2.2-3.6s. "Several
+    seconds on a dead screen" was an understatement by an order of magnitude.
+
+    EVERY value on it is a real discovered value. There is no timer, no
+    minimum display time and no synthetic step anywhere in this class: a stage
+    that finishes in 20ms flashes past, and the elapsed figure it publishes is
+    a real monotonic delta.
+
+    THREAD SAFETY. Three threads write to one of these -- the connect request
+    thread (stages 1-9), the listener thread (`socket`, from run_socket_
+    listener's on_socket / the pump's error handler) and the recompute worker
+    (`ranking`) -- and a fourth, whichever request thread is serving
+    /api/live/connect-progress, reads it. So NOTHING mutates the stage list
+    directly: every mutation is handed to `publish` as a callable, and
+    register_live_routes runs it under the same `lock` every other write to
+    `state` takes, with the same identity guard (a superseded connect's late
+    callback must be a no-op, exactly as a superseded listener's is). The
+    snapshot published under that lock is rebuilt from scratch each time and
+    never mutated afterwards, so the endpoint can serve it after releasing.
+
+    CALLER'S PRECONDITION: never call a method on this while holding `lock` --
+    `lock` is a plain threading.Lock, not an RLock, so a progress call from
+    inside a `with lock:` block would deadlock the whole app. The call sites
+    that live next to a locked write (on_socket, the pump's error handler,
+    recompute_worker) all make the call after the block, and say so.
+    """
+
+    def __init__(self, plan=(), publish=None):
+        self._stages = [{"key": k, "label": lbl, "status": "pending",
+                         "value": None, "ms": None} for k, lbl in plan]
+        self._by_key = {s["key"]: s for s in self._stages}
+        self._publish = publish
+        self._started = time.monotonic()
+        # Frozen the moment nothing is left running, so the handoff screen's
+        # "5.6s" is how long the connect actually took rather than how long
+        # the user has been reading the result.
+        self._ended = None
+        self._stage_started = {}
+        self._facts = {}
+        self._error = None
+
+    # -- mutation. Each one is a no-op for a key this plan does not carry, so
+    # a caller need not know which conditional rows are in play. --
+
+    def _apply(self, mutate):
+        if self._publish is None:
+            mutate()
+        else:
+            self._publish(self, mutate)
+
+    def _open(self, key):
+        """The stage under `key`, if it is still open to being changed. A
+        terminal stage is never reopened: the socket stage can be failed by
+        the pump's error handler and completed by on_socket, and whichever
+        genuinely happened first is the one that is true."""
+        stage = self._by_key.get(key)
+        if stage is None or stage["status"] in ("ok", "warn", "failed"):
+            return None
+        return stage
+
+    def begin(self, key):
+        def run():
+            stage = self._open(key)
+            if stage is None or stage["status"] == "running":
+                return
+            stage["status"] = "running"
+            self._stage_started[key] = time.monotonic()
+        self._apply(run)
+
+    def value(self, key, value):
+        """A live value on a stage still running -- the manager-fit counter,
+        which is the only place a real fraction exists to show (fit_all
+        genuinely fits N of M managers). Never a percentage of elapsed time."""
+        def run():
+            stage = self._open(key)
+            if stage is not None:
+                stage["value"] = value
+        self._apply(run)
+
+    def _finish(self, key, status, value):
+        def run():
+            stage = self._open(key)
+            if stage is None:
+                return
+            stage["status"] = status
+            stage["value"] = value
+            started = self._stage_started.get(key)
+            stage["ms"] = (None if started is None
+                           else round((time.monotonic() - started) * 1000))
+            self._settle()
+        self._apply(run)
+
+    def _settle(self):
+        """Stop the clock the first time nothing is left to do. A terminal
+        stage is never reopened (see `_open`), so this cannot un-settle."""
+        if self._ended is None and self.phase() != "connecting":
+            self._ended = time.monotonic()
+
+    def ok(self, key, value=None):
+        self._finish(key, "ok", value)
+
+    def warn(self, key, value):
+        """Done, but not the way it was meant to be -- the connect carries on.
+        The one that matters is `settings`: _league_settings_from_espn returns
+        None on ANY failure and build_session then silently uses the
+        database's own roster, which decides the round count and every
+        replacement level. Silence there was the bug."""
+        self._finish(key, "warn", value)
+
+    def fail(self, key, value, hint=None):
+        """Stopped here. `key=None` (or a key already terminal) fails the
+        first stage still open, so a caller that only knows "the connect died"
+        -- the pump's error handler, which cannot know which stage was live --
+        still lands the failure on a real row rather than nowhere."""
+        def run():
+            if self.phase() == "failed":
+                return          # the FIRST failure is the one that matters
+            stage = self._open(key) if key else None
+            if stage is None:
+                stage = next((s for s in self._stages
+                              if s["status"] in ("pending", "running")), None)
+            if stage is None:
+                return
+            stage["status"] = "failed"
+            stage["value"] = value
+            started = self._stage_started.get(stage["key"])
+            stage["ms"] = (None if started is None
+                           else round((time.monotonic() - started) * 1000))
+            self._error = {"stage": stage["key"], "label": stage["label"],
+                           "detail": value, "hint": hint}
+            self._settle()
+        self._apply(run)
+
+    def fact(self, **kw):
+        """What the connect learned, for the handoff screen's fact grid. Only
+        ever set from a value actually read -- a fact nobody discovered is
+        absent, and the screen drops the cell rather than inventing one."""
+        def run():
+            self._facts.update(kw)
+        self._apply(run)
+
+    # -- reading --
+
+    def phase(self) -> str:
+        if any(s["status"] == "failed" for s in self._stages):
+            return "failed"
+        if any(s["status"] in ("pending", "running") for s in self._stages):
+            return "connecting"
+        return "ready"
+
+    def snapshot(self) -> dict:
+        """A fresh, self-contained copy -- built under `lock` by the endpoint
+        and never mutated afterwards, so it can be serialised after the lock
+        releases without a torn read.
+
+        `elapsed_ms` is computed HERE, per request, rather than stored at the
+        last mutation: build_board alone runs for ~1.9s without a single
+        stage transition, and an elapsed figure that only moved when a stage
+        landed would read as a stopped clock exactly during the waits it
+        exists to measure.
+        """
+        end = self._ended if self._ended is not None else time.monotonic()
+        return {
+            "phase": self.phase(),
+            "stages": [dict(s) for s in self._stages],
+            "facts": dict(self._facts),
+            "error": dict(self._error) if self._error else None,
+            "elapsed_ms": round((end - self._started) * 1000),
+        }
+
+
+# The no-op progress every caller that isn't a connect gets: live_start and
+# every test that calls build_session directly. An empty plan means every
+# method above returns at its first lookup, so the instrumentation costs those
+# callers nothing and needs no `if progress is not None` at any call site.
+_NO_PROGRESS = ConnectProgress()
 
 
 class ConnectBody(BaseModel):
@@ -820,8 +1137,54 @@ def register_live_routes(app, conn, db_path):
              # after its session truly ends would make every future
              # reconnect to that same league fail; closing one a thread is
              # still using would be worse.
-             "league_conn": None}
+             "league_conn": None,
+             # The live ConnectProgress for the most recent connect (see the
+             # class, and GET /api/live/connect-progress). Deliberately the
+             # object, not a rendered snapshot: it is mutated only under
+             # `lock` and snapshotted only under `lock`, so the endpoint
+             # cannot serve a half-written stage, and the elapsed figure is
+             # computed at request time instead of freezing between stages.
+             # Survives the connect that built it -- the screen is still
+             # reading it while the socket opens and the first ranking lands,
+             # both of which happen after the connect handler has returned.
+             "connect": None,
+             # Bumped for every connect attempt, valid or not. The identity
+             # guard for progress writes, exactly as `listener` is for state
+             # writes: a superseded connect's late callback (its listener
+             # thread dying, its recompute worker finishing) must not write
+             # over the record of the connect that replaced it. A counter and
+             # not the object itself because the object is what it guards.
+             "connect_seq": 0}
     lock = threading.Lock()
+
+    def _new_progress(token_path: bool, **facts):
+        """Open a progress record for a connect that is about to run.
+
+        Publishes the whole stage plan up front -- every row pending -- so
+        the screen draws the shape of the work on its first poll rather than
+        growing a list one row at a time. `facts` are what the caller
+        already knows before any work happens (the league and team ids off
+        the token); everything else is added as it is discovered.
+        """
+        with lock:
+            state["connect_seq"] += 1
+            seq = state["connect_seq"]
+            # Read under the same lock as the sequence bump: whether there is
+            # a listener to stop decides whether the plan carries a `reset`
+            # row, and a plan that disagrees with what the connect then does
+            # would leave a row spinning forever or land a value nowhere.
+            had_listener = state["listener"] is not None
+
+        def publish(prog, mutate):
+            with lock:
+                if state["connect_seq"] != seq:
+                    return          # superseded -- see state["connect_seq"]
+                mutate()
+                state["connect"] = prog
+        progress = ConnectProgress(_connect_plan(token_path, had_listener),
+                                   publish)
+        progress.fact(**facts)      # the first publish, which registers it
+        return progress
 
     def _stop_listener(timeout: float = LISTENER_STOP_TIMEOUT) -> bool:
         """Signal the active listener thread to stop and wait for it to exit.
@@ -983,7 +1346,7 @@ def register_live_routes(app, conn, db_path):
             # pair is written together or not at all.
             state["horizon_pick"] = int(horizon)
 
-    def _provision_and_build(league_id, team_id, settings=None):
+    def _provision_and_build(league_id, team_id, settings=None, progress=None):
         """Open (provisioning if needed) the connection this league's session
         lives on, and build the session against it.
 
@@ -1010,12 +1373,29 @@ def register_live_routes(app, conn, db_path):
         freshly opened league_conn is closed here -- nothing else holds it
         yet -- so a provisioned file is never left locked.
         """
+        progress = progress or _NO_PROGRESS
+        progress.begin("league")
         league_conn = None
         if (league_id and league_id != DEFAULT_LEAGUE
                 and league_id != leagues_mod.DEFAULT_LEAGUE_ID):
+            league_path = leagues_mod.league_db_path(
+                league_id, root=leagues_mod.LEAGUES_ROOT)
+            # Read BEFORE provisioning, because provision_league is
+            # idempotent and afterwards the two cases are indistinguishable.
+            # Worth telling apart on screen: seeding a new league's file is a
+            # table-by-table copy of every universal table (2.9s measured
+            # against the real 33MB database, the third most expensive thing
+            # a connect does), and it happens exactly once per league -- so a
+            # first connect that pauses here is doing something real, and
+            # every later one flashes past.
+            existed = os.path.exists(league_path)
             league_path = provision_league(
                 league_id, universal_path=db_path, root=leagues_mod.LEAGUES_ROOT)
             league_conn = get_conn(league_path)
+            progress.ok("league", "already provisioned" if existed
+                        else "new file · seeded from the shared database")
+        else:
+            progress.ok("league", "the shared database")
         work_conn = league_conn if league_conn is not None else conn
         try:
             cur = work_conn.cursor()
@@ -1042,12 +1422,34 @@ def register_live_routes(app, conn, db_path):
                 # _slot_for_team rather than indexing last season's stale
                 # order. It is the LATER resolution, off sess.settings, that
                 # has to gate on the flag (see _resolve_slot).
+                progress.begin("slot")
                 my_slot = None
                 if team_id is not None:
                     my_slot = (_slot_from_pick_order(settings, team_id)
                                or _slot_for_team(cur, team_id))
+                # "of 8" comes from the settings this session is actually
+                # being built with, and only when they are known at this
+                # point -- ESPN's fetch has happened, the database's fallback
+                # has not (build_session does that a few lines below). No
+                # count rather than a count that could disagree with the
+                # roster the board is about to be built for.
+                teams = getattr(settings, "teams", None)
+                if my_slot is not None:
+                    progress.ok("slot", f"you pick {_ordinal(my_slot)}"
+                                + (f" of {teams}" if teams else ""))
+                    progress.fact(my_slot=int(my_slot))
+                else:
+                    # Genuinely unknown, not a default: no teamId in the
+                    # pasted url, or a league whose pickOrder ESPN did not
+                    # publish and whose managers are in no imported history
+                    # (a mock's strangers). The socket's own TOKEN/SELECTING
+                    # frames name the team later (see _resolve_slot), which
+                    # is what this row says rather than guessing a seat --
+                    # a wrong slot attributes every pick to the wrong manager
+                    # and nothing downstream can detect it.
+                    progress.warn("slot", "waiting on the draft socket")
                 session = build_session(cur, my_slot, league_id=league_id,
-                                        settings=settings)
+                                        settings=settings, progress=progress)
             finally:
                 cur.close()
         except Exception:
@@ -1056,7 +1458,120 @@ def register_live_routes(app, conn, db_path):
             raise
         return work_conn, league_conn, session
 
-    def _launch_listener(work_conn, league_conn, league_id, session, run_fn):
+    _SCORING_LABELS = {"ppr": "PPR", "half": "half-PPR", "std": "standard"}
+
+    def _connect_work(progress, league_id, team_id, season):
+        """Everything both connect endpoints do between validating their own
+        input and launching the listener, in one place so the two paths
+        cannot drift -- and so the stages are recorded identically for both.
+
+        Unchanged in order and in effect from the two copies it replaces:
+        stop the previous listener, fetch ESPN's settings (best-effort),
+        provision + build, fetch ESPN's team names (best-effort). The only
+        additions are the progress marks around each and the ones inside
+        _provision_and_build/build_session.
+        """
+        progress.begin("reset")
+        # Exactly one listener at a time. Rather than refuse a reconnect --
+        # which would trap a caller recovering from a dead listener behind a
+        # separate, easy-to-forget /api/live/stop -- the old one is always
+        # stopped and joined FIRST. That is also where its per-league
+        # connection is closed, so the single-writer DuckDB file is free
+        # before _provision_and_build reopens it. If it will not stop in
+        # time, refuse rather than race it.
+        if not _stop_listener():
+            progress.fail(
+                "reset", "the previous listener is still running",
+                hint="Wait a few seconds and click the bookmark again. Two "
+                     "sockets for one team is the one thing this refuses to "
+                     "risk.")
+            raise HTTPException(
+                status_code=503,
+                detail="the previous listener did not stop in time -- try again")
+        progress.ok("reset", "stopped")
+
+        progress.begin("settings")
+        # The league's real roster/scoring from ESPN, so the session drafts for
+        # the actual roster (rounds, starters) rather than the cold-start
+        # default. None on any failure -> build_session reads the db's own.
+        espn_settings = _league_settings_from_espn(league_id, season)
+        if espn_settings is not None:
+            progress.ok("settings", _settings_line(espn_settings))
+            progress.fact(settings_source="espn", **_settings_facts(espn_settings))
+        else:
+            # THE SILENT FAILURE THIS SCREEN EXISTS TO SURFACE. This returns
+            # None on any failure at all -- no network, a league whose
+            # settings are not published, a mock that has already been torn
+            # down (verified: the owner's own mock league id 1132152457 now
+            # 404s) -- and build_session then quietly uses whatever the
+            # database holds. That fallback decides the round count and every
+            # replacement level, so a league that is not shaped like the
+            # saved one is wrong everywhere downstream and nothing said so.
+            # The row says only what is known HERE -- ESPN did not answer.
+            # WHICH fallback is used is not known until build_session has
+            # opened the league's database (the design mock's "unavailable ·
+            # using saved" asserts an answer this line cannot have yet, and
+            # for a league provisioned by this app it is the wrong one). The
+            # shape actually used is published in `facts` a few lines below,
+            # and the screen's callout is what carries it.
+            progress.warn("settings", "unavailable")
+
+        try:
+            work_conn, league_conn, session = _provision_and_build(
+                league_id, team_id, settings=espn_settings, progress=progress)
+        except Exception as exc:      # noqa: BLE001 -- re-raised immediately;
+            # this only records WHERE it died before FastAPI turns it into a
+            # 500. Without it a build that raises (a duplicated player_id in
+            # the ADP feed took build_session down once already, see
+            # build_pool's own comment) leaves the row it died on spinning
+            # and the screen says nothing about which step failed. `fail`
+            # with no key lands on whichever stage was still open, which is
+            # exactly the one that raised.
+            progress.fail(None, f"{type(exc).__name__}: {exc}",
+                          hint="This is a fault in the board build, not in "
+                               "your league. The helper's log has the "
+                               "traceback.")
+            raise
+        # Authoritative, whatever the source: these come off the settings the
+        # session was ACTUALLY built with, so the handoff screen's fact grid
+        # can never describe a league the board was not built for.
+        # `settings_source` is set here only for the ESPN case -- build_session
+        # owns the other two, because only it can tell "saved" from "default".
+        progress.fact(**_settings_facts(session.settings))
+        if session.settings_from_espn:
+            progress.fact(settings_source="espn")
+
+        progress.begin("teams")
+        # Real ESPN team names for the board's columns, fetched once here (the
+        # URL carries the season). Best-effort -- a failure leaves team_slots
+        # empty and the board falls back to "Team {slot}".
+        session = _attach_team_slots(session, league_id, season)
+        teams = session.settings.teams
+        named = len(session.team_slots)
+        if named:
+            progress.ok("teams", f"{named} of {teams}")
+            progress.fact(
+                team_names=[session.team_slots.get(s)
+                            for s in range(1, teams + 1)],
+                my_team=session.team_slots.get(session.my_slot))
+        else:
+            progress.warn("teams", f"unavailable · Team 1-{teams}")
+        return work_conn, league_conn, session
+
+    def _settings_line(settings) -> str:
+        """The one line that makes 'reading league settings' worth showing:
+        what it actually read."""
+        fmt = _SCORING_LABELS.get(league_mod.scoring_format(settings), "?")
+        return f"{settings.teams} teams · {fmt} · {settings.rounds} rounds"
+
+    def _settings_facts(settings) -> dict:
+        return {"teams": settings.teams, "rounds": settings.rounds,
+                "scoring_format": league_mod.scoring_format(settings),
+                "starters": dict(settings.starters),
+                "flex_slots": settings.flex_slots, "bench": settings.bench}
+
+    def _launch_listener(work_conn, league_conn, league_id, session, run_fn,
+                         progress=None):
         """Register a built session's listener thread and start it.
 
         `run_fn(listener, on_change, stop_event)` is what actually opens and
@@ -1067,6 +1582,7 @@ def register_live_routes(app, conn, db_path):
         in-flight callback a no-op, the listener_error capture, and the state
         registration + generation bump.
         """
+        progress = progress or _NO_PROGRESS
         listener = DraftListener(session.crosswalk)
         stop_event = threading.Event()
         # DraftSession is frozen, so the my_slot back-fill replaces the
@@ -1149,10 +1665,22 @@ def register_live_routes(app, conn, db_path):
                         if state["listener"] is listener:
                             state["recompute_error"] = \
                                 f"{type(exc).__name__}: {exc}"
+                    # OUTSIDE the block above: `lock` is a plain Lock and
+                    # every ConnectProgress method takes it (see the class
+                    # docstring), so calling one from inside would deadlock.
+                    # Only the FIRST ranking is a connect stage -- `fail` is
+                    # a no-op once the stage is terminal, so a recompute that
+                    # dies at pick 40 does not reach back and mark a connect
+                    # that finished half an hour ago.
+                    progress.fail("ranking", f"{type(exc).__name__}: {exc}",
+                                  hint="The board is still live; the ranked "
+                                       "list will retry on the next pick.")
                 else:
                     with lock:
                         if state["listener"] is listener:
                             state["recompute_error"] = None
+                        ranked = len(state["candidates"])
+                    progress.ok("ranking", f"{ranked} ranked")
 
         def _resolve_slot(c2) -> bool:
             """Resolve my_slot from ESPN's pick order, history, or the
@@ -1284,6 +1812,20 @@ def register_live_routes(app, conn, db_path):
                 with lock:
                     if state["listener"] is listener:
                         state["listener_error"] = str(exc)
+                # Outside the lock (see the recompute worker's own note, and
+                # ConnectProgress's docstring). This is the failure the
+                # connect screen has to be able to name: run_socket_listener
+                # raises here after MAX_EMPTY_RECONNECTS frameless attempts,
+                # which is what an expired draft token looks like, and until
+                # now it surfaced only as a red pill inside a draft room the
+                # user had already been handed. `fail` lands on the socket
+                # stage on the bookmarklet path and, on the browser path
+                # (which has no socket row at all), on whichever stage was
+                # still open -- never nowhere.
+                progress.fail("socket", str(exc),
+                              hint="Go back to your ESPN draft tab and click "
+                                   "the Draft Helper bookmark again -- it "
+                                   "mints a fresh token.")
 
         thread = threading.Thread(target=pump, daemon=True)
         recompute_thread = threading.Thread(target=recompute_worker, daemon=True)
@@ -1342,6 +1884,17 @@ def register_live_routes(app, conn, db_path):
         # names our team -- that path is unchanged and still needed.
         if session.my_slot is not None:
             request_recompute(session, made_at_launch)
+            progress.begin("ranking")
+        else:
+            # Terminal, and honestly so: with no slot there is nothing to rank
+            # FOR, and this connect will never request one (see the note
+            # above). The room still fills -- live_state's vor fallback serves
+            # the pool ranked by value over replacement -- and the slot-aware
+            # ranking arrives on its own the moment the socket names our team.
+            # Left `pending` instead, the screen would wait for a stage that
+            # is never coming.
+            progress.warn("ranking", "waiting on your slot")
+        progress.begin("socket")
         thread.start()
         # my_slot is echoed back deliberately: None means genuinely undetected
         # yet, not a default. A resolved value went through draft_teams ->
@@ -1603,6 +2156,39 @@ def register_live_routes(app, conn, db_path):
             "my_roster": my_roster,
         }
 
+    @app.get("/api/live/connect-progress")
+    def live_connect_progress():
+        """What the connect is doing right now, stage by stage.
+
+        A separate endpoint from /api/live/state, and a deliberately tiny
+        one: it touches no database at all (state's own handler runs a
+        COUNT(*), a _drafted_state replay and a vor fallback ranking on every
+        call), because the connect screen polls this several times a second
+        while the connect thread is busy building a board. It also has to
+        answer BEFORE there is a session, which is precisely the window
+        /api/live/state reports as `active: false` and nothing else.
+
+        Serving it while a connect is blocked in POST /api/live/connect-token
+        works because that handler is a plain `def`, so Starlette runs it in
+        the threadpool and the event loop stays free -- verified against a
+        real uvicorn (a 5s blocking sync POST, GETs answering in 2-18ms
+        throughout). That is the whole reason the connect endpoints keep
+        their existing synchronous contract, response shape and error
+        semantics: the progress is carried by a second request, not by
+        turning the first one into a job queue.
+
+        `phase: "idle"` (never a 404) for a helper that has not been
+        connected since it started -- the same "present with an empty value"
+        convention live_state's inactive branch follows.
+        """
+        with lock:
+            progress = state["connect"]
+            body = progress.snapshot() if progress is not None else None
+        if body is None:
+            return {"phase": "idle", "stages": [], "facts": {},
+                    "error": None, "elapsed_ms": 0}
+        return body
+
     @app.get("/api/live/board")
     def live_board():
         """The full draft-board grid: every column named, every pick placed.
@@ -1825,36 +2411,24 @@ def register_live_routes(app, conn, db_path):
 
     @app.post("/api/live/connect")
     def live_connect(body: ConnectBody):
+        progress = _new_progress(token_path=False)
+        progress.begin("token")
         # Validate the one thing that can be invalid (the league id) BEFORE
         # tearing down a working listener -- an invalid request must never
         # stop one that was running. Team id / slot resolution never raises
         # (see _slot_for_team's docstring).
-        league_id = _resolve_league_id(body.url)
-
-        # Exactly one listener at a time. Rather than refuse a reconnect --
-        # which would trap a caller recovering from a dead listener behind a
-        # separate, easy-to-forget /api/live/stop -- the old one is always
-        # stopped and joined FIRST. That is also where its per-league
-        # connection is closed, so the single-writer DuckDB file is free
-        # before _provision_and_build reopens it. If it will not stop in
-        # time, refuse rather than race it.
-        if not _stop_listener():
-            raise HTTPException(
-                status_code=503,
-                detail="the previous listener did not stop in time -- try again")
+        try:
+            league_id = _resolve_league_id(body.url)
+        except HTTPException as exc:
+            progress.fail("token", exc.detail)
+            raise
+        progress.ok("token", f"league {league_id}")
+        progress.fact(league_id=league_id)
 
         team_id = _team_id_from_url(body.url)
         season = _season_from_url(body.url)
-        # The league's real roster/scoring from ESPN, so the session drafts for
-        # the actual roster (rounds, starters) rather than the cold-start
-        # default. None on any failure -> build_session reads the db's own.
-        espn_settings = _league_settings_from_espn(league_id, season)
-        work_conn, league_conn, session = _provision_and_build(
-            league_id, team_id, settings=espn_settings)
-        # Real ESPN team names for the board's columns, fetched once here (the
-        # URL carries the season). Best-effort -- a failure leaves team_slots
-        # empty and the board falls back to "Team {slot}".
-        session = _attach_team_slots(session, league_id, season)
+        work_conn, league_conn, session = _connect_work(
+            progress, league_id, team_id, season)
 
         def run_fn(listener, on_change, on_activity, stop_event):
             # The browser observer: watches the socket a real ESPN tab holds.
@@ -1865,7 +2439,8 @@ def register_live_routes(app, conn, db_path):
             run_listener(listener, body.url, STATE_PATH,
                          on_change=on_change, stop_event=stop_event)
 
-        return _launch_listener(work_conn, league_conn, league_id, session, run_fn)
+        return _launch_listener(work_conn, league_conn, league_id, session,
+                                run_fn, progress=progress)
 
     @app.post("/api/live/connect-token")
     def live_connect_token(body: TokenBody):
@@ -1882,7 +2457,19 @@ def register_live_routes(app, conn, db_path):
         the reason the browser-window fallback (`/api/live/connect`) can be
         avoided whenever the drafter can click a bookmark.
         """
+        progress = _new_progress(token_path=True, league_id=body.leagueId)
+        progress.begin("token")
+        # NOTHING about this step reaches ESPN: the token is a per-draft nonce
+        # the bookmarklet already minted on ESPN's own page, and the first
+        # thing that actually puts it in front of ESPN is the socket handshake
+        # at the bottom of this file. So this row says what it really is --
+        # the four fields arrived and the team id is a number -- and it is the
+        # SOCKET row that reports whether ESPN accepted the token.
         if not (body.leagueId and body.teamId and body.swid and body.token):
+            progress.fail(
+                "token", "the bookmarklet sent an incomplete token",
+                hint="Open your ESPN draft room and click the Draft Helper "
+                     "bookmark from inside it, not from another tab.")
             raise HTTPException(
                 status_code=422,
                 detail="missing leagueId, teamId, swid, or token")
@@ -1893,24 +2480,15 @@ def register_live_routes(app, conn, db_path):
         try:
             team_id = int(body.teamId)
         except (TypeError, ValueError):
+            progress.fail(
+                "token", f"team id {body.teamId!r} is not a number",
+                hint="Open your ESPN draft room and click the Draft Helper "
+                     "bookmark from inside it, not from another tab.")
             raise HTTPException(status_code=422, detail="teamId must be numeric")
+        progress.ok("token", f"team {team_id} · season {body.season or '?'}")
 
-        # Same one-listener-at-a-time teardown as live_connect, and for the
-        # same reason: stop and join the old one (closing its connection)
-        # before _provision_and_build reopens this league's single-writer file.
-        if not _stop_listener():
-            raise HTTPException(
-                status_code=503,
-                detail="the previous listener did not stop in time -- try again")
-
-        # The league's real roster/scoring from ESPN (TokenBody carries the
-        # season). None on failure -> the db's own settings.
-        espn_settings = _league_settings_from_espn(body.leagueId, body.season)
-        work_conn, league_conn, session = _provision_and_build(
-            body.leagueId, team_id, settings=espn_settings)
-        # Real ESPN team names for the board's columns. TokenBody carries the
-        # season outright. Best-effort, same as the browser path.
-        session = _attach_team_slots(session, body.leagueId, body.season)
+        work_conn, league_conn, session = _connect_work(
+            progress, body.leagueId, team_id, body.season)
 
         def run_fn(listener, on_change, on_activity, stop_event):
             def _on_socket(handle):
@@ -1925,6 +2503,12 @@ def register_live_routes(app, conn, db_path):
                 with lock:
                     if state["listener"] is listener:
                         state["socket"] = handle
+                # After the block, never inside it: `lock` is a plain Lock
+                # and ConnectProgress takes it (see its docstring). This is
+                # the first and only moment ESPN itself has accepted the
+                # token -- the handshake behind run_socket_listener's first
+                # successful connect -- so it is the honest place to say so.
+                progress.ok("socket", "connected")
 
             run_socket_listener(listener, body.leagueId, body.teamId, body.swid,
                                 body.token, on_change=on_change,
@@ -1943,6 +2527,6 @@ def register_live_routes(app, conn, db_path):
                 "received_at": datetime.now(timezone.utc).isoformat(),
             }
         return _launch_listener(work_conn, league_conn, body.leagueId, session,
-                                run_fn)
+                                run_fn, progress=progress)
 
     return state, _recompute

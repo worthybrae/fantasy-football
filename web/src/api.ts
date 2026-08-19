@@ -472,6 +472,78 @@ export async function connectWithToken(
   return res.json()
 }
 
+// -- the connect screen ---------------------------------------------------
+//
+// GET /api/live/connect-progress, polled while POST /api/live/connect-token
+// is still blocked. The two are concurrent on purpose: the connect endpoint
+// is a plain sync handler, so Starlette runs it in the threadpool and this
+// one answers throughout (api/live.py's live_connect_progress explains the
+// choice and what was measured). Nothing here is a client-side estimate --
+// every value below is a value the server actually discovered.
+
+// `warn` is "done, but not the way it was meant to be" and the connect
+// carried on -- ESPN's settings unavailable so the saved roster was used, no
+// team names, no slot yet. `failed` stopped the connect.
+export type ConnectStageStatus = 'pending' | 'running' | 'ok' | 'warn' | 'failed'
+
+export interface ConnectStage {
+  key: string
+  label: string
+  status: ConnectStageStatus
+  /** What this step discovered ("249 players", "you pick 2nd of 8"). Null
+   *  until it has discovered it. */
+  value: string | null
+  /** Real measured duration, null while the stage is still pending/running. */
+  ms: number | null
+}
+
+// Everything the connect learned, for the handoff screen's fact grid. Every
+// field is optional because every one of them is only present once something
+// actually discovered it -- a missing key means "not known", and the screen
+// drops that cell rather than rendering a zero it made up.
+export interface ConnectFacts {
+  league_id?: string
+  teams?: number
+  rounds?: number
+  scoring_format?: 'ppr' | 'half' | 'std'
+  starters?: Record<string, number>
+  flex_slots?: number
+  bench?: number
+  players?: number
+  /** Managers fitted from this league's imported draft history; 0 means the
+   *  cold start (the market prior), which is a different model, not a worse
+   *  count. */
+  managers?: number
+  seasons?: number
+  my_slot?: number
+  team_names?: (string | null)[]
+  my_team?: string | null
+  /** Where the roster/scoring the board was built for came from, and the
+   *  two fallbacks are NOT the same thing: 'saved' is this league's own
+   *  imported settings, 'default' is the built-in cold-start league (8 teams,
+   *  PPR, 15 rounds) that any league provisioned by this app falls back to,
+   *  because `league` is a per-league table provisioning does not copy. Both
+   *  decide the round count and every replacement level. */
+  settings_source?: 'espn' | 'saved' | 'default'
+}
+
+export interface ConnectProgress {
+  /** 'idle' = this helper has not connected since it started. */
+  phase: 'idle' | 'connecting' | 'ready' | 'failed'
+  stages: ConnectStage[]
+  facts: ConnectFacts
+  error: { stage: string; label: string; detail: string; hint: string | null } | null
+  elapsed_ms: number
+}
+
+export async function fetchConnectProgress(): Promise<ConnectProgress> {
+  const res = await fetch('/api/live/connect-progress')
+  if (!res.ok) {
+    throw new Error(`Failed to read connect progress (${res.status})`)
+  }
+  return res.json()
+}
+
 // -- landing page --------------------------------------------------------
 //
 // Two calls, split by what they cost. `status` is table reads (milliseconds)

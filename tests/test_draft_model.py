@@ -1348,3 +1348,41 @@ def test_cold_start_opponent_drafts_toward_the_market(tmp_path):
     best, worst = probs[0], probs[9]             # rank 1 vs rank 10
     assert best > worst
     assert best > 3 * worst, (best, worst)       # a clear market lean, not a nudge
+
+
+def test_fit_all_reports_each_manager_as_it_is_fitted(tmp_path):
+    """The connect screen's one honest fraction.
+
+    fit_all is 27.5-30.7s of a 32-35s connect against the owner's own league
+    (build_observations 9.9s, the pooled fit 3.3s, then eight per-manager fits
+    at 1.5-3.1s each) -- and the per-manager loop is the only place in the
+    whole connect where a real N-of-M exists to report. Everything else is
+    one indivisible step, where a percentage would have to be invented.
+
+    The first call carries done=0, deliberately: it fires as soon as the
+    manager set is known (after build_observations and prepare) rather than
+    after the pooled fit adds another three seconds of silence.
+    """
+    from scoring.draft_model import fit_all
+    conn = _seed_many(tmp_path)
+    calls = []
+    fits = fit_all(conn, on_manager=lambda done, total, seasons:
+                   calls.append((done, total, tuple(seasons))))
+    assert [c[0] for c in calls] == [0, 1, 2]
+    assert all(c[1] == 2 for c in calls)
+    assert calls[0][2] == (2023, 2024, 2025)
+    # It reports on exactly the managers it actually fitted.
+    assert calls[-1][0] == len(set(fits) - {"__pooled__"}) == 2
+
+
+def test_fit_all_never_reports_a_manager_on_the_cold_start_path(tmp_path):
+    """No history means no fits at all -- so the callback is never called,
+    which is how build_session tells "no draft history for this league" apart
+    from "no managers fitted yet" and says the honest thing on screen
+    ("none · market prior") rather than "0 of 0"."""
+    from scoring.draft_model import fit_all
+    from pipeline.db import get_conn
+    calls = []
+    fit_all(get_conn(str(tmp_path / "empty.duckdb")),
+            on_manager=lambda *a: calls.append(a))
+    assert calls == []

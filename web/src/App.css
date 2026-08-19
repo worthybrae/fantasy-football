@@ -1629,7 +1629,8 @@ td:first-child {
   color: var(--accent);
 }
 
-/* Same spinner idiom as `.landing-spinner`, sized to sit inside an 11px
+/* Same spinner idiom as the connect screen's `.cs-glyph-run`, sized to sit
+   inside an 11px
    line box. `flex-shrink: 0` so the ellipsis eats the sentence, never the
    spinner -- a spinner squeezed to nothing is a loading indicator that
    stops indicating. */
@@ -2334,12 +2335,6 @@ td:first-child {
   gap: var(--space-6);
 }
 
-.landing-centered {
-  min-height: 100svh;
-  justify-content: center;
-  align-items: center;
-}
-
 .landing-bar {
   display: flex;
   align-items: center;
@@ -2707,33 +2702,19 @@ td:first-child {
   color: var(--accent);
 }
 
-/* -- connecting: one second, then a redirect -- */
-
-.landing-connecting {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--space-3);
-  text-align: center;
-}
-
-.landing-connecting-title {
-  font-size: var(--text-xl);
-  color: var(--text-1);
-}
-
-.landing-spinner {
-  width: 18px;
-  height: 18px;
-  border: 2px solid var(--border);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: landing-spin 0.8s linear infinite;
-}
-
+/* Kept, though the .landing-spinner it was written for is gone: two other
+   spinners in this file (.pp-loading-dot, .top3-recompute-dot) animate on
+   it, and deleting it would have stopped both dead. */
 @keyframes landing-spin {
   to { transform: rotate(360deg); }
 }
+
+/* The one-line "Connecting to your draft" screen that used to live here
+   (.landing-connecting/.landing-connecting-title/.landing-spinner, and the
+   .landing-centered wrapper below it) is gone: it claimed to last "about a
+   second and end in a redirect" while the connect it covered actually
+   blocks for 4-35s. Its replacement is .connect-screen at the bottom of this
+   file. */
 
 .landing-bookmark:focus-visible,
 .landing-band-action:focus-visible {
@@ -2742,7 +2723,6 @@ td:first-child {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .landing-spinner,
   .preview-row-skeleton {
     animation: none;
   }
@@ -2776,5 +2756,474 @@ td:first-child {
   .readiness-row {
     grid-template-columns: 1fr;
     gap: var(--space-1);
+  }
+}
+
+/* ==========================================================================
+   The connect screen — .design/onboarding/{Main,Ready,Degraded,Expired}
+   ==========================================================================
+   The screen between clicking the bookmarklet and the draft room appearing.
+   Same tokens as the room it hands off to (index.css), one 620px column
+   centred in the viewport, so the handoff is a content change rather than a
+   change of world. No new font, no new colour: the status glyphs use --ok,
+   --accent and --fail exactly as the room's connection pill does.
+   ========================================================================== */
+
+.connect-screen {
+  min-height: 100svh;
+  display: flex;
+  padding: var(--space-6) var(--space-5);
+}
+
+/* `margin: auto` rather than `align-items: center`: the failure screen is
+   taller than a short viewport (stage list + recovery steps + actions), and
+   a centred flex item that overflows its container is clipped at the TOP
+   with no way to scroll to it -- the "Couldn't connect" heading and the
+   first rows would simply be gone. Auto margins collapse instead, so a tall
+   screen scrolls normally and a short one still centres. */
+.cs-col {
+  margin: auto;
+  width: 100%;
+  max-width: 620px;
+  display: flex;
+  flex-direction: column;
+  gap: 30px;
+}
+
+/* The hairline, pinned to the very top edge of the viewport. It measures
+   STAGES COMPLETED, never time: the stages differ by three orders of
+   magnitude (6ms to 30s), so a time-based bar would be a fabrication. */
+.cs-bar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--bg-2);
+}
+
+.cs-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 260ms ease-out;
+}
+
+.cs-bar-done {
+  background: var(--accent);
+}
+
+.cs-bar-fail {
+  background: var(--fail);
+}
+
+.cs-head {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cs-cap {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--text-3);
+}
+
+.cs-cap-ok {
+  color: var(--ok);
+}
+
+.cs-cap-fail {
+  color: var(--fail);
+}
+
+.cs-title {
+  font-size: 27px;
+  font-weight: 600;
+  color: var(--text-1);
+  letter-spacing: -0.015em;
+}
+
+.cs-sub {
+  font-size: 13.5px;
+  color: var(--text-2);
+}
+
+/* -- the stage rows -- */
+
+.cs-stages {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--border);
+}
+
+/* Full-width rule, inset content: the dividers run edge to edge of the
+   column while the text sits in from them. */
+.cs-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 44px;
+  padding: 0 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.cs-row-running {
+  background: var(--accent-bg);
+}
+
+.cs-row-failed {
+  background: color-mix(in srgb, var(--fail) 10%, transparent);
+}
+
+.cs-row-warn {
+  background: var(--accent-bg);
+}
+
+.cs-row-glyph {
+  width: 18px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* The label keeps its full width and the VALUE truncates, never the other
+   way round: a long value (a socket error's own text) squeezed the label
+   into three wrapped lines that overflowed the fixed 44px row. */
+.cs-row-label {
+  font-size: 13.5px;
+  color: var(--text-3);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.cs-row-ok .cs-row-label {
+  color: var(--text-2);
+}
+
+.cs-row-running .cs-row-label,
+.cs-row-warn .cs-row-label,
+.cs-row-failed .cs-row-label {
+  color: var(--text-1);
+  font-weight: 500;
+}
+
+.cs-row-value {
+  margin-left: auto;
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-1);
+  /* The row is fixed height; a long discovered value truncates rather than
+     pushing the label out or breaking the rhythm of the list. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  animation: cs-rise 240ms ease-out both;
+}
+
+.cs-row-warn .cs-row-value {
+  color: var(--accent);
+}
+
+.cs-row-failed .cs-row-value {
+  color: var(--fail);
+}
+
+@keyframes cs-rise {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* -- glyphs: four silhouettes, so status never rests on colour alone -- */
+
+.cs-glyph {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  flex-shrink: 0;
+}
+
+.cs-glyph-ok {
+  stroke: var(--ok);
+}
+
+.cs-glyph-run {
+  stroke: var(--accent);
+  transform-origin: 50% 50%;
+  animation: cs-spin 900ms linear infinite;
+}
+
+.cs-glyph-warn {
+  stroke: var(--accent);
+  stroke-width: 2.4;
+}
+
+.cs-glyph-fail {
+  stroke: var(--fail);
+  stroke-width: 2.6;
+}
+
+.cs-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--text-3);
+  opacity: 0.5;
+}
+
+@keyframes cs-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* -- footer -- */
+
+.cs-foot {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.cs-elapsed {
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+
+.cs-footnote {
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+
+.cs-link {
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.cs-link:hover {
+  color: #ffc87a;
+}
+
+/* -- what it learned -- */
+
+.cs-facts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  margin: 0;
+  background: var(--border);
+  border: 1px solid var(--border);
+}
+
+.cs-fact {
+  background: var(--bg-1);
+  padding: 12px 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.cs-fact dt {
+  font-size: 10px;
+}
+
+.cs-fact-value {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-1);
+}
+
+.cs-seat {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.cs-seats {
+  display: flex;
+  gap: 4px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.cs-seat-cell {
+  width: 40px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg-1);
+  color: var(--text-3);
+  font-size: var(--text-base);
+  font-weight: 700;
+}
+
+/* The owner's own seat: accent fill AND the only filled cell in the row, so
+   it reads as "yours" without depending on hue. */
+.cs-seat-mine {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg-0);
+}
+
+.cs-seat-note {
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+
+/* -- callouts and actions -- */
+
+.cs-note {
+  display: flex;
+  gap: 12px;
+  padding: 15px 16px;
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius);
+}
+
+.cs-note-body {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.cs-note-title {
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+.cs-note-text {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
+.cs-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.cs-btn {
+  padding: 9px 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-2);
+  font-size: var(--text-base);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.cs-btn:hover {
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+.cs-btn-primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--bg-0);
+  font-weight: 700;
+}
+
+.cs-btn-primary:hover {
+  background: #ffc87a;
+  border-color: #ffc87a;
+  color: var(--bg-0);
+}
+
+.cs-btn:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 2px;
+}
+
+.cs-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+  padding: 17px 18px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.cs-steps ol {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.cs-steps li {
+  display: flex;
+  gap: 11px;
+  align-items: baseline;
+  font-size: var(--text-base);
+  color: var(--text-2);
+  line-height: 1.45;
+}
+
+.cs-step-n {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cs-glyph-run,
+  .cs-row-value {
+    animation: none;
+  }
+
+  .cs-bar-fill {
+    transition: none;
+  }
+}
+
+@media (max-width: 560px) {
+  .cs-facts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .cs-row {
+    padding: 0 10px;
+    gap: 9px;
+  }
+
+  .cs-title {
+    font-size: 22px;
+  }
+
+  /* Eleven 40px cells do not fit a phone; they wrap rather than scroll, so
+     the owner's own seat is never the one off screen. */
+  .cs-seats {
+    flex-wrap: wrap;
   }
 }
