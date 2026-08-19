@@ -404,6 +404,93 @@ def test_state_candidates_carry_gain_now(tmp_path):
     assert gains == sorted(gains, reverse=True)
 
 
+def test_state_serves_the_full_pool_by_vor_when_my_slot_is_unknown(tmp_path):
+    """Defect 2 (post-merge fix): the owner's actual complaint -- "available
+    should show all the players, no one has been drafted yet" -- with
+    my_slot never resolved and _recompute (which needs a slot, see its own
+    docstring) never even called. Before this fix `/api/live/state` served
+    whatever `state["candidates"]` happened to hold, which stays the []
+    _launch_listener initializes it to for as long as my_slot is None --
+    an empty pool on screen even though 249 real players were sitting
+    right there in `session.pool`.
+
+    Drives the real engine (real pool, real board) through a real GET, the
+    same discipline test_state_candidates_carry_gain_now already holds for
+    the my_slot-known path, so this is a real regression test rather than a
+    mock of the new code path.
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path, extra_players=[
+        {"player_id": "p2", "name": "B Runner", "position": "RB",
+         "team": "DET", "espn_id": 4430807},
+        {"player_id": "p3", "name": "C Slot", "position": "WR",
+         "team": "GB", "espn_id": 4426515},
+    ])
+    conn = get_conn(path)
+    app = FastAPI()
+    state, _recompute = register_live_routes(app, conn, path)
+    client = TestClient(app)
+
+    session = build_session(conn, my_slot=None)
+    state["session"] = session
+    # p2 drafted; must not appear among the candidates below -- proves this
+    # path reads the real `drafted` table, not a stale/empty mask.
+    write_table(conn, "drafted", pd.DataFrame([{"player_id": "p2", "pick_no": 1}]))
+
+    body = client.get("/api/live/state").json()
+
+    assert body["my_slot"] is None
+    # _recompute was never called (no request_recompute fires before
+    # my_slot resolves or a pick lands -- see _launch_listener) and yet the
+    # pool is fully served, not empty.
+    ids = [c["player_id"] for c in body["candidates"]]
+    assert set(ids) == set(session.pool.player_id) - {"p2"}
+    assert len(ids) == len(session.pool.player_id) - 1
+    # Ranked by vor_points descending -- never zero, never fabricated.
+    vors = [c["vor_points"] for c in body["candidates"]]
+    assert vors == sorted(vors, reverse=True)
+    for c in body["candidates"]:
+        assert c["gain_now"] is None
+        assert c["survive_pct"] is None
+        assert c["fills"] is None
+        assert c["rank"] >= 1
+    # Fresh every poll (recomputed against the current `taken` mask, not an
+    # async result that can go stale) -- so this never trips DraftRoom's
+    # "recomputing for pick N" banner (candidates_as_of_pick < picks_made).
+    assert body["candidates_as_of_pick"] == body["picks_made"] == 1
+
+
+def test_state_my_slot_known_behavior_is_unchanged_by_the_vor_fallback(tmp_path):
+    """The known-my_slot path must be untouched: still whatever _recompute
+    actually stored (snapshot["candidates"]/["as_of_pick"]), not silently
+    swapped for the vor-only fallback just because it now exists."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    conn = get_conn(path)
+    app = FastAPI()
+    state, _recompute = register_live_routes(app, conn, path)
+    client = TestClient(app)
+
+    session = build_session(conn, my_slot=1)
+    state["session"] = session
+    # No _recompute call at all -- candidates/as_of_pick stay at their
+    # _launch_listener-style defaults, exactly as they would before any
+    # activity/pick landed.
+    state["candidates"] = []
+    state["as_of_pick"] = None
+
+    body = client.get("/api/live/state").json()
+    assert body["my_slot"] == 1
+    assert body["candidates"] == []
+    assert body["candidates_as_of_pick"] is None
+
+
 def test_state_carries_the_pick_clock_league_settings_and_my_roster(tmp_path):
     """Task 7b: the rail's three missing feeds. `/api/live/state` must serve
     `ms_remaining` straight off the listener, `settings` off the session's
@@ -2040,7 +2127,16 @@ def test_unmapped_picks_surface_in_state(tmp_path, monkeypatch, _isolated_league
     list was being computed and discarded; now it is stored."""
     path = str(tmp_path / "u.duckdb")
     _seed_minimal_live_db(path)
-    monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
+    # (taken, taken_order) shaped like _drafted_state's real "nothing
+    # drafted yet" return (see its own docstring) -- a bare `set()` used to
+    # stand in here and went unexercised (my_slot stays None throughout this
+    # test, so _recompute's own call to _drafted_state was always skipped),
+    # but /api/live/state's Defect 2 fallback (scoring.gain.available_by_vor)
+    # now calls _drafted_state directly whenever my_slot is None, and it
+    # needs the real boolean-array shape, not a set.
+    monkeypatch.setattr(
+        "api.live._drafted_state",
+        lambda cur, pool: (np.zeros(len(pool.player_id), dtype=bool), []))
     monkeypatch.setattr("api.live.survival", _fake_survival_frame)
     monkeypatch.setattr("api.live.rank_available",
                         lambda *a, **k: _fake_candidates_frame("x"))

@@ -64,7 +64,21 @@ function fillsIsOpenSlot(fills: string): boolean {
 // gain_now=+25 for a thin, weak position whose replacement level is even
 // worse) instead falls through to the `survive_pct`/default branches,
 // neither of which mentions `vor_points` at all.
-function reasonFor(c: LiveCandidate): string {
+// A candidate row once there is a roster to rank it against: gain_now,
+// survive_pct and fills arrive together as real values or together as null
+// (see LiveCandidate's own comment in api.ts -- api/live.py serves one
+// payload or the other for the whole list, never a mix per row). Narrowing
+// once, via isRanked below, is what lets reasonFor and this file's own
+// fmtSigned/fillsIsOpenSlot keep treating these three as plain values
+// instead of every line growing a null check that can never actually fire
+// once the guard below has run.
+type RankedCandidate = LiveCandidate & { gain_now: number; survive_pct: number; fills: string }
+
+function isRanked(c: LiveCandidate): c is RankedCandidate {
+  return c.gain_now !== null
+}
+
+function reasonFor(c: RankedCandidate): string {
   const survive = Math.round(c.survive_pct)
 
   const slot =
@@ -114,6 +128,26 @@ export default function TopThree({ candidates, players, onDraft, isMyTurn, nextP
   const top3 = candidates.slice(0, 3)
   if (top3.length === 0) return null
 
+  // Defect 2: gain_now is all-or-nothing across the whole list (see
+  // RankedCandidate's own comment above) -- api/live.py serves either a
+  // slot-ranked payload or the vor-only fallback for my_slot === null,
+  // never a mix. Checking the lead row is therefore enough to know which
+  // this is. Three cards of dashes plus a "take one of these" caption would
+  // imply a real recommendation exists when none has been computed yet --
+  // so this renders nothing card-shaped at all, just the one quiet line
+  // explaining why, in the same slot the cards would otherwise occupy.
+  if (!isRanked(top3[0])) {
+    return (
+      <div className="top3">
+        <p className="top3-hint top3-hint-standalone">
+          Ranked by value over replacement until your draft slot is known --
+          personalized recommendations start once it resolves.
+        </p>
+      </div>
+    )
+  }
+  const ranked = top3.filter(isRanked)
+
   return (
     <div className="top3">
       <div className="top3-head">
@@ -123,7 +157,7 @@ export default function TopThree({ candidates, players, onDraft, isMyTurn, nextP
         </span>
       </div>
       <div className="top3-grid">
-        {top3.map((c, i) => {
+        {ranked.map((c, i) => {
           const player = players[c.player_id]
           return (
             <div key={c.player_id} className={`top3-card${i === 0 ? ' top3-card-lead' : ''}`}>

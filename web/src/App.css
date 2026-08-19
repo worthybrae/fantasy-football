@@ -1499,6 +1499,15 @@ td:first-child {
   color: var(--text-3);
 }
 
+/* Defect 2: where the three recommendation cards sit when my_slot is not
+   yet resolved and there is nothing ranked to show -- same bottom padding
+   and divider `.top3-grid` would otherwise supply, so the section doesn't
+   visually collapse just because the cards are absent this poll. */
+.top3-hint-standalone {
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--border);
+}
+
 .top3-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

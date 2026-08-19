@@ -99,6 +99,54 @@ def expected_best_next(values, survive) -> float:
     return total
 
 
+def available_by_vor(pool, taken) -> pd.DataFrame:
+    """The available pool -- who is still on the board, full stop -- ranked
+    by the board's own `vor_points` descending, for when there is no roster
+    to rank FOR yet (my_slot not resolved: see api/live.py's DraftSession.my_slot
+    and _recompute, which needs a slot to index `rosters`/`survival` into
+    and skips entirely without one).
+
+    A sibling function rather than a mode bolted onto `rank_available`,
+    deliberately: that function's whole shape -- per-position `next_best`
+    (needs `survive`), `need_weight`/`fills_slot` (needs `counts`, i.e. a
+    roster), the capped-sorts-last tiebreak -- exists to answer "what does
+    THIS PICK gain over waiting," a question with no meaning until there is
+    a roster to gain FOR. Threading `settings=None, counts=None,
+    survive=None` through all of that would turn every line of it into a
+    None-check, for a function whose docstring and every existing caller
+    promise a `gain_now`-ranked result. "Who is left" needs none of that
+    machinery -- just the pool minus `taken` -- so it gets its own, much
+    smaller function instead.
+
+    Same eight-column shape `rank_available` returns (this is what keeps
+    `LiveCandidate` one shape on the frontend, not two payload types to
+    branch on): `gain_now`, `survive_pct` and `fills` are `None`, not `0.0`,
+    `0.0` and `""` -- a fabricated zero here would print as a real
+    recommendation ("take him now, he's worth nothing") for a player nobody
+    has actually ranked yet. `rank` is still the list's own display order,
+    1-based, over vor_points -- it is not a promise that this is optimal for
+    anyone's roster.
+    """
+    available = np.flatnonzero(~np.asarray(taken))
+    if available.size == 0:
+        return pd.DataFrame(columns=["player_id", "position", "proj_points",
+                                     "vor_points", "gain_now", "survive_pct",
+                                     "fills", "rank"])
+    rows = [{
+        "player_id": pool.player_id[idx],
+        "position": str(pool.position[idx]),
+        "proj_points": float(pool.points[idx]),
+        "vor_points": float(pool.vor[idx]),
+        "gain_now": None,
+        "survive_pct": None,
+        "fills": None,
+    } for idx in available]
+    out = pd.DataFrame(rows).sort_values(
+        "vor_points", ascending=False).reset_index(drop=True)
+    out["rank"] = out.index + 1
+    return out
+
+
 def rank_available(pool, settings, taken, counts: dict, survive) -> pd.DataFrame:
     """The available pool, ranked by gain_now descending.
 

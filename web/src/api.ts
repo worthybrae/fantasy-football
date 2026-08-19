@@ -161,14 +161,23 @@ export function ageLabel(createdAt: string): string {
 // DraftSession docstring) and joining the rest against the full board is
 // the caller's job, via `player_id` against `fetchPlayers()`'s
 // one-time-fetched list.
+//
+// `gain_now`/`survive_pct`/`fills` are `null` together, never individually,
+// whenever `/api/live/state`'s `my_slot` is itself null: there is no roster
+// to rank a pick FOR yet (see scoring/gain.available_by_vor's own
+// docstring), so the list is sorted by `vor_points` alone instead. One
+// shape either way -- the frontend never branches on "which payload is
+// this," only on whether a given row's own fields are null (AvailableList
+// renders `—`; TopThree does not render its cards at all, see its own
+// comment).
 export type LiveCandidate = {
   player_id: string
   position: string
   proj_points: number
   vor_points: number
-  gain_now: number
-  survive_pct: number
-  fills: string
+  gain_now: number | null
+  survive_pct: number | null
+  fills: string | null
   rank: number
 }
 
@@ -220,6 +229,13 @@ export interface LiveState {
   // entirely. Typed nullable rather than optional since every read site
   // already treats "no slot" and "not this slot" the same way.
   my_slot: number | null
+  // DraftListener.started, straight off the socket's own STATE frame
+  // (pipeline/draft_listener.py) -- present (never omitted) on both the
+  // active and inactive responses, same convention as listener_alive below.
+  // Lets ClockPanel tell "the draft has not started yet" apart from
+  // "started, waiting on someone else's pick" -- both used to render as the
+  // identical "Waiting on the room" heading.
+  draft_started: boolean
   candidates: LiveCandidate[]
   // The pick COUNT `candidates` was computed against, so the pick they are
   // for is that + 1 -- the same +1 the room applies to `picks_made`. Less

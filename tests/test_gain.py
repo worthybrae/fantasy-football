@@ -2,8 +2,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from scoring.gain import (expected_best_next, fills_slot, need_kind,
-                          need_weight, rank_available)
+from scoring.gain import (available_by_vor, expected_best_next, fills_slot,
+                          need_kind, need_weight, rank_available)
 from scoring.league import LeagueSettings
 
 
@@ -133,6 +133,63 @@ def test_rank_available_sorts_capped_players_last():
     assert by_id["rb2"] < 0.0
     # And `capped` is a sort key, not a served column.
     assert "capped" not in out.columns
+
+
+def test_available_by_vor_ranks_by_vor_points_descending():
+    """Defect 2 (post-merge fix): before my_slot is known there is no
+    roster to rank a pick FOR, but "who is still on the board" needs
+    neither -- ranked here purely by the board's own vor_points."""
+    pool = _pool(player_id=["a", "b", "c"], position=["RB", "WR", "QB"],
+                 points=[200.0, 150.0, 300.0], vor=[10.0, 40.0, 25.0])
+    taken = np.zeros(3, dtype=bool)
+    out = available_by_vor(pool, taken)
+    assert list(out["player_id"]) == ["b", "c", "a"]
+    assert list(out["rank"]) == [1, 2, 3]
+
+
+def test_available_by_vor_drops_taken_players():
+    pool = _pool(player_id=["a", "b"], position=["RB", "RB"],
+                 points=[200.0, 150.0], vor=[50.0, 10.0])
+    taken = np.array([True, False])
+    out = available_by_vor(pool, taken)
+    assert list(out["player_id"]) == ["b"]
+
+
+def test_available_by_vor_leaves_gain_now_survive_pct_fills_null():
+    """Never a fabricated 0.0/0.0/"" -- a real recommendation has not been
+    computed for any of these players, and the caller (api/live.py) must be
+    able to tell that apart from a genuine zero."""
+    pool = _pool(player_id=["a"], position=["RB"], points=[200.0], vor=[10.0])
+    out = available_by_vor(pool, np.zeros(1, dtype=bool))
+    row = out.iloc[0]
+    assert row["gain_now"] is None
+    assert row["survive_pct"] is None
+    assert row["fills"] is None
+    # And this must actually survive to JSON as `null`, not NaN -- the same
+    # pitfall api/live.py's _float_or_none/_int_or_none helpers exist for
+    # elsewhere in this codebase.
+    import json
+    encoded = json.dumps(out.to_dict(orient="records"))
+    assert '"gain_now": null' in encoded
+
+
+def test_available_by_vor_returns_the_same_columns_as_rank_available():
+    """One LiveCandidate shape either way -- the frontend must not branch on
+    two payload types (see the task brief)."""
+    pool = _pool(player_id=["a"], position=["RB"], points=[200.0], vor=[10.0])
+    empty = available_by_vor(pool, np.zeros(1, dtype=bool))
+    ranked = rank_available(pool, settings(), np.zeros(1, dtype=bool), {},
+                            np.array([0.5]))
+    assert list(empty.columns) == list(ranked.columns)
+
+
+def test_available_by_vor_empty_when_nobody_is_left():
+    pool = _pool(player_id=["a"], position=["RB"], points=[200.0], vor=[10.0])
+    out = available_by_vor(pool, np.array([True]))
+    assert out.empty
+    assert list(out.columns) == ["player_id", "position", "proj_points",
+                                 "vor_points", "gain_now", "survive_pct",
+                                 "fills", "rank"]
 
 
 class _pool:

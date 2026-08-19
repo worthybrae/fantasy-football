@@ -14,8 +14,11 @@ function posBadge(position: string): ReactNode {
 // position already outvalues him), and a bare template literal would print
 // "+-4" for that case. Positive gets an explicit "+" (nothing else on this
 // screen implies sign the way a raw number does); zero and negative print
-// as-is.
-function fmtSigned(n: number): string {
+// as-is. `null` (no roster to rank this pick for yet -- my_slot not
+// resolved, see LiveCandidate's own comment in api.ts) renders as a dash,
+// never as "0" or "+0" -- either would read as a real, computed zero gain.
+function fmtSigned(n: number | null): string {
+  if (n === null) return '—'
   const r = Math.round(n)
   return r > 0 ? `+${r}` : `${r}`
 }
@@ -29,15 +32,16 @@ function fmtRank(n: number | null): string {
 }
 
 // Whether `fills` names a slot in the actual starting lineup -- FLEX
-// counts, since a flex slot still starts. `BENCH` and gain.py's `—` ("no
-// slot left at all, even the bench is full") both read muted: the server
-// already decided which is which (need_kind/fills_slot in scoring/gain.py),
-// this only mirrors that split in color. TopThree.tsx applies the identical
-// rule to its own three-figure row for the same reason RosterPanel colors
-// an open starter slot and not an open bench one -- one meaning, drawn the
-// same way everywhere it appears.
-function fillsIsOpenSlot(fills: string): boolean {
-  return fills !== 'BENCH' && fills !== '—'
+// counts, since a flex slot still starts. `BENCH`, gain.py's `—` ("no slot
+// left at all, even the bench is full"), and `null` (no roster to fill a
+// slot on yet -- my_slot not resolved) all read muted: the server already
+// decided which is which (need_kind/fills_slot in scoring/gain.py) for the
+// first two, and null is simply not an answer at all. TopThree.tsx applies
+// the identical rule to its own three-figure row for the same reason
+// RosterPanel colors an open starter slot and not an open bench one -- one
+// meaning, drawn the same way everywhere it appears.
+function fillsIsOpenSlot(fills: string | null): boolean {
+  return fills !== null && fills !== 'BENCH' && fills !== '—'
 }
 
 const POSITIONS = ['ALL', 'QB', 'RB', 'WR', 'TE', 'K', 'DST']
@@ -139,13 +143,20 @@ export default function AvailableList({ candidates, players, onDraft, isMyTurn }
                     position is nearly as good. Full emphasis here, muted
                     two columns to its left, is the argument made visually. */}
                 <td className="avail-col-num mono avail-gain">{fmtSigned(c.gain_now)}</td>
-                <td className="avail-col-num mono" style={{ color: riskTone(c.survive_pct) }}>
-                  {Math.round(c.survive_pct)}%
+                {/* null survive_pct (no roster to survive FOR yet) gets no
+                    riskTone color at all -- riskTone's red/amber/green ramp
+                    is a claim about a real probability, and coloring a dash
+                    would imply one exists. */}
+                <td
+                  className="avail-col-num mono"
+                  style={c.survive_pct === null ? undefined : { color: riskTone(c.survive_pct) }}
+                >
+                  {c.survive_pct === null ? '—' : `${Math.round(c.survive_pct)}%`}
                 </td>
                 <td className="avail-col-num mono avail-adp">{fmtRank(player?.market_rank ?? null)}</td>
                 <td className="avail-col-fills">
                   <span className={`avail-fills${fillsIsOpenSlot(c.fills) ? ' is-open' : ''}`}>
-                    {c.fills}
+                    {c.fills ?? '—'}
                   </span>
                 </td>
                 <td className="avail-col-btn">

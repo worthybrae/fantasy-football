@@ -5,7 +5,15 @@ function posBadge(position: string) {
   return <span className={`pos-badge pos-badge-${position.toLowerCase()}`}>{position}</span>
 }
 
-function fmtSigned(n: number): string {
+// `null` (see AvailableList.tsx's own copy of this function for the full
+// rationale) renders as a dash. In practice a candidate never reaches this
+// dialog with a null gain_now -- ConfirmPick only ever mounts for a pick
+// made while it is actually your turn, which requires my_slot to already be
+// resolved -- but the type is honest about every LiveCandidate, not just
+// the ones this call site happens to see, so this handles it the same way
+// every other reader of the type does rather than asserting it away.
+function fmtSigned(n: number | null): string {
+  if (n === null) return '—'
   const r = Math.round(n)
   return r > 0 ? `+${r}` : `${r}`
 }
@@ -15,8 +23,8 @@ function fmtSigned(n: number): string {
 // and gain.py's `—` read muted. Folded-in review finding: this dialog's
 // own Fills figure was left plain while both other views already applied
 // the rule -- one meaning, drawn the same way everywhere it appears.
-function fillsIsOpenSlot(fills: string): boolean {
-  return fills !== 'BENCH' && fills !== '—'
+function fillsIsOpenSlot(fills: string | null): boolean {
+  return fills !== null && fills !== 'BENCH' && fills !== '—'
 }
 
 export type PickStatus = 'idle' | 'sending' | 'done' | 'failed'
@@ -91,7 +99,7 @@ export default function ConfirmPick({
           <div>
             <div className="draft-cap">Fills</div>
             <div className={`confirm-figure mono${fillsIsOpenSlot(candidate.fills) ? ' is-open' : ''}`}>
-              {candidate.fills}
+              {candidate.fills ?? '—'}
             </div>
           </div>
           <div>

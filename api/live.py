@@ -167,7 +167,7 @@ from pipeline.leagues import DEFAULT_LEAGUE, provision_league
 from scoring.config import CURRENT_SEASON
 from scoring.draft_sim import (_drafted_state, _seed_rosters, snake_slots,
                                survival)
-from scoring.gain import rank_available
+from scoring.gain import available_by_vor, rank_available
 
 
 class ConnectBody(BaseModel):
@@ -1235,6 +1235,11 @@ def register_live_routes(app, conn, db_path):
                         "socket_alive": False,
                         "token_received": state.get("token") is not None,
                         "ms_remaining": None,
+                        # No listener at all on this branch, so genuinely
+                        # unstarted rather than unknown -- same reasoning as
+                        # every other false/null default here (see
+                        # listener_alive's own comment just above).
+                        "draft_started": False,
                         "settings": _league_settings_payload(None),
                         "my_roster": []}
             snapshot = dict(state)
@@ -1250,6 +1255,15 @@ def register_live_routes(app, conn, db_path):
             # decayed or interpolated guess, so a genuinely stale value
             # never gets rendered as a live one.
             ms_remaining = listener.ms_remaining if listener is not None else None
+            # Whether the draft has actually started, straight off
+            # DraftListener.started -- set once, True, by the socket's own
+            # STATE frame (pipeline/draft_listener.py). Read here, same
+            # snapshot and same reasoning as ms_remaining just above: Defect
+            # 4 needs the rail to tell "the draft has not started yet" apart
+            # from "started, waiting on someone else's pick" -- both used to
+            # render as the same "Waiting on the room" heading, with no way
+            # for the drafter to know which one they were looking at.
+            draft_started = listener.started if listener is not None else False
             # Whether a SELECT actually has somewhere to go, read here for
             # the same reason ms_remaining is: it belongs to this response's
             # one consistent snapshot. Exactly the condition
@@ -1305,6 +1319,28 @@ def register_live_routes(app, conn, db_path):
                 # runs on every poll rather than being cached against the
                 # pick count.
                 my_roster = []
+                # Defect 2: "who is available" (the pool minus `drafted`) is
+                # always knowable and must render even before my_slot is --
+                # "how they rank for YOUR roster" is the part that genuinely
+                # needs one. _recompute already refuses to run at all without
+                # my_slot (survival()/rank_available need a real slot to
+                # index rosters/snake order by -- see its own docstring), so
+                # `snapshot["candidates"]` simply stays the [] it was
+                # initialized to in _launch_listener for as long as my_slot
+                # is unknown, and there is no async worker result to wait on
+                # here. available_by_vor needs only `taken`, computed fresh
+                # on this same cheap _drafted_state call every poll (see the
+                # timing note just above) -- ranked by the board's own
+                # vor_points, with gain_now/survive_pct/fills honestly None
+                # rather than a fabricated 0.0/"" (scoring/gain.py's own
+                # docstring). candidates_as_of_pick is simply `picks_made`
+                # here: unlike the async-computed slot-ranked list, this is
+                # never stale -- it is recomputed against the current
+                # `taken` mask on every single poll -- so DraftRoom's
+                # "recomputing for pick N" banner (candidates_as_of_pick <
+                # picks_made) correctly never fires for it.
+                candidates = snapshot["candidates"]
+                candidates_as_of_pick = snapshot["as_of_pick"]
                 if session.my_slot is not None:
                     try:
                         _, taken_order = _drafted_state(cur, session.pool)
@@ -1312,6 +1348,15 @@ def register_live_routes(app, conn, db_path):
                         taken_order = None
                     if taken_order is not None:
                         my_roster = _my_roster(session, taken_order)
+                else:
+                    try:
+                        taken, _ = _drafted_state(cur, session.pool)
+                    except ValueError:
+                        taken = None
+                    if taken is not None:
+                        candidates = available_by_vor(
+                            session.pool, taken).to_dict(orient="records")
+                        candidates_as_of_pick = int(picks_made)
             finally:
                 cur.close()
         slots = snake_slots(session.settings.teams, session.settings.rounds)
@@ -1322,8 +1367,9 @@ def register_live_routes(app, conn, db_path):
             "picks_made": int(picks_made),
             "on_the_clock": on_clock,
             "my_slot": session.my_slot,
-            "candidates": snapshot["candidates"],
-            "candidates_as_of_pick": snapshot["as_of_pick"],
+            "draft_started": draft_started,
+            "candidates": candidates,
+            "candidates_as_of_pick": candidates_as_of_pick,
             "last_poll_at": (snapshot["last_poll_at"].isoformat()
                              if snapshot["last_poll_at"] else None),
             "stale": _is_stale(snapshot["last_poll_at"], now),
