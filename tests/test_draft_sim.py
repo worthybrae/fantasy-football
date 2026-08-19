@@ -1338,6 +1338,101 @@ def test_survival_on_the_clock_makes_gain_now_non_degenerate():
     assert frame["gain_now"].iloc[0] > frame["gain_now"].iloc[2]
 
 
+# --- Regression: `betas.get(slot_managers.get(slot))` misses to `None` for
+# ANY slot a caller hasn't named a manager for -- every slot, for every
+# league, until ESPN publishes `draftDayPickOrder` (slot_managers stays {}),
+# and every manager in a cold-start league with no fitted history (betas
+# stays {}, since api/live.py's `build_session` builds it as `{m:
+# fits.get(m, pooled) for m in fits if m != "__pooled__"}`, which is {}
+# when `fit_all` returns only `__pooled__`). The fallback for that miss used
+# to be `np.zeros(len(FEATURE_NAMES))`, which makes `scores = X @ beta`
+# identically zero and the softmax over the whole remaining pool uniform --
+# every unresolved opponent draws completely at random, ignoring adp_rank,
+# need, position, everything.
+#
+# Observed live: pick 22 of an 8-team mock draft, 9 picks before the owner's
+# next turn (slot 6 on the clock, owner in slot 2 -- reproduced exactly
+# below). Every available player, Derrick Henry and Josh Jacobs included,
+# came back at 94-98% survival: indistinguishable from a kicker, because a
+# uniform draw over the ~249-deep pool gives every player survival
+# ~= 1 - 9/249 = 0.964 regardless of how good he is. `gain.expected_best_next`
+# then collapsed to each position's own best player and `gain_now` was a
+# wall of near-zeros, so pandas' unstable sort -- not the model -- decided
+# that a kicker and a QB, not a running back, filled two of the top three
+# recommendation slots.
+def test_survival_falls_back_to_the_market_prior_not_zeros_when_unresolved():
+    """With `slot_managers={}` and `betas={}` (both misses, the live bug's
+    exact inputs) at a realistic 9-pick gap, the highest-ADP player still on
+    the board must survive at MATERIALLY below 1.0 -- the market-following
+    answer, not the old uniform fallback's near-certain "he's fine, waiting
+    costs nothing" answer.
+
+    8 teams, 21 picks already made (so pick 22 -- the observed pick -- is
+    about to happen, on the clock is slot 6), owner sits in slot 2: verified
+    separately that slot 2's next turn is pick 31, exactly 9 opponent picks
+    away, matching the live report. The old zeros fallback measured on this
+    exact fixture/scenario put the highest-ADP survivor at 0.731 -- a
+    threshold of 0.5 cleanly fails against that and passes against the fix.
+    """
+    pool = _pool(60)
+    already = 21
+    my_slot = 2
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    taken[:already] = True
+    taken_order = list(range(already))
+
+    target = _next_pick_for(S, my_slot=my_slot, already=already)
+    assert target - 1 - already == 9, "fixture drifted off the observed 9-pick gap"
+
+    out = survival(pool, S, slot_managers={}, my_slot=my_slot, taken=taken,
+                   betas={}, n_rollouts=300, seed=0, taken_order=taken_order,
+                   on_the_clock=False)
+    avail = out.set_index("player_id")["avail_pct"]
+
+    top_of_board = avail["p21"]                 # adp_rank 22, the best player left
+    assert top_of_board < 0.5, (
+        f"top-ADP available player survived at {top_of_board:.3f} -- too "
+        "close to the old uniform-random fallback's 0.731 on this same "
+        "fixture, not the market-following prior's near-certain 'he's gone'")
+
+
+def test_run_draft_follows_market_order_not_uniform_random_when_unresolved():
+    """`_run_draft` has its own copy of the identical fallback, in the branch
+    that simulates an opponent's pick -- same miss (`betas.get(
+    slot_managers.get(slot))` -> None), same old zeros default, same
+    uniform-random consequence. Not reachable from the live path
+    (api/live.py never calls `_run_draft`/`rollout` directly, only
+    `survival`) or from `run_sim` (which fills every referenced manager's
+    beta via `betas.setdefault(manager, pooled)` before this code ever
+    runs, and refuses to run at all if a slot has no manager) -- but
+    `_run_draft`/`rollout`/`predict_board` are public and any other caller
+    reaches this fallback exactly as directly as `survival`'s callers did,
+    so it is fixed for the same reason.
+
+    Pick 1 of a fresh draft (nobody taken) has nothing to distinguish
+    players by except adp_rank, and COLD_START_PRIOR's `reach` coefficient
+    (-8.09, the largest-magnitude weight in the vector) should make that
+    pick close to deterministic: the rank-1 player, every time. Measured
+    separately: pool index 0 in 50/50 rollouts under this fix, versus a
+    mean pool index of ~31 (out of 60 -- a uniform draw) under the old
+    zeros fallback.
+    """
+    pool = _pool(60)
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    first_picks = []
+    for seed in range(20):
+        record = []
+        _run_draft(pool, S, {}, 8, taken, {}, rng=np.random.default_rng(seed),
+                  record=record)
+        first_picks.append(record[0][1])   # pool index chosen with pick 1
+
+    assert first_picks == [0] * len(first_picks), (
+        f"pick 1 did not always go to the rank-1 player: {first_picks} -- "
+        "the market-following prior should make this near-deterministic, "
+        "not spread uniformly across the pool the way the old zeros "
+        "fallback did")
+
+
 import scoring.board as board_mod
 import scoring.draft_model as draft_model_mod
 import scoring.draft_sim as draft_sim_mod

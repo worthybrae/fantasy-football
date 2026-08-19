@@ -31,9 +31,10 @@ from scoring import factors
 from scoring.board import (FANTASY_POSITIONS, GAMES, POSITION_FLOOR,
                            _norm_name, adp_match_key, projections)
 from scoring.config import CURRENT_SEASON, RECENCY_WEIGHTS
-from scoring.draft_model import (EARLY_ROUNDS, FEATURE_NAMES, FFC_BLEND_WEIGHT,
-                                 HYPE_SCALE, RUN_WINDOW, _ATTRIBUTE_DEFAULTS,
-                                 _centre_within_position, _log_rank_features)
+from scoring.draft_model import (COLD_START_PRIOR, EARLY_ROUNDS, FEATURE_NAMES,
+                                 FFC_BLEND_WEIGHT, HYPE_SCALE, RUN_WINDOW,
+                                 _ATTRIBUTE_DEFAULTS, _centre_within_position,
+                                 _log_rank_features)
 from scoring.player_history import assert_no_column_collision, attributes_as_of
 
 FLEX_POSITIONS = ("RB", "WR", "TE")
@@ -761,7 +762,24 @@ def _run_draft(pool, settings, slot_managers, my_slot, taken, betas, rng,
         else:
             beta = betas.get(slot_managers.get(slot))
             if beta is None:
-                beta = np.zeros(len(FEATURE_NAMES))
+                # A zeros beta makes every score 0, so the softmax below is
+                # uniform: this opponent drafts the ENTIRE remaining pool at
+                # equal odds, ignoring ADP, need and position entirely. That
+                # is not "unmodeled" -- it is an actively wrong, confident
+                # model of a fantasy manager, and it is silent: nothing here
+                # would ever surface a fallback that fires. It is also the
+                # common case, not a rare one -- `slot_managers.get(slot)` is
+                # `None` for any slot ESPN hasn't published a draft order
+                # for, which is every slot until ESPN sets one, and `betas`
+                # is `{}` for any league with no draft history to fit
+                # (api/live.py's `build_session` builds it as `{m:
+                # fits.get(m, pooled) for m in fits if m != "__pooled__"}`,
+                # which is empty at cold start since fit_all then returns
+                # only `__pooled__`). COLD_START_PRIOR is the fix: a real,
+                # measured "drafts like the market" prior (see its docstring
+                # at scoring/draft_model.py), so an unresolvable opponent
+                # follows ADP instead of drafting at random.
+                beta = COLD_START_PRIOR
             legal = available[_legal_mask(pool, available, roster["counts"], caps)]
             if len(legal) == 0:
                 choice = int(available[0])      # no legal player exists at all
@@ -995,7 +1013,22 @@ def survival(pool, settings, slot_managers, my_slot, taken, betas,
                 break
             beta = betas.get(slot_managers.get(slot))
             if beta is None:
-                beta = np.zeros(len(FEATURE_NAMES))
+                # Same fallback and the same reason as `_run_draft` above:
+                # zeros made the softmax uniform, so an unresolved opponent
+                # drafted the whole remaining pool at equal odds. This is
+                # what turned into the live bug -- pick 22 of an 8-team mock,
+                # 9 opponent picks before the owner's next turn, and EVERY
+                # available player (Derrick Henry and Josh Jacobs included)
+                # came back at 94-98% survival, because uniform draws give
+                # each of ~249 available players survival ~= 1 - 9/249 =
+                # 96.4% regardless of how good he is. `expected_best_next`
+                # then equalled each position's own best player,
+                # `gain.gain_now` collapsed to 0 for every position leader,
+                # and the top-3 board was a QB, a kicker and a TE at 0 --
+                # pandas' unstable sort deciding the order among six tied
+                # zeros, not the model. COLD_START_PRIOR makes the fallback
+                # follow the market instead of drafting at random.
+                beta = COLD_START_PRIOR
             X = _live_features(pool, available, offset + 1, rosters[slot],
                                recent, settings)
             scores = X @ beta
