@@ -183,12 +183,36 @@ export default function ClockPanel({ state, secondsLeft, board = null }: {
   // already polled -- no new fetch) over a bare slot number, falling back
   // to the slot only when the board hasn't named that column yet.
   const waitingOnName = teamNameForSlot(board, state.on_the_clock)
+
+  // `draft_started` alone is not evidence that the draft has NOT started.
+  // It is DraftListener.started, set from the socket's STATE frame, and
+  // STATE is a one-time transition broadcast rather than a per-connection
+  // handshake: tests/fixtures/espn_draft_socket.jsonl carries a single
+  // `STATE 1` in 161 frames, and data/draft_room_trace.jsonl exactly two
+  // STATE frames in the whole session (draft start, draft complete). A
+  // fresh DraftListener is constructed on every connect, so any listener
+  // created AFTER the draft began never sees one and reports
+  // `started == False` for the rest of the draft -- and the bookmarklet
+  // click this very panel's recovery text asks for (see the listener-down
+  // branch above) is exactly what constructs one. Picks already on the
+  // board are the second, independent witness that it started: `picks_made`
+  // is counted from the `drafted` table, not from any frame this listener
+  // has to have been alive for.
+  const started = state.draft_started || state.picks_made > 0
+
+  // `youAreUp` first, deliberately. It used to sit BELOW the not-started
+  // test, so a listener that reconnected mid-draft (started == false
+  // forever, see above) read "Draft has not started yet" over a live
+  // ticking countdown while the owner was on the clock -- the one heading
+  // that must never be wrong. Now the not-started case can only ever paint
+  // when nothing else is true: nobody's pick is ours, and no pick has
+  // landed.
   const heading = draftDone
     ? 'Draft complete'
-    : !state.draft_started
-      ? 'Draft has not started yet'
-      : youAreUp
-        ? 'You are on the clock'
+    : youAreUp
+      ? 'You are on the clock'
+      : !started
+        ? 'Draft has not started yet'
         : waitingOnName !== null
           ? `Waiting on ${waitingOnName}`
           : `Waiting on slot ${state.on_the_clock}`
