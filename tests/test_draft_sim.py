@@ -819,7 +819,7 @@ def test_live_features_matches_feature_matrix_on_a_late_round_pick():
 # built on, without changing rollout()'s own scalar return type) lets a
 # second test check that a full simulated draft actually honours it.
 
-from scoring.draft_sim import _roster_cap, _run_draft
+from scoring.draft_sim import _roster_cap, _run_draft, survival
 
 
 def test_roster_cap_limits_kicker_defense_and_qb_regardless_of_starters():
@@ -827,6 +827,134 @@ def test_roster_cap_limits_kicker_defense_and_qb_regardless_of_starters():
     assert caps["K"] == 1
     assert caps["DST"] == 1
     assert caps["QB"] <= 3
+
+
+# The roster FLOOR, the counterpart of the cap above. Same argument as
+# _roster_cap's own ("learned coefficients cannot express a hard ceiling, so
+# it is imposed as a mask instead"), applied to the other end: with two picks
+# left and an empty kicker and defense slot, a manager takes a kicker and a
+# defense. The full measurement is in `_must_fill_mask`'s docstring; the
+# short version is that `pos_DST` is fitted on a draft_picks table with ZERO
+# DST rows in it, and without this floor no modelled opponent ever drafted a
+# defense -- 7 of 8 simulated teams finished an entire 120-pick draft with an
+# empty DST starter slot, every defense came back at 1.000 survival at every
+# point of the draft, and gain_now for every defense was exactly 0.0000.
+
+def _two_round_league():
+    """Two teams, one QB and one DST to start, two rounds. Snake [1,2,2,1],
+    so slot 2 holds back-to-back picks and both of its picks are visible in
+    one four-pick draft -- the whole must-fill argument, with nothing else
+    in it."""
+    return league.LeagueSettings(
+        season=2026, teams=2, starters={"QB": 1, "DST": 1},
+        flex_slots=0, bench=0, scoring={}, draft_type="SNAKE")
+
+
+def _qb_then_dst_pool(n_qb=6, n_dst=6):
+    """The real board's shape in miniature: every defense ranks below every
+    quarterback in the market, which is what makes `reach` (-8.09) plus
+    `pos_DST` (-11.14) refuse them."""
+    pos = ["QB"] * n_qb + ["DST"] * n_dst
+    n = n_qb + n_dst
+    return SimPool(
+        player_id=np.array([f"p{i}" for i in range(n)]),
+        norm=np.array([f"player {i}" for i in range(n)]),
+        position=np.array(pos), adp_rank=np.arange(1, n + 1, dtype=float),
+        points=np.linspace(300.0, 60.0, n), availability=np.full(n, 90.0),
+        vor=np.linspace(300.0, 60.0, n),
+        market_rank=np.arange(1, n + 1, dtype=float),
+        age=np.full(n, np.nan), no_track_record=np.full(n, True),
+        hype=np.full(n, np.nan), trend=np.zeros(n))
+
+
+def test_the_roster_floor_does_not_bind_while_a_roster_has_slack():
+    """It must not touch the rounds the fit is actually good in. Measured
+    over 8 seeds of a full 120-pick draft on the real pool, the earliest pick
+    at which it binds for anybody is 106 -- round 14 of 15."""
+    from scoring.draft_sim import _must_fill_mask
+    pool = _pool()
+    idx = np.arange(len(pool.player_id))
+
+    # Nothing drafted, 15 picks to go: 8 starter slots open, no constraint.
+    assert _must_fill_mask(pool, idx, {}, S, 15) is None
+    # Even down to 9 picks left with every starter slot still open.
+    assert _must_fill_mask(pool, idx, {}, S, 9) is None
+    # A roster with nothing left to fill is never constrained either.
+    full = {"QB": 1, "RB": 2, "WR": 2, "TE": 1, "K": 1, "DST": 1}
+    assert _must_fill_mask(pool, idx, full, S, 1) is None
+
+
+def test_the_roster_floor_binds_when_the_picks_run_down_to_the_open_slots():
+    from scoring.draft_sim import _must_fill_mask
+    pool = _pool()
+    idx = np.arange(len(pool.player_id))
+
+    # One slot open (DST), one pick left: this pick is that slot.
+    counts = {"QB": 1, "RB": 2, "WR": 2, "TE": 1, "K": 1}
+    mask = _must_fill_mask(pool, idx, counts, S, 1)
+    assert mask is not None
+    assert set(pool.position[idx[mask]]) == {"DST"}
+    # Two open, two left: either, and nothing else.
+    counts = {"QB": 1, "RB": 2, "WR": 2, "TE": 1}
+    mask = _must_fill_mask(pool, idx, counts, S, 2)
+    assert set(pool.position[idx[mask]]) == {"K", "DST"}
+    # Two open, three left -- still slack, so still the fit's decision.
+    assert _must_fill_mask(pool, idx, counts, S, 3) is None
+    # No player at a needed position is available: None, never an empty mask,
+    # so the caller can apply the result unconditionally.
+    only_qbs = idx[pool.position[idx] == "QB"]
+    counts = {"QB": 1, "RB": 2, "WR": 2, "TE": 1, "K": 1}
+    assert _must_fill_mask(pool, only_qbs, counts, S, 1) is None
+
+
+def test_an_opponent_fills_its_last_starter_slot_instead_of_a_second_qb():
+    """Without the floor this opponent finishes with two quarterbacks and no
+    defense, in every seed. The QB cap is 3 (_roster_cap), so a second QB is
+    perfectly legal and the fit much prefers it: every defense here ranks
+    below every quarterback in the market, so `reach` and `pos_DST` together
+    put them out of reach.
+
+    betas={} and slot_managers={} on purpose -- that is the unresolved
+    opponent, which now follows COLD_START_PRIOR (see _run_draft's own
+    comment). Six seeds, because the choice is sampled from a softmax and one
+    seed proves nothing about a distribution.
+    """
+    settings, pool = _two_round_league(), _qb_then_dst_pool()
+    n = len(pool.player_id)
+    for seed in range(6):
+        rosters = _run_draft(pool, settings, {}, 1, np.zeros(n, dtype=bool),
+                             {}, np.random.default_rng(seed), taken_order=[])
+        assert rosters[2]["counts"] == {"QB": 1, "DST": 1}, f"seed {seed}"
+
+
+def test_survival_stops_pinning_every_defense_at_certainty():
+    """The live consequence, and the reason the floor has to be in `survival`
+    too and not only in `_run_draft`: this loop IS what "will he still be
+    there" is counted from. With opponents that never draft a defense, every
+    defense comes back at exactly 1.000, `gain.expected_best_next` collapses
+    to the position's own leader, and `gain_now` is exactly 0.0000 for every
+    defense at every pick of the draft -- so the room can never surface one.
+
+    Measured on the real 249-player pool at the owner's final pick, same
+    board state either way: best defense rank 3, gain_now +0.000, survival
+    1.000 before; rank 1, gain_now +4.977, survival 0.235 after.
+    """
+    settings, pool = _two_round_league(), _qb_then_dst_pool()
+    n = len(pool.player_id)
+    frame = survival(pool, settings, {}, 1, np.zeros(n, dtype=bool), {},
+                     n_rollouts=200, seed=11, taken_order=[],
+                     on_the_clock=True, horizon=0)
+    dst = frame[pool.position == "DST"]["avail_pct"].to_numpy()
+    assert dst.max() < 1.0, "every defense still survives with certainty"
+    # The BEST defense is the one at risk -- that ordering is the signal
+    # `expected_best_next` reads, and a flat 1.000 destroys it.
+    assert dst[0] < dst[-1]
+
+
+def test_turns_left_counts_the_pick_on_the_clock_as_one_of_mine():
+    from scoring.draft_sim import _turns_left
+    slots = snake_slots(2, 2)                       # [1, 2, 2, 1]
+    assert _turns_left(slots, 2) == [2, 2, 1, 1]
 
 
 def test_greedy_takes_the_running_back_over_the_higher_scoring_quarterback():

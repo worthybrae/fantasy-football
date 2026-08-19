@@ -620,12 +620,36 @@ def select_lambda(X_list, chosen_list, seasons, prior, grid=None,
 # from six real seasons of an actual PPR league, frozen here with their
 # provenance. They already encode "draft roughly to the market": `reach` -8.1
 # penalises taking a player the board ranks well below the pick, `fall` +3.8
-# rewards taking a value that has slid, and `pos_DST` -11.1 / `qb_early` +1.5
-# capture the structural facts every league shares (nobody drafts a defense in
-# round two; quarterbacks go earlier than their raw value). An unknown league's
-# opponents drafting like the average of a real, observed one is a defensible
-# default and a measured one -- this same pooled fit scores top-1 0.25 against
-# real drafts.
+# rewards taking a value that has slid, and `qb_early` +1.5 captures a
+# structural fact every league shares (quarterbacks go earlier than their raw
+# value). An unknown league's opponents drafting like the average of a real,
+# observed one is a defensible default and a measured one -- this same pooled
+# fit scores top-1 0.25 against real drafts.
+#
+# `pos_DST` -11.14 IS THE ONE COEFFICIENT HERE THAT IS NOT EVIDENCE ABOUT
+# ANYBODY'S BEHAVIOR, and this comment used to claim it was ("nobody drafts a
+# defense in round two"). The data behind it could not have said anything
+# else: `draft_picks` on the database this was fitted from holds 712 rows
+# across six seasons and NOT ONE of them is a DST -- the positions present are
+# WR/RB/TE/QB/K only, and every season is missing exactly eight picks (2020
+# [60, 68, 72, 90, 102, 113, 126, 127]; 2025 [98, 99, 100, 104, 106, 107, 108,
+# 112]; and so on) while all eight of that season's kickers are recorded. The
+# eight missing picks are the eight defenses, dropped somewhere in the ESPN
+# import. So the fit saw a defense in every choice set, saw one chosen zero
+# times, and drove this coefficient as negative as the ridge allowed. It is a
+# correct fit to data in which the event is unobservable.
+#
+# The number is left exactly as fitted -- editing it would launder a guess as
+# a measurement, and it is still the right anchor for the leagues whose
+# history the same import shapes the same way. What it cannot be allowed to
+# do is decide the end of a simulated draft: with this prior driving every
+# unresolved opponent, 7 of 8 simulated teams finished a full 120-pick draft
+# with an empty DST starter slot and `gain_now` for every defense was exactly
+# 0.0000 at every pick. That is corrected in the simulator, ON TOP of the fit
+# and clearly separated from it -- see `scoring/draft_sim._must_fill_mask`,
+# which imposes the roster floor the coefficients cannot express, exactly as
+# `_roster_cap` already imposes the ceiling. The real fix is the import, and
+# it is not in either file.
 #
 # As a league accrues its own history, `fit_all` shrinks each manager off this
 # prior via `select_lambda`, so the market default is the anchor that a real

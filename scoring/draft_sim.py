@@ -490,6 +490,139 @@ def _roster_cap(settings) -> dict:
     return caps
 
 
+def _turns_left(slots, rounds: int) -> list:
+    """For every offset in the snake, how many picks the slot on the clock at
+    that offset still has, COUNTING the pick at that offset itself.
+
+    Precomputed once per simulation rather than counted per pick: every slot
+    appears exactly `rounds` times in `slots`, so this is one pass, and the
+    obvious `sum(1 for s in slots[offset:] if s == slot)` inside the rollout
+    loop would be O(picks) per pick, i.e. O(120 x 120 x rollouts).
+    """
+    seen, out = {}, []
+    for slot in slots:
+        seen[slot] = seen.get(slot, 0) + 1
+        out.append(rounds - seen[slot] + 1)
+    return out
+
+
+def _must_fill_mask(pool, indices, counts, settings, turns_left: int):
+    """Which of `indices` fill a starter slot this roster can no longer defer,
+    or None when the constraint does not bind (which is nearly always).
+
+    A CORRECTION TO THE FIT, NOT PART OF IT. Deliberately not expressed as a
+    coefficient, because there is no measurement behind a coefficient here --
+    see below for what the fit actually saw. This is the floor that
+    `_roster_cap` is the ceiling of, and it is here for the same stated
+    reason: "learned coefficients cannot express a hard ceiling, so it is
+    imposed as a mask instead." A manager with two picks left and an empty
+    kicker and defense slot takes a kicker and a defense. That is not a
+    tendency to be fitted, it is what the roster rules leave them.
+
+    WHAT WENT WRONG WITHOUT IT. `COLD_START_PRIOR`'s `pos_DST` is -11.14, and
+    every per-manager fit on this deployment's own database shrinks to that
+    same value. Measured on the real 249-player pool (8 teams, 15 rounds),
+    `_run_draft` run out to all 120 picks, 8 seeds, with the real fitted
+    betas and again with cold-start: EXACTLY ONE defense was drafted per
+    simulated draft, every time at pick 113 -- and pick 113 is my own slot's
+    round-15 pick, taken by `_greedy_choice`. No modelled opponent drafted a
+    defense at any pick of any of the sixteen simulations, so 7 of the 8
+    simulated teams finished the draft with an empty DST starter slot.
+
+    Downstream that made every defense unpickable by construction: `survival`
+    runs these same opponents, so DST availability came back at 1.000 at pick
+    0, 21, 50, 99 and 110 alike; `gain.expected_best_next` then equals the
+    position's own leader, and `gain_now` was exactly 0.0000 for every
+    defense at every point of the draft. The tool could never surface one,
+    and an owner following it literally reaches the last round without a
+    defense.
+
+    WHY THE COEFFICIENT IS NOT EVIDENCE, which is what makes a correction
+    honest rather than a thumb on the scale. `draft_picks` on this database
+    holds 712 rows over six seasons and NOT ONE of them is a DST: the
+    positions present are WR/RB/TE/QB/K only. Every season is missing exactly
+    eight picks -- 2020 [60, 68, 72, 90, 102, 113, 126, 127], 2025
+    [98, 99, 100, 104, 106, 107, 108, 112], and so on, eight per season,
+    always in the late rounds -- while all 8 kickers are recorded every year.
+    Those eight are the eight defenses, dropped somewhere in the ESPN import.
+    So the fit saw defenses in every choice set and saw one chosen zero
+    times, and drove `pos_DST` as negative as the ridge allowed. The number
+    is a correct fit to data in which the event is unobservable; it is not a
+    measurement of how anybody drafts. Its own comment reads "nobody drafts a
+    defense in round two" -- the data behind it could not have said anything
+    else, and the real drafts it was taken from filled all eight defense
+    slots every year, between picks 60 and 127. (The import is the real bug
+    and it is not in this file; nothing here can fix it, and nothing here
+    should pretend the coefficient means more than it does.)
+
+    WHAT IT FIXES, measured the same way. All 8 defenses are drafted in all
+    16 simulations, none of the 8 teams finishes short at any starter
+    position, and every first kicker still goes at pick 68-87 exactly as
+    before. On the live side, at the owner's own final pick with an empty DST
+    slot and the same board state either way: the best defense went from rank
+    3, gain_now +0.000, survival 1.000 to rank 1, gain_now +4.977, survival
+    0.235. `survival` costs the same (1.45 / 1.01 / 1.23 / 1.07 / 0.21s at
+    picks_made 0 / 21 / 50 / 99 / 110, against 1.45 / 0.99 / 1.22 / 1.11 /
+    0.19s before).
+
+    WHAT THIS DOES NOT DO. It does not touch the rounds where the fit is
+    good. The constraint binds only when a roster's remaining picks have run
+    down to its unfilled starter slots, which cannot happen early: at pick 1
+    every roster has 8 starter slots and 15 picks. Measured over the same 8
+    seeds, the earliest pick at which it binds for anybody is 106 -- round 14
+    of 15. At picks_made=99 the live ranking is identical to the digit before
+    and after. It adds no preference between positions, changes no
+    probability, and is not consulted at all while a roster still has slack
+    -- the softmax over `X @ beta` decides every one of those picks exactly
+    as before.
+
+    AND IT IS DELIBERATELY CONSERVATIVE, which is the honest limit of what
+    can be claimed here. It puts every simulated defense in round 15. The
+    real drafts it should be reproducing took theirs between picks 60 and
+    127, mean 105.6 -- that is INFERRED, not read: the pick numbers come from
+    the eight gaps each season leaves in `draft_picks`, which are the eight
+    defenses by elimination (every other position is fully accounted for, and
+    2025's 112 rows are 120 minus 8). So a defense's urgency in rounds 9-14
+    is still understated and `gain_now` for one is still 0.00 there. Closing
+    that needs the import fixed so the fit can see the real timing; picking a
+    number for it here would be inventing the measurement this whole
+    docstring exists to say we do not have.
+
+    `turns_left` is this slot's remaining picks including the current one
+    (see `_turns_left`). Returns None, never an empty mask, when the
+    constraint does not bind or when no player at a still-needed position is
+    in `indices` at all -- so a caller can apply the result unconditionally
+    and can never be left with nothing to pick.
+
+    WHO IT APPLIES TO. In `_run_draft`, opponents only: my own slot picks
+    through `_greedy_choice`, which values a roster rather than sampling a
+    fit, and is measurably not the problem -- it took the defense at pick 113
+    in all 16 simulations above, and its policy is not something this
+    correction should be quietly changing. In `survival` it applies to every
+    pick between now and my horizon, mine included, because that loop has no
+    my-slot branch and does not need one: it is counting who comes off the
+    board, and an intervening pick of my own removes a player exactly like
+    anybody else's.
+    """
+    needed = [pos for pos, n in settings.starters.items()
+              if counts.get(pos, 0) < n]
+    if not needed:
+        return None
+    open_slots = sum(n - counts.get(pos, 0)
+                     for pos, n in settings.starters.items()
+                     if counts.get(pos, 0) < n)
+    if open_slots < turns_left:
+        return None
+    # Same fixed-vocabulary OR as `_legal_mask`, and for the same reason:
+    # np.unique's sort and a per-player Python comprehension both showed up
+    # as measurable costs inside the rollout loop (see its docstring).
+    positions = pool.position[indices]
+    mask = np.zeros(len(indices), dtype=bool)
+    for pos in needed:
+        mask |= positions == pos
+    return mask if mask.any() else None
+
+
 # Heuristic cutoff chosen for speed, not a proven bound -- marginal
 # roster-value gain and raw points don't have to rank identically. Scanning
 # every legal remaining player would make every rollout O(pool) roster
@@ -730,6 +863,7 @@ def _run_draft(pool, settings, slot_managers, my_slot, taken, betas, rng,
     caps = _roster_cap(settings)
     rounds = settings.rounds
     slots = snake_slots(settings.teams, rounds)
+    turns_left = _turns_left(slots, rounds)
     if taken_order is None and gone.any():
         warnings.warn(
             "draft_sim: players are marked taken but no taken_order was given; "
@@ -781,6 +915,20 @@ def _run_draft(pool, settings, slot_managers, my_slot, taken, betas, rng,
                 # follows ADP instead of drafting at random.
                 beta = COLD_START_PRIOR
             legal = available[_legal_mask(pool, available, roster["counts"], caps)]
+            # The roster floor, applied on top of the fit rather than inside
+            # it: once an opponent's remaining picks have run down to their
+            # unfilled starter slots, those slots are what the picks are for.
+            # Without it no modelled opponent ever drafted a defense at all
+            # -- 7 of 8 simulated teams finished with an empty DST slot, and
+            # `pos_DST` is fitted on a `draft_picks` table containing zero
+            # DST rows. The whole argument, with the measurements, is in
+            # `_must_fill_mask`'s docstring; it returns None (leaving `legal`
+            # exactly as the fit left it) for every pick where the constraint
+            # does not bind, which measures as everything before round 14.
+            must_fill = _must_fill_mask(pool, legal, roster["counts"],
+                                        settings, turns_left[offset])
+            if must_fill is not None:
+                legal = legal[must_fill]
             if len(legal) == 0:
                 choice = int(available[0])      # no legal player exists at all
             else:
@@ -1127,6 +1275,7 @@ def survival(pool, settings, slot_managers, my_slot, taken, betas,
     start = already + 1 if on_the_clock else already
     target = _horizon_pick_for(settings, my_slot, start, horizon)
     slots = snake_slots(settings.teams, settings.rounds)
+    turns_left = _turns_left(slots, settings.rounds)
     caps = _roster_cap(settings)
     counts = np.zeros(len(pool.player_id))
 
@@ -1166,6 +1315,20 @@ def survival(pool, settings, slot_managers, my_slot, taken, betas,
                 pos = pool.position[idx]
                 if rosters[slot].get(pos, 0) >= caps.get(pos, 99):
                     scores[j] = -np.inf
+            # The same roster floor `_run_draft` applies, and it has to be
+            # here too or the two disagree about the same opponents: this
+            # loop IS what "will he still be there" is counted from, so an
+            # opponent who never drafts a defense here hands every defense a
+            # survival of 1.000 and a `gain_now` of exactly 0.0000 at every
+            # pick of the draft (measured -- see `_must_fill_mask`).
+            # Re-checked against `finite` rather than applied blind: a
+            # position at its cap is already -inf, and forcing the pick onto
+            # a set with no finite score left would leave the softmax below
+            # with nothing to sample.
+            must_fill = _must_fill_mask(pool, available, rosters[slot],
+                                        settings, turns_left[offset])
+            if must_fill is not None and np.isfinite(scores[must_fill]).any():
+                scores[~must_fill] = -np.inf
             finite = np.isfinite(scores)
             if not finite.any():
                 choice = int(available[0])
