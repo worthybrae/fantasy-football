@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import type { LiveState } from '../../api'
 import { nextPickFor } from './pickOrder'
 
@@ -85,6 +86,21 @@ export default function ClockPanel({ state, secondsLeft }: { state: LiveState; s
         <p className="clock-down-message">
           {state.listener_error ?? 'The draft listener has stopped responding -- picks made in ESPN will not appear here.'}
         </p>
+        {/* Spec section 6 wants the recovery instruction shown whenever the
+            room is down, not only when it happens to be embedded in the
+            error text. It only ever was: the words "click the Draft Helper
+            bookmark again" live inside two RuntimeError strings in
+            pipeline/draft_socket.py (the two give-up-after-N-empty-
+            reconnects paths), so every other way this thread dies -- and
+            every hang that sets no error at all, which is exactly the case
+            `listener_alive` exists to catch -- reached this panel with a
+            message and no action. Unconditional now, and it links back to
+            the page that actually hands the bookmarklet over, since App.tsx
+            routes one way and nothing else here leaves the room. */}
+        <p className="clock-down-message">
+          Click the Draft Helper bookmarklet again in your ESPN draft tab to
+          reconnect, or <Link to="/">go back to setup</Link>.
+        </p>
       </div>
     )
   }
@@ -130,6 +146,20 @@ export default function ClockPanel({ state, secondsLeft }: { state: LiveState; s
       {state.stale && (
         <p className="clock-stale" role="status">
           No successful update in the last 15 seconds -- the numbers below may be behind.
+        </p>
+      )}
+      {/* Spec section 6's first case, said where it is being felt: "socket
+          dropped while on the clock -- the clock panel says so and the draft
+          buttons disable." Only while `youAreUp`, deliberately. The
+          browser-observer path (/api/live/connect) never publishes a
+          SocketHandle at all, so `socket_alive` is permanently false there
+          and an unconditional notice would be a permanent one for a session
+          that is working exactly as designed; on the clock is the one moment
+          the difference actually costs the user something. */}
+      {youAreUp && !state.socket_alive && (
+        <p className="clock-stale" role="alert">
+          The draft socket is not connected -- picks cannot be sent from here
+          right now. Make this pick in ESPN.
         </p>
       )}
       <div className="clock-figures">

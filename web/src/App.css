@@ -852,12 +852,29 @@ td:first-child {
   border-bottom: 1px solid var(--border);
 }
 
+/* Also the room's link home (and so to the bookmarklet that reconnects it)
+   -- styled to read as the title it already was, not as a link, since
+   nothing about the room's layout should change to accommodate it. */
 .draft-topbar-title {
   font-weight: 700;
   font-size: var(--text-base);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text-1);
+  text-decoration: none;
+}
+
+.draft-topbar-title:hover {
+  color: var(--accent);
+}
+
+/* The full-PPR caveat beside the scoring chip. Deliberately quiet -- it is
+   a standing property of the numbers, not an event, so it must not compete
+   with the pick counter or the status pill. */
+.draft-topbar-note {
+  font-size: var(--text-xs);
+  color: var(--accent);
+  white-space: nowrap;
 }
 
 .draft-topbar-sep {
@@ -939,6 +956,51 @@ td:first-child {
   background: color-mix(in srgb, var(--fail) 10%, var(--bg-1));
   border-bottom: 1px solid var(--fail);
   font-size: var(--text-sm);
+}
+
+/* Two tiers below the error banner, sharing its geometry so a stack of them
+   reads as one strip rather than three unrelated bars.
+
+   `alert` is fail-toned like the error banner but is not an error: an
+   unmapped pick means the list below is wrong in a way the user has to know
+   about. `notice` is accent-toned and transient -- a recompute that has not
+   landed yet resolves itself within a poll or two, and painting that red
+   every time a pick lands would make the red mean nothing by round three. */
+.draft-alert-banner {
+  flex-shrink: 0;
+  margin: 0;
+  padding: var(--space-2) var(--space-4);
+  background: color-mix(in srgb, var(--fail) 10%, var(--bg-1));
+  border-bottom: 1px solid var(--fail);
+  font-size: var(--text-sm);
+  color: var(--text-1);
+}
+
+.draft-notice-banner {
+  flex-shrink: 0;
+  margin: 0;
+  padding: var(--space-2) var(--space-4);
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-1));
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+
+/* The raw ids behind an unmapped pick. They are the only way to work out
+   which player the crosswalk missed, so they are shown rather than counted
+   -- inline and small, because the headline sentence is the part that has
+   to land under a clock. */
+.draft-unmapped-list {
+  margin: var(--space-1) 0 0;
+  padding-left: var(--space-4);
+  font-size: var(--text-xs);
+  color: var(--text-2);
+  /* `.draft-room` is height-capped with overflow hidden and the page itself
+     never scrolls, so an unbounded list here would push the board and the
+     rail off the bottom of the screen. Capped and scrolled inside itself:
+     a long crosswalk outage costs a scrollbar in the banner, not the room. */
+  max-height: 4.5em;
+  overflow-y: auto;
 }
 
 .draft-body {
@@ -1086,6 +1148,15 @@ td:first-child {
   font-size: var(--text-sm);
   color: var(--text-1);
   line-height: 1.5;
+}
+
+/* The recovery link out of a dead room. Nothing in this app styles bare
+   anchors, and the browser default (blue, on this panel's fail-tinted dark
+   background) is the one place in the room where a link would be hard to
+   read -- which is the last place that should be true. */
+.clock-down-message a {
+  color: var(--accent);
+  text-decoration: underline;
 }
 
 .clock-countdown {

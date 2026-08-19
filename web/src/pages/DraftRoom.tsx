@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { fetchBoard, fetchLiveState, fetchPlayers, selectPlayer, type LiveBoard, type LiveCandidate,
          type LiveSettings, type LiveState, type Player, type RosterPlayer } from '../api'
 import ClockPanel from '../components/draft/ClockPanel'
@@ -222,8 +223,19 @@ export default function DraftRoom() {
   const tabHint = playerCount > 0 ? `${playerCount} players in the pool` : ''
 
   const listenerOk = !!state?.active && state.listener_alive && state.listener_error === null
-  const connectionLabel = !state?.active ? 'NOT CONNECTED' : listenerOk ? 'ESPN LIVE' : 'LISTENER DOWN'
-  const connectionTone = !state?.active ? 'off' : listenerOk ? 'ok' : 'fail'
+  // Two separate failures, named separately. A detached send socket
+  // (`socket_alive` false) is not a dead listener: frames keep arriving, the
+  // board keeps filling, and the only thing that stops working is picking --
+  // which is precisely the failure the old single `listenerOk` pill hid
+  // behind a green "ESPN LIVE" while every draft click 503'd. It is also the
+  // permanent state of the browser-observer path (/api/live/connect
+  // publishes no SocketHandle), where "you cannot draft from here" is the
+  // honest label rather than a fault.
+  const socketOk = !!state?.active && state.socket_alive
+  const connectionLabel = !state?.active
+    ? 'NOT CONNECTED'
+    : !listenerOk ? 'LISTENER DOWN' : !socketOk ? 'SOCKET DOWN' : 'ESPN LIVE'
+  const connectionTone = !state?.active ? 'off' : (listenerOk && socketOk) ? 'ok' : 'fail'
 
   // ms_remaining straight off state -- never decayed or interpolated
   // between polls, see ClockPanel.tsx's own comment on the ticker for why
@@ -249,12 +261,37 @@ export default function DraftRoom() {
     ? assignRoster(rosterSlotLabels(state.settings), state.my_roster)
     : []
 
-  // Same test as ClockPanel's own `youAreUp` -- gates both the top-three and
-  // the table's draft buttons. Computed once here rather than inside either
-  // component, which have no access to `state` at all (see
-  // AvailableList.tsx's own comment on why this prop exists beyond what the
-  // task brief's original signature listed).
-  const isMyTurn = !!state?.active && state.on_the_clock !== null && state.on_the_clock === state.my_slot
+  // Gates both the top-three and the table's draft buttons. Computed once
+  // here rather than inside either component, which have no access to
+  // `state` at all (see AvailableList.tsx's own comment on why this prop
+  // exists beyond what the task brief's original signature listed).
+  //
+  // `socket_alive` is part of the test, not just whose turn it is: POST
+  // /api/live/select answers 503 with no live handle, and during a
+  // run_socket_listener reconnect the handle is detached while the listener
+  // thread is alive and `stale` has not tripped (CLOCK frames stamped
+  // last_poll_at a second ago), so "on turn, socket down" was
+  // indistinguishable from "on turn, socket up" and every click 503'd. Spec
+  // section 6: the buttons disable while the socket is down and re-enable
+  // when the handle reports alive again -- which happens on its own here,
+  // since this is recomputed from every 2.5s poll. Deliberately NOT the same
+  // test as ClockPanel's `youAreUp`, which is about whose turn it is and
+  // stays true while the socket is down.
+  const isMyTurn = !!state?.active && state.on_the_clock !== null
+    && state.on_the_clock === state.my_slot && state.socket_alive
+
+  // The list on screen was computed for an older pick than the one on the
+  // clock: a pick has landed and its recompute has not finished (0.1-0.8s of
+  // ranking plus up to 2.5s of poll lag). Presenting it as current would
+  // recommend a player who may already be gone -- exactly what
+  // _recompute's own as_of_pick guard exists to prevent server-side. Both
+  // counts are pick COUNTS, so the pick each is FOR is that + 1, the same +1
+  // `thisPickNo` applies. Restored from the deleted LiveDraft.tsx, whose
+  // `isRecomputing` banner went with it.
+  const rankedForPickNo = state?.active && state.candidates_as_of_pick !== null
+    && state.candidates_as_of_pick < state.picks_made
+    ? state.candidates_as_of_pick + 1
+    : null
 
   // The pick TopThree's hint names ("...vs. waiting until pick N") --
   // exactly ClockPanel's own `nextPickNo`, recomputed here since ClockPanel
@@ -322,12 +359,35 @@ export default function DraftRoom() {
       </div>
 
       <header className="draft-topbar">
-        <span className="draft-topbar-title">Draft Helper</span>
+        {/* The room's only way out. App.tsx routes one way (/ -> /draft) and
+            nothing here linked back, so a user whose listener died had no
+            route to the page that hands over the bookmarklet -- the one
+            thing that reconnects them -- short of editing the URL bar under
+            a pick clock. The title carries it rather than adding a control:
+            same layout, same words, now clickable. ClockPanel's listener-down
+            panel links here too, with the instruction. */}
+        <Link to="/" className="draft-topbar-title">Draft Helper</Link>
         <span className="draft-topbar-sep" aria-hidden="true" />
         {state?.active && (
           <span className="draft-topbar-league">
             {state.settings.teams} teams
             {state.settings.scoring_format && ` · ${SCORING_LABEL[state.settings.scoring_format]}`}
+          </span>
+        )}
+        {/* scoring/board.py warns about this to server stderr, where nobody
+            drafting in a browser will ever see it: projections() is not
+            scoring-format aware (its first rung is ESPN's own fixed season
+            projection, its fallback reads a fixed full-PPR ppg), so
+            proj_points -- and therefore vor, and therefore every number this
+            room ranks on -- is priced in full PPR whatever the league
+            actually scores. Serving `scoring_format` in the chip above and
+            saying nothing here would be worse than silence: it tells the
+            user "Half PPR" while ranking them on PPR. Making projections()
+            format-aware is a tracked follow-up, not this fix. */}
+        {state?.active && state.settings.scoring_format !== null
+          && state.settings.scoring_format !== 'ppr' && (
+          <span className="draft-topbar-note">
+            ranked on full-PPR points regardless
           </span>
         )}
         <span className="draft-topbar-spacer" />
@@ -343,6 +403,62 @@ export default function DraftRoom() {
       </header>
 
       {error && <p className="error draft-error-banner">{error}</p>}
+
+      {/* Ranking has stopped while everything else keeps working. The
+          listener is fine, the clock ticks, the board fills -- and the list
+          below is frozen at whatever pick it last reached. Nothing said so
+          before api/live.py grew `recompute_error`; `listener_alive` tracks
+          the other thread entirely. role="alert" for the same reason the
+          unmapped banner has one: this changes what the numbers below mean. */}
+      {state?.active && state.recompute_error !== null && (
+        <p className="draft-error-banner" role="alert">
+          Ranking has stopped ({state.recompute_error}). The list below is
+          {' '}frozen{state.candidates_as_of_pick !== null
+            ? ` at pick ${state.candidates_as_of_pick + 1}`
+            : ' and was never computed'} -- picks are still being recorded,
+          {' '}but nothing below is being re-ranked.
+        </p>
+      )}
+
+      {/* A pick the socket confirmed that the crosswalk could not resolve to
+          a board player. He is off the board in ESPN and still sitting in the
+          ranked list here, recommendable, with `survive_pct` counting him as
+          available. api/live.py has served these since Task 5 and the room
+          rendered them nowhere -- a regression against the deleted
+          LiveDraft.tsx, which had exactly this banner. Spec section 6 asks
+          for it by name as the surface a crosswalk-gap 400 should also
+          appear in. */}
+      {state?.active && state.unmapped_picks.length > 0 && (
+        <div className="draft-alert-banner" role="alert">
+          <strong>
+            {state.unmapped_picks.length} pick
+            {state.unmapped_picks.length === 1 ? '' : 's'} could not be matched
+            to a player
+          </strong>
+          {' '}-- they are off the board in ESPN but may still be listed as
+          available below, and ranked as though nobody had taken them.
+          <ul className="draft-unmapped-list">
+            {state.unmapped_picks.map((u) => (
+              <li key={u.overall_pick} className="mono">
+                pick {u.overall_pick} · espn id {u.espn_player_id}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* The list is for an older pick than the one on the clock: a pick
+          landed and its recompute has not finished (0.1-0.8s of ranking plus
+          up to 2.5s of poll lag). Without this the room presents a
+          superseded list as current, which is the one thing _recompute's own
+          as_of_pick guard exists to prevent server-side. role="status", not
+          "alert": it resolves itself within a poll or two. */}
+      {rankedForPickNo !== null && state?.active && (
+        <p className="draft-notice-banner" role="status">
+          Recomputing for pick {state.picks_made + 1} -- the list below is
+          {' '}still for pick {rankedForPickNo}.
+        </p>
+      )}
 
       <div className="draft-body">
         <div className="draft-main-col">
