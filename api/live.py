@@ -808,6 +808,26 @@ def register_live_routes(app, conn, db_path):
             # simulator resumes from.
             rosters, _ = _seed_rosters(session.pool, session.settings, taken_order)
             counts = rosters[session.my_slot]["counts"]
+            # Is the pick on the clock RIGHT NOW our own? survival() cannot
+            # work this out from the pick count alone -- `_next_pick_for`
+            # scans inclusively, so "my pick is now" and "my pick is next"
+            # look identical to it and it answers "now", which pins every
+            # available player's survival at 1.0 and makes gain_now
+            # identically zero for the leader at every position (see
+            # survival's own docstring). This is the only caller that is
+            # ever asked WHILE the user is on the clock, and it is the one
+            # whose answer is read at exactly that moment, so it is the one
+            # that has to say which turn it means.
+            #
+            # Derived from `len(taken_order)`, not the `picks_made`
+            # argument: `taken_order` is what survival() itself counts
+            # `already` from, and picks_made was read on the listener
+            # thread before this ranking was queued, so a pick landing in
+            # between would leave the two disagreeing by one -- exactly the
+            # off-by-one this is here to close.
+            snake = snake_slots(session.settings.teams, session.settings.rounds)
+            on_the_clock = (len(taken_order) < len(snake)
+                            and snake[len(taken_order)] == session.my_slot)
             # survival()'s avail_pct is already a 0-1 probability (see its
             # docstring and the "counts / max(n_rollouts, 1)" line it
             # returns) -- rank_available wants exactly that, no rescaling.
@@ -815,7 +835,8 @@ def register_live_routes(app, conn, db_path):
                 session.pool, session.settings, session.slot_managers,
                 session.my_slot, taken, session.betas,
                 n_rollouts=SURVIVAL_ROLLOUTS, seed=session.seed,
-                taken_order=taken_order)["avail_pct"].to_numpy()
+                taken_order=taken_order,
+                on_the_clock=on_the_clock)["avail_pct"].to_numpy()
             frame = rank_available(session.pool, session.settings, taken,
                                    counts, avail)
         finally:

@@ -574,6 +574,50 @@ def test_recompute_passes_the_session_seed_to_survival(tmp_path, monkeypatch):
     assert captured["seed"] == 773311
 
 
+def test_recompute_tells_survival_when_the_pick_on_the_clock_is_mine(
+        tmp_path, monkeypatch):
+    """The whole-branch Critical, at the seam it actually lived in.
+
+    `survival` cannot tell "my pick is now" from "my pick is next" on its
+    own (`_next_pick_for` scans inclusively), and this is the caller that
+    is invoked at exactly the moment the distinction matters: `made` is
+    `count(*) FROM drafted`, i.e. picks_made, so the last recompute before
+    the user's turn is the one served while they pick. Left to infer, it
+    returned 1.0 for every available player and `gain_now` came back
+    identically zero for the leader at every position.
+
+    Both directions asserted: three picks made in an 8-team snake puts slot
+    4 on the clock (snake_slots(8, 15)[3] == 4) and must set
+    `on_the_clock=True`; nothing drafted puts slot 1 on the clock, not slot
+    4, and must leave it False. `taken_order` is all None -- `_seed_rosters`
+    counts a None pick as a turn consumed without touching the pool (which
+    is None in this fixture), which is exactly the "advance the snake"
+    behaviour needed here.
+    """
+    state, _recompute = _live_routes_with_conn(tmp_path)
+    session = _live_session()
+    assert session.my_slot == 4
+    monkeypatch.setattr("api.live.rank_available",
+                         lambda *a, **k: _fake_candidates_frame("p1"))
+    captured = {}
+
+    def fake_survival(*a, **k):
+        captured.update(k)
+        return pd.DataFrame({"player_id": [], "avail_pct": []})
+
+    monkeypatch.setattr("api.live.survival", fake_survival)
+
+    monkeypatch.setattr("api.live._drafted_state",
+                        lambda cur, pool: (set(), [None, None, None]))
+    _recompute(session, picks_made=3)
+    assert captured["on_the_clock"] is True
+
+    captured.clear()
+    monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
+    _recompute(session, picks_made=0)
+    assert captured["on_the_clock"] is False
+
+
 def test_live_start_success_path_builds_and_stores_a_session(tmp_path):
     """live_start's non-reused path: build_session runs against a real
     database, the response carries the pinned seed and a real board

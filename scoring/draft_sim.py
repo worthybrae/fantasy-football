@@ -914,7 +914,7 @@ def search_pick(pool, settings, slot_managers, my_slot, taken, betas,
 
 def survival(pool, settings, slot_managers, my_slot, taken, betas,
              n_rollouts: int = DEFAULT_ROLLOUTS, seed: int = 0,
-             taken_order=None):
+             taken_order=None, on_the_clock: bool = False):
     """Probability each player is still available when my next turn arrives.
 
     Counted from the same rollout machinery, but stopping at my next pick
@@ -925,6 +925,36 @@ def survival(pool, settings, slot_managers, my_slot, taken, betas,
     for the same reason: without it every opponent between now and my turn
     resumes with an empty roster, so `need` reads 1.0 everywhere and the
     caps re-arm from zero.
+
+    `on_the_clock` names WHICH turn is being measured, because the pick
+    count alone cannot say. `_next_pick_for` scans from `already`
+    INCLUSIVELY, so when the pick about to be made is my own it answers
+    "my next turn is this pick", the rollout loop below has nothing to
+    range over, and every available player comes back at exactly 1.0.
+
+    That is the right answer for `search_pick`/`run_sim`, which value the
+    pick they are about to make: a player who is on the board right now is
+    there with certainty, and `_run_draft(forced=idx)` forces him at that
+    same pick. It is the WRONG answer for the live ranking, whose whole
+    question is what will still be there AFTER this pick -- with survival
+    pinned at 1.0, `gain.expected_best_next` collapses to the position's
+    own leader and `gain_now` is identically 0.0 for the best player at
+    every position, so which of six position leaders (a kicker as readily
+    as a running back) reaches the top three is decided by pandas' unstable
+    sort rather than by any number. So the live caller passes
+    `on_the_clock=True` and gets the turn after this one; the default keeps
+    the offline callers unchanged.
+
+    The measured turn is then found from `already + 1`, which leaves the
+    player about to be taken with this very pick in the pool: survival is
+    over-estimated by exactly one player, since one of the survivors
+    counted here is the one I am about to remove myself. That is the
+    deliberate choice -- the alternative is guessing which player that is,
+    and a guess would be wrong far more often than one player in a
+    position's tail matters. At the wheel (my two picks back to back, no
+    opponent in between) the range is empty again and survival is a
+    truthful 1.0: waiting from the first of a pair to the second genuinely
+    costs nothing but the one player I take.
     """
     if taken_order is None and taken.any():
         warnings.warn(
@@ -932,7 +962,8 @@ def survival(pool, settings, slot_managers, my_slot, taken, betas,
             "was given; opponents resume with empty rosters, so their needs "
             "and roster caps are wrong", RuntimeWarning, stacklevel=2)
     already = len(taken_order) if taken_order is not None else int(taken.sum())
-    target = _next_pick_for(settings, my_slot, already)
+    start = already + 1 if on_the_clock else already
+    target = _next_pick_for(settings, my_slot, start)
     slots = snake_slots(settings.teams, settings.rounds)
     caps = _roster_cap(settings)
     counts = np.zeros(len(pool.player_id))
@@ -943,7 +974,7 @@ def survival(pool, settings, slot_managers, my_slot, taken, betas,
         seeded, seeded_recent = _seed_rosters(pool, settings, taken_order)
         rosters = {slot: state["counts"] for slot, state in seeded.items()}
         recent = list(seeded_recent)
-        for offset in range(already, min(target - 1, len(slots))):
+        for offset in range(start, min(target - 1, len(slots))):
             slot = slots[offset]
             available = np.flatnonzero(~gone)
             if len(available) == 0:

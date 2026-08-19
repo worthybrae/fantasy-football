@@ -1,25 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { LiveState } from '../../api'
-
-// Overall pick number (1-based) for `slot` (1-based) in round `round`
-// (0-based), snake order: forward in even rounds, reversed in odd. Mirrors
-// scoring/draft_sim.snake_slots exactly -- verified pick-by-pick against it
-// (e.g. teams=4: round 1 gives slot 1 pick 8, slot 4 pick 5) rather than
-// assumed from the task brief's formula, which turned out to already be
-// correct.
-function pickNumberFor(round: number, slot: number, teams: number): number {
-  return round * teams + (round % 2 === 0 ? slot : teams - slot + 1)
-}
-
-// The next pick number >= `fromPickNo` belonging to `mySlot`. Every slot
-// picks exactly once per round, so the answer is always in the round
-// `fromPickNo` falls in, or the very next one -- no need for the league's
-// total round count, which nothing this room fetches carries either.
-function nextPickFor(fromPickNo: number, mySlot: number, teams: number): number {
-  const round = Math.floor((fromPickNo - 1) / teams)
-  const thisRound = pickNumberFor(round, mySlot, teams)
-  return thisRound >= fromPickNo ? thisRound : pickNumberFor(round + 1, mySlot, teams)
-}
+import { nextPickFor } from './pickOrder'
 
 const roundOf = (pickNo: number, teams: number) => Math.ceil(pickNo / teams)
 

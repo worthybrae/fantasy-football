@@ -7,6 +7,7 @@ import TopThree from '../components/draft/TopThree'
 import AvailableList from '../components/draft/AvailableList'
 import ConfirmPick, { type PickStatus } from '../components/draft/ConfirmPick'
 import DraftBoardGrid from '../components/DraftBoardGrid'
+import { nextPickFor } from '../components/draft/pickOrder'
 
 const POLL_MS = 2500
 
@@ -91,21 +92,6 @@ function assignRoster(labels: string[], myRoster: RosterPlayer[]): RosterSlot[] 
 
 const SCORING_LABEL: Record<'ppr' | 'half' | 'std', string> = {
   ppr: 'PPR', half: 'Half PPR', std: 'Standard',
-}
-
-// Duplicated from ClockPanel.tsx (unexported there too, same precedent as
-// posBadge's own multi-file duplication) -- needed here only so TopThree's
-// hint can name the actual pick number `gain_now` is measured against
-// ("...vs. waiting until pick N"). See ClockPanel.tsx's own comment on
-// pickNumberFor for the verification against scoring/draft_sim.snake_slots.
-function pickNumberFor(round: number, slot: number, teams: number): number {
-  return round * teams + (round % 2 === 0 ? slot : teams - slot + 1)
-}
-
-function nextPickFor(fromPickNo: number, mySlot: number, teams: number): number {
-  const round = Math.floor((fromPickNo - 1) / teams)
-  const thisRound = pickNumberFor(round, mySlot, teams)
-  return thisRound >= fromPickNo ? thisRound : pickNumberFor(round + 1, mySlot, teams)
 }
 
 export default function DraftRoom() {
@@ -271,10 +257,12 @@ export default function DraftRoom() {
   const isMyTurn = !!state?.active && state.on_the_clock !== null && state.on_the_clock === state.my_slot
 
   // The pick TopThree's hint names ("...vs. waiting until pick N") --
-  // exactly ClockPanel's own `nextPickNo` (see its comment), recomputed
-  // here since ClockPanel keeps that value private to its own render. null
-  // whenever `thisPickNo` itself is null (draft inactive/over) or my_slot
-  // isn't resolved yet -- TopThree drops the clause rather than guessing.
+  // exactly ClockPanel's own `nextPickNo`, recomputed here since ClockPanel
+  // keeps that value private to its own render, but off the one shared
+  // `nextPickFor` now rather than a second copy of the arithmetic (see
+  // components/draft/pickOrder.ts). null whenever `thisPickNo` itself is
+  // null (draft inactive/over) or my_slot isn't resolved yet -- TopThree
+  // drops the clause rather than guessing.
   const nextPickNo = state?.active && state.my_slot !== null && thisPickNo !== null
     ? nextPickFor(thisPickNo, state.my_slot, state.settings.teams as number)
     : null

@@ -1210,8 +1210,14 @@ def test_survival_does_not_simulate_when_my_turn_is_immediately_next():
     running the draft out. Isolate the tightest case -- my_slot picks first
     overall (slot 1, nobody drafted yet) -- so `_next_pick_for` returns 1
     and the simulation loop's range is empty: zero picks get simulated, and
-    "who can I wait on" for right now is answered as "everyone", not
-    whatever the board would look like several picks later.
+    "who can I wait on" for the pick being valued is answered as
+    "everyone", not whatever the board would look like several picks later.
+
+    This is the DEFAULT (`on_the_clock=False`) reading, the one
+    search_pick/run_sim want: they value the pick they are about to make,
+    and a player on the board right now is available for it with
+    certainty. The live ranking asks the other question and passes
+    `on_the_clock=True` -- see the test below.
     """
     pool = _pool()
     slots = {i: f"m{i}" for i in range(1, 9)}
@@ -1219,6 +1225,70 @@ def test_survival_does_not_simulate_when_my_turn_is_immediately_next():
     out = survival(pool, S, slots, 1, taken, _flat_betas(slots.values()),
                    n_rollouts=10, seed=0)
     assert (out["avail_pct"] == 1.0).all()
+
+
+def test_survival_on_the_clock_measures_the_turn_after_this_one():
+    """The whole-branch Critical: at the exact moment the user is on the
+    clock, `survival` returned 1.0 for every available player.
+
+    `_next_pick_for` scans from `already` inclusively, so with slot 1 and
+    nobody drafted it answered "my next turn is pick 1" -- the pick being
+    made right now -- and the rollout loop had nothing to range over. That
+    is the moment api/live.py's `_recompute` is called with (`made =
+    count(*) FROM drafted`, i.e. exactly picks_made), so the LAST ranking
+    computed before the user picks was always the degenerate one, and it
+    is the one on screen while they pick.
+
+    `on_the_clock=True` measures the turn after this one instead: slot 1's
+    pick 16 in an 8-team snake, with picks 2..15 simulated in between, so
+    the deep pool cannot all survive.
+    """
+    pool = _pool()
+    slots = {i: f"m{i}" for i in range(1, 9)}
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    out = survival(pool, S, slots, 1, taken, _adp_betas(slots.values()),
+                   n_rollouts=40, seed=0, on_the_clock=True)
+    assert (out["avail_pct"] < 1.0).any(), \
+        "every player survived: the rollout loop ran zero picks again"
+    # 14 opponents pick between pick 1 and slot 1's pick 16, so at most 14
+    # players can have been removed -- and the market-following betas take
+    # them off the top of the board, so p0 in particular cannot be certain.
+    assert out.loc[out["player_id"] == "p0", "avail_pct"].iloc[0] < 1.0
+    assert ((out["avail_pct"] >= 0) & (out["avail_pct"] <= 1)).all()
+
+
+from scoring.gain import rank_available
+
+
+def test_survival_on_the_clock_makes_gain_now_non_degenerate():
+    """The consequence the Critical was actually read through.
+
+    With survival pinned at 1.0, `gain.expected_best_next` short-circuits
+    after the first element (`none_better *= 1 - 1.0`), so `next_best[pos]`
+    is exactly `max(vor at pos)` and `gain_now` is identically 0.0 for the
+    leader at EVERY position -- six rows tied at zero, above every other
+    player, with `sort_values`' default (unstable) quicksort deciding which
+    three of them the room captions "take one of these". A kicker was as
+    likely to land there as a running back.
+
+    Same state the recompute sees at the same moment: slot 1 on the clock
+    at pick 1. Asserts both halves -- survival is no longer uniform, and
+    the position leaders are no longer tied at exactly zero.
+    """
+    pool = _pool()
+    slot_managers = {i: f"m{i}" for i in range(1, 9)}
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    avail = survival(pool, S, slot_managers, 1, taken,
+                     _adp_betas(slot_managers.values()),
+                     n_rollouts=40, seed=0, on_the_clock=True)["avail_pct"]
+    frame = rank_available(pool, S, taken, {}, avail.to_numpy())
+    leaders = frame.sort_values("vor_points", ascending=False).drop_duplicates(
+        "position")
+    assert not (leaders["gain_now"] == 0.0).all(), \
+        "every position leader tied at exactly zero -- gain_now is degenerate"
+    # The top three are a real ranking, not a coin flip between six tied
+    # rows: the best row strictly beats the third-best.
+    assert frame["gain_now"].iloc[0] > frame["gain_now"].iloc[2]
 
 
 import scoring.board as board_mod
