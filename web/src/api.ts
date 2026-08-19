@@ -153,10 +153,13 @@ export function ageLabel(createdAt: string): string {
 
 // One row of the ranked available list. Sorted by `gain_now` descending on
 // the server (scoring/gain.py) -- the value this pick gains over the best
-// player at the same position expected to survive to your next pick,
-// weighted by whether your roster can start him. `vor_points` is the raw
-// value over replacement it is derived from; the two differ most exactly
-// where the old EV ranking used to reach. No name/position/team here beyond
+// player at the same position expected to survive to `horizon_pick` below
+// (the first turn of yours far enough away for the comparison to mean
+// anything, NOT necessarily your immediately-next one), weighted by whether
+// your roster can start him, and `survive_pct` is measured to that same
+// pick. `vor_points` is the raw value over replacement it is derived from;
+// the two differ most exactly where the old EV ranking used to reach. No
+// name/position/team here beyond
 // `position` itself: the live loop is cheap by design (see api/live.py's
 // DraftSession docstring) and joining the rest against the full board is
 // the caller's job, via `player_id` against `fetchPlayers()`'s
@@ -245,6 +248,20 @@ export interface LiveState {
   // `isRecomputing` in LiveDraft.tsx, a file this branch deleted -- and
   // with it, for a while, the indicator itself.)
   candidates_as_of_pick: number | null
+  // The pick `gain_now` and `survive_pct` were actually measured against:
+  // the first turn of yours at least a full round of opponent picks away
+  // (scoring/draft_sim.horizon_picks), which at the wheel and at short gaps
+  // is NOT your immediately-next pick. Stored server-side alongside
+  // `candidates` under the same lock, so it always describes the list that
+  // came with it rather than the poll that fetched it.
+  //
+  // null when no gain-ranked list exists yet (no session, or my_slot
+  // unresolved so the list is vor_points-only) AND when the horizon is the
+  // end of the draft -- `horizon_is_end_of_draft` is what tells those apart,
+  // and it exists because the alternative was serving pick 121 of a
+  // 120-pick draft. Never both: a number here means a pick that exists.
+  horizon_pick: number | null
+  horizon_is_end_of_draft: boolean
   last_poll_at: string | null
   // True whenever the listener hasn't successfully polled in the last 15s
   // (api/live.py's STALE_AFTER_SECONDS) -- including "never polled."

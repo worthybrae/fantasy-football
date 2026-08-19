@@ -8,7 +8,6 @@ import TopThree from '../components/draft/TopThree'
 import AvailableList from '../components/draft/AvailableList'
 import ConfirmPick, { type PickStatus } from '../components/draft/ConfirmPick'
 import DraftBoardGrid from '../components/DraftBoardGrid'
-import { nextPickFor } from '../components/draft/pickOrder'
 
 const POLL_MS = 2500
 
@@ -293,15 +292,24 @@ export default function DraftRoom() {
     ? state.candidates_as_of_pick + 1
     : null
 
-  // The pick TopThree's hint names ("...vs. waiting until pick N") --
-  // exactly ClockPanel's own `nextPickNo`, recomputed here since ClockPanel
-  // keeps that value private to its own render, but off the one shared
-  // `nextPickFor` now rather than a second copy of the arithmetic (see
-  // components/draft/pickOrder.ts). null whenever `thisPickNo` itself is
-  // null (draft inactive/over) or my_slot isn't resolved yet -- TopThree
-  // drops the clause rather than guessing.
-  const nextPickNo = state?.active && state.my_slot !== null && thisPickNo !== null
-    ? nextPickFor(thisPickNo, state.my_slot, state.settings.teams as number)
+  // The pick the ranked list was actually measured against, named exactly
+  // as the server reports it. NOT derived here from `nextPickFor` any more:
+  // that answers "which pick do I take next", and since the horizon skips
+  // turns too close to carry any signal (a wheel, or the 1-pick gap that
+  // put a kicker 6th at pick 1 -- see scoring/draft_sim.horizon_picks) the
+  // two genuinely differ. Deriving it client-side would caption the list
+  // with a pick it was not measured against, which is worse than saying
+  // nothing. ClockPanel keeps its own `nextPickFor` because "when do I pick
+  // next" really is that question.
+  //
+  // null -> TopThree drops the clause entirely rather than guessing:
+  // `horizon_pick` is null both before any gain-ranked list exists and when
+  // the horizon ran off the end of the draft, and the second case is the
+  // one `horizon_is_end_of_draft` names instead of inventing a pick number.
+  const horizonLabel = state?.active
+    ? state.horizon_is_end_of_draft
+      ? 'the end of the draft'
+      : state.horizon_pick !== null ? `pick ${state.horizon_pick}` : null
     : null
 
   // "Roster after" for the confirm dialog: my_roster's current length plus
@@ -499,13 +507,14 @@ export default function DraftRoom() {
                     players={players}
                     onDraft={handleDraftClick}
                     isMyTurn={isMyTurn}
-                    nextPickNo={nextPickNo}
+                    horizonLabel={horizonLabel}
                   />
                   <AvailableList
                     candidates={state?.candidates ?? []}
                     players={players}
                     onDraft={handleDraftClick}
                     isMyTurn={isMyTurn}
+                    horizonLabel={horizonLabel}
                   />
                 </>
               )

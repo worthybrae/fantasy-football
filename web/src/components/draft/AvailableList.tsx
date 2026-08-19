@@ -59,6 +59,13 @@ interface AvailableListProps {
   // TopThree gate their buttons on the exact same boolean rather than each
   // re-deriving "is it my turn" from state fields they don't have.
   isMyTurn: boolean
+  // The pick the server measured this list against ("pick 18", "the end of
+  // the draft"), or null when there is no gain-ranked list yet. Same value
+  // TopThree's hint names -- it is here because the "He lasts" column is a
+  // probability of surviving to THAT pick, not to your immediately-next
+  // one (scoring/draft_sim.horizon_picks skips turns too close to measure),
+  // and an unlabelled 0% reads as the wrong claim.
+  horizonLabel: string | null
 }
 
 // The ranked available pool: search + position filter above a table sorted
@@ -66,7 +73,7 @@ interface AvailableListProps {
 // Both filters are client-side per the task brief ("the server sends the
 // whole ranked list") -- the pool tops out in the low hundreds, cheap
 // enough to filter on every keystroke without debouncing.
-export default function AvailableList({ candidates, players, onDraft, isMyTurn }: AvailableListProps) {
+export default function AvailableList({ candidates, players, onDraft, isMyTurn, horizonLabel }: AvailableListProps) {
   const [search, setSearch] = useState('')
   const [pos, setPos] = useState('ALL')
 
@@ -113,7 +120,13 @@ export default function AvailableList({ candidates, players, onDraft, isMyTurn }
             <th className="avail-col-num">Proj</th>
             <th className="avail-col-num">Over repl</th>
             <th className="avail-col-num">Gain now</th>
-            <th className="avail-col-num">He lasts</th>
+            {/* Header names the horizon when there is one; the column is
+                "chance he is still on the board at that pick". Without the
+                label a reader takes it for "lasts to my next pick", which
+                at a wheel or a short gap is a different pick entirely. */}
+            <th className="avail-col-num">
+              {horizonLabel !== null ? `Lasts to ${horizonLabel}` : 'He lasts'}
+            </th>
             <th className="avail-col-num">ADP</th>
             <th className="avail-col-fills">Fills</th>
             <th className="avail-col-btn" />

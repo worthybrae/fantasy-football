@@ -1338,6 +1338,193 @@ def test_survival_on_the_clock_makes_gain_now_non_degenerate():
     assert frame["gain_now"].iloc[0] > frame["gain_now"].iloc[2]
 
 
+# --- The horizon. `gain_now` is one step of a position's supply curve --
+# now versus the turn survival is measured to -- and over a one- or
+# two-opponent-pick step that number is ~0 for everybody, so the ranking has
+# no signal left and the top of the board is decided by the sort. Observed
+# live at pick 1 of an 8-team mock with the owner in slot 2 (exactly ONE
+# opponent pick before their turn): every available player at ~100%
+# survival, and the top six read Gibbs, Nacua, McBride (TE), Josh Allen
+# (QB), Houston DST, Brandon Aubrey (K) -- a defense fifth and a kicker
+# sixth in round 1. The fix measures to the first turn at least
+# `horizon_picks(settings)` opponent picks away instead. In the owner's own
+# words, a tight end being available in round 9 is not a reason to take one
+# in round 3, and only the SHAPE of the curve can tell those apart.
+
+from scoring.draft_sim import _horizon_pick_for, horizon_picks
+
+
+def test_horizon_picks_is_one_round_of_opponent_picks_derived_from_teams():
+    """`teams - 1`: a round is `teams` picks and one of them is mine.
+
+    Derived from the league, never a hardcoded 7 -- a 12-team league gets
+    11. The dummy settings object only needs `.teams`.
+    """
+    assert horizon_picks(S) == S.teams - 1 == 7
+    assert horizon_picks(type("S12", (), {"teams": 12})()) == 11
+
+
+def test_horizon_threshold_splits_the_snakes_two_gaps_for_every_slot():
+    """Why `teams - 1` is the natural line and not an arbitrary knob.
+
+    Each slot's two turns in a round pair are 2*(slot-1) and
+    2*(teams-slot) opponent picks apart, which always sum to 2*teams-2 --
+    so exactly one of them is below `teams - 1` and one is at or above it.
+    The threshold therefore skips the turnaround (my picks at or near the
+    wheel, where the board barely moves in between) and keeps the genuine
+    full-round wait, for every slot. Verified against snake_slots itself
+    rather than against that formula.
+    """
+    slots = snake_slots(S.teams, S.rounds)
+    h = horizon_picks(S)
+    for my_slot in range(1, S.teams + 1):
+        turns = [i for i, s in enumerate(slots) if s == my_slot]
+        # Opponent picks between my first three turns: the two gaps.
+        gaps = [turns[k + 1] - turns[k] - 1 for k in range(2)]
+        assert sum(gaps) == 2 * S.teams - 2
+        assert min(gaps) < h <= max(gaps), (my_slot, gaps)
+
+
+def test_horizon_pick_for_at_zero_is_exactly_next_pick_for():
+    """The horizon=0 case is not a special case: it is the general walk
+    evaluated at zero, which is what `_next_pick_for` (run_sim's and
+    search_pick's only reading of "my next pick") now calls. If these two
+    ever disagreed, the offline callers would have quietly changed meaning.
+    """
+    for my_slot in (1, 2, 5, 8):
+        for already in (0, 1, 7, 8, 15, 60, 119, 120, 130):
+            assert (_horizon_pick_for(S, my_slot, already, 0)
+                    == _next_pick_for(S, my_slot, already))
+
+
+def test_horizon_pick_for_skips_turns_too_close_to_measure_anything():
+    """8 teams, 15 rounds. Slot 2's turns are 2, 15, 18, 31, ... .
+
+    From nothing drafted, my next turn (pick 2) is one opponent pick away
+    and is skipped; pick 15 is 13 opponent picks away and is taken. From my
+    own pick 15 (start=15, the on_the_clock reading), pick 18 is the wheel
+    partner two opponent picks away and is skipped for pick 31 -- 12
+    opponent picks, since my own pick 18 does not count against the
+    threshold.
+    """
+    h = horizon_picks(S)
+    assert _horizon_pick_for(S, 2, 0, h) == 15
+    assert _horizon_pick_for(S, 2, 15, h) == 31
+    # Slot 8 at the wheel: on the clock at pick 8 (start=8), its own pick 9
+    # follows with NO opponent in between, so the horizon has to reach 24.
+    assert _horizon_pick_for(S, 8, 8, h) == 24
+
+
+def test_horizon_pick_for_falls_back_to_my_last_turn_then_off_the_end():
+    """Two different fallbacks, deliberately.
+
+    Late in the draft no turn of mine is a full round away any more. That
+    is not a reason to answer "the end of the draft" -- my last turn is a
+    real pick, and it is the most informative horizon that actually exists
+    for me. Only when I hold NO turn after this one does the answer become
+    `len(slots) + 1`, the off-the-end sentinel `_next_pick_for` has always
+    returned, which the caller must render as "the end of the draft"
+    rather than as a pick number (api/live.py's horizon_is_end_of_draft).
+    """
+    h = horizon_picks(S)
+    slots = snake_slots(S.teams, S.rounds)
+    mine = [i + 1 for i, s in enumerate(slots) if s == 2]
+    assert mine[-1] == 114 and len(slots) == 120
+    # On the clock at 111 (start=111): only pick 114 remains, 2 opponent
+    # picks away -- under the threshold, so the fallback returns it anyway.
+    assert _horizon_pick_for(S, 2, 111, h) == 114
+    # On the clock at my last pick: no turn remains at all.
+    assert _horizon_pick_for(S, 2, 114, h) == len(slots) + 1
+
+
+def test_survival_with_a_horizon_is_not_degenerate_at_a_one_pick_gap():
+    """The owner's exact scenario, in miniature: slot 2 with pick 1 on the
+    clock, one opponent pick before my turn.
+
+    Without the horizon every player survives (only one pick happens), so
+    `gain.expected_best_next` equals each position's own leader and
+    `gain_now` is 0.0 for the leader at EVERY position -- six rows tied at
+    zero above everything else, which is how a kicker and a defense reached
+    the top six of a round-1 board. With it, the same call measures to pick
+    15 and the leaders separate.
+    """
+    pool = _pool()
+    slot_managers = {i: f"m{i}" for i in range(1, 9)}
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    betas = _adp_betas(slot_managers.values())
+
+    def ranked(horizon):
+        avail = survival(pool, S, slot_managers, 2, taken, betas,
+                         n_rollouts=40, seed=0, horizon=horizon)["avail_pct"]
+        return rank_available(pool, S, taken, {}, avail.to_numpy())
+
+    def leaders(frame):
+        return frame.sort_values("vor_points", ascending=False) \
+            .drop_duplicates("position")
+
+    # One opponent pick can remove one player, so at most one position moves
+    # at all: three of the six leaders (QB, K and DST here) come back at
+    # EXACTLY 0.0, tied with each other and sorted above all 54 players with
+    # a negative gain, and only three players in the whole pool have any
+    # positive gain to rank on. That tie is the defect -- on the real board
+    # it is what put a defense 5th and a kicker 6th at pick 1.
+    before = ranked(0)
+    assert int((before["gain_now"] > 0).sum()) == 3
+    assert int((leaders(before)["gain_now"] == 0.0).sum()) == 3
+
+    # Measuring to pick 15 instead: every leader separates, and there is a
+    # real ranking underneath them rather than three rows and a tie.
+    after = ranked(horizon_picks(S))
+    assert not (leaders(after)["gain_now"] == 0.0).any()
+    assert int((after["gain_now"] > 0).sum()) > 10
+
+
+def test_survival_at_the_wheel_is_no_longer_a_uniform_one():
+    """The residual artifact the one-step horizon carried, now retired.
+
+    At the wheel my two picks are back to back, so measuring to my
+    "next" turn simulated zero opponent picks and returned a truthful but
+    useless 1.0 for everybody -- degenerate `gain_now` for one turn of
+    every round pair. The horizon walks past that turn to the next one
+    that is a real wait, so the same state now produces a real
+    distribution.
+    """
+    pool = _pool()
+    slot_managers = {i: f"m{i}" for i in range(1, 9)}
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    taken[:7] = True                      # picks 1-7 gone; slot 8 on the clock
+    taken_order = list(range(7))
+    betas = _adp_betas(slot_managers.values())
+
+    old = survival(pool, S, slot_managers, 8, taken, betas, n_rollouts=20,
+                   seed=0, taken_order=taken_order, on_the_clock=True)
+    assert (old.loc[~taken, "avail_pct"] == 1.0).all(), \
+        "fixture drifted off the documented wheel artifact"
+
+    new = survival(pool, S, slot_managers, 8, taken, betas, n_rollouts=40,
+                   seed=0, taken_order=taken_order, on_the_clock=True,
+                   horizon=horizon_picks(S))
+    assert (new.loc[~taken, "avail_pct"] < 1.0).any()
+
+
+def test_survival_default_leaves_the_offline_callers_where_they_were():
+    """`run_sim` and `search_pick` never pass `horizon`, and the default has
+    to mean exactly what they already meant: my very next pick. Same seed,
+    same rollouts -- the two frames must be identical, not merely close.
+    """
+    import inspect
+    assert inspect.signature(survival).parameters["horizon"].default == 0
+    pool = _pool()
+    slot_managers = {i: f"m{i}" for i in range(1, 9)}
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    betas = _adp_betas(slot_managers.values())
+    default = survival(pool, S, slot_managers, 5, taken, betas,
+                       n_rollouts=30, seed=3)
+    explicit = survival(pool, S, slot_managers, 5, taken, betas,
+                        n_rollouts=30, seed=3, horizon=0)
+    pd.testing.assert_frame_equal(default, explicit)
+
+
 # --- Regression: `betas.get(slot_managers.get(slot))` misses to `None` for
 # ANY slot a caller hasn't named a manager for -- every slot, for every
 # league, until ESPN publishes `draftDayPickOrder` (slot_managers stays {}),

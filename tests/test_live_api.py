@@ -404,6 +404,103 @@ def test_state_candidates_carry_gain_now(tmp_path):
     assert gains == sorted(gains, reverse=True)
 
 
+def test_state_names_the_pick_the_ranking_was_actually_measured_against(tmp_path):
+    """`gain_now` is measured to the HORIZON, and the room has to say so.
+
+    8 teams, my_slot 2, nothing drafted: my immediately-next pick is 2, one
+    opponent pick away -- the gap that made every survival ~100% and put a
+    defense and a kicker in the top six of a round-1 board. The ranking is
+    measured to pick 15 instead (scoring/draft_sim.horizon_picks: one full
+    round of opponent picks), so 15 is the number that must reach the
+    payload. Serving 2 would caption the list with a pick nobody measured.
+
+    Real engine end to end (real pool, real settings, real survival() and
+    rank_available() through a real GET), the same discipline
+    test_state_candidates_carry_gain_now holds.
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from scoring.draft_sim import _horizon_pick_for, _next_pick_for, horizon_picks
+
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path, extra_players=[
+        {"player_id": "p2", "name": "B Runner", "position": "RB",
+         "team": "DET", "espn_id": 4430807},
+    ])
+    conn = get_conn(path)
+    app = FastAPI()
+    state, _recompute = register_live_routes(app, conn, path)
+    client = TestClient(app)
+
+    session = build_session(conn, my_slot=2)
+    state["session"] = session
+    _recompute(session, picks_made=0)
+
+    body = client.get("/api/live/state").json()
+    settings = session.settings
+    expected = _horizon_pick_for(settings, 2, 0, horizon_picks(settings))
+    assert expected == 15
+    assert body["horizon_pick"] == expected
+    assert body["horizon_is_end_of_draft"] is False
+    # ... and it is genuinely NOT the pick the room used to name.
+    assert _next_pick_for(settings, 2, 0) == 2
+    assert body["horizon_pick"] != _next_pick_for(settings, 2, 0)
+
+
+def test_state_says_end_of_draft_rather_than_a_pick_that_does_not_exist(tmp_path):
+    """At my last turn there is no later turn to measure against, so
+    `_horizon_pick_for` returns its off-the-end sentinel (len(slots) + 1)
+    and survival runs to the end of the draft. That sentinel is not a pick:
+    printing it would put "vs. waiting until pick 129" on a 128-pick draft.
+
+    The seeded league is 8 teams x 16 rounds, so slot 2's last turn is pick
+    127. The ghost rows carry player ids that are not in the pool, which
+    `_drafted_state` deliberately keeps as None entries -- they still
+    consume their turns, which is all this test needs them to do.
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from scoring.draft_sim import snake_slots
+
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    conn = get_conn(path)
+    app = FastAPI()
+    state, _recompute = register_live_routes(app, conn, path)
+    client = TestClient(app)
+
+    session = build_session(conn, my_slot=2)
+    slots = snake_slots(session.settings.teams, session.settings.rounds)
+    assert len(slots) == 128 and slots[126] == 2, "fixture drifted"
+    write_table(conn, "drafted", pd.DataFrame(
+        [{"player_id": f"ghost{i}", "pick_no": i} for i in range(1, 127)]))
+    state["session"] = session
+    _recompute(session, picks_made=126)
+
+    body = client.get("/api/live/state").json()
+    assert state["horizon_pick"] == len(slots) + 1      # the sentinel, stored
+    assert body["horizon_is_end_of_draft"] is True      # named, not printed
+    assert body["horizon_pick"] is None
+
+
+def test_state_carries_the_horizon_keys_even_with_no_session(tmp_path):
+    """Same "present with a null/false value, never omitted" convention
+    listener_alive and socket_alive already follow on the inactive branch --
+    the room reads these two on every poll and an absent key would read as
+    undefined, falsy by luck rather than by contract."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    path = str(tmp_path / "live.duckdb")
+    conn = get_conn(path)
+    app = FastAPI()
+    register_live_routes(app, conn, path)
+    body = TestClient(app).get("/api/live/state").json()
+    assert body["active"] is False
+    assert body["horizon_pick"] is None
+    assert body["horizon_is_end_of_draft"] is False
+
+
 def test_state_serves_the_full_pool_by_vor_when_my_slot_is_unknown(tmp_path):
     """Defect 2 (post-merge fix): the owner's actual complaint -- "available
     should show all the players, no one has been drafted yet" -- with

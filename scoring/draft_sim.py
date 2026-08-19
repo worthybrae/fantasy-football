@@ -824,12 +824,118 @@ DEFAULT_ROLLOUTS = 300
 DEFAULT_CANDIDATES = 12
 
 
-def _next_pick_for(settings, my_slot, already) -> int:
+def horizon_picks(settings) -> int:
+    """How many opponent picks a turn has to be away before measuring
+    `gain_now` against it says anything.
+
+    One full round of the draft, counted in opponent picks: a round is
+    `teams` picks and one of them is mine, so `teams - 1` are somebody
+    else's. Derived from `settings.teams`, never a hardcoded 7.
+
+    THE SNAKE MAKES THIS THE NATURAL LINE. My two turns in a round pair are
+    `2 * (slot - 1)` and `2 * (teams - slot)` opponent picks apart, and those
+    two always sum to `2 * teams - 2` -- so one of them is always below
+    `teams - 1` and the other always above it, for every slot. In this
+    league (verified against snake_slots, not assumed): slot 1 gets 0 and
+    14, slot 2 gets 2 and 12, slot 4 gets 6 and 8, slot 8 gets 14 and 0.
+    `teams - 1` is therefore exactly the line between a turnaround -- my two
+    picks at the wheel, or near it, where the board barely moves in between
+    -- and a genuine wait of a full round. Skipping the first and measuring
+    to the second is the whole rule.
+
+    Why measuring to the turnaround is worthless, in the owner's own words:
+    "just because I don't have a TE in the 2nd round doesn't mean I should
+    go for a TE in round 3 since a lot of TEs are in round 9." What tells a
+    round-3 tight end from a round-9 one is the SHAPE of the position's
+    supply curve -- TE1 -> TE3 is a slide, RB1 -> RB9 is a cliff -- and one
+    step over one or two opponent picks cannot see a shape at all. Measured
+    on the real 249-player pool, 8 teams, pick 1 on the clock, `gain_now`
+    positive for how many players at all:
+
+        gap (opponent picks)   1    2    3    4    5    6    7   14
+        players with gain > 0  1    3    4    5    6    7    8   13
+
+    (Slots 2..8 and then slot 1, all at pick 1, horizon off.) Under ten and
+    the bottom of a top-ten list is the zero tail -- every position's leader
+    tied at 0.0, ordered by nothing, which is how a defense and a kicker
+    placed 5th and 6th in round 1. `teams - 1` is the smallest threshold
+    that clears that at every slot: with it, the first kicker at pick 1
+    ranks 12th-17th and the first defense 11th-16th, where before they
+    ranked 6th-12th and 5th-11th at every slot but the one whose next turn
+    was already a full round away.
+
+    Both extremes cost something and both were measured, so this is a
+    trade-off, not a free parameter:
+
+    - Shorter (H=0, the old behavior) is the defect: at a 1-3 pick gap
+      everything survives at ~100%, `gain.expected_best_next` collapses to
+      the position's own leader, and `gain_now` is 0.0 for the leader at
+      every position including K and DST.
+    - Longer does NOT keep getting better. A horizon past my next real turn
+      prices a wait I never actually take, and as it lengthens `gain_now`
+      slides back toward raw `need_weight * vor_points` -- the ranking the
+      spec's "Gain now" section exists to replace, the one that reaches for
+      quarterbacks and tight ends. Measured at H = 2*teams-2 = 14 (one full
+      round-TRIP, the other natural anchor): at pick 9 the horizon jumps
+      past BOTH of slot 2's real turns (15 and 18) out to 31, and two tight
+      ends climb into the top ten (McBride 10th -> 4th); in round 3 Josh
+      Allen climbs 9th -> 4th. At H=30 the top of the board is raw VOR
+      order. So the rule takes the FIRST turn that is a real wait, not the
+      furthest one available.
+    """
+    return settings.teams - 1
+
+
+def _horizon_pick_for(settings, my_slot, already, horizon: int = 0) -> int:
+    """The overall pick number (1-based) of my next turn at least `horizon`
+    opponent picks from now.
+
+    `already` is the pick count the walk starts from; the scan is INCLUSIVE
+    of the pick at that offset, which is what lets `on_the_clock` (see
+    `survival`) choose between "my pick is now" and "my pick is next" by
+    shifting `already` rather than by a second code path.
+
+    Walks my remaining turns in order and counts, for each, how many picks
+    between here and there are somebody else's: a turn `k` places later in
+    my own sequence has `k` of my own picks in front of it, so the opponent
+    count to my `k`-th remaining turn at pick P is `(P - 1 - already) - k`.
+    The first turn that clears `horizon` wins.
+
+    `horizon <= 0` returns my very next turn, unconditionally: the first
+    candidate always has an opponent count >= 0. That is not a special case
+    bolted on -- it is the general rule evaluated at zero, which is why
+    `_next_pick_for` is now this function rather than a second copy of the
+    same arithmetic, and why `run_sim`/`search_pick` (which call it only
+    through that name) cannot drift from it.
+
+    Two fallbacks, and they are different things:
+
+    - No turn is far enough away (late in the draft, where my remaining
+      turns simply run out before `horizon` picks do): the LAST turn I have.
+      It is the most informative horizon that actually exists for me, and it
+      is a real pick number the room can name.
+    - No turn remains at all (I am on my final pick): `len(slots) + 1`, the
+      same off-the-end answer `_next_pick_for` has always given, which
+      `survival` reads as "simulate to the end of the draft". That number is
+      not a pick that exists, so the caller must not print it -- see
+      api/live.py's `horizon_is_end_of_draft`.
+    """
     slots = snake_slots(settings.teams, settings.rounds)
-    for offset in range(already, len(slots)):
-        if slots[offset] == my_slot:
-            return offset + 1
-    return len(slots) + 1
+    mine = [offset + 1 for offset in range(already, len(slots))
+            if slots[offset] == my_slot]
+    if not mine:
+        return len(slots) + 1
+    for k, pick in enumerate(mine):
+        if (pick - 1 - already) - k >= horizon:
+            return pick
+    return mine[-1]
+
+
+def _next_pick_for(settings, my_slot, already) -> int:
+    """My very next turn: `_horizon_pick_for` at horizon zero, not a second
+    implementation of it. run_sim and search_pick reach the pick arithmetic
+    only through this name and mean exactly this."""
+    return _horizon_pick_for(settings, my_slot, already, 0)
 
 
 SEARCH_COLUMNS = ["player_id", "ev", "se", "applied_pct", "rank"]
@@ -946,10 +1052,13 @@ def search_pick(pool, settings, slot_managers, my_slot, taken, betas,
 
 def survival(pool, settings, slot_managers, my_slot, taken, betas,
              n_rollouts: int = DEFAULT_ROLLOUTS, seed: int = 0,
-             taken_order=None, on_the_clock: bool = False):
-    """Probability each player is still available when my next turn arrives.
+             taken_order=None, on_the_clock: bool = False,
+             horizon: int = 0):
+    """Probability each player is still available when my measured turn
+    arrives -- my next turn by default, or the first one `horizon` opponent
+    picks away.
 
-    Counted from the same rollout machinery, but stopping at my next pick
+    Counted from the same rollout machinery, but stopping at that pick
     rather than running the draft out -- this is the "who can I wait on"
     number, and it only depends on what happens before my turn.
 
@@ -983,10 +1092,31 @@ def survival(pool, settings, slot_managers, my_slot, taken, betas,
     counted here is the one I am about to remove myself. That is the
     deliberate choice -- the alternative is guessing which player that is,
     and a guess would be wrong far more often than one player in a
-    position's tail matters. At the wheel (my two picks back to back, no
-    opponent in between) the range is empty again and survival is a
-    truthful 1.0: waiting from the first of a pair to the second genuinely
-    costs nothing but the one player I take.
+    position's tail matters.
+
+    `horizon` (opponent picks; see `horizon_picks` for the rule and
+    `_horizon_pick_for` for the walk) is what makes the measurement mean
+    anything when my next turn is close. `gain_now` is one step of a
+    position's supply curve -- now versus the turn measured here -- and a
+    step taken over one or two opponent picks is near zero for everybody,
+    at which point the ranking has no signal left in it and the order of
+    the top of the board is whatever the sort happened to produce. Observed
+    live at pick 1 of an 8-team mock with the owner in slot 2, one opponent
+    pick before their turn: every available player back at ~100% survival, a
+    defense 5th and a kicker 6th in round 1. Stepping past that turn to one
+    a full round of opponent picks away is what lets the curve's SHAPE show
+    -- the owner's own framing, that a tight end being available in round 9
+    is not a reason to take one in round 3.
+    `horizon=0` is my very next turn, the historical behavior, and stays
+    the default so `run_sim`/`search_pick` are untouched.
+
+    This also retires a known artifact of measuring to the immediate next
+    turn: at the wheel (my two picks back to back, no opponent in between)
+    the rollout range was empty and survival was a uniform 1.0, so `gain_now`
+    was degenerate for one turn of every round pair -- truthful about the
+    one-step question, useless as a ranking. A horizon of at least one
+    opponent pick can never land on the second half of a wheel, because the
+    walk keeps going until it finds a turn far enough away.
     """
     if taken_order is None and taken.any():
         warnings.warn(
@@ -995,7 +1125,7 @@ def survival(pool, settings, slot_managers, my_slot, taken, betas,
             "and roster caps are wrong", RuntimeWarning, stacklevel=2)
     already = len(taken_order) if taken_order is not None else int(taken.sum())
     start = already + 1 if on_the_clock else already
-    target = _next_pick_for(settings, my_slot, start)
+    target = _horizon_pick_for(settings, my_slot, start, horizon)
     slots = snake_slots(settings.teams, settings.rounds)
     caps = _roster_cap(settings)
     counts = np.zeros(len(pool.player_id))

@@ -165,7 +165,8 @@ from pipeline.espn_teams import http_fetch as _team_view_fetch
 from pipeline import leagues as leagues_mod
 from pipeline.leagues import DEFAULT_LEAGUE, provision_league
 from scoring.config import CURRENT_SEASON
-from scoring.draft_sim import (_drafted_state, _seed_rosters, snake_slots,
+from scoring.draft_sim import (_drafted_state, _horizon_pick_for,
+                               _seed_rosters, horizon_picks, snake_slots,
                                survival)
 from scoring.gain import available_by_vor, rank_available
 
@@ -602,16 +603,25 @@ ROLLOUTS_FAR, ROLLOUTS_NEAR, ROLLOUTS_NOW = 12, 25, 40
 # without a real ten-second wait.
 LISTENER_STOP_TIMEOUT = 10.0
 
-# survival() runs ONE set of rollouts that stop at my next turn, not one full
-# draft per candidate, so the old clock-rationed budget (12/25/40, see
-# rollouts_for below) is no longer the constraint it was priced against.
-# This is the whole recompute cost now, and it buys a materially tighter
-# survival estimate for a fraction of what search_pick cost: measured
-# against the real production pool (data/nfl.duckdb, 249 players, 8 teams),
-# survival(n_rollouts=400) plus rank_available together ran in 0.1-0.8s
-# across picks_made 0/8/50/100 -- an order of magnitude under even the
-# cheapest old ROLLOUTS_FAR budget's ~2.3s (12 rollouts * ~0.19s), let alone
-# the 30-90s pick clock this has to fit inside.
+# survival() runs ONE set of rollouts that stop at the turn being measured,
+# not one full draft per candidate, so the old clock-rationed budget
+# (12/25/40, see rollouts_for below) is no longer the constraint it was
+# priced against. This is the whole recompute cost now, and it buys a
+# materially tighter survival estimate for a fraction of what search_pick
+# cost: measured against the real production pool (data/nfl.duckdb, 249
+# players, 8 teams), survival(n_rollouts=400) plus rank_available together
+# ran in 0.1-0.8s across picks_made 0/8/50/100 -- an order of magnitude
+# under even the cheapest old ROLLOUTS_FAR budget's ~2.3s (12 rollouts *
+# ~0.19s), let alone the 30-90s pick clock this has to fit inside.
+#
+# Re-measured on the same pool once the horizon landed (see
+# draft_sim.horizon_picks): 0.97-1.49s across the same four pick counts,
+# worst case at pick 1. It costs more because it simulates more -- each
+# rollout now runs to a turn a full round of opponent picks away instead of
+# stopping at whatever turn came next, which at pick 1 of an 8-team draft is
+# 13 simulated picks instead of 1. Still an order of magnitude under the
+# pick clock, and it is the only reason the ranking has any signal in it at
+# a short gap, so the trade is not close.
 SURVIVAL_ROLLOUTS = 400
 
 
@@ -696,6 +706,11 @@ def register_live_routes(app, conn, db_path):
     """
     state = {"session": None, "last_poll_at": None, "unmapped": [],
              "candidates": [], "as_of_pick": None, "computing_for": None,
+             # The pick `candidates` was ranked against (see _recompute).
+             # Written and cleared with `candidates` everywhere, never on
+             # its own: a horizon left over from a previous session would
+             # caption the new one's list with the old one's pick number.
+             "horizon_pick": None,
              # Bumped by live_start and live_stop. A stop/start cycle resets
              # as_of_pick to None, which blinds the pick-count guard below --
              # a stale _recompute launched under the old session would see
@@ -877,6 +892,26 @@ def register_live_routes(app, conn, db_path):
             snake = snake_slots(session.settings.teams, session.settings.rounds)
             on_the_clock = (len(taken_order) < len(snake)
                             and snake[len(taken_order)] == session.my_slot)
+            # WHICH turn of mine this ranking is measured against. Not my
+            # immediately-next one: at a 1-3 opponent-pick gap that step is
+            # ~zero for everybody and the ranking has no signal left (a
+            # defense 5th and a kicker 6th at pick 1 of the owner's mock --
+            # see horizon_picks for the measurements). `horizon_picks`
+            # derives the threshold from this league's own team count, and
+            # `_horizon_pick_for` walks my turns to the first one that far
+            # away, so this number is a pick that exists and is mine --
+            # except at my last pick of the draft, where it is the
+            # off-the-end sentinel and `horizon_is_end_of_draft` below is
+            # what the room renders instead.
+            #
+            # Computed from the same `len(taken_order)`/`on_the_clock` pair
+            # survival() is called with, in the same critical section, so
+            # the number served can never describe a different pick than
+            # the one the ranking actually used.
+            start = len(taken_order) + 1 if on_the_clock else len(taken_order)
+            h = horizon_picks(session.settings)
+            horizon = _horizon_pick_for(session.settings, session.my_slot,
+                                        start, h)
             # survival()'s avail_pct is already a 0-1 probability (see its
             # docstring and the "counts / max(n_rollouts, 1)" line it
             # returns) -- rank_available wants exactly that, no rescaling.
@@ -884,8 +919,8 @@ def register_live_routes(app, conn, db_path):
                 session.pool, session.settings, session.slot_managers,
                 session.my_slot, taken, session.betas,
                 n_rollouts=SURVIVAL_ROLLOUTS, seed=session.seed,
-                taken_order=taken_order,
-                on_the_clock=on_the_clock)["avail_pct"].to_numpy()
+                taken_order=taken_order, on_the_clock=on_the_clock,
+                horizon=h)["avail_pct"].to_numpy()
             frame = rank_available(session.pool, session.settings, taken,
                                    counts, avail)
         finally:
@@ -897,6 +932,13 @@ def register_live_routes(app, conn, db_path):
                 return          # superseded while we were computing
             state["candidates"] = frame.to_dict(orient="records")
             state["as_of_pick"] = picks_made
+            # Stored WITH the candidates it belongs to, under the same lock
+            # and behind the same two staleness guards, rather than
+            # recomputed in live_state from that request's own pick count:
+            # a list ranked against pick 18 must never be captioned "vs.
+            # waiting until pick 31" because a pick landed in between. The
+            # pair is written together or not at all.
+            state["horizon_pick"] = int(horizon)
 
     def _provision_and_build(league_id, team_id, settings=None):
         """Open (provisioning if needed) the connection this league's session
@@ -1182,6 +1224,7 @@ def register_live_routes(app, conn, db_path):
                           "listener_error": None, "recompute_error": None,
                           "league_conn": league_conn,
                           "candidates": [], "as_of_pick": None,
+                          "horizon_pick": None,
                           "unmapped": [], "last_poll_at": None})
             state["generation"] = state.get("generation", 0) + 1
         recompute_thread.start()
@@ -1209,8 +1252,9 @@ def register_live_routes(app, conn, db_path):
         with lock:
             state["generation"] += 1
             state.update({"session": session, "candidates": [],
-                          "as_of_pick": None, "unmapped": [],
-                          "last_poll_at": None, "recompute_error": None})
+                          "as_of_pick": None, "horizon_pick": None,
+                          "unmapped": [], "last_poll_at": None,
+                          "recompute_error": None})
         return {"active": True, "reused": False,
                 "board_fingerprint": session.board_fingerprint,
                 "seed": session.seed}
@@ -1223,6 +1267,12 @@ def register_live_routes(app, conn, db_path):
             if session is None:
                 return {"active": False, "picks_made": 0, "on_the_clock": None,
                         "candidates": [], "candidates_as_of_pick": None,
+                        # Same "present with a null/false value, never
+                        # omitted" convention the rest of this branch
+                        # follows: no session means no ranking and so no
+                        # pick it was measured against.
+                        "horizon_pick": None,
+                        "horizon_is_end_of_draft": False,
                         "last_poll_at": None, "stale": True,
                         "unmapped_picks": [], "listener_error": None,
                         "listener_alive": False, "recompute_error": None,
@@ -1341,6 +1391,7 @@ def register_live_routes(app, conn, db_path):
                 # picks_made) correctly never fires for it.
                 candidates = snapshot["candidates"]
                 candidates_as_of_pick = snapshot["as_of_pick"]
+                horizon_pick = snapshot["horizon_pick"]
                 if session.my_slot is not None:
                     try:
                         _, taken_order = _drafted_state(cur, session.pool)
@@ -1357,15 +1408,34 @@ def register_live_routes(app, conn, db_path):
                         candidates = available_by_vor(
                             session.pool, taken).to_dict(orient="records")
                         candidates_as_of_pick = int(picks_made)
+                        # This fallback list is ranked by vor_points alone,
+                        # against nothing -- gain_now/survive_pct are None on
+                        # every row of it. Naming a horizon pick here would
+                        # caption a list that was never measured against one.
+                        horizon_pick = None
             finally:
                 cur.close()
         slots = snake_slots(session.settings.teams, session.settings.rounds)
         on_clock = slots[picks_made] if picks_made < len(slots) else None
         thread = snapshot["listener_thread"]
+        # The horizon _recompute actually measured this list against, split
+        # into the two things the room has to be able to say. A horizon past
+        # the last pick of the draft is `_horizon_pick_for`'s off-the-end
+        # sentinel -- I hold no turn after this one, so survival ran to the
+        # end of the draft. That is a real state (my final pick, every
+        # round-15 wheel) and it must read as "the end of the draft", never
+        # as pick 121 of a 120-pick draft. `horizon_pick` is None both then
+        # and before any ranking exists, which the room already handles by
+        # dropping the clause; the flag is what tells the two apart.
+        horizon_is_end_of_draft = (horizon_pick is not None
+                                   and horizon_pick > len(slots))
         return {
             "active": True,
             "picks_made": int(picks_made),
             "on_the_clock": on_clock,
+            "horizon_pick": (None if horizon_pick is None
+                             or horizon_is_end_of_draft else int(horizon_pick)),
+            "horizon_is_end_of_draft": horizon_is_end_of_draft,
             "my_slot": session.my_slot,
             "draft_started": draft_started,
             "candidates": candidates,
@@ -1607,8 +1677,9 @@ def register_live_routes(app, conn, db_path):
             # the identity guard, it does not touch anything the thread
             # itself might still hold open.
             state.update({"session": None, "candidates": [],
-                          "as_of_pick": None, "unmapped": [],
-                          "last_poll_at": None, "listener": None,
+                          "as_of_pick": None, "horizon_pick": None,
+                          "unmapped": [], "last_poll_at": None,
+                          "listener": None,
                           "listener_thread": None, "listener_stop": None,
                           "recompute_thread": None, "listener_error": None,
                           "recompute_error": None})

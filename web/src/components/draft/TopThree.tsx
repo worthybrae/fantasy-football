@@ -78,8 +78,20 @@ function isRanked(c: LiveCandidate): c is RankedCandidate {
   return c.gain_now !== null
 }
 
-function reasonFor(c: RankedCandidate): string {
+// `horizonLabel` is the pick gain_now and survive_pct were measured
+// against, already phrased by DraftRoom ("pick 18", "the end of the
+// draft"). These sentences used to say "your next pick" and that is now
+// wrong: the horizon deliberately skips turns too close to measure anything
+// (see scoring/draft_sim.horizon_picks), so at the wheel it is two turns
+// away, not one. Naming it is the difference between "he is a 33% bet to
+// last to pick 31" -- true, and the number the ranking is built on -- and
+// the same sentence about a pick nobody measured. The fallback phrase names
+// no pick at all rather than guessing one; it is only reachable if a ranked
+// list ever arrives without its horizon, which api/live.py writes under one
+// lock precisely so it cannot.
+function reasonFor(c: RankedCandidate, horizonLabel: string | null): string {
   const survive = Math.round(c.survive_pct)
+  const at = horizonLabel ?? 'the turn this list is measured against'
 
   const slot =
     c.fills === '—' ? 'has no roster spot open right now'
@@ -87,18 +99,18 @@ function reasonFor(c: RankedCandidate): string {
         : `fills your open ${c.fills} slot`
 
   if (c.fills === '—') {
-    return `He ${slot} -- this pick would not start no matter what, whatever his ${survive}% odds of lasting to your next one are worth.`
+    return `He ${slot} -- this pick would not start no matter what, whatever his ${survive}% odds of lasting to ${at} are worth.`
   }
   if (c.gain_now <= 0) {
-    return `He ${slot}, but the model expects an option at least as good at his position to still be there at your next pick -- taking him now nets ${fmtSigned(c.gain_now)} against that, whatever his own ${survive}% survival odds are worth, so this is not the pick to make yet.`
+    return `He ${slot}, but the model expects an option at least as good at his position to still be there at ${at} -- taking him now nets ${fmtSigned(c.gain_now)} against that, whatever his own ${survive}% survival odds are worth, so this is not the pick to make yet.`
   }
   if (c.vor_points > 0 && c.gain_now / c.vor_points < 0.15) {
     return `He ${slot}, but the next-best option there is nearly as good -- only ${fmtSigned(c.gain_now)} is actually at stake, well short of the ${fmtSigned(c.vor_points)} over replacement he shows on the board.`
   }
   if (survive >= 55) {
-    return `He ${slot} and is worth ${fmtSigned(c.gain_now)} now, but he is a ${survive}% bet to still be there at your next pick -- fine to wait if you want someone else first.`
+    return `He ${slot} and is worth ${fmtSigned(c.gain_now)} now, but he is a ${survive}% bet to still be there at ${at} -- fine to wait if you want someone else first.`
   }
-  return `He ${slot} and is worth ${fmtSigned(c.gain_now)} over the best replacement there -- only a ${survive}% chance he lasts to your next pick, so this is the one to take now.`
+  return `He ${slot} and is worth ${fmtSigned(c.gain_now)} over the best replacement there -- only a ${survive}% chance he lasts to ${at}, so this is the one to take now.`
 }
 
 interface TopThreeProps {
@@ -109,14 +121,15 @@ interface TopThreeProps {
   // literal signature, added for the same reason: the draft button has to
   // gate on whose turn it is, and this component has no other way to know.
   isMyTurn: boolean
-  // The overall pick number `gain_now` is actually measured against --
-  // "what you gain by taking him now instead of waiting until pick N."
-  // DraftRoom derives it the same way ClockPanel already does (a
-  // duplicated copy of ClockPanel.tsx's own nextPickFor -- see its
-  // comment there). null whenever DraftRoom can't derive it honestly (no
-  // active session, my_slot not resolved yet, or the draft is over) --
-  // the hint drops the clause entirely rather than guessing a number.
-  nextPickNo: number | null
+  // The pick `gain_now` and `survive_pct` are actually measured against,
+  // already phrased ("pick 18", "the end of the draft") by DraftRoom off
+  // /api/live/state's own `horizon_pick`/`horizon_is_end_of_draft`. Not a
+  // number and not derived here: it is the server's horizon (the first turn
+  // far enough away to carry signal, see scoring/draft_sim.horizon_picks),
+  // and the end-of-draft case has no pick number to print at all. null
+  // whenever no gain-ranked list exists yet -- the hint drops the clause
+  // entirely rather than guessing.
+  horizonLabel: string | null
 }
 
 // Three cards above the ranked table, the same `candidates` prop
@@ -124,7 +137,7 @@ interface TopThreeProps {
 // that component and never touches what shows up here. This always names
 // the three best picks on the board by gain_now, regardless of what the
 // user happens to be searching for below.
-export default function TopThree({ candidates, players, onDraft, isMyTurn, nextPickNo }: TopThreeProps) {
+export default function TopThree({ candidates, players, onDraft, isMyTurn, horizonLabel }: TopThreeProps) {
   const top3 = candidates.slice(0, 3)
   if (top3.length === 0) return null
 
@@ -153,7 +166,7 @@ export default function TopThree({ candidates, players, onDraft, isMyTurn, nextP
       <div className="top3-head">
         <span className="draft-cap top3-cap">Take one of these</span>
         <span className="top3-hint">
-          ranked by what you gain now vs. waiting{nextPickNo !== null ? ` until pick ${nextPickNo}` : ''}
+          ranked by what you gain now vs. waiting{horizonLabel !== null ? ` until ${horizonLabel}` : ''}
         </span>
       </div>
       <div className="top3-grid">
@@ -182,7 +195,12 @@ export default function TopThree({ candidates, players, onDraft, isMyTurn, nextP
                   <div className="top3-figure mono">{fmtSigned(c.gain_now)}</div>
                 </div>
                 <div>
-                  <div className="draft-cap">He lasts</div>
+                  {/* The caption names the horizon, because the figure
+                      under it is a probability of lasting to THAT pick --
+                      "He lasts 0%" reads as "he will not survive your next
+                      pick" and would be flatly wrong at a wheel, where the
+                      measured turn is two turns out. */}
+                  <div className="draft-cap">{horizonLabel !== null ? `Lasts to ${horizonLabel}` : 'He lasts'}</div>
                   <div className="top3-figure mono" style={{ color: riskTone(c.survive_pct) }}>
                     {Math.round(c.survive_pct)}%
                   </div>
@@ -194,7 +212,7 @@ export default function TopThree({ candidates, players, onDraft, isMyTurn, nextP
                   </div>
                 </div>
               </div>
-              <p className="top3-reason">{reasonFor(c)}</p>
+              <p className="top3-reason">{reasonFor(c, horizonLabel)}</p>
             </div>
           )
         })}
