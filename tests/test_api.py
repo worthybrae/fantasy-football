@@ -221,6 +221,25 @@ def test_profile_endpoint(tmp_path):
 def test_profile_404(tmp_path):
     assert _client(tmp_path).get("/api/players/nope/profile").status_code == 404
 
+def test_profile_endpoint_reflects_a_pick_made_after_first_call(tmp_path):
+    """The scenario /api/players and /api/players/{id}/profile now share a
+    cache (scoring/board_cache.py) for: the owner opens a profile (building
+    and caching the board), then drafts a player through POST
+    /api/drafted/{id} -- the next profile click, for that same player or any
+    other, must reflect the pick rather than replaying the board that was
+    cached before it. A cache keyed on anything less than a fresh read of
+    the `drafted` table would show this player as still available."""
+    c = _client(tmp_path)
+    pid = c.get("/api/players").json()["players"][0]["player_id"]
+
+    before = c.get(f"/api/players/{pid}/profile").json()
+    assert before["header"]["drafted"] is False
+
+    assert c.post(f"/api/drafted/{pid}").status_code == 200
+
+    after = c.get(f"/api/players/{pid}/profile").json()
+    assert after["header"]["drafted"] is True
+
 def test_profile_custom_weights_change_composite(tmp_path):
     """The profile endpoint must honor the same w_* sliders the board uses --
     a regression here would mean the drawer's rank/VOR/composite can

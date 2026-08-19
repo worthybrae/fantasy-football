@@ -7,7 +7,11 @@ import pandas as pd
 from fastapi import Body, FastAPI, HTTPException, Query
 from pipeline.db import get_conn, read_table, write_table, DEFAULT_PATH
 from scoring import league
-from scoring.board import build_board
+from scoring.board import build_board  # noqa: F401 -- kept importable so
+# test_landing_status_does_not_build_the_board can monkeypatch
+# "api.main.build_board" to assert /api/landing/status never reaches it.
+# Every real board build below goes through cached_build_board instead.
+from scoring.board_cache import cached_build_board
 from scoring.config import DEFAULT_WEIGHTS
 from scoring.draft_model import SUMMARY_FEATURES
 from scoring.draft_sim import DEFAULT_ROLLOUTS, run_sim
@@ -145,7 +149,12 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
                        "environment": w_environment, "schedule": w_schedule,
                        "durability": w_durability}
             try:
-                board = build_board(cur, weights)
+                # cached_build_board (scoring/board_cache.py): this endpoint
+                # alone cost ~1.6-1.9s per request rebuilding the same board
+                # from scratch. The cache key covers weights/settings/drafted/
+                # data-freshness, so a slider change or a pick still produces
+                # a fresh board -- see that module's docstring.
+                board = cached_build_board(cur, weights)
             except ValueError as e:
                 # compute_composite raises when weights sum <= 0 -- reachable
                 # from the UI if every slider is dragged to 0.
@@ -275,7 +284,9 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
         """
         cur = conn.cursor()
         try:
-            board = build_board(cur, DEFAULT_WEIGHTS)
+            # Same board GET /api/players just built (same weights, same
+            # cache key) -- see cached_build_board's docstring.
+            board = cached_build_board(cur, DEFAULT_WEIGHTS)
             n = max(1, min(int(limit), 50))
             top = board.sort_values("rank").head(n)[list(PREVIEW_COLUMNS)]
             top = top.astype(object).where(top.notna(), None)
@@ -569,7 +580,10 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
             if cells.empty:
                 return {"run": run, "teams": settings.teams,
                         "rounds": settings.rounds, "order": order, "cells": []}
-            board = build_board(cur, settings=settings)
+            # cached_build_board, not build_board directly -- same board as
+            # /api/players when weights/settings/drafted state agree, no
+            # separate 1.6-1.9s rebuild for this grid.
+            board = cached_build_board(cur, settings=settings)
             # drop_duplicates because board ids are not unique: see
             # build_board's own comment -- _add_adp_only_players synthesizes
             # `player_id = "adp_" + norm` with no position in the key, so one

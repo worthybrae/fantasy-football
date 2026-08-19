@@ -4,7 +4,8 @@ import numpy as np
 import pandas as pd
 from pipeline.db import read_table
 from scoring import factors
-from scoring.board import build_board, _norm_name, _adapt_depth_charts
+from scoring.board import _norm_name, _adapt_depth_charts
+from scoring.board_cache import cached_build_board
 from scoring.config import RECENCY_WEIGHTS
 from scoring.ppr import compute_ppr_points
 from scoring.similarity import (player_season_features, find_twins,
@@ -387,7 +388,16 @@ def _enrich_twins(twins: dict, board: pd.DataFrame) -> dict:
 
 
 def build_profile(conn, player_id: str, weights: dict | None = None) -> dict | None:
-    board = build_board(conn, weights)
+    # Was `build_board(conn, weights)` -- every profile click rebuilt the
+    # whole 249-row board (all factors, composite, VOR, tiers, a five-source
+    # market consensus) just to read one row back out, measured at ~3.1s
+    # end to end. cached_build_board (scoring/board_cache.py) reuses the same
+    # board `GET /api/players` just built, or built for a prior profile
+    # click with the same weights/settings/drafted state, and only
+    # recomputes when one of those actually changed -- see that module's
+    # docstring for the exact key and the staleness failure it guards
+    # against (a profile showing a just-picked player as still available).
+    board = cached_build_board(conn, weights)
     match = board[board["player_id"] == player_id]
     if match.empty:
         return None

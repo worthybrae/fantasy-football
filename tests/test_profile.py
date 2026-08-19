@@ -1,5 +1,5 @@
 import pandas as pd
-from pipeline.db import get_conn, write_table
+from pipeline.db import get_conn, record_freshness, write_table
 from scoring.profile import season_summaries, game_log, build_profile, _stat_line
 
 def _weekly_rows():
@@ -424,3 +424,135 @@ def test_weekly_difficulty_rows_and_percentiles():
     assert wk1["fpa_pg"] == 30.0 and wk2["fpa_pg"] == 10.0
     assert wk1["pct"] > wk2["pct"]          # high FPA = soft = high percentile
     assert weekly_difficulty(sched, prior, "HOU", "K") == []
+
+
+# -- board cache invalidation (scoring/board_cache.py) --------------------
+#
+# build_profile used to call scoring.board.build_board directly, rebuilding
+# the whole 249-row board (every factor, the composite, VOR, tiers, a
+# five-source market consensus) on every single call just to read one row
+# back out -- measured on data/nfl.duckdb at ~3.1s end to end. It now goes
+# through cached_build_board (scoring/board_cache.py), which reuses a
+# previously-built board when nothing it depends on has changed. A test that
+# only timed the second call would prove the cache exists, not that it's
+# correct -- these instead pin the two failure modes a wrong cache key would
+# cause: serving one weight profile's board under another's, and serving a
+# board built before a pick as though it were built after one.
+
+def _two_player_weekly_rows():
+    """p1: high per-game production, a short career (4/4/17 games across
+    three seasons). p2: modest production, a full three-season workload.
+    Production-only weights must favor p1; durability-only weights must
+    favor p2 -- the same disagreement test_api.py's
+    test_players_custom_weights_change_output uses to prove weights aren't
+    silently ignored, reused here to prove a wrong weights key in the CACHE
+    doesn't silently ignore them either."""
+    def rows(pid, name, team, opp, weeks_by_season, receptions, yards, targets):
+        return [
+            {"player_id": pid, "player_display_name": name, "position": "WR",
+             "recent_team": team, "opponent_team": opp, "season": season, "week": w,
+             "receptions": receptions, "receiving_yards": yards, "targets": targets,
+             "carries": 0}
+            for season, n_weeks in weeks_by_season.items()
+            for w in range(1, n_weeks + 1)
+        ]
+    return pd.DataFrame(
+        rows("p1", "A Star", "DET", "GB", {2023: 4, 2024: 4, 2025: 17},
+             receptions=8, yards=90, targets=10)
+        + rows("p2", "B Steady", "GB", "DET", {2023: 17, 2024: 17, 2025: 17},
+               receptions=2, yards=15, targets=4))
+
+
+def _seed_two_players(tmp_path):
+    conn = get_conn(str(tmp_path / "two.duckdb"))
+    write_table(conn, "weekly", _two_player_weekly_rows())
+    write_table(conn, "schedules", pd.DataFrame([
+        {"home_team": "DET", "away_team": "GB", "week": 1,
+         "total_line": 51.0, "spread_line": 3.0}]))
+    write_table(conn, "adp", pd.DataFrame([
+        {"adp_name": "A Star", "position": "WR", "team": "DET", "adp": 5.1},
+        {"adp_name": "B Steady", "position": "WR", "team": "GB", "adp": 20.0}]))
+    write_table(conn, "depth_charts", pd.DataFrame(
+        columns=["gsis_id", "depth_team", "formation", "week", "position"]))
+    write_table(conn, "snap_counts", pd.DataFrame(
+        columns=["player", "team", "season", "offense_pct"]))
+    write_table(conn, "espn_adp", pd.DataFrame(
+        columns=["espn_id", "espn_name", "position", "espn_adp", "espn_ppr_rank"]))
+    write_table(conn, "fp_ecr", pd.DataFrame(
+        columns=["fp_name", "team", "position", "rank_ecr", "rank_ave", "rank_std", "fp_tier"]))
+    write_table(conn, "sleeper_ids", pd.DataFrame(
+        columns=["gsis_id", "espn_id", "sleeper_name", "position", "team"]))
+    return conn
+
+
+def test_build_profile_cache_does_not_serve_one_weight_profile_under_another(tmp_path):
+    conn = _seed_two_players(tmp_path)
+    durability_only = {"production": 0.0, "role": 0.0, "environment": 0.0,
+                       "schedule": 0.0, "durability": 1.0}
+
+    default_first = build_profile(conn, "p1")                       # populates the cache
+    custom = build_profile(conn, "p1", durability_only)             # a different key
+    default_second = build_profile(conn, "p1")                      # must not read `custom`'s entry
+
+    assert default_first["header"]["composite"] == default_second["header"]["composite"]
+    assert default_first["header"]["composite"] != custom["header"]["composite"]
+
+
+def test_build_profile_reflects_a_pick_made_after_first_call(tmp_path):
+    """The scenario the task exists for: the owner opens a player's profile
+    (the board gets built and cached), somebody -- the API's own
+    POST /api/drafted, or (during a real live draft) the websocket handler
+    in api/live.py, which writes the `drafted` table directly and outside
+    this cache's control -- drafts a player, and the very next profile
+    click must not still show that player as available."""
+    conn = _seed(tmp_path)
+    before = build_profile(conn, "p1")
+    assert before["header"]["drafted"] is False
+
+    # Mirrors the INSERT api/main.py's POST /api/drafted/{id} and api/live.py
+    # both use -- neither goes through this cache, so the cache has to
+    # notice on its own (see _drafted_key in scoring/board_cache.py).
+    conn.execute("INSERT INTO drafted VALUES (?, ?)", ["p1", 1])
+
+    after = build_profile(conn, "p1")
+    assert after["header"]["drafted"] is True
+
+
+def test_build_profile_reflects_a_pipeline_refresh(tmp_path):
+    """`weekly` is a UNIVERSAL_TABLES source pipeline.refresh rewrites and
+    stamps into `meta` via record_freshness -- not something a pick or a
+    weight slider touches. Before any refresh, a player absent from `weekly`
+    at seed time has no profile at all; after `weekly` is rewritten with
+    that player added (a `write_table` + `record_freshness` pair, exactly
+    what pipeline.refresh.main() does for every source it touches), the
+    cache must rebuild rather than keep serving the pre-refresh universe."""
+    conn = _seed(tmp_path)
+    assert build_profile(conn, "p2") is None          # not in the seeded universe yet
+
+    refreshed = pd.concat([_weekly_rows(), pd.DataFrame(
+        [{"player_id": "p2", "player_display_name": "Fresh Import", "position": "WR",
+          "recent_team": "GB", "opponent_team": "DET", "season": 2025, "week": w,
+          "receptions": 5, "receiving_yards": 60, "receiving_tds": 0, "targets": 8,
+          "carries": 0} for w in range(1, 11)])], ignore_index=True)
+    write_table(conn, "weekly", refreshed)
+    record_freshness(conn, "weekly", True, len(refreshed))
+
+    after = build_profile(conn, "p2")
+    assert after is not None
+    assert after["header"]["name"] == "Fresh Import"
+
+
+def test_cached_build_board_lru_is_bounded(tmp_path):
+    """The owner drags five continuous slider values in the UI; a cache
+    keyed partly on those floats grows one entry per distinct drag position
+    if nothing bounds it -- a slow leak over a multi-hour draft-night
+    session. Push far more distinct weight combinations through the cache
+    than its stated bound (scoring.board_cache._MAX_ENTRIES) and confirm the
+    LRU actually evicts rather than just documenting that it should."""
+    from scoring.board_cache import _MAX_ENTRIES, cached_build_board, _cache
+    conn = _seed(tmp_path)
+    for i in range(_MAX_ENTRIES + 10):
+        weights = {"production": 0.2 + i * 1e-4, "role": 0.2, "environment": 0.2,
+                   "schedule": 0.2, "durability": 0.2 - i * 1e-4}
+        cached_build_board(conn, weights)
+    assert len(_cache) <= _MAX_ENTRIES
