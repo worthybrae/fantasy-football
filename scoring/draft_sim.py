@@ -1363,6 +1363,29 @@ def _drafted_state(conn, pool):
     players to the wrong teams and silently corrupt every roster, need and
     cap downstream. So this refuses to guess and asks the user to re-mark
     them, which is cheap: un-toggle and re-toggle in draft order.
+
+    `taken_order` is indexed BY `pick_no`, not by row: entry i is overall pick
+    i+1, and a pick number this table holds no row for is a None. That is the
+    contract `_seed_rosters` reads it under (it walks the snake by position,
+    so entry i is handed to whoever was on the clock for pick i+1) and it is
+    NOT the same as "one entry per row" -- `drafted` is routinely missing pick
+    numbers it never had a row for:
+
+      - a pick whose player the crosswalk could not resolve is reported in
+        `LivePicks.unmapped` and deliberately never written here (see
+        `pipeline/espn_live.picks_from_events`), and
+      - `DELETE /api/drafted/{id}` takes a manually-marked pick back out and
+        leaves its number behind.
+
+    Building the list row by row made every pick AFTER such a hole shift one
+    slot to the left, silently: on a mid-draft JOIN, where ESPN replays the
+    whole draft at once, one unmapped pick in round 1 re-attributed every
+    round after it and the owner's own picks showed up in a neighbour's
+    column, which is the "it doesnt show my previous picks" report this
+    indexing fixes. `len(taken_order)` is therefore the number of picks
+    actually MADE (the highest pick number seen), which is also what
+    `_run_draft` and `survival` resume from as `already` -- counting rows
+    there had them resume from the wrong turn by exactly the number of holes.
     """
     drafted = read_table(conn, "drafted")
     if drafted.empty:
@@ -1376,13 +1399,34 @@ def _drafted_state(conn, pool):
             "rosters. Un-mark and re-mark them in draft order (or clear the "
             "drafted table) and run again.")
     ordered = drafted.sort_values("pick_no")
+    numbers = [int(n) for n in ordered["pick_no"]]
+    # Every writer of this table numbers from 1 (`picks_from_events` counts
+    # SELECTED frames, `POST /api/drafted` uses max+1, `translate` copies
+    # ESPN's own 1-based overallPickNumber), so a number below 1 cannot be
+    # placed in the snake at all -- exactly as unattributable as the null
+    # above, and refused the same way rather than silently wrapping onto the
+    # end of the list via a negative index.
+    if numbers[0] < 1:
+        raise ValueError(
+            f"drafted pick_no {numbers[0]} is not a pick number -- pick "
+            "numbers start at 1, so this row cannot be attributed to a team. "
+            "Un-mark and re-mark it in draft order (or clear the drafted "
+            "table) and run again.")
     position_of = {pid: i for i, pid in enumerate(pool.player_id)}
-    # A drafted player who is no longer on the board (a refresh dropped him)
-    # still consumed his turn, so he stays in the order as a None rather than
-    # shifting every later pick onto the wrong slot.
-    taken_order = [position_of.get(pid) for pid in ordered["player_id"]]
+    # Sized by the LAST pick number, not the row count, so the holes above
+    # stay in the order as Nones. A drafted player who is no longer on the
+    # board (a refresh dropped him) lands as a None here too, for the same
+    # reason and with the same effect: he still consumed his turn, so he must
+    # not shift every later pick onto the wrong slot.
+    taken_order = [None] * numbers[-1]
     taken = np.zeros(len(pool.player_id), dtype=bool)
-    for idx in taken_order:
+    for pid, pick_no in zip(ordered["player_id"], numbers):
+        idx = position_of.get(pid)
+        # Last row wins for a duplicated pick_no, which no writer produces
+        # (apply_picks rebuilds the table wholesale from one numbering, and
+        # POST /api/drafted takes max+1) -- noted because the alternative,
+        # dropping one of the two, would lose a pick rather than a position.
+        taken_order[pick_no - 1] = idx
         if idx is not None:
             taken[idx] = True
     return taken, taken_order

@@ -1014,6 +1014,31 @@ def picks_until_turn(settings, my_slot: int, picks_made: int) -> int:
     return 0
 
 
+# "How many picks has this draft made", as SQL. Deliberately max(pick_no) and
+# NOT count(*), which is what every one of these call sites used to run.
+# `drafted` holds no row for a pick whose player the crosswalk could not
+# resolve -- those are reported in `unmapped_picks` and deliberately never
+# written (see pipeline/espn_live.picks_from_events) -- nor for one that
+# DELETE /api/drafted took back out. Counting rows therefore under-reports the
+# draft by exactly the number of those holes, and everything derived from the
+# number then names a turn that has already gone by: the slot on the clock,
+# how many picks until mine (picks_until_turn just above), the pick a ranking
+# was measured against. On a mid-draft JOIN, where the whole draft replays at
+# once, a single unmapped pick in round 1 was enough to leave the room a full
+# turn behind for the rest of the draft.
+#
+# Sound because pick numbers are 1-based and dense by contract: every writer
+# numbers from 1 (picks_from_events counts SELECTED frames, POST /api/drafted
+# takes max+1, espn_live.translate copies ESPN's own overallPickNumber), and
+# scoring.draft_sim._drafted_state refuses a row below 1 outright. So the
+# highest number written IS the count of picks made, holes and all. It agrees
+# with `len(taken_order)` from that same function, which is what matters:
+# the two are compared against each other (candidates_as_of_pick vs
+# picks_made) and a mismatch would leave the room's "recomputing" banner on
+# forever.
+PICKS_MADE_SQL = "SELECT coalesce(max(pick_no), 0) FROM drafted"
+
+
 def _is_stale(last_poll_at, now) -> bool:
     """Never having polled counts as stale: the UI must not present an empty
     board as a current one."""
@@ -1761,7 +1786,7 @@ def register_live_routes(app, conn, db_path):
                     try:
                         if _resolve_slot(c2):
                             made = c2.execute(
-                                "SELECT count(*) FROM drafted").fetchone()[0]
+                                PICKS_MADE_SQL).fetchone()[0]
                             request_recompute(current["session"], made)
                     finally:
                         c2.close()
@@ -1782,8 +1807,7 @@ def register_live_routes(app, conn, db_path):
                 try:
                     live = listener.picks()
                     apply_picks(c2, live)
-                    made = c2.execute(
-                        "SELECT count(*) FROM drafted").fetchone()[0]
+                    made = c2.execute(PICKS_MADE_SQL).fetchone()[0]
                 finally:
                     c2.close()
                 # Surface picks the crosswalk could not resolve. They are
@@ -1840,8 +1864,7 @@ def register_live_routes(app, conn, db_path):
         made_at_launch = 0
         c0 = work_conn.cursor()
         try:
-            made_at_launch = c0.execute(
-                "SELECT count(*) FROM drafted").fetchone()[0]
+            made_at_launch = c0.execute(PICKS_MADE_SQL).fetchone()[0]
         finally:
             c0.close()
         with lock:
@@ -2021,7 +2044,7 @@ def register_live_routes(app, conn, db_path):
             # nothing else holds `lock` while blocking on the database.
             cur = (snapshot["league_conn"] or conn).cursor()
             try:
-                picks_made = cur.execute("SELECT count(*) FROM drafted").fetchone()[0]
+                picks_made = cur.execute(PICKS_MADE_SQL).fetchone()[0]
                 # My own roster so far. Only queried when my_slot is known --
                 # _my_roster returns [] unconditionally otherwise, so the
                 # extra read would be wasted -- and wrapped against the one
@@ -2220,7 +2243,12 @@ def register_live_routes(app, conn, db_path):
         settings = session.settings
         teams, rounds = settings.teams, settings.rounds
         slots = snake_slots(teams, rounds)
-        picks_made = len(picks)
+        # The highest pick number, not the row count -- see PICKS_MADE_SQL,
+        # which live_state runs for exactly this number. Computed from the
+        # rows already in hand rather than a second query, but it has to be
+        # the same quantity: the two endpoints are polled together and the
+        # room draws one clock from them.
+        picks_made = max((int(pick_no) for _, pick_no in picks), default=0)
         on_clock = slots[picks_made] if picks_made < len(slots) else None
 
         columns = [
@@ -2284,8 +2312,7 @@ def register_live_routes(app, conn, db_path):
                     status_code=503, detail="the draft socket is not connected")
             cur = active_conn.cursor()
             try:
-                picks_made = cur.execute(
-                    "SELECT count(*) FROM drafted").fetchone()[0]
+                picks_made = cur.execute(PICKS_MADE_SQL).fetchone()[0]
                 already = cur.execute(
                     "SELECT count(*) FROM drafted WHERE player_id = ?",
                     [body.player_id]).fetchone()[0]

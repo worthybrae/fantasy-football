@@ -2410,9 +2410,18 @@ def test_board_returns_the_grid_with_snake_positions_and_stats(tmp_path):
     assert body["teams"] == 8
     assert body["rounds"] == 16
     assert body["my_slot"] == 7
-    assert body["picks_made"] == 4
-    # 4 picks made -> pick #5 is on the clock: slot 5, still round 1.
-    assert body["on_the_clock"] == 5
+    # NINE picks made, not the four rows this table holds. `drafted` is a
+    # sparse record of a dense sequence -- picks 4-8 have no row here, exactly
+    # as a pick the crosswalk could not resolve has none in a live draft (see
+    # api/live.PICKS_MADE_SQL) -- and the highest pick number is what says how
+    # far the draft has got. Reading the row count instead made this endpoint
+    # contradict itself: it placed p1's cell at overall 9, in round 2, while
+    # simultaneously reporting a draft only four picks old and still in round
+    # 1. It cannot be both.
+    assert body["picks_made"] == 9
+    # 9 picks made -> pick #10 is on the clock: the reversed second round's
+    # second pick, slot 7.
+    assert body["on_the_clock"] == 7
 
     cols = body["columns"]
     assert [c["slot"] for c in cols] == list(range(1, 9))
@@ -3161,3 +3170,215 @@ def test_progress_is_readable_while_the_connect_is_still_blocked(
         thread.join(timeout=30)
     assert done.is_set()
     client.post("/api/live/stop")
+
+
+# --- Joining a draft already in progress ------------------------------------
+#
+# ESPN replays every prior SELECTED frame the moment a socket JOINs a draft
+# that has already started (see pipeline/draft_socket.run_socket_listener and
+# espn_live.picks_from_events, whose dedup exists for exactly that replay).
+# These drive that replay end to end -- the real run_socket_listener with only
+# `_connect` faked, so the frames go through the same recv loop, the same
+# on_activity/on_change callbacks, the same apply_picks and the same
+# /api/live/state a real connect uses.
+
+def _capture_frames_through(n_selected):
+    """Every ws-recv payload of the real capture, cut right after the n-th
+    SELECTED -- i.e. what a socket that JOINs after n picks have been made
+    has to arrive already knowing."""
+    rows = [json.loads(l) for l in _SOCKET_FIXTURE.read_text().splitlines() if l]
+    payloads = [str(r.get("payload") or "") for r in rows if r["kind"] == "ws-recv"]
+    out, seen = [], 0
+    for p in payloads:
+        out.append(p)
+        if p.strip().startswith("SELECTED "):
+            seen += 1
+            if seen == n_selected:
+                break
+    return out
+
+
+class _ReplaySocket:
+    """A socket that hands over a JOIN's whole replay burst back to back and
+    then goes quiet, which is what `_connect` returns to run_socket_listener
+    on a mid-draft connect. TimeoutError is the real websockets `recv`
+    contract for "nothing waiting", which the recv loop treats as a poll tick
+    rather than a drop, so the listener stays connected instead of
+    reconnecting into a second replay."""
+
+    def __init__(self, frames):
+        self._frames = list(frames)
+        self.sent = []
+
+    def recv(self, timeout=None):
+        if self._frames:
+            return self._frames.pop(0)
+        raise TimeoutError
+
+    def send(self, text):
+        self.sent.append(text)
+
+    def close(self):
+        pass
+
+
+# `_seed_minimal_live_db`'s own default player already carries this id, which
+# is the capture's overall pick 2. Seeding a second board row for it would
+# make the crosswalk (a dict keyed by espn_id) silently keep only one of the
+# two, so the replay below reuses that row instead of adding a duplicate.
+_SEEDED_ESPN_ID = 4429795
+
+
+def _seed_capture_league(path, root, espn_ids, positions=None):
+    """A board carrying one player per given ESPN id, plus league tables that
+    put team 2 (the capture's own team -- see its TOKEN frame) in slot 2.
+
+    `espn_ids` is the ordered list of ids the replay will SELECT; an id passed
+    as None gets a synthetic espn_id no frame ever names, which is a player
+    who is on the board but out of the crosswalk's reach for this draft --
+    exactly the shape of a real pick the crosswalk cannot resolve.
+
+    Returns the session's REAL crosswalk (espn id -> board player_id), read
+    off the built board rather than assumed from the seed, so the assertions
+    below name the player the running code actually resolved.
+    """
+    positions = positions or ["RB", "WR", "WR", "RB", "WR", "RB", "TE", "QB"]
+    extra = [{"player_id": f"x{i}", "name": f"Player {i}",
+              "position": positions[i % len(positions)],
+              "team": "DET" if i % 2 else "GB",
+              "espn_id": e if e is not None else 900000 + i}
+             for i, e in enumerate(espn_ids) if e != _SEEDED_ESPN_ID]
+    _seed_minimal_live_db(path, extra_players=extra)
+
+    from pipeline.leagues import provision_league
+    lg = get_conn(provision_league("1", universal_path=path, root=root))
+    write_table(lg, "draft_teams", pd.DataFrame(
+        [{"season": 2025, "team_id": t, "manager": f"m{t}", "slot": None}
+         for t in range(1, 9)]))
+    write_table(lg, "draft_order", pd.DataFrame(
+        [{"slot": t, "manager": f"m{t}", "is_me": t == 2} for t in range(1, 9)]))
+    lg.close()
+
+    setup = get_conn(path)
+    crosswalk = build_session(setup, my_slot=2).crosswalk
+    setup.close()
+    for e in espn_ids:
+        if e is not None:
+            assert e in crosswalk, f"fixture espn id {e} did not cross-walk"
+    return crosswalk
+
+
+def _join_mid_draft(monkeypatch, tmp_path, root, n_picks, hole_at=None):
+    """Connect to a draft `n_picks` in, and return (client, by_espn_id).
+
+    `hole_at` is a 1-based overall pick whose player is deliberately absent
+    from the board's crosswalk.
+    """
+    from pipeline import draft_socket
+
+    frames = _capture_frames_through(n_picks)
+    selected = [f.strip() for f in frames if f.strip().startswith("SELECTED ")]
+    ids = [int(f.split()[2]) for f in selected]
+    seeded = list(ids)
+    if hole_at is not None:
+        seeded[hole_at - 1] = None
+
+    path = str(tmp_path / "live.duckdb")
+    by_espn = _seed_capture_league(path, root, seeded)
+
+    monkeypatch.setattr(draft_socket, "_connect",
+                        lambda url, cookie: _ReplaySocket(frames))
+    # The ranking is not what these assert; keep it cheap and deterministic so
+    # the recompute worker cannot outrun the listener's own writes.
+    monkeypatch.setattr("api.live.survival", _fake_survival_frame)
+    monkeypatch.setattr("api.live.rank_available",
+                        lambda *a, **k: _fake_candidates_frame("x0"))
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    client = TestClient(create_app(path))
+    resp = client.post("/api/live/connect-token", json={
+        "leagueId": "1", "teamId": "2", "swid": "{X}",
+        "token": "1953383334", "season": "2026"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["my_slot"] == 2
+    return client, by_espn, ids
+
+
+@pytest.mark.skipif(not _SOCKET_FIXTURE.exists(), reason="no draft capture")
+def test_joining_mid_draft_shows_the_owners_existing_roster(
+        tmp_path, monkeypatch, _isolated_leagues_root):
+    """The owner's report: "if i join a draft halfway through it doesnt show
+    my previous picks".
+
+    The capture is an 8-team snake whose own team is 2 (its TOKEN frame), so
+    overall picks 2, 15 and 18 are the owner's. Joining after 23 picks must
+    show all three, in pick order, and count 23 picks made.
+    """
+    client, by_espn, ids = _join_mid_draft(
+        monkeypatch, tmp_path, _isolated_leagues_root, 23)
+    try:
+        assert _wait_until(
+            lambda: client.get("/api/live/state").json()["picks_made"] == 23), \
+            "the JOIN replay never finished landing in `drafted`"
+        body = client.get("/api/live/state").json()
+        assert body["unmapped_picks"] == []
+        assert [p["player_id"] for p in body["my_roster"]] == [
+            by_espn[ids[1]], by_espn[ids[14]], by_espn[ids[17]]]
+        # Pick 24 is the last of round 3 in an 8-team snake -> slot 8.
+        assert body["on_the_clock"] == 8
+        cells = client.get("/api/live/board").json()["cells"]
+        assert sorted(c["overall"] for c in cells) == list(range(1, 24))
+    finally:
+        client.post("/api/live/stop")
+
+
+@pytest.mark.skipif(not _SOCKET_FIXTURE.exists(), reason="no draft capture")
+def test_a_pick_the_crosswalk_cannot_map_does_not_shift_every_later_pick(
+        tmp_path, monkeypatch, _isolated_leagues_root):
+    """THE DEFECT behind the report, and the reason it showed up on a
+    mid-draft join rather than a draft watched from pick 1.
+
+    A pick whose player the crosswalk cannot reach is reported in
+    `unmapped_picks` and never written to `drafted` -- so `drafted.pick_no`
+    has a HOLE in it. `_drafted_state` used to build `taken_order` from the
+    ROWS of that table, one entry per row, and `_seed_rosters` walks it by
+    position: entry i is the pick that was made i-th. One missing row
+    therefore pulled every later pick one slot to the left, and every roster
+    from that point on belonged to the wrong team.
+
+    Watching from pick 1 the damage is one cell at a time and self-evident.
+    On a mid-draft JOIN the whole replay lands at once, so a single unmapped
+    pick in round 1 silently re-attributes every round after it -- the
+    owner's own picks land in a neighbour's column and MY ROSTER shows
+    players they never drafted.
+
+    Same capture and same slot as the test above, with overall pick 1's
+    player off the board. The owner's picks (2, 15, 18) must still be the
+    owner's; the count of picks made must still be 23, not 22, or the room
+    names the wrong slot on the clock.
+    """
+    client, by_espn, ids = _join_mid_draft(
+        monkeypatch, tmp_path, _isolated_leagues_root, 23, hole_at=1)
+    try:
+        assert _wait_until(
+            lambda: client.get("/api/live/state").json()["unmapped_picks"]), \
+            "the unmapped pick was never surfaced"
+        assert _wait_until(
+            lambda: client.get("/api/live/state").json()["picks_made"] == 23), \
+            "picks_made counted rows in `drafted`, not picks actually made"
+        body = client.get("/api/live/state").json()
+        # Honestly reported rather than silently dropped -- this player IS
+        # gone and the board cannot know which of its rows he is.
+        assert body["unmapped_picks"] == [
+            {"espn_player_id": ids[0], "overall_pick": 1}]
+        # The whole point: attribution is by overall pick number, so the hole
+        # at pick 1 costs pick 1 and nothing else.
+        assert [p["player_id"] for p in body["my_roster"]] == [
+            by_espn[ids[1]], by_espn[ids[14]], by_espn[ids[17]]]
+        assert body["on_the_clock"] == 8
+        cells = client.get("/api/live/board").json()["cells"]
+        # Every pick but the unmapped one, each in its own true position.
+        assert sorted(c["overall"] for c in cells) == list(range(2, 24))
+    finally:
+        client.post("/api/live/stop")

@@ -2423,3 +2423,69 @@ def test_live_features_matches_feature_matrix_on_the_new_columns():
     np.testing.assert_allclose(
         _live_features(sim, available, 9, {"RB": 1}, ["WR", "RB"], S),
         feature_matrix(obs, S))
+
+
+# --- `taken_order` is indexed by pick number, not by row --------------------
+
+from scoring.draft_sim import _drafted_state, _seed_rosters
+
+
+def test_drafted_state_keeps_a_missing_pick_number_as_a_hole(tmp_path):
+    """`drafted` is a sparse record of a dense sequence.
+
+    Two writers routinely leave a pick number with no row behind it: a live
+    pick whose player the crosswalk cannot resolve is reported in
+    `LivePicks.unmapped` and never written (pipeline/espn_live.
+    picks_from_events), and `DELETE /api/drafted/{id}` takes a manually marked
+    pick back out. Building `taken_order` one entry per ROW made every later
+    pick shift one position earlier, and `_seed_rosters` walks that list by
+    position -- so one hole handed every subsequent pick to the wrong team.
+    """
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    for pid, pick_no in [("p5", 1), ("p1", 2), ("p9", 4)]:      # 3 is missing
+        conn.execute("INSERT INTO drafted VALUES (?, ?)", [pid, pick_no])
+
+    taken, taken_order = _drafted_state(conn, _pool(12))
+
+    # Entry i is overall pick i+1: the hole is a None that still consumes its
+    # turn, exactly like a drafted player who has fallen out of the pool.
+    assert taken_order == [5, 1, None, 9]
+    # ...and therefore len() is the number of picks MADE, which is what
+    # `_run_draft` and `survival` resume from.
+    assert len(taken_order) == 4
+    assert taken[5] and taken[1] and taken[9]
+    assert not taken[0]
+
+
+def test_a_missing_pick_number_costs_only_its_own_pick(tmp_path):
+    """The consequence, at the level that broke: attribution.
+
+    An 8-team snake gives picks 1-8 to slots 1-8 in order. With pick 3
+    missing, pick 4 must still belong to slot 4 -- not to slot 3, which is
+    what a row-indexed order produced, and which is how a mid-draft JOIN with
+    one unresolvable pick in round 1 re-attributed every round after it.
+    """
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    for pick_no, pid in [(1, "p0"), (2, "p1"), (4, "p3"), (5, "p4")]:
+        conn.execute("INSERT INTO drafted VALUES (?, ?)", [pid, pick_no])
+
+    pool = _pool(12)
+    _, taken_order = _drafted_state(conn, pool)
+    rosters, _ = _seed_rosters(pool, S, taken_order)
+
+    assert rosters[1]["indices"] == [0]
+    assert rosters[2]["indices"] == [1]
+    assert rosters[3]["indices"] == []          # its pick is the missing one
+    assert rosters[4]["indices"] == [3]
+    assert rosters[5]["indices"] == [4]
+
+
+def test_drafted_state_refuses_a_pick_number_below_one(tmp_path):
+    """Every writer numbers from 1, so a smaller number is as unattributable
+    as the null `pick_no` above -- and, left alone, would index from the END
+    of `taken_order` and hand a real player to a team at the wrong end of the
+    snake. Refused the same way, rather than silently wrapping."""
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    conn.execute("INSERT INTO drafted VALUES (?, ?)", ["p1", 0])
+    with pytest.raises(ValueError, match="pick number"):
+        _drafted_state(conn, _pool(12))
