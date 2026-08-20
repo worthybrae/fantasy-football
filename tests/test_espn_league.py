@@ -313,3 +313,49 @@ def test_import_does_not_build_a_historic_espn_table():
     # call. `historic_espn_cs` has no closing quote at that offset, so the
     # cheat-sheet writer below it does not trip this.
     assert '"historic_espn"' not in inspect.getsource(import_league)
+
+
+def test_a_dst_pick_is_a_real_pick_not_espns_placeholder():
+    """The defect this pins, and the reason the predicate is a whitelist.
+
+    ESPN's D/ST player ids are NEGATIVE by design -- -(16000 + proTeamId),
+    the same convention `pipeline/espn_live._dst_espn_id` builds and the live
+    crosswalk depends on. The old `playerId > 0` test therefore dropped every
+    defense ever drafted: 712 rows over six seasons with zero DST, each season
+    short by exactly the eight defenses.
+
+    -1 (and 0, and null) still have to go. So does -16000, which is
+    -(16000 + 0) and proTeamId 0 is ESPN's free agent, not a team.
+    """
+    from pipeline.espn_league import DST_ESPN_IDS, _is_real_pick
+    # Ravens are proTeamId 33, Texans 34, Falcons 1.
+    assert {-16033, -16034, -16001} <= DST_ESPN_IDS
+    assert len(DST_ESPN_IDS) == 32
+    for real in (4046537, -16033, -16001, -16034):
+        assert _is_real_pick({"playerId": real}) is True
+    for padding in (-1, 0, None, -16000, -2, -15033, -14033):
+        assert _is_real_pick({"playerId": padding}) is False
+    assert _is_real_pick({}) is False
+
+
+def test_parse_draft_picks_keeps_defenses_and_still_drops_padding():
+    payload = {"draftDetail": {"drafted": True, "picks": [
+        {"overallPickNumber": 1, "roundId": 1, "roundPickNumber": 1,
+         "teamId": 3, "playerId": 4046537, "keeper": False},
+        {"overallPickNumber": 2, "roundId": 1, "roundPickNumber": 2,
+         "teamId": 7, "playerId": -16033, "keeper": False},   # Ravens D/ST
+        {"overallPickNumber": 3, "roundId": 1, "roundPickNumber": 3,
+         "teamId": 1, "playerId": -1, "keeper": False},
+    ]}}
+    df = parse_draft_picks(payload, 2025)
+    assert df["espn_player_id"].tolist() == [4046537, -16033]
+
+
+def test_a_season_whose_only_picks_are_defenses_still_counts_as_drafted():
+    """`import_seasons` decides a season happened by asking `_is_real_pick`.
+    With the old predicate a hypothetical defense-only board read as an
+    undrafted one -- the same bug, one level up, where it silently drops a
+    whole SEASON rather than eight picks."""
+    from pipeline.espn_league import _is_real_pick
+    picks = [{"overallPickNumber": i, "playerId": -(16000 + i)} for i in range(1, 9)]
+    assert any(_is_real_pick(p) for p in picks)

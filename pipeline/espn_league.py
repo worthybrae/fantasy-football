@@ -37,6 +37,13 @@ ESPN_PRO_TEAMS = {
 _PICK_COLUMNS = ["season", "overall_pick", "round", "round_pick",
                  "team_id", "espn_player_id", "keeper"]
 
+# ESPN's own D/ST player ids: one per team, at -(16000 + proTeamId). Built
+# from ESPN_PRO_TEAMS above rather than hardcoded, so it tracks the same team
+# table everything else in this module keys on. Duplicated in intent (not in
+# code) by `pipeline/espn_live._dst_espn_id`, which cannot be imported here --
+# espn_live imports THIS module, so the dependency only runs one way.
+DST_ESPN_IDS = frozenset(-(16000 + pro_team_id) for pro_team_id in ESPN_PRO_TEAMS)
+
 
 def _is_real_pick(pick: dict) -> bool:
     """ESPN pads a draft board with placeholder picks whose playerId is -1.
@@ -45,8 +52,40 @@ def _is_real_pick(pick: dict) -> bool:
     it carries a team, a round, and an overall number. Even completed
     drafts carry a few (a round nobody filled). They are not picks anyone
     made, so they must never reach the model.
+
+    DO NOT TIGHTEN THIS BACK TO `playerId > 0`. That is what it used to be,
+    and it silently threw away EVERY D/ST pick this league has ever made,
+    because ESPN's negative id space is not all sentinels -- it holds real
+    team entities, one per proTeamId:
+
+        -16001..-16034   D/ST          (defaultPositionId 16)
+        -15001..-15034   team QB       (15)
+        -14001..-14034   head coach    (14)
+
+    Measured against ESPN's own 2025 player universe (2876 entries): 96 of
+    them carry a negative id, exactly 32 in each of those three bands, every
+    one exactly -(N000 + proTeamId), and there is no other negative id
+    anywhere in the universe. So a `> 0` threshold does not select "real
+    player, not padding" -- it selects "not a team". The damage was measured
+    too: `draft_picks` held 712 rows over six seasons with ZERO DST, every
+    season short by exactly eight picks (2020 [60, 68, 72, 90, 102, 113, 126,
+    127], 2025 [98, 99, 100, 104, 106, 107, 108, 112], ...) while all eight of
+    that season's kickers were recorded. Those gaps are the defenses. Downstream
+    that taught the manager model that a defense is never chosen and drove
+    `scoring.draft_model.COLD_START_PRIOR`'s `pos_DST` to -11.14, an event the
+    fit could not have seen.
+
+    So this is a whitelist, not a threshold: a real pick names a real player
+    id, or one of the 32 D/ST ids. Everything else -- -1, 0, null, or any
+    wider sentinel ESPN adds later -- is padding. Coaches and team QBs are
+    deliberately NOT admitted: this tool models no such roster slot
+    (ESPN_SLOT_POSITIONS has no 14 or 15), so a league that drafted one would
+    get a pick with no position, which is the same poison as a padding row.
     """
-    return (pick.get("playerId") or -1) > 0
+    player_id = pick.get("playerId")
+    if player_id is None:
+        return False
+    return player_id > 0 or player_id in DST_ESPN_IDS
 
 
 def parse_draft_picks(payload: dict, season: int) -> pd.DataFrame:
