@@ -281,6 +281,38 @@ from scoring.plan import build_plan
 PLAN_BUILD_ATTEMPTS = 40
 
 
+def plan_is_worth_rebuilding(settings, my_slot, previous, picks_made) -> bool:
+    """Whether the plan has gone stale enough to be worth ~2.5s of CPU.
+
+    It was rebuilt on every pick, which for an 8-team, 16-round draft is 128
+    builds of a 120-draft simulation. The ranking worker is protected from
+    that by `ranking_wanted`, but nothing else is: every HTTP request the
+    room makes -- a player profile above all -- competes with it for the GIL,
+    and a profile is what the user clicks while the clock runs.
+
+    A plan does not change much when some other team takes a running back. It
+    changes when MY roster changes, because every round after that is
+    re-planned around what I now hold, and it drifts as the board empties.
+    So: rebuild on my own picks, rebuild once a round otherwise, skip the
+    rest. Roughly 30 builds instead of 128, and never more than a round out
+    of date.
+
+    `previous` is `state["plan_as_of_pick"]`, or None when no plan has ever
+    been built -- which always rebuilds, since "stale" is meaningless before
+    there is anything to be stale.
+    """
+    if previous is None:
+        return True
+    if picks_made - previous >= settings.teams:
+        return True
+    # The pick that just landed, if it was mine: `picks_made` counts
+    # COMPLETED picks, so the last one sits at index picks_made - 1.
+    snake = snake_slots(settings.teams, settings.rounds)
+    if 0 < picks_made <= len(snake):
+        return snake[picks_made - 1] == my_slot
+    return False
+
+
 def _plan_bias_for_round(plan, my_slot, my_picks_made):
     """The plan's read on the round I am about to pick in, as position ->
     confidence, or None when there is nothing trustworthy to steer by.
@@ -2499,6 +2531,12 @@ def register_live_routes(app, conn, db_path):
                 with lock:
                     if state["listener"] is not listener:
                         continue
+                with lock:
+                    previous = (state["plan_as_of_pick"]
+                                if state["plan"] is not None else None)
+                if not plan_is_worth_rebuilding(sess.settings, sess.my_slot,
+                                                previous, made):
+                    continue
                 # Build in the gaps between rankings, retrying after each
                 # yield. Retrying is not optional: a ranking is requested on
                 # EVERY pick and a plan takes ~2.5s, so a worker that gave

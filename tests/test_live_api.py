@@ -1,3 +1,4 @@
+import pathlib
 import numpy as np
 import pandas as pd
 import pytest
@@ -4546,3 +4547,69 @@ def test_plan_bias_tolerates_a_plan_that_lags_the_draft():
     stale = _plan_for()
     stale["as_of_pick"] = 4           # built long before the current pick
     assert _plan_bias_for_round(stale, 2, 2) == {"TE": 0.94}
+
+
+def _plan_routes(tmp_path):
+    from fastapi import FastAPI
+    from pipeline.db import get_conn
+    path = str(tmp_path / "throttle.duckdb")
+    app = FastAPI()
+    state, _ = register_live_routes(app, get_conn(path), path)
+    return app, state
+
+
+def test_plan_rebuilds_on_my_own_picks_and_once_a_round_otherwise():
+    """The plan was rebuilt on every pick -- 128 builds of a 120-draft
+    simulation per draft, each ~2.5s, competing under the GIL with every HTTP
+    request the room makes. The ranking has `ranking_wanted` to protect it; a
+    player profile has nothing, and a profile is what the user clicks while
+    the clock is running."""
+    from api.live import plan_is_worth_rebuilding as worth
+    from scoring.draft_sim import snake_slots
+
+    s = _live_session()
+    st, me = s.settings, s.my_slot
+    snake = snake_slots(st.teams, st.rounds)
+    mine = [i + 1 for i, slot in enumerate(snake) if slot == me]
+
+    # No plan yet always builds -- "stale" is meaningless before there is one.
+    assert worth(st, me, None, 0) is True
+
+    # My own pick just landed: rebuild, however recent the last plan.
+    for pick in mine[:4]:
+        assert worth(st, me, pick - 1, pick) is True, pick
+
+    # Somebody else's pick, inside the same round: skip.
+    others = [p for p in range(1, st.teams * 2) if p not in mine]
+    skipped = [p for p in others if not worth(st, me, p - 1, p)]
+    assert skipped, "the throttle must actually skip somebody else's picks"
+
+    # A full round elapsing rebuilds regardless of whose pick it was.
+    for p in others[:4]:
+        assert worth(st, me, p - st.teams, p) is True, p
+
+
+def test_plan_throttle_never_skips_more_than_a_round():
+    """The staleness bound is the whole safety argument: a throttle that can
+    skip indefinitely is a plan that silently stops tracking the draft."""
+    from api.live import plan_is_worth_rebuilding as worth
+    s = _live_session()
+    st, me = s.settings, s.my_slot
+    for previous in range(0, st.teams * st.rounds - st.teams):
+        stalest = max(p for p in range(previous, previous + st.teams + 1)
+                      if not worth(st, me, previous, p))
+        assert stalest - previous < st.teams, (previous, stalest)
+
+
+def test_plan_endpoint_still_serves_a_throttled_plan(tmp_path):
+    """Throttling must not make the endpoint report `pending` forever: a plan
+    that is a few picks old is still a plan, and the room shows it with its
+    own `as_of_pick` caption."""
+    from fastapi.testclient import TestClient
+    app, state = _plan_routes(tmp_path)
+    state["session"] = _live_session()
+    state["plan"] = {"my_slot": 2, "as_of_pick": 17, "rounds_plan": [],
+                     "cliffs": [], "best_available": []}
+    state["plan_as_of_pick"] = 17
+    body = TestClient(app).get("/api/live/plan").json()
+    assert body["pending"] is False and body["as_of_pick"] == 17
