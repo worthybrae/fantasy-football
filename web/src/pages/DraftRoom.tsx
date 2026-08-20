@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { fetchBoard, fetchLiveState, fetchPlayers, selectPlayer, type BoardPlayer, type LiveBoard,
+import { fetchBoard, fetchLiveState, fetchPlayers, selectPlayer, setAutodraft,
+         type BoardPlayer, type LiveBoard,
          type LiveCandidate, type LiveSettings, type LiveState, type Player,
          type RosterPlayer } from '../api'
 import ClockPanel from '../components/draft/ClockPanel'
@@ -178,6 +179,17 @@ export default function DraftRoom() {
   const [confirming, setConfirming] = useState<LiveCandidate | null>(null)
   const [pickStatus, setPickStatus] = useState<PickStatus>('idle')
   const [pickError, setPickError] = useState<string | null>(null)
+
+  // The autodraft round trip, held here for the same reasons the pick
+  // confirmation above is: the 2.5s poll must not lose a request in flight,
+  // and the request has to outlive the re-renders around it. Note what is
+  // NOT here -- the flag itself. That lives in `state.autodraft`, straight
+  // off ESPN via the poll, so nothing in this room can show an autodraft
+  // state ESPN did not confirm. Same rule the pick dialog follows, and it
+  // matters more here: an owner who wrongly believes they took autodraft
+  // back off will stop watching the clock.
+  const [autodraftPending, setAutodraftPending] = useState(false)
+  const [autodraftError, setAutodraftError] = useState<string | null>(null)
 
   // The player profile open over the room, or null. Held here rather than
   // in the URL on purpose: a route swap unmounts this whole component --
@@ -444,6 +456,40 @@ export default function DraftRoom() {
     }
   }
 
+  async function handleSetAutodraft(on: boolean) {
+    // Guarded here as well as by the switch's own `disabled`: a second
+    // request would race the first one's confirmation, and whichever
+    // resolved last would decide what the error slot said about a state
+    // neither of them owns any more.
+    if (autodraftPending) return
+    setAutodraftPending(true)
+    setAutodraftError(null)
+    try {
+      await setAutodraft(on)
+      // ESPN confirmed. Nothing is written into `state.autodraft` here --
+      // that value only ever comes from the poll. Pulling the state endpoint
+      // once immediately is not optimism, it is the opposite: it fetches
+      // ESPN's confirmed value rather than waiting up to POLL_MS to see it,
+      // so the switch moves on the same fact the request returned on instead
+      // of sitting in its old position for two and a half seconds after a
+      // click that worked. Best effort -- a failed refetch changes nothing,
+      // since the interval poll is still running.
+      try {
+        setState(await fetchLiveState())
+      } catch {
+        // The 2.5s poll will bring it.
+      }
+    } catch (e) {
+      // The server's own message, rendered verbatim by ClockPanel: a 504
+      // here is api/live.py's "ESPN did not confirm the autodraft change",
+      // which means the command may or may not have landed -- replacing it
+      // with a generic "failed" would lose exactly that.
+      setAutodraftError(e instanceof Error ? e.message : 'Could not change autodraft')
+    } finally {
+      setAutodraftPending(false)
+    }
+  }
+
   return (
     <div className="draft-room">
       <div className="sr-only" aria-live="polite">
@@ -645,7 +691,14 @@ export default function DraftRoom() {
                   room already polls /api/live/board every 2.5s (see the
                   effect above), so ClockPanel is handed the same state
                   rather than fetching its own. */}
-              <ClockPanel state={state} secondsLeft={secondsLeft} board={board} />
+              <ClockPanel
+                state={state}
+                secondsLeft={secondsLeft}
+                board={board}
+                autodraftPending={autodraftPending}
+                autodraftError={autodraftError}
+                onSetAutodraft={handleSetAutodraft}
+              />
               {state.active ? (
                 <RosterPanel slots={slots} />
               ) : (

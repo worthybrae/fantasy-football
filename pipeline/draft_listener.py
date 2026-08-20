@@ -39,6 +39,23 @@ class DraftListener:
         # map still went off the board -- and the person who just clicked
         # DRAFT needs to know it landed either way.
         self.selected_espn_ids = set()
+        # Every team's autodraft flag, by ESPN team id. ESPN broadcasts
+        # `AUTODRAFT <teamId> <true|false>` to the whole room, not only to
+        # the team it concerns -- data/draft_room_trace.jsonl carries teams
+        # 2, 3 and 7 flipping in both directions across one session.
+        #
+        # Keyed by team id rather than collapsed to "is this me" on arrival,
+        # and that is load-bearing rather than tidiness: ESPN replays this
+        # state on JOIN, and the replayed AUTODRAFT lands BEFORE the TOKEN
+        # frame that names our own team. In the capture `AUTODRAFT 2 false`
+        # is the very first frame of the session (line 503) and TOKEN
+        # arrives eight frames later (line 511);
+        # tests/fixtures/espn_draft_socket.jsonl opens the same way. A
+        # listener that only recorded the flag when `team_id ==
+        # self.my_team_id` would therefore throw away the one frame a
+        # mid-draft connect gets, and go on reporting "not on autodraft" for
+        # a team ESPN is already picking for.
+        self.autodraft_by_team = {}
 
     def on_frame(self, payload: str) -> bool:
         """Fold one frame into accumulated state.
@@ -99,9 +116,54 @@ class DraftListener:
             espn_id = _as_int(event.args[1], None)
             if espn_id is not None:
                 self.selected_espn_ids.add(espn_id)
+        elif event.verb == "AUTODRAFT" and len(event.args) > 1:
+            # `AUTODRAFT <teamId> <true|false>` -- the inbound, per-team
+            # broadcast. Verified against data/draft_room_trace.jsonl: line
+            # 1112 is `AUTODRAFT 2 true`, sent by ESPN the moment team 2's
+            # clock ran out (line 1111 is that team's last CLOCK tick,
+            # `CLOCK 6 4964 2`, and line 1113 the pick ESPN then made for
+            # it); line 1188 is `AUTODRAFT 2 false`, ESPN's echo of the
+            # client's own outbound `AUTODRAFT false` two frames earlier at
+            # line 1186 -- which carries NO team id, because the socket
+            # already identifies the team it speaks for.
+            #
+            # Only the two literals ESPN has actually been observed sending
+            # count. A third value has never appeared, and mapping an
+            # unrecognised one to False would quietly report "autodraft is
+            # off" for a team ESPN may be picking for -- the exact failure
+            # this state exists to prevent. Ignored instead, leaving
+            # whatever was last confirmed, the same discipline TOKEN and
+            # SELECTED above already use for a frame they cannot parse.
+            #
+            # Deliberately not reported as a change in this method's return
+            # value: `on_change` (api/live.py) applies picks and launches a
+            # recompute, and an autodraft flip moves neither the pick count
+            # nor my_slot. The room reads this off /api/live/state on the
+            # 2.5s poll it already runs, so the cost of leaving it out is at
+            # most one poll of latency rather than a full ranking pass every
+            # time any of eight teams flips.
+            team_id = _as_int(event.args[0], None)
+            flag = _autodraft_flag(event.args[1])
+            if team_id is not None and flag is not None:
+                self.autodraft_by_team[team_id] = flag
         after_picks = len(self.picks().rows)
         newly_learned_team = self.my_team_id is not None and not had_team
         return after_picks != before_picks or newly_learned_team
+
+    @property
+    def my_autodraft(self) -> bool | None:
+        """This session's own autodraft flag, or None if ESPN has not said.
+
+        None is a real and distinct third answer, not a stand-in for False:
+        it means either that no AUTODRAFT frame has landed for our team yet
+        or that TOKEN has not yet named which team is ours. Collapsing it to
+        False would make "ESPN has not told us" indistinguishable from "ESPN
+        told us it is off", and the one state this flag exists to shout
+        about is the one a wrong default would hide.
+        """
+        if self.my_team_id is None:
+            return None
+        return self.autodraft_by_team.get(self.my_team_id)
 
     def picks(self) -> LivePicks:
         """Fold everything seen so far. Re-foldable: the event list is
@@ -114,6 +176,21 @@ def _as_int(value, fallback):
         return int(value)
     except (TypeError, ValueError):
         return fallback
+
+
+def _autodraft_flag(arg: str) -> bool | None:
+    """`true`/`false` out of an AUTODRAFT frame's second argument, or None
+    for anything else -- see the caller for why an unrecognised value must
+    not read as False. Case-insensitive: ESPN has only ever been observed
+    sending lowercase (every AUTODRAFT frame in data/draft_room_trace.jsonl
+    and tests/fixtures/espn_draft_socket.jsonl), and nothing documents that
+    as a guarantee."""
+    text = (arg or "").strip().lower()
+    if text == "true":
+        return True
+    if text == "false":
+        return False
+    return None
 
 
 def _team_id_from_token(arg: str) -> int | None:

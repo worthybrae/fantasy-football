@@ -1067,6 +1067,29 @@ SELECT_TIMEOUT_SECONDS = 8.0
 SELECT_POLL_SECONDS = 0.1
 
 
+class AutodraftBody(BaseModel):
+    """The state to put ESPN's autodraft into -- not "flip it".
+
+    A target state rather than a toggle on purpose: the client is polling
+    the current value every 2.5s, so a "flip" sent against a value that
+    changed in between (ESPN flipping us ON at the same moment the user
+    clicked to turn it off) would act on a state that no longer exists. A
+    target is idempotent under exactly that race.
+    """
+    on: bool
+
+
+# Same 8s bound and 0.1s cadence as the SELECT round trip above, for the
+# same two reasons: long enough for a round trip to a busy draft server,
+# short enough that a wedged request cannot eat the pick clock. Named
+# separately rather than reusing SELECT's so the two can diverge -- the
+# only measurement there is of ESPN's AUTODRAFT echo is fast (the capture's
+# outbound `AUTODRAFT false` at line 1186 is answered by `AUTODRAFT 2
+# false` at line 1188, two frames later), but one capture is not a bound.
+AUTODRAFT_TIMEOUT_SECONDS = 8.0
+AUTODRAFT_POLL_SECONDS = 0.1
+
+
 def _espn_id_for(board_row) -> int | None:
     """The ESPN player id to send in a SELECT.
 
@@ -1998,6 +2021,13 @@ def register_live_routes(app, conn, db_path):
                         # absent key would read as undefined -- falsy by
                         # luck rather than by contract.
                         "socket_alive": False,
+                        # Null, never False. There is no listener on this
+                        # branch and so nothing has heard ESPN say either
+                        # way -- and "we have not been told" is a different
+                        # fact from "ESPN says autodraft is off" (see
+                        # DraftListener.my_autodraft). Present rather than
+                        # omitted, same convention as every other key here.
+                        "autodraft": None,
                         "token_received": state.get("token") is not None,
                         "ms_remaining": None,
                         # No listener at all on this branch, so genuinely
@@ -2029,6 +2059,26 @@ def register_live_routes(app, conn, db_path):
             # render as the same "Waiting on the room" heading, with no way
             # for the drafter to know which one they were looking at.
             draft_started = listener.started if listener is not None else False
+            # ESPN's own autodraft flag for OUR team -- true means ESPN
+            # is making this session's picks itself, which is the alarm the
+            # room's clock panel exists to raise. True/False/None, where
+            # None means ESPN has not said yet (no AUTODRAFT frame for our
+            # team, or TOKEN has not named our team) -- see
+            # DraftListener.my_autodraft for why that must not read as
+            # False.
+            #
+            # Read here, inside `lock`, for the same reason ms_remaining and
+            # draft_started just above are: so this response is one
+            # consistent snapshot. `lock` does not exclude the listener
+            # thread, which folds frames without holding it -- but this read
+            # needs the consistency more than those two do, not less. It is
+            # a COMPOUND read (my_team_id, then a dict lookup keyed by it)
+            # rather than one int attribute, and a torn one is a real bug:
+            # taking my_team_id from before a reconnect resolved it and the
+            # dict from after would report a flag looked up under the wrong
+            # team's key. `my_autodraft` performs both halves inside the one
+            # property so the pair is drawn at a single instant.
+            autodraft = listener.my_autodraft if listener is not None else None
             # Whether a SELECT actually has somewhere to go, read here for
             # the same reason ms_remaining is: it belongs to this response's
             # one consistent snapshot. Exactly the condition
@@ -2198,6 +2248,7 @@ def register_live_routes(app, conn, db_path):
             # for that reason -- see the state key's own comment.
             "recompute_error": snapshot["recompute_error"],
             "socket_alive": socket_alive,
+            "autodraft": autodraft,
             "token_received": snapshot.get("token") is not None,
             "ms_remaining": ms_remaining,
             "settings": _league_settings_payload(session.settings),
@@ -2432,6 +2483,113 @@ def register_live_routes(app, conn, db_path):
             status_code=504,
             detail="ESPN did not confirm the pick -- check the ESPN draft room "
             "before picking again")
+
+    @app.post("/api/live/autodraft")
+    def live_autodraft(body: AutodraftBody):
+        """Turn ESPN's autodraft on or off, and report only what ESPN
+        confirmed.
+
+        Miss a pick and ESPN puts your team on autodraft: it starts making
+        the picks for you, and nothing in its UI comes to this tool to say
+        so. `DraftListener` now hears that (see its AUTODRAFT branch); this
+        is the way back out.
+
+        The same round trip as /api/live/select, deliberately -- send the
+        command, wait for the server's own frame to echo it back, return on
+        confirmation only. Nothing here writes the flag into the listener:
+        `on_frame` records it when, and only when, ESPN's AUTODRAFT frame
+        arrives, so a request that times out leaves the state exactly as
+        ESPN last stated it rather than claiming a change it could not
+        verify. That is the same no-optimistic-state rule the pick dialog
+        follows, and it matters more here, not less: a user who wrongly
+        believes they have taken autodraft back off will stop watching the
+        clock.
+
+        Both frame formats verified against data/draft_room_trace.jsonl:
+          - OUTBOUND `AUTODRAFT <true|false>`, with NO team id -- line 1186,
+            the real client turning its own autodraft back off. The socket
+            already identifies the team it speaks for (it is the `3=` and
+            `5=` team of the JOIN url, see draft_socket.socket_url).
+          - INBOUND `AUTODRAFT <teamId> <true|false>` -- line 1188, ESPN
+            answering that send two frames later. Broadcast to the whole
+            room for every team, which is exactly why the wait below has to
+            match on OUR team id rather than merely on the verb: teams 2, 3
+            and 7 all flip across this one capture, and confirming on a
+            neighbour's frame would report a change that never happened to
+            us.
+
+        There is no off-turn guard, unlike /api/live/select, and that is a
+        reading of the capture rather than an omission: the client's own
+        `AUTODRAFT false` at line 1186 sits between two OTHER teams' picks
+        (line 1185 `SELECTED 4 4432708 12`, line 1189 `SELECTING 3 30000`).
+        Turning autodraft off while somebody else is on the clock is what
+        ESPN's own room does -- and it is the case that matters most, since
+        a user who has just been flipped onto autodraft has by definition
+        already lost their turn.
+
+        `socket.send`'s except clause is the same triple as live_select's,
+        for the same documented reason (see its docstring): ConnectionClosed
+        is not a subclass of ConnectionError, and the socket dropping mid-
+        request is the one failure this endpoint exists to turn into a clean
+        503 rather than a 500.
+        """
+        with lock:
+            session = state["session"]
+            socket = state["socket"]
+            listener = state["listener"]
+            if session is None:
+                raise HTTPException(status_code=409, detail="no live draft session")
+            if socket is None or not socket.alive():
+                raise HTTPException(
+                    status_code=503, detail="the draft socket is not connected")
+            # Without our own team id there is no way to tell our echo from
+            # the seven other teams ESPN broadcasts the same verb for, so
+            # this request could only ever guess -- refuse instead. In
+            # practice a live socket resolves this within a frame or two of
+            # connecting (TOKEN lands eight frames in, see the capture), so
+            # this is the first second of a session, not a dead end.
+            if listener is None or listener.my_team_id is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="this session does not know its ESPN team yet -- "
+                    "give the draft socket a moment and try again")
+            # Already there, as far as ESPN's own last word goes. Returning
+            # here rather than sending is not a shortcut: ESPN has never
+            # been observed re-broadcasting AUTODRAFT for a value that did
+            # not change, so a redundant send would most likely sit out the
+            # full timeout and then 504 -- reporting failure for a state
+            # that is already exactly what was asked for. This is also what
+            # makes the endpoint idempotent under the one real race: ESPN
+            # flipping us on (or the user double-clicking) between the poll
+            # that drew the switch and the click that acted on it.
+            current = listener.my_autodraft
+            if current == body.on:
+                return {"autodraft": body.on, "changed": False}
+
+        try:
+            socket.send(f"AUTODRAFT {'true' if body.on else 'false'}\n")
+        except (ConnectionError, OSError, ConnectionClosed) as exc:
+            raise HTTPException(
+                status_code=503, detail=f"could not reach ESPN: {exc}") from exc
+
+        # Polled, not signalled, and against a `listener` captured once
+        # under `lock` -- both exactly as live_select does it, and the
+        # stale-reference tradeoff there applies here unchanged: a session
+        # restarted mid-wait leaves this reading a listener whose thread has
+        # already stopped, so the flag simply stops changing and this
+        # request times out honestly instead of confirming on behalf of a
+        # listener that no longer speaks for the live session.
+        deadline = time.monotonic() + AUTODRAFT_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            if listener.my_autodraft == body.on:
+                return {"autodraft": body.on, "changed": True}
+            time.sleep(AUTODRAFT_POLL_SECONDS)
+        raise HTTPException(
+            status_code=504,
+            detail="ESPN did not confirm the autodraft change -- as far as "
+            f"this tool knows autodraft is still "
+            f"{'on' if current else 'off' if current is False else 'unknown'}; "
+            "check the ESPN draft room")
 
     @app.post("/api/live/stop")
     def live_stop():

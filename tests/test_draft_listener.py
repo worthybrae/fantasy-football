@@ -178,3 +178,86 @@ def test_the_real_capture_drives_the_listener_end_to_end():
     assert len(out.rows) >= 9
     assert out.unmapped == []
     assert list(out.rows["pick_no"]) == list(range(1, len(out.rows) + 1))
+
+
+# --- AUTODRAFT: ESPN picking for you when you miss a turn ------------------
+
+
+def test_autodraft_is_tracked_per_team_and_only_ours_is_reported():
+    """`AUTODRAFT <teamId> <true|false>` is broadcast for every team in the
+    room -- data/draft_room_trace.jsonl carries teams 2, 3 and 7 flipping in
+    both directions across one session. A neighbour going on autodraft must
+    never read as us going on autodraft."""
+    lis = DraftListener({})
+    lis.on_frame("TOKEN 1:196877779:2:{SWID}:-1781796296")
+    lis.on_frame("AUTODRAFT 3 true")
+    assert lis.my_autodraft is None       # nothing said about US yet
+    lis.on_frame("AUTODRAFT 2 true")
+    assert lis.my_autodraft is True
+    lis.on_frame("AUTODRAFT 2 false")
+    assert lis.my_autodraft is False
+    assert lis.autodraft_by_team == {2: False, 3: True}
+
+
+def test_autodraft_arriving_before_the_token_frame_is_not_lost():
+    """The ordering that decides whether a mid-draft connect works at all.
+
+    ESPN replays autodraft state on JOIN, and the replayed frame lands BEFORE
+    the TOKEN frame that names our own team: in data/draft_room_trace.jsonl
+    `AUTODRAFT 2 false` is line 503, the session's first frame, and TOKEN is
+    line 511. So the flag cannot be filtered to "is this me?" as it arrives
+    -- it has to be kept per team id and resolved once TOKEN lands, which is
+    what this pins."""
+    lis = DraftListener({})
+    lis.on_frame("AUTODRAFT 2 true")
+    assert lis.my_autodraft is None       # we do not know who we are yet
+    lis.on_frame("TOKEN 1:196877779:2:{SWID}:-1781796296")
+    assert lis.my_autodraft is True
+
+
+def test_an_unrecognised_autodraft_value_never_reads_as_off():
+    """Only the two literals ESPN has been observed sending count. Mapping
+    anything else to False would report "autodraft is off" for a team ESPN
+    may be picking for -- the one wrong answer this state cannot give."""
+    lis = DraftListener({})
+    lis.on_frame("TOKEN 1:1:2:{SWID}:1")
+    lis.on_frame("AUTODRAFT 2 true")
+    for junk in ("AUTODRAFT 2 maybe", "AUTODRAFT 2", "AUTODRAFT",
+                 "AUTODRAFT x false", "AUTODRAFT 2 0"):
+        lis.on_frame(junk)
+        assert lis.my_autodraft is True, junk
+
+
+def test_autodraft_casing_is_not_assumed():
+    """Lowercase in every captured frame, but nothing documents that as a
+    guarantee."""
+    lis = DraftListener({})
+    lis.on_frame("TOKEN 1:1:2:{SWID}:1")
+    lis.on_frame("AUTODRAFT 2 TRUE")
+    assert lis.my_autodraft is True
+
+
+def test_an_autodraft_frame_is_not_reported_as_a_change():
+    """on_frame's return value drives api/live.py's on_change, which applies
+    picks and launches a ranking pass. An autodraft flip moves neither the
+    pick count nor my_team_id, so it must not pay for one -- the room reads
+    the flag off /api/live/state on the poll it already runs."""
+    lis = DraftListener({})
+    lis.on_frame("TOKEN 1:1:2:{SWID}:1")
+    assert lis.on_frame("AUTODRAFT 2 true") is False
+    assert lis.on_frame("AUTODRAFT 2 false") is False
+
+
+@pytest.mark.skipif(not FIXTURE.exists(), reason="no draft capture")
+def test_the_real_captures_first_frame_states_autodraft_before_anything_else():
+    """Not an assumption about ESPN's replay -- the capture itself. The very
+    first frame of the session, before INIT and before TOKEN, is ESPN stating
+    team 2's autodraft flag. That is the whole reason a mid-draft connect can
+    know this at all."""
+    payloads = _payloads()
+    assert payloads[0].strip() == "AUTODRAFT 2 false"
+    lis = DraftListener({})
+    for p in payloads:
+        lis.on_frame(p)
+    assert lis.my_team_id == 2
+    assert lis.my_autodraft is False

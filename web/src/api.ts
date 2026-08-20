@@ -289,6 +289,21 @@ export interface LiveState {
   // listener thread is alive and `stale` has not tripped, so the draft
   // buttons have to read this too or every click 503s (spec section 6).
   socket_alive: boolean
+  // ESPN's own autodraft flag for THIS session's team -- true means ESPN is
+  // making the picks itself, which is what happens the moment you miss a
+  // turn. Straight off DraftListener.my_autodraft (pipeline/
+  // draft_listener.py), which reads it from the `AUTODRAFT <teamId>
+  // <true|false>` frames ESPN broadcasts for every team in the room.
+  //
+  // Three values, not two. `null` means ESPN has not said yet -- no
+  // AUTODRAFT frame for our team, or the socket has not named our team --
+  // and it is a different fact from `false`. Anything that renders this must
+  // keep them apart: showing "off" for a state nobody has confirmed is the
+  // exact failure the flag exists to prevent. In practice null lasts about
+  // as long as the first frame of a session (ESPN states autodraft in its
+  // JOIN replay before anything else) and is permanent only where there is
+  // no session at all.
+  autodraft: boolean | null
   // The bookmarklet has delivered a draft token. The onboarding gate flips
   // from "open your draft and click Draft Helper" to the live board on this.
   token_received?: boolean
@@ -354,6 +369,49 @@ export async function selectPlayer(playerId: string): Promise<SelectResult> {
     if (controller.signal.aborted) {
       throw new Error('ESPN did not confirm the pick -- check the ESPN draft '
         + 'room before picking again')
+    }
+    throw e
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+// Turns ESPN's autodraft on or off. Resolves only once ESPN echoed the
+// change back for our own team, exactly like `selectPlayer` above -- a
+// resolved promise means ESPN confirmed it, and nothing anywhere writes the
+// flag optimistically. The next poll of /api/live/state is what moves the
+// switch; this call only ever decides whether that poll will find it moved.
+//
+// Aborted client-side on the same reasoning and the same margin as
+// selectPlayer's (see SELECT_ABORT_MS): the server's own bound is 8s
+// (api/live.py's AUTODRAFT_TIMEOUT_SECONDS), and this catches only a request
+// that is never coming back, which would otherwise leave the switch stuck
+// pending -- and therefore un-clickable -- for the rest of the draft.
+const AUTODRAFT_ABORT_MS = 15000
+
+export async function setAutodraft(on: boolean): Promise<{ autodraft: boolean; changed: boolean }> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), AUTODRAFT_ABORT_MS)
+  try {
+    const res = await fetch('/api/live/autodraft', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ on }),
+      signal: controller.signal,
+    })
+    if (!res.ok) {
+      const detail = await res.json().catch(() => null)
+      throw new Error(detail?.detail ?? `Could not change autodraft (${res.status})`)
+    }
+    return await res.json()
+  } catch (e) {
+    // The server's own 504 wording, for the same reason selectPlayer borrows
+    // it: an aborted request is the same situation as ESPN not answering --
+    // the command may or may not have landed, and only the ESPN draft room
+    // can settle it.
+    if (controller.signal.aborted) {
+      throw new Error('ESPN did not confirm the autodraft change -- check the '
+        + 'ESPN draft room')
     }
     throw e
   } finally {

@@ -65,13 +65,28 @@ const ASSUMED_CLOCK_SECONDS = 30
 // one) while still catching a real stall well inside a single pick's clock.
 const COUNTDOWN_STALE_AFTER_MS = 12_000
 
-export default function ClockPanel({ state, secondsLeft, board = null }: {
+export default function ClockPanel({
+  state, secondsLeft, board = null,
+  autodraftPending = false, autodraftError = null, onSetAutodraft = null,
+}: {
   state: LiveState
   secondsLeft: number | null
   // Defect 4's team-name lookup only (see teamNameForSlot), defaulted to
   // null so an existing caller that hasn't been updated still type-checks.
   // DraftRoom already holds this from its own /api/live/board poll.
   board?: LiveBoard | null
+  // The autodraft round trip, owned by DraftRoom for the same reason the
+  // pick dialog's status is (see its own `pickStatus` comment): a 2.5s poll
+  // landing mid-request must not lose track of a request in flight, and the
+  // request itself has to outlive whatever re-renders around it. The
+  // CONFIRMED state is not among these -- that is `state.autodraft`, off the
+  // poll, so this panel can never show a value ESPN did not send.
+  autodraftPending?: boolean
+  autodraftError?: string | null
+  // null (the default) makes the control read-only: it still shows what ESPN
+  // says, it just has nowhere to send a change. Same defaulting precedent as
+  // `board` above.
+  onSetAutodraft?: ((on: boolean) => void) | null
 }) {
   // Own ticker, not a prop from DraftRoom: this component's signature is
   // {state, secondsLeft} (Task 8/9 were written against it, and Defect 3
@@ -223,10 +238,81 @@ export default function ClockPanel({ state, secondsLeft, board = null }: {
     ? Math.max(0, Math.min(100, (displaySeconds / ASSUMED_CLOCK_SECONDS) * 100))
     : null
 
+  // ESPN's own flag, never this component's guess -- `state.autodraft` is
+  // whatever ESPN last broadcast for our team (api/live.py serves
+  // DraftListener.my_autodraft). Three values: true, false, and null for
+  // "ESPN has not said", which must not render as "off" (see api.ts's own
+  // comment on the field). null shows a dash and no switch: there is no
+  // honest position to draw a two-state control in, and it lasts about one
+  // frame of a real session.
+  const autodraftOn = state.autodraft === true
+  // A switch that cannot send is worse than no switch -- it would accept a
+  // click and silently do nothing. The socket is the only thing that can
+  // carry the command (the browser-observer path publishes none at all, and
+  // a reconnect detaches the one it has), and a request already in flight
+  // must not take a second click.
+  const canToggle = onSetAutodraft !== null && state.socket_alive && !autodraftPending
+  const autodraftTitle = autodraftPending
+    ? 'Waiting for ESPN to confirm…'
+    : onSetAutodraft === null
+      ? 'Autodraft, as ESPN last reported it'
+      : !state.socket_alive
+        ? 'The draft socket is not connected — change this in ESPN itself'
+        : autodraftOn
+          ? 'ESPN is drafting for you. Switch off to take your picks back.'
+          : 'Switch on to let ESPN draft for you.'
+
   return (
-    <div className={`clock-panel${youAreUp ? ' clock-panel-up' : ''}`}>
+    <div className={`clock-panel${youAreUp ? ' clock-panel-up' : ''}${autodraftOn ? ' clock-panel-auto' : ''}`}>
       <div className="draft-cap">{heading}</div>
-      <div className="clock-countdown mono">{formatCountdown(displaySeconds)}</div>
+      {/* The countdown keeps the whole left side; the autodraft control sits
+          beside it, top right, where the owner asked for it. It is state
+          first and control second: when autodraft is off this is a quiet
+          grey switch that does not compete with a 48px clock, and when ESPN
+          has flipped it on the whole panel turns and the alert below spells
+          out what is happening. */}
+      <div className="clock-headline">
+        <div className="clock-countdown mono">{formatCountdown(displaySeconds)}</div>
+        <div className="autodraft">
+          <span className="draft-cap autodraft-cap">Autodraft</span>
+          {state.autodraft === null ? (
+            <span className="autodraft-unknown mono" title="ESPN has not reported autodraft for your team yet">—</span>
+          ) : (
+            <button
+              type="button"
+              role="switch"
+              aria-checked={autodraftOn}
+              aria-busy={autodraftPending}
+              aria-label="ESPN autodraft"
+              title={autodraftTitle}
+              className={`autodraft-switch${autodraftOn ? ' is-on' : ''}${autodraftPending ? ' is-pending' : ''}`}
+              disabled={!canToggle}
+              onClick={() => onSetAutodraft?.(!autodraftOn)}
+            >
+              <span className="autodraft-knob" />
+            </button>
+          )}
+        </div>
+      </div>
+      {autodraftOn && (
+        // The alarm, not a status line. ESPN flips a team to autodraft when
+        // it misses a pick and then just carries on drafting for it -- the
+        // person it is happening to may have no idea, which is the whole
+        // reason this feature exists. role="alert" so it is announced the
+        // moment the poll brings it in, not only when someone looks.
+        <div className="autodraft-alert" role="alert">
+          <strong>ESPN is drafting for you.</strong> A pick ran out of time, so
+          ESPN is making your picks itself. Switch autodraft off to take them
+          back.
+        </div>
+      )}
+      {autodraftError !== null && (
+        // The server's own words, verbatim, same rule ConfirmPick follows: a
+        // 504 here says "ESPN did not confirm", which is not "it failed" --
+        // and the difference decides whether the owner needs to go look at
+        // the ESPN room.
+        <p className="clock-stale" role="alert">{autodraftError}</p>
+      )}
       {pct !== null && (
         // Rendered only when there IS a real clock value -- a `pct: 0` bar
         // sitting under `--:--` used to read as "the clock just ran out,"

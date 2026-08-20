@@ -3316,11 +3316,18 @@ def _seed_capture_league(path, root, espn_ids, positions=None):
     return crosswalk
 
 
-def _join_mid_draft(monkeypatch, tmp_path, root, n_picks, hole_at=None):
+def _join_mid_draft(monkeypatch, tmp_path, root, n_picks, hole_at=None,
+                    make_socket=None):
     """Connect to a draft `n_picks` in, and return (client, by_espn_id).
 
     `hole_at` is a 1-based overall pick whose player is deliberately absent
     from the board's crosswalk.
+
+    `make_socket(frames) -> socket` swaps in a different stand-in for the
+    connection `_connect` returns; the default is `_ReplaySocket`, which
+    delivers the burst and then goes quiet. The autodraft tests at the end of
+    this file pass one that can also ANSWER a send, which a JOIN replay alone
+    never has to do.
     """
     from pipeline import draft_socket
 
@@ -3334,8 +3341,9 @@ def _join_mid_draft(monkeypatch, tmp_path, root, n_picks, hole_at=None):
     path = str(tmp_path / "live.duckdb")
     by_espn = _seed_capture_league(path, root, seeded)
 
+    make_socket = make_socket or _ReplaySocket
     monkeypatch.setattr(draft_socket, "_connect",
-                        lambda url, cookie: _ReplaySocket(frames))
+                        lambda url, cookie: make_socket(frames))
     # The ranking is not what these assert; keep it cheap and deterministic so
     # the recompute worker cannot outrun the listener's own writes.
     monkeypatch.setattr("api.live.survival", _fake_survival_frame)
@@ -3430,3 +3438,338 @@ def test_a_pick_the_crosswalk_cannot_map_does_not_shift_every_later_pick(
         assert sorted(c["overall"] for c in cells) == list(range(2, 24))
     finally:
         client.post("/api/live/stop")
+
+
+# --- ESPN's autodraft: the state, and the way back out of it ---------------
+#
+# Miss a pick and ESPN flips your team onto autodraft and starts making the
+# picks itself. Nothing in its UI tells this tool that happened; the socket
+# does, and these drive both directions of it.
+#
+# The frames are real. tests/fixtures/espn_autodraft.jsonl is three records
+# lifted VERBATIM out of data/draft_room_trace.jsonl -- lines 1112, 1186 and
+# 1188: ESPN flipping team 2 on the moment its clock ran out, the real ESPN
+# client turning it back off, and ESPN's echo two frames later. That trace is
+# not git-tracked, which is why the three frames live in a fixture instead;
+# they are the same captured session as tests/fixtures/espn_draft_socket.jsonl
+# (identical socket URL, and every record of that fixture appears in the
+# trace), so replaying the two together is one continuous draft, not a splice
+# of two.
+#
+# Both tests run the REAL run_socket_listener with only `_connect` faked, the
+# same as the mid-draft-join tests above: the frames go through the same recv
+# loop, the same DraftListener, the same POST /api/live/autodraft and the same
+# /api/live/state a live draft night uses.
+
+_AUTODRAFT_FIXTURE = Path("tests/fixtures/espn_autodraft.jsonl")
+
+
+def _autodraft_frames():
+    """(espn_flips_us_on, what_the_client_sends, espn_confirms_off) -- the
+    three captured payloads in the order they happened. The kinds are
+    asserted rather than assumed: the middle one is the only ws-send of the
+    three, and reading it as an inbound frame would quietly turn this whole
+    section into a test of nothing."""
+    rows = [json.loads(l) for l in _AUTODRAFT_FIXTURE.read_text().splitlines() if l]
+    kinds = [r["kind"] for r in rows]
+    assert kinds == ["ws-recv", "ws-send", "ws-recv"], kinds
+    return tuple(str(r.get("payload") or "") for r in rows)
+
+
+class _AutodraftSocket:
+    """A `_ReplaySocket` that can also answer back.
+
+    Delivers the JOIN replay burst and then goes quiet (TimeoutError, the
+    real `websockets` contract for "nothing waiting"), exactly like
+    _ReplaySocket. Two additions:
+
+      - `flip()`, called from the test, queues ESPN's unprompted `AUTODRAFT 2
+        true` -- the frame a missed pick produces, arriving with nothing sent
+        to provoke it.
+      - a send is echoed ONLY when it matches the capture's own outbound
+        frame byte for byte. That is deliberate and is what makes the round
+        trip a real pin on the wire format: an endpoint that sent
+        `AUTODRAFT 0`, or included the team id ESPN's inbound frames carry,
+        would get no echo and time out rather than quietly passing.
+
+    Locked because `send` runs on whatever thread FastAPI hands the request
+    while `recv` runs on the listener thread -- the same split
+    pipeline.draft_socket.SocketHandle exists for.
+    """
+
+    def __init__(self, frames, flip_frame, outbound, echo_frame):
+        self._lock = threading.Lock()
+        self._frames = list(frames)
+        self._queued = []
+        self._flip_frame = flip_frame
+        self._outbound = outbound
+        self._echo_frame = echo_frame
+        self.sent = []
+
+    def flip(self):
+        """ESPN putting us on autodraft with nothing sent to ask for it."""
+        with self._lock:
+            self._queued.append(self._flip_frame)
+
+    def recv(self, timeout=None):
+        with self._lock:
+            if self._frames:
+                return self._frames.pop(0)
+            if self._queued:
+                return self._queued.pop(0)
+        raise TimeoutError
+
+    def send(self, text):
+        with self._lock:
+            self.sent.append(text)
+            if text == self._outbound:
+                self._queued.append(self._echo_frame)
+
+    def close(self):
+        pass
+
+
+def _autodraft_of(client):
+    return client.get("/api/live/state").json()["autodraft"]
+
+
+def _make_state_readable(state):
+    """live_app_on_clock's session is built for /api/live/select, which needs
+    only teams/rounds and a board -- /api/live/state additionally serves the
+    league shape and replays the drafted rows for my_roster, so it needs a
+    real LeagueSettings and a pool. Same trivial-pool/real-settings patch
+    test_state_reports_socket_alive and test_state_reports_draft_started_from
+    _the_listener each already apply inline, for the same reason (`drafted` is
+    empty in this fixture, so nothing is replayed)."""
+    state["session"] = dataclasses.replace(
+        state["session"],
+        pool=type("P", (), {"player_id": np.array([])})(),
+        settings=league_mod.LeagueSettings(
+            season=2026, teams=8,
+            starters={"QB": 1, "RB": 2, "WR": 2, "TE": 1, "K": 1, "DST": 1},
+            flex_slots=1, bench=6, scoring={"receptions": 1.0},
+            draft_type="SNAKE"))
+
+
+@pytest.mark.skipif(not _SOCKET_FIXTURE.exists(), reason="no draft capture")
+def test_espn_flipping_us_onto_autodraft_is_seen_and_can_be_turned_back_off(
+        tmp_path, monkeypatch, _isolated_leagues_root):
+    """The whole round trip, in the order draft night produces it.
+
+    1. Connect mid-draft. The capture's own first frame is `AUTODRAFT 2
+       false`, so the room starts out correctly saying autodraft is off.
+    2. ESPN flips us on, unprompted (the captured frame from the moment team
+       2's clock ran out). /api/live/state has to notice with nothing having
+       asked it to.
+    3. POST /api/live/autodraft {"on": false} sends the capture's own
+       outbound frame and returns only once ESPN's echo names OUR team --
+       and the state then reads off that echo, not off the request.
+    """
+    flip_on, outbound, echo_off = _autodraft_frames()
+
+    sockets = []
+
+    def make_socket(frames):
+        sock = _AutodraftSocket(frames, flip_on, outbound, echo_off)
+        sockets.append(sock)
+        return sock
+
+    client, _by_espn, _ids = _join_mid_draft(
+        monkeypatch, tmp_path, _isolated_leagues_root, 3,
+        make_socket=make_socket)
+    try:
+        # Off to start with, and known to be off -- not merely "not yet
+        # heard of". The capture opens with ESPN stating it.
+        assert _wait_until(lambda: _autodraft_of(client) is False), \
+            "the JOIN replay's own AUTODRAFT frame never reached the state"
+
+        sockets[0].flip()
+        assert _wait_until(lambda: _autodraft_of(client) is True), \
+            "ESPN put us on autodraft and the room never noticed"
+
+        res = client.post("/api/live/autodraft", json={"on": False})
+        assert res.status_code == 200, res.text
+        assert res.json() == {"autodraft": False, "changed": True}
+        # Byte for byte the frame ESPN's own client sent (trace line 1186):
+        # no team id, because the socket already identifies the team.
+        assert sockets[0].sent == [outbound]
+        # And the state follows ESPN's echo, which is the only reason the
+        # call above returned at all.
+        assert _autodraft_of(client) is False
+    finally:
+        client.post("/api/live/stop")
+
+
+@pytest.mark.skipif(not _SOCKET_FIXTURE.exists(), reason="no draft capture")
+def test_joining_a_draft_while_already_on_autodraft_learns_it_from_the_replay(
+        tmp_path, monkeypatch, _isolated_leagues_root):
+    """Connecting mid-draft to a team ESPN is ALREADY drafting for.
+
+    This is the case a naive implementation gets wrong in the most dangerous
+    direction -- silently reporting "autodraft off" for a session whose picks
+    ESPN is making. Two things have to hold for it to work, and both are
+    properties of the real capture rather than of the code:
+
+      - ESPN states autodraft in the JOIN replay at all (it does: the
+        capture's very first frame, before INIT, before anything).
+      - it states it BEFORE the TOKEN frame that names our own team (it does:
+        trace line 503 vs line 511). So the listener cannot decide "is this
+        me?" as the frame arrives; it has to keep the flag per team id and
+        resolve ours later.
+
+    The replay here is the capture's own, with its leading `AUTODRAFT 2
+    false` swapped for the captured `AUTODRAFT 2 true` -- the same frame, the
+    same team, from the same session, moved to the position a draft already
+    on autodraft would put it in. Nothing else about the burst changes: the
+    SELECTED frames, and so the picks and the crosswalk, are untouched.
+    """
+    flip_on, outbound, echo_off = _autodraft_frames()
+    off_frame = echo_off      # `AUTODRAFT 2 false`, what the replay carries
+
+    swapped = []
+
+    def make_socket(frames):
+        replay = list(frames)
+        assert replay[0] == off_frame, \
+            f"the capture no longer opens with {off_frame!r}: {replay[0]!r}"
+        replay[0] = flip_on
+        swapped.append(True)
+        return _AutodraftSocket(replay, flip_on, outbound, echo_off)
+
+    client, _by_espn, _ids = _join_mid_draft(
+        monkeypatch, tmp_path, _isolated_leagues_root, 3,
+        make_socket=make_socket)
+    try:
+        assert swapped, "the replay socket was never built"
+        assert _wait_until(lambda: _autodraft_of(client) is True), \
+            "a connect that JOINed an already-autodrafting team reported " \
+            f"autodraft={_autodraft_of(client)!r}"
+        # Not a fluke of ordering: the picks landed too, so this is the real
+        # replay path and not a listener that stopped at the first frame.
+        assert _wait_until(
+            lambda: client.get("/api/live/state").json()["picks_made"] == 3)
+    finally:
+        client.post("/api/live/stop")
+
+
+# --- POST /api/live/autodraft: the guards ---------------------------------
+#
+# Same fixtures the SELECT tests use (see _live_app / live_app_on_clock), for
+# the failure states that need no capture: they are about this session's own
+# shape, not about anything ESPN sent.
+
+
+def test_autodraft_with_no_session_is_409(tmp_path):
+    client, _state = _live_app(tmp_path)
+    res = client.post("/api/live/autodraft", json={"on": False})
+    assert res.status_code == 409
+    assert "no live draft session" in res.json()["detail"]
+
+
+def test_autodraft_with_no_socket_is_503(live_app_on_clock_no_socket):
+    """The browser-observer path (/api/live/connect) publishes no
+    SocketHandle at all, and a run_socket_listener reconnect detaches the one
+    it has -- neither can send, and both must say so rather than time out."""
+    client, state = live_app_on_clock_no_socket
+    state["listener"].on_frame("TOKEN 1:1:30:{X}:1\n")
+    res = client.post("/api/live/autodraft", json={"on": False})
+    assert res.status_code == 503
+
+
+def test_autodraft_before_the_socket_names_our_team_is_refused(live_app_on_clock):
+    """ESPN broadcasts AUTODRAFT for every team in the room, so without our
+    own team id there is nothing to match an echo against -- confirming on a
+    neighbour's frame would report a change that never happened to us.
+    Refused rather than guessed."""
+    client, _state, ws, listener = live_app_on_clock
+    assert listener.my_team_id is None
+    res = client.post("/api/live/autodraft", json={"on": True})
+    assert res.status_code == 409
+    assert "ESPN team" in res.json()["detail"]
+    assert ws.sent == []
+
+
+def test_autodraft_returns_only_on_espns_echo_for_our_own_team(live_app_on_clock):
+    """A neighbour flipping must not confirm our request. Team 3's frame is
+    fed first and has to be ignored; only team 30's -- ours, per the TOKEN
+    below -- answers the request."""
+    client, state, ws, listener = live_app_on_clock
+    _make_state_readable(state)
+    listener.on_frame("TOKEN 1:1:30:{X}:1\n")
+    ws.on_send(lambda text: (listener.on_frame("AUTODRAFT 3 true\n"),
+                             listener.on_frame("AUTODRAFT 30 true\n")))
+    res = client.post("/api/live/autodraft", json={"on": True})
+    assert res.status_code == 200
+    assert ws.sent == ["AUTODRAFT true\n"]
+    assert res.json() == {"autodraft": True, "changed": True}
+    assert client.get("/api/live/state").json()["autodraft"] is True
+
+
+def test_autodraft_times_out_without_confirmation_and_changes_nothing(
+        live_app_on_clock, monkeypatch):
+    """No echo means no claim. The endpoint must not report success, and
+    nothing may write the flag on the request's behalf -- only ESPN's own
+    frame ever sets it."""
+    import api.live
+    monkeypatch.setattr(api.live, "AUTODRAFT_TIMEOUT_SECONDS", 0.2)
+    client, state, ws, listener = live_app_on_clock
+    _make_state_readable(state)
+    listener.on_frame("TOKEN 1:1:30:{X}:1\n")
+    listener.on_frame("AUTODRAFT 30 true\n")
+    res = client.post("/api/live/autodraft", json={"on": False})
+    assert res.status_code == 504
+    assert "still on" in res.json()["detail"]
+    assert ws.sent == ["AUTODRAFT false\n"]
+    # Unchanged, and still ESPN's last word rather than the request's.
+    assert listener.my_autodraft is True
+    assert client.get("/api/live/state").json()["autodraft"] is True
+
+
+def test_autodraft_already_in_the_requested_state_sends_nothing(live_app_on_clock):
+    """ESPN has not been observed re-broadcasting a flag that did not change,
+    so a redundant send would sit out the whole timeout and then report
+    failure for a state that is already exactly what was asked for. The
+    honest answer is the state itself, and `changed: false` to say no command
+    was sent."""
+    client, _state, ws, listener = live_app_on_clock
+    listener.on_frame("TOKEN 1:1:30:{X}:1\n")
+    listener.on_frame("AUTODRAFT 30 true\n")
+    res = client.post("/api/live/autodraft", json={"on": True})
+    assert res.status_code == 200
+    assert res.json() == {"autodraft": True, "changed": False}
+    assert ws.sent == []
+
+
+def test_autodraft_send_failure_via_connection_closed_is_503_not_500(
+        live_app_on_clock):
+    """The same race live_select documents: this request reads the socket
+    reference just before the listener thread detaches and closes it, and the
+    real connection underneath raises ConnectionClosed -- which is NOT a
+    subclass of ConnectionError. Catching only the builtin would turn a
+    dropped socket into a 500."""
+    from websockets.exceptions import ConnectionClosed
+
+    client, _state, ws, listener = live_app_on_clock
+    listener.on_frame("TOKEN 1:1:30:{X}:1\n")
+    ws.send_error = ConnectionClosed(None, None)
+    res = client.post("/api/live/autodraft", json={"on": True})
+    assert res.status_code == 503
+    assert "could not reach ESPN" in res.json()["detail"]
+
+
+def test_state_reports_autodraft_null_when_espn_has_not_said(live_app_on_clock):
+    """Null, not false. "We have not been told" and "ESPN says it is off" are
+    different facts, and defaulting the first to the second would hide
+    exactly the state this feature exists to surface."""
+    client, state, _ws, _listener = live_app_on_clock
+    _make_state_readable(state)
+    assert client.get("/api/live/state").json()["autodraft"] is None
+
+
+def test_inactive_state_carries_the_autodraft_key(tmp_path):
+    """Present with a null value, never omitted -- the same convention
+    listener_alive/socket_alive already follow on this branch."""
+    client, _state = _live_app(tmp_path)
+    body = client.get("/api/live/state").json()
+    assert body["active"] is False
+    assert "autodraft" in body and body["autodraft"] is None

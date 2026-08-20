@@ -1281,6 +1281,151 @@ td:first-child {
   color: var(--text-3);
 }
 
+/* -- autodraft: ESPN making your picks for you --------------------------
+
+   Miss a pick and ESPN flips your team onto autodraft and carries on
+   drafting without you. State first, control second: the switch lives at the
+   top right of the clock panel where the countdown already draws the eye,
+   and it is deliberately quiet while autodraft is off -- a grey track next
+   to a 48px clock. When ESPN has turned it on the whole panel changes
+   underneath it, because at that point this is not a setting, it is an
+   alarm. */
+
+.clock-headline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+/* The label follows the panel's own state colour, like every other
+   .draft-cap in the rail -- deliberately not overridden. Verified on the
+   rendered panel: red label over a red switch reads as one unit, which is
+   what it is, and singling it out in grey made it the only cap in the panel
+   that did not match. */
+.autodraft {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-1);
+  flex-shrink: 0;
+}
+
+/* ESPN has not reported the flag yet (see api.ts's `autodraft`): a dash, not
+   a switch drawn in the "off" position -- there is no honest position for a
+   two-state control to sit in when the state is unknown. */
+.autodraft-unknown {
+  font-size: var(--text-md);
+  font-weight: 700;
+  color: var(--text-3);
+  line-height: 20px;
+}
+
+.autodraft-switch {
+  position: relative;
+  width: 38px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-2);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.autodraft-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text-3);
+  transition: transform 120ms ease, background 120ms ease;
+}
+
+/* On means ESPN is picking for you, so this is the failure colour, not the
+   accent -- the accent already means "your turn / interactive" everywhere
+   else in the room and reusing it here would read as a good state. */
+.autodraft-switch.is-on {
+  background: var(--fail);
+  border-color: var(--fail);
+}
+
+.autodraft-switch.is-on .autodraft-knob {
+  background: var(--text-1);
+  transform: translateX(18px);
+}
+
+.autodraft-switch:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* In flight: visibly waiting on ESPN and not accepting another click. The
+   knob holds its confirmed position -- it must not slide to where the
+   request is asking to go, since that is exactly the optimistic state this
+   whole path refuses. */
+.autodraft-switch.is-pending {
+  opacity: 0.55;
+  animation: autodraft-pending 1.1s ease-in-out infinite;
+}
+
+@keyframes autodraft-pending {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 0.85; }
+}
+
+/* Disabled but not pending: no socket to send on (the browser-observer path,
+   or a reconnect in progress). Still shows the state, just cannot change it
+   -- the title says why. */
+.autodraft-switch:disabled {
+  cursor: not-allowed;
+}
+
+.autodraft-switch:disabled:not(.is-pending) {
+  opacity: 0.5;
+}
+
+/* The panel itself while ESPN is drafting for you. Ordered AFTER
+   .clock-panel-up on purpose: the two can be true at once (on the clock and
+   already autodrafting is the worst case there is), equal specificity means
+   the later rule wins, and the one that has to win is the alarm. */
+.clock-panel-auto {
+  background: color-mix(in srgb, var(--fail) 12%, transparent);
+}
+
+.clock-panel-auto .draft-cap {
+  color: var(--fail);
+}
+
+.autodraft-alert {
+  margin-top: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--fail);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--fail) 16%, transparent);
+  font-size: var(--text-sm);
+  color: var(--text-1);
+  line-height: 1.5;
+}
+
+.autodraft-alert strong {
+  display: block;
+  font-weight: 700;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .autodraft-switch,
+  .autodraft-knob {
+    transition: none;
+  }
+
+  .autodraft-switch.is-pending {
+    animation: none;
+  }
+}
+
 /* -- roster panel -- */
 
 .roster-panel {
