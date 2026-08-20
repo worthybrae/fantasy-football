@@ -7,12 +7,40 @@ from scoring import factors, league
 from scoring.board import _norm_name, _adapt_depth_charts
 from scoring.board_cache import cached_build_board
 from scoring.config import RECENCY_WEIGHTS
-from scoring.profile_cache import cached_profile_frames, snap_share_by_season
+from scoring.profile_cache import (RANK_MIN_GAMES, _table_columns,
+                                   cached_profile_frames, season_rank_frame,
+                                   snap_share_by_season)
 from scoring.ppr import compute_ppr_points, normalize_rules, prices_kicking
-from scoring.similarity import (player_season_features, find_twins,
-                                value_neighbors)
+from scoring.similarity import (_age_in_season, player_season_features,
+                                find_twins, value_neighbors)
 
 _KDST_POSITIONS = {"K", "DST"}
+
+# The comparable cohort's band, and the one number on this page that is a
+# CALIBRATION rather than a derivation -- named as such, the way
+# scoring/config.py names STREAMED_REPLACEMENT_RANK and NEED_WEIGHTS, so
+# nobody later mistakes it for something that fell out of the data.
+#
+# There is no ground truth for "how close is close enough to be a
+# comparable". What there is, measured on data/nfl.duckdb for Jahmyr Gibbs'
+# 21.6-ppg third season, is a straight trade of sample size against
+# tightness:
+#
+#     +-1 ppg / same year     n = 2     median -- (too few to have a shape)
+#     +-3 ppg / +-1 year      n = 19    median -2.8 ppg, 13 of 19 declined
+#     +-4 ppg / +-2 years     n = 40    median -2.6 ppg
+#
+# +-3/+-1 is the tightest band that still produces a distribution rather
+# than an anecdote. n=2 is not a cohort; +-4/+-2 doubles the sample for a
+# median that barely moves, by admitting backs two years further along the
+# age curve, which is the one axis the cohort exists to hold still.
+#
+# The band is SERVED in the payload (`cohort.ppg_band` / `cohort.exp_band`)
+# rather than only applied, because a card that says "19 comparable seasons"
+# without saying what made them comparable is asking to be believed rather
+# than read.
+COMP_PPG_BAND = 3.0
+COMP_EXP_BAND = 1
 
 # Distinguishable from an explicit `snap_share=None`, which means "there is
 # no snap data" -- a real, different answer from "work it out yourself".
@@ -48,6 +76,18 @@ def _round_or_none(v, ndigits):
     if v is None or (isinstance(v, float) and math.isnan(v)) or pd.isna(v):
         return None
     return round(float(v), ndigits)
+
+
+def _int_or_none(v):
+    """`int(v)` unless there is nothing to convert.
+
+    Ranks arrive as floats out of pandas' `rank`/`transform`, and a season
+    that did not qualify has no rank at all. `int(nan)` is a ValueError and
+    `_scrub` never sees it, so the None has to happen here.
+    """
+    if v is None or pd.isna(v):
+        return None
+    return int(v)
 
 
 def _stat_line(row, position):
@@ -136,20 +176,30 @@ def _game_stats(row):
 
 def season_summaries(weekly: pd.DataFrame, snaps: pd.DataFrame | None, player_id: str,
                      *, season_features: pd.DataFrame | None = None,
-                     snap_share=_UNSET, rules: dict | None = None) -> list[dict]:
+                     snap_share=_UNSET, rules: dict | None = None,
+                     season_ranks=_UNSET) -> list[dict]:
     """Per-season rows for one player.
 
-    Only ONE thing here is league-wide: `pos_finish`, which ranks this
-    player against every other player-season in `season_features`.
-    Everything else reads `weekly[weekly.player_id == player_id]` and
-    `snaps` for this player's name/team/season. So a caller that already
-    holds the two league-wide aggregates -- the features frame and the
-    snap-share aggregate -- may pass them in and hand `weekly` nothing but
-    this player's rows, and `snaps` nothing at all. That is what
-    scoring/profile.py's `build_profile` does now: recomputing them per
-    click cost 0.211s and 0.343s respectively on data/nfl.duckdb (see
-    scoring/profile_cache.py). Pass neither and the behaviour is what it
-    always was, which is what every test here does.
+    Only TWO things here are league-wide: `pos_finish`, which ranks this
+    player against every other player-season in `season_features`, and the
+    per-position rank pair (`pos_rank_ppg` / `cv_rank`) that comes out of
+    `season_ranks`. Everything else reads `weekly[weekly.player_id ==
+    player_id]` and `snaps` for this player's name/team/season. So a caller
+    that already holds the three league-wide aggregates -- the features
+    frame, the snap-share aggregate and the rank frame -- may pass them in
+    and hand `weekly` nothing but this player's rows, and `snaps` nothing at
+    all. That is what scoring/profile.py's `build_profile` does now:
+    recomputing them per click cost 0.211s and 0.343s respectively on
+    data/nfl.duckdb (see scoring/profile_cache.py). Pass none of them and
+    the behaviour is what it always was, which is what every test here does.
+
+    `season_ranks` follows `season_features`' convention, not
+    `snap_share`'s: `_UNSET` means "derive it from what I gave you"
+    (`profile_cache.season_rank_frame`), and it carries the same hazard
+    `pos_finish` already carries -- derived from one player's rows it says
+    "1st of 1". A caller narrowing `weekly` to one player MUST pass the
+    league-wide frame, and `build_profile` does. `None` means "this database
+    cannot produce ranks", and every rank key comes back null.
 
     `rules` is the league's `settings.scoring`; None is full PPR. It prices
     `ppg_std` here directly, and -- on the path that computes them -- `ppg`,
@@ -157,7 +207,9 @@ def season_summaries(weekly: pd.DataFrame, snaps: pd.DataFrame | None, player_id
     supplying `season_features` MUST have priced that frame under the same
     rules, or a row would carry a half-PPR volatility beside a full-PPR
     average: `build_profile` gets both from `cached_profile_frames(conn,
-    rules)`, which keys on them (scoring/profile_cache.py).
+    rules)`, which keys on them (scoring/profile_cache.py). The same applies
+    to `season_ranks`, whose coefficient of variation divides one
+    rules-priced number by another.
     """
     if weekly.empty:
         return []
@@ -190,6 +242,24 @@ def season_summaries(weekly: pd.DataFrame, snaps: pd.DataFrame | None, player_id
         mine = mine.rename(columns={"offense_pct": "snap_share"})
     else:
         mine["snap_share"] = np.nan
+
+    # Positional rank by points per game, and the scale-adjusted volatility
+    # rank beside it -- both league-wide, both built once per database in
+    # profile_cache.season_rank_frame (read that function for why the
+    # volatility rank is a coefficient of variation and not a sigma).
+    # A season below RANK_MIN_GAMES has no row in the frame and comes back
+    # null on every one of these keys, which is the honest answer: it was
+    # not ranked, so there is no rank to show.
+    ranks = (season_rank_frame(weekly, feats, rules)
+             if season_ranks is _UNSET else season_ranks)
+    rank_cols = ["pos_rank_ppg", "pos_rank_ppg_n", "cv", "cv_rank",
+                 "cv_rank_n", "cv_pos_median"]
+    if ranks is not None and not ranks.empty:
+        mine = mine.merge(ranks[["player_id", "season"] + rank_cols],
+                          on=["player_id", "season"], how="left")
+    else:
+        for c in rank_cols:
+            mine[c] = np.nan
 
     # Passing aggregates aren't part of player_season_features (that frame
     # feeds twin matching in similarity.py and must not change) -- aggregate
@@ -257,6 +327,17 @@ def season_summaries(weekly: pd.DataFrame, snaps: pd.DataFrame | None, player_id
             "fg_long": int(r["fg_long"]),
             "pat_made": int(r["pat_made"]),
             "pat_att": int(r["pat_att"]),
+            # Additive, like the kicking block above it and the passing block
+            # before that: an existing client indexes the keys it knows by
+            # name and ignores the rest, so nothing it already renders moves.
+            # Every one of these is null for a season under RANK_MIN_GAMES --
+            # a rank nobody computed is not a rank of zero.
+            "pos_rank_ppg": _int_or_none(r["pos_rank_ppg"]),
+            "pos_rank_ppg_n": _int_or_none(r["pos_rank_ppg_n"]),
+            "cv": _round_or_none(r["cv"], 3),
+            "cv_rank": _int_or_none(r["cv_rank"]),
+            "cv_rank_n": _int_or_none(r["cv_rank_n"]),
+            "cv_pos_median": _round_or_none(r["cv_pos_median"], 3),
         })
     return rows
 
@@ -409,6 +490,20 @@ def weekly_difficulty(schedules: pd.DataFrame, prior_weekly: pd.DataFrame,
     pct = its percentile among all teams (high = allows a lot = soft
     matchup). Weeks without a game (bye) carry a null opponent.
 
+    rank / rank_n = the same ordering as a plain league rank, 1 = SOFTEST
+    (allows the most), out of however many defences the prior season has
+    rows for (32 on data/nfl.duckdb, for every position). Added because the
+    owner asked for it in those words: a percentile is a number you have to
+    convert before you can use it, and "41st percentile" and "20th of 32"
+    are the same fact with one of them readable at a glance. `pct` is left
+    exactly as it was -- it is what the existing schedule strip renders, and
+    changing it would move a number nobody asked to move.
+
+    Note the DIRECTION, because it is the opposite of a difficulty rank: a
+    HIGH `fpa_pg` is a GOOD matchup, so rank 1 goes to the defence that gave
+    up the most, not the least (2025, RB: Cincinnati 1st at 28.3 allowed,
+    Denver 32nd at 16.9).
+
     K is included exactly when the league prices kicking, and for the same
     reason scoring/board.py stops neutralising a kicker's `schedule` factor
     then: both numbers are the same quantity -- prior-season points allowed
@@ -434,6 +529,10 @@ def weekly_difficulty(schedules: pd.DataFrame, prior_weekly: pd.DataFrame,
     if allowed.empty:
         return []
     pct = allowed.rank(pct=True) * 100
+    # `method="min"` so a tie reads as a shared position ("two teams 5th")
+    # rather than a fractional rank, matching every other rank in this file.
+    rank = allowed.rank(ascending=False, method="min")
+    rank_n = int(len(allowed))
     games = {}
     mine = schedules[(schedules["home_team"] == team) | (schedules["away_team"] == team)]
     for _, g in mine.iterrows():
@@ -449,8 +548,234 @@ def weekly_difficulty(schedules: pd.DataFrame, prior_weekly: pd.DataFrame,
             "week": week, "opponent": opp, "home": home,
             "fpa_pg": round(float(allowed[opp]), 1) if opp in allowed.index else None,
             "pct": round(float(pct[opp])) if opp in pct.index else None,
+            "rank": int(rank[opp]) if opp in rank.index else None,
+            "rank_n": rank_n if opp in rank.index else None,
         })
     return rows
+
+
+def comparable_cohort(pool: pd.DataFrame, feats: pd.DataFrame, player_id: str,
+                      rookie_season: int | None = None) -> dict | None:
+    """Seasons that looked like this player's latest one, and what happened next.
+
+    `similar` (stat twins) answers "who does he most resemble" and returns
+    five names. This answers a different question the card needs -- "what
+    does a season like this usually do next" -- and that needs a
+    distribution, not a top five. So the cohort is not a nearest-neighbour
+    list at all: it is every qualifying season inside a band, unranked, with
+    the median and the decline count that only mean anything over a whole
+    group.
+
+    THE BAND IS A CALIBRATION, NOT A DERIVATION. See COMP_PPG_BAND above for
+    the three bands that were measured and why +-3 ppg / +-1 NFL season was
+    picked, and note that the payload carries the band it used so the card
+    can say what it did.
+
+    The target season is the latest one this player has, chosen the same way
+    `find_twins` chooses its own (`sort_values("season").iloc[-1]`) so the
+    two blocks on the page are talking about the same season. It is also
+    excluded from its own cohort -- a season is not a comparable for itself
+    -- but the player's OTHER seasons are NOT excluded. That is deliberate:
+    Gibbs' own 2024 is one of the nineteen seasons that most resembles his
+    2025, and dropping it would be dropping evidence for a tidiness that
+    helps nobody. (Where it happens to be moot, as here: 2025 has no 2026 to
+    change into, so it could never have entered its own cohort anyway.)
+
+    `change` is served per comparable, not just `next_ppg`. The raw next
+    year is the number the twin block already shows and it makes the reader
+    do the subtraction against a different starting point for every row;
+    the card wants the distribution of MOVEMENT, which is one column.
+
+    `rookie_season` is passed in rather than looked up here -- `player_bio`
+    has already resolved it out of `players` for the header, and doing it
+    twice cost 2.3 ms of `drop_duplicates` over 25,044 rows per click. None
+    (a player nflverse has no rookie season for) drops the experience band
+    and keeps the points-per-game one, which is a wider cohort honestly
+    labelled: the payload's `exp_band` comes back null to say so.
+
+    None when there is no target season at all (no weekly history: rookies,
+    defenses) -- the same "hide the card" signal the empty lists elsewhere
+    give.
+    """
+    if feats.empty or pool.empty:
+        return None
+    mine = feats[feats["player_id"] == player_id]
+    if mine.empty:
+        return None
+    target = mine.sort_values("season").iloc[-1]
+    exp = (int(target["season"]) - int(rookie_season) + 1
+           if rookie_season is not None else None)
+
+    band = pool[(pool["position"] == target["position"])
+                & ((pool["ppg"] - target["ppg"]).abs() <= COMP_PPG_BAND)]
+    if exp is not None:
+        band = band[(band["nfl_season"] - exp).abs() <= COMP_EXP_BAND]
+    band = band[~((band["player_id"] == player_id)
+                  & (band["season"] == target["season"]))]
+
+    change = band["change"]
+    comps = [{"player_id": r["player_id"], "name": r["name"],
+              "season": int(r["season"]),
+              "nfl_season": _int_or_none(r["nfl_season"]),
+              "ppg": round(float(r["ppg"]), 1),
+              "next_ppg": round(float(r["next_ppg"]), 1),
+              "change": round(float(r["change"]), 1)}
+             for _, r in band.sort_values("change").iterrows()]
+    return {
+        "season": int(target["season"]),
+        "position": target["position"],
+        "ppg": round(float(target["ppg"]), 1),
+        "nfl_season": exp,
+        # The calibration, served so the card can state it.
+        "ppg_band": COMP_PPG_BAND,
+        "exp_band": COMP_EXP_BAND if exp is not None else None,
+        "min_games": RANK_MIN_GAMES,
+        "n": len(comps),
+        "median_change": _round_or_none(change.median(), 1),
+        "declined": int((change < 0).sum()),
+        "improved": int((change > 0).sum()),
+        "players": comps,
+    }
+
+
+def snap_share_by_game(conn, crosswalk: pd.DataFrame, snap_columns,
+                       player_id: str) -> dict:
+    """(season, week) -> offensive snap share, for every regular-season game.
+
+    The season means the profile already carries hides the story the card
+    wants to tell. Gibbs' 2025 reads 0.66 as one number; week by week it is
+    66, 56, 69, 62, 52, 69, 56, 66, 50, 73, 74, 70, 69, 81, 86, 69, 71 -- a
+    role that grew through the year, which is a different thing to know
+    about a running back than "two thirds of the snaps".
+
+    Keyed through `oline.reconcile_pfr_to_gsis` (see
+    profile_cache._pfr_crosswalk) rather than by name: the season aggregate
+    can afford a name+team+season join because it is averaging, and this
+    cannot -- attaching the wrong Michael Jordan's snaps to seventeen
+    individual games is a per-game lie, not a smoothed one.
+
+    REG only, unlike `snap_share`, which averages every row `snap_counts`
+    has including playoffs. This has to be REG because it is joined onto
+    `game_log`, whose rows come from `weekly` -- a REG-only table on this
+    database (verified: `SELECT DISTINCT season_type FROM weekly` is
+    ['REG']). A playoff snap row would otherwise land on the week-19-and-up
+    rows the log does not have, or worse, collide with a regular-season week
+    number from an 18-week era.
+
+    An empty dict is the answer for a player the crosswalk cannot resolve
+    (6.6% of skill-position snap rows), for a database with no snap table,
+    and for a defense. Every game_log row then carries a null, not a zero.
+    """
+    if crosswalk is None or crosswalk.empty:
+        return {}
+    hit = crosswalk[crosswalk["gsis_id"] == player_id]
+    if hit.empty:
+        return {}
+    # `snap_columns` comes off the frame profile_cache already read, rather
+    # than an information_schema query per request (1.1 ms, measured).
+    cols = set(snap_columns)
+    if not {"season", "week", "offense_pct", "pfr_player_id"}.issubset(cols):
+        return {}
+    # The filter is pushed into SQL for the same measured reason
+    # `_player_weekly` pushes its own: snap_counts is 253,106 rows and this
+    # wants at most ~120 of them (1.6 ms against 0.165s for the whole table).
+    where = "pfr_player_id = ?"
+    params = [hit.iloc[0]["pfr_player_id"]]
+    if "game_type" in cols:
+        where += " AND game_type = 'REG'"
+    rows = conn.execute(
+        f"SELECT season, week, offense_pct FROM snap_counts WHERE {where}",
+        params).df()
+    return {(int(r["season"]), int(r["week"])): r["offense_pct"]
+            for _, r in rows.iterrows() if not pd.isna(r["offense_pct"])}
+
+
+def team_line_quality(lq: pd.DataFrame, season: int, team, position) -> dict | None:
+    """The team's offensive line, ranked against the other 31.
+
+    `scoring/oline.py` has been built, tested and unused since it was
+    written -- imported by nothing but its own test file. This is the wiring.
+    The composite AND its four components are all served, because the
+    composite alone is an opaque 0-100 and the parts are what make it
+    arguable: Detroit's 2026 line is 21st at 44.4 not because it is falling
+    apart (continuity 0.815) but because its five starters have missed a
+    quarter of their careers between them (availability 0.748) -- a
+    different thing for a manager to know.
+
+    `rank` is out of `len(lq)` (32 on a full database), 1 = best line, which
+    is the direction `line_quality` already sorts in.
+
+    DST GETS NULL, DELIBERATELY. A defense's own team's offensive line tells
+    you nothing about the defense -- it is a fact about the eleven players
+    who leave the field when it comes on. Serving it anyway would put a
+    plausible-looking number on the card that means nothing, which is worse
+    than a blank. Kickers keep it: a kicker's attempts come from his own
+    offence moving the ball, so the line is the same input for him as for a
+    running back, just weaker.
+    """
+    if lq is None or lq.empty or position == "DST" or not isinstance(team, str):
+        return None
+    ranked = lq.reset_index(drop=True)
+    hit = ranked.index[ranked["team"] == team]
+    if len(hit) == 0:
+        return None
+    r = ranked.loc[hit[0]]
+    return {
+        "season": int(season),
+        "team": team,
+        "rank": int(hit[0]) + 1,
+        "teams": int(len(ranked)),
+        "line_quality": _round_or_none(r["line_quality"], 1),
+        "continuity": _round_or_none(r["continuity_raw"], 3),
+        "availability": _round_or_none(r["availability_raw"], 3),
+        "returning": _round_or_none(r["returning_raw"], 3),
+        "experience": _round_or_none(r["experience_raw"], 1),
+    }
+
+
+def player_bio(players: pd.DataFrame, player_id: str, season: int) -> dict:
+    """Birth date, rookie season, and the two numbers derived from them.
+
+    AGE IS AS OF SEPTEMBER 1 OF THE SEASON YEAR, which is not a new
+    convention invented here: it is `similarity._age_in_season`, which the
+    stat-twin block has always matched comparables on, imported rather than
+    re-implemented so the "age 23" on one half of the card cannot disagree
+    with the "age 23" on the other. September 1 is opening week, so the
+    number is "how old was he while he was playing that season" rather than
+    "how old was he on some arbitrary January boundary" -- and for a player
+    born in the middle of a season, the first is the honest one. (Jahmyr
+    Gibbs, born 2002-03-20: 23 through the whole of 2025, 24 through 2026.)
+
+    `nfl_season` is 1-BASED -- a rookie year is his 1st NFL season, not his
+    0th -- from `players.rookie_season`, the same column `oline._experience`
+    counts service time off. Gibbs' rookie season is 2023, so 2025 is his
+    third and the 2026 he is being drafted for is his fourth.
+
+    `season` is the season being drafted, so the header reads as the player
+    will be this year. Each row of `seasons` carries its own `age` and
+    `nfl_season` for the same two facts as of THAT year.
+
+    Everything is None for a player the `players` table has no row for --
+    every defense, and any player nflverse has no biography for. Nulls, not
+    zeros: "age 0" is a claim, "age unknown" is the truth.
+    """
+    out = {"season": int(season), "birth_date": None, "rookie_season": None,
+           "age": None, "nfl_season": None}
+    if players.empty or "gsis_id" not in players.columns:
+        return out
+    hit = players[players["gsis_id"] == player_id]
+    if hit.empty:
+        return out
+    row = hit.iloc[0]
+    birth = row.get("birth_date")
+    if birth is not None and not pd.isna(birth):
+        out["birth_date"] = str(pd.Timestamp(birth).date())
+        out["age"] = _age_in_season(birth, int(season))
+    rookie = row.get("rookie_season")
+    if rookie is not None and not pd.isna(rookie):
+        out["rookie_season"] = int(rookie)
+        out["nfl_season"] = int(season) - int(rookie) + 1
+    return out
 
 
 def _outlook(weekly: pd.DataFrame, depth: pd.DataFrame, schedules: pd.DataFrame,
@@ -528,19 +853,6 @@ def _enrich_twins(twins: dict, board: pd.DataFrame) -> dict:
             p["rank"] = None
             p["market_rank"] = None
     return twins
-
-
-def _table_columns(conn, name: str) -> set[str]:
-    """Column names of `name`, or an empty set if the table doesn't exist.
-
-    Same existence check `read_table` (pipeline/db.py) makes, one query
-    later: the filtered reads below have to know a column is there before
-    they can put it in a WHERE clause, and a table that predates a column
-    must fall back to reading the lot rather than raising.
-    """
-    return {r[0] for r in conn.execute(
-        "SELECT column_name FROM information_schema.columns WHERE table_name = ?",
-        [name]).fetchall()}
 
 
 def _player_weekly(conn, player_id: str) -> pd.DataFrame:
@@ -679,7 +991,8 @@ def build_profile(conn, player_id: str, weights: dict | None = None,
     else:
         seasons = season_summaries(wk_mine, None, player_id,
                                    season_features=frames.season_features,
-                                   snap_share=frames.snap_share, rules=rules)
+                                   snap_share=frames.snap_share, rules=rules,
+                                   season_ranks=frames.season_ranks)
         logs = game_log(wk_mine, player_id, season_len=frames.season_len,
                         rules=rules)
     outlook_out = _outlook(frames.prior_weekly, depth, schedules, header, rules)
@@ -729,6 +1042,32 @@ def build_profile(conn, player_id: str, weights: dict | None = None,
     # expression, so rows, index and order all match; an empty `weekly`
     # still yields the empty frame this used to fall back to.
     prior = frames.prior_weekly
+
+    # -- everything the redesigned player card added, all of it additive ----
+    #
+    # `bio` is the season being drafted; each season row also gets the same
+    # two facts as of ITS year, which is what makes a history table readable
+    # (a 16-ppg season at 21 and a 16-ppg season at 30 are not the same
+    # season). Annotated after the fact rather than inside `season_summaries`
+    # so that function keeps its "one player's weekly rows plus three
+    # league-wide aggregates" shape and does not grow a `players` argument.
+    bio = player_bio(frames.players, player_id, frames.draft_season)
+    for s in seasons:
+        s["age"] = (_age_in_season(bio["birth_date"], s["season"])
+                    if bio["birth_date"] else None)
+        s["nfl_season"] = (s["season"] - bio["rookie_season"] + 1
+                           if bio["rookie_season"] else None)
+
+    # Per-game snap share, hung on the log rows it belongs to rather than
+    # served as a parallel list -- the log already carries (season, week) and
+    # the opponent for each of them. A dnp row keeps its null: he took no
+    # snaps because he did not play, which is not a snap share of zero.
+    snaps_by_game = snap_share_by_game(conn, frames.pfr_to_gsis,
+                                       frames.snap_columns, player_id)
+    for g in logs:
+        g["snap_pct"] = (None if g["dnp"] else
+                         _round_or_none(snaps_by_game.get((g["season"], g["week"])), 3))
+
     payload = {
         "header": header,
         "factors": factors_out,
@@ -740,5 +1079,15 @@ def build_profile(conn, player_id: str, weights: dict | None = None,
         "schedule": weekly_difficulty(schedules, prior, header["team"],
                                       header["position"], rules),
         "similar": similar,
+        "bio": bio,
+        # Same three-aggregate contract as `season_summaries` above: the pool
+        # and the features frame both come out of the cache priced under this
+        # league's rules, so the band, the median and the decline count are
+        # this league's points and not PPR's.
+        "cohort": (None if not seasons else
+                   comparable_cohort(frames.comp_pool, frames.season_features,
+                                     player_id, bio["rookie_season"])),
+        "oline": team_line_quality(frames.line_quality, frames.draft_season,
+                                   header["team"], header["position"]),
     }
     return _scrub(payload)

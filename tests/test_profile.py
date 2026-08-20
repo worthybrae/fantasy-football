@@ -1146,3 +1146,622 @@ def test_a_defenses_profile_is_unchanged_because_nothing_can_score_one(tmp_path)
     # league scores.
     for factor in ("production", "durability", "role", "schedule"):
         assert profile["factors"][factor] == 50.0
+
+
+# ===========================================================================
+# The redesigned player card's seven additions
+# ===========================================================================
+#
+# Everything below is ADDITIVE to the payload: no pre-existing key changes
+# value or disappears. That was checked the only way it can be checked --
+# against the real database, before and after, key by key, for a skill
+# player, a kicker and a defense (see
+# .superpowers/sdd/profile-data-report.md). What these tests pin instead is
+# the part a payload diff cannot see: that each new number is the number it
+# claims to be, and that the ones which rank a whole position-season are
+# computed once per database rather than once per click.
+
+def _card_weekly_rows():
+    """Two receivers whose RAW volatility and SCALE-ADJUSTED volatility
+    disagree, plus a third season nobody can rank.
+
+    big   40.0 ppg, weeks alternating 32 and 48 -> sigma 8.55, cv 0.214
+    small 10.0 ppg, weeks alternating  6 and 14 -> sigma 4.28, cv 0.428
+
+    `big` swings twice as far in absolute points and half as far relative to
+    what he scores. Rank the two on sigma and `big` is the more volatile of
+    the two; rank them on the coefficient and he is the steadier -- which is
+    the whole reason scoring/profile_cache.season_rank_frame divides. On
+    data/nfl.duckdb the same disagreement puts Jahmyr Gibbs' 2025 at 97th of
+    97 backs by sigma and 28th of 95 by coefficient.
+
+    `short` plays 4 games -- under RANK_MIN_GAMES -- so his season is ranked
+    nowhere and must come back null rather than 1st of a pool of one.
+
+    Each carries a 2024 season as well, so 2025 has a preceding year that
+    CAN enter a cohort (a comparable needs a following season on record).
+    """
+    def rows(pid, name, season, per_week):
+        # `big` alternates his opponent as well as his catch count, so GB
+        # concedes only his 48s and CHI only his 32s -- three teams end up in
+        # the points-allowed table with three different figures, which is
+        # what a schedule RANK needs to be a rank of anything.
+        return [{"player_id": pid, "player_display_name": name, "position": "WR",
+                 "recent_team": "DET" if pid == "big" else "GB",
+                 "opponent_team": (("GB" if w % 2 else "CHI") if pid == "big"
+                                   else "DET"),
+                 "season": season, "week": w, "receptions": r,
+                 "receiving_yards": 0, "receiving_tds": 0, "targets": r + 2,
+                 "carries": 0}
+                for w, r in enumerate(per_week, start=1)]
+    alt = lambda a, b, n: [a if i % 2 else b for i in range(n)]
+    return pd.DataFrame(
+        rows("big", "Big Swing", 2025, alt(32, 48, 8))
+        + rows("big", "Big Swing", 2024, [38] * 8)          # flat 38.0 ppg
+        + rows("small", "Small Swing", 2025, alt(6, 14, 8))
+        + rows("small", "Small Swing", 2024, [12] * 8)      # flat 12.0 ppg
+        + rows("short", "Short Season", 2025, [30] * 4)     # under the qualifier
+        + rows("short", "Short Season", 2024, [30] * 4))
+
+
+def _seed_card_fixture(tmp_path, *, snaps=None, depth=None, players=None):
+    from scoring import board_cache, profile_cache
+    board_cache.clear()
+    profile_cache.clear()
+    conn = get_conn(str(tmp_path / "card.duckdb"))
+    write_table(conn, "weekly", _card_weekly_rows())
+    write_table(conn, "schedules", pd.DataFrame([
+        {"home_team": "DET", "away_team": "GB", "week": 1,
+         "total_line": 51.0, "spread_line": 3.0},
+        {"home_team": "CHI", "away_team": "DET", "week": 2,
+         "total_line": 48.0, "spread_line": -1.0}]))
+    write_table(conn, "adp", pd.DataFrame([
+        {"adp_name": "Big Swing", "position": "WR", "team": "DET", "adp": 5.1},
+        {"adp_name": "Small Swing", "position": "WR", "team": "GB", "adp": 20.0},
+        {"adp_name": "Short Season", "position": "WR", "team": "GB", "adp": 30.0}]))
+    write_table(conn, "depth_charts", depth if depth is not None else pd.DataFrame(
+        columns=["gsis_id", "depth_team", "formation", "week", "position"]))
+    write_table(conn, "snap_counts", snaps if snaps is not None else pd.DataFrame(
+        columns=["player", "team", "season", "offense_pct"]))
+    write_table(conn, "players", players if players is not None else pd.DataFrame([
+        {"gsis_id": "big", "display_name": "Big Swing",
+         "birth_date": "2000-03-20", "rookie_season": 2023},
+        {"gsis_id": "small", "display_name": "Small Swing",
+         "birth_date": "1996-10-15", "rookie_season": 2019},
+        {"gsis_id": "short", "display_name": "Short Season",
+         "birth_date": "1999-01-01", "rookie_season": 2022}]))
+    write_table(conn, "espn_adp", pd.DataFrame(
+        columns=["espn_id", "espn_name", "position", "espn_adp", "espn_ppr_rank"]))
+    write_table(conn, "fp_ecr", pd.DataFrame(
+        columns=["fp_name", "team", "position", "rank_ecr", "rank_ave",
+                 "rank_std", "fp_tier"]))
+    write_table(conn, "sleeper_ids", pd.DataFrame(
+        columns=["gsis_id", "espn_id", "sleeper_name", "position", "team"]))
+    return conn
+
+
+def _season(profile, season):
+    return next(s for s in profile["seasons"] if s["season"] == season)
+
+
+# -- 2. positional rank by points per game ----------------------------------
+
+def test_positional_rank_by_ppg_is_distinct_from_the_total_points_finish(tmp_path):
+    """`pos_finish` ranks on SEASON TOTAL points over every player-season;
+    this ranks on POINTS PER GAME over the qualified ones. They are different
+    questions and the fixture separates them: `short` scores 30 a game, more
+    than either qualifier, but only for four games -- so he finishes last on
+    totals and would be first on per-game if he were ranked at all."""
+    conn = _seed_card_fixture(tmp_path)
+    big = _season(build_profile(conn, "big"), 2025)
+    small = _season(build_profile(conn, "small"), 2025)
+
+    assert big["ppg"] == 40.0 and small["ppg"] == 10.0
+    assert (big["pos_rank_ppg"], big["pos_rank_ppg_n"]) == (1, 2)
+    assert (small["pos_rank_ppg"], small["pos_rank_ppg_n"]) == (2, 2)
+    # The denominator is the qualified pool, not the whole position: `short`
+    # is a third WR in this season and is not in it.
+    #
+    # And the two rankings genuinely disagree, which is why both are served:
+    # on SEASON TOTALS `short`'s four 30-point games (120) beat `small`'s
+    # eight 10-point ones (80), so `small` finishes 3rd of the three -- while
+    # per game he is 2nd of the two anyone can rank.
+    short = _season(build_profile(conn, "short"), 2025)
+    assert (big["pos_finish"], short["pos_finish"], small["pos_finish"]) == (1, 2, 3)
+
+
+def test_a_season_under_the_games_qualifier_is_ranked_nowhere(tmp_path):
+    """Four games is not a season you can rank a per-game average from, and
+    the honest answer is no rank at all. Null, not 1st-of-1: a rank nobody
+    computed must not arrive looking like a computed one."""
+    conn = _seed_card_fixture(tmp_path)
+    short = _season(build_profile(conn, "short"), 2025)
+    assert short["ppg"] == 30.0        # the average is still shown
+    for key in ("pos_rank_ppg", "pos_rank_ppg_n", "cv", "cv_rank",
+                "cv_rank_n", "cv_pos_median"):
+        assert short[key] is None, key
+    # ...and he is absent from the denominator the ranked players are given.
+    assert _season(build_profile(conn, "big"), 2025)["pos_rank_ppg_n"] == 2
+
+
+# -- 3. volatility, scale-adjusted ------------------------------------------
+
+def test_volatility_ranks_on_the_coefficient_not_the_raw_deviation(tmp_path):
+    """THE REGRESSION THIS TEST EXISTS FOR.
+
+    Ranking on raw sigma re-ranks by scoring: a bigger scorer swings in
+    bigger absolute points because his good weeks are bigger, not because he
+    is less reliable (measured across the 2023-2025 running back pools of
+    data/nfl.duckdb, sigma correlates with points per game at r = 0.85 /
+    0.81 / 0.87). On raw sigma Jahmyr Gibbs' 2025 comes out 97th of 97 --
+    "the most volatile back in the league" -- and on the coefficient the same
+    season is 28th of 95.
+
+    Here `big` has DOUBLE `small`'s sigma and HALF his coefficient, so the
+    two orderings are exact opposites and no amount of luck can pass this
+    with a sigma rank.
+    """
+    conn = _seed_card_fixture(tmp_path)
+    big = _season(build_profile(conn, "big"), 2025)
+    small = _season(build_profile(conn, "small"), 2025)
+
+    # Raw sigma -- still published, unchanged, and still says the opposite.
+    assert big["ppg_std"] > small["ppg_std"]
+    assert (big["ppg_std"], small["ppg_std"]) == (8.55, 4.28)
+
+    # The coefficient, and the rank built on it.
+    assert big["cv"] == 0.214 and small["cv"] == 0.428
+    assert (big["cv_rank"], big["cv_rank_n"]) == (1, 2)
+    assert (small["cv_rank"], small["cv_rank_n"]) == (2, 2)
+
+    # The position median travels with the rank, because 0.214 is not a
+    # number anyone has intuitions about and "0.214 against 0.321" is.
+    assert big["cv_pos_median"] == small["cv_pos_median"] == 0.321
+
+
+def test_a_season_with_no_positive_mean_gets_no_coefficient(tmp_path):
+    """sigma over a mean of nothing is not a volatility, and a NEGATIVE
+    coefficient would sort as the steadiest season in the league. Such a
+    season is excluded from the volatility pool entirely -- which is why the
+    two denominators can differ (on data/nfl.duckdb, 2025's running backs are
+    97 by points per game and 95 by coefficient)."""
+    from scoring.profile_cache import season_rank_frame
+    from scoring.similarity import player_season_features
+    weekly = pd.concat([_card_weekly_rows(), pd.DataFrame(
+        [{"player_id": "sunk", "player_display_name": "Net Negative",
+          "position": "WR", "recent_team": "GB", "opponent_team": "DET",
+          "season": 2025, "week": w, "receptions": 0, "receiving_yards": 0,
+          "receiving_tds": 0, "targets": 1, "carries": 0,
+          "receiving_fumbles_lost": 1 if w % 2 else 0}
+         for w in range(1, 9)])], ignore_index=True)
+    ranks = season_rank_frame(weekly, player_season_features(weekly), None)
+    sunk = ranks[(ranks["player_id"] == "sunk") & (ranks["season"] == 2025)].iloc[0]
+
+    assert sunk["pos_rank_ppg"] == 3 and sunk["pos_rank_ppg_n"] == 3
+    assert pd.isna(sunk["cv"]) and pd.isna(sunk["cv_rank"])
+    assert sunk["cv_rank_n"] == 2          # counted out of the volatility pool
+
+
+# -- 4. comparable cohort ---------------------------------------------------
+
+def test_comparable_cohort_is_a_distribution_not_a_top_five(tmp_path):
+    """`similar` answers "who does he resemble" with five names; this answers
+    "what does a season like this usually do next", which needs every
+    qualifying season and the shape they make.
+
+    `big`'s target season is 2025 at 40.0 ppg in his 3rd year. `small`'s 2024
+    (12.0 ppg, 6th year) is outside both bands. `big`'s own 2024 (38.0 ppg,
+    2nd year, followed by 40.0) is inside both -- 2.0 ppg apart and one year
+    apart -- so it is the cohort, and its change is +2.0.
+    """
+    conn = _seed_card_fixture(tmp_path)
+    cohort = build_profile(conn, "big")["cohort"]
+
+    assert cohort["season"] == 2025 and cohort["ppg"] == 40.0
+    assert cohort["nfl_season"] == 3
+    # The band is served, not just applied: a card that says "n comparable
+    # seasons" without saying what made them comparable cannot be read.
+    assert cohort["ppg_band"] == 3.0 and cohort["exp_band"] == 1
+    assert cohort["min_games"] == 8
+
+    assert cohort["n"] == 1
+    assert cohort["declined"] == 0 and cohort["improved"] == 1
+    assert cohort["median_change"] == 2.0
+    comp = cohort["players"][0]
+    assert comp["player_id"] == "big" and comp["season"] == 2024
+    assert comp["ppg"] == 38.0 and comp["next_ppg"] == 40.0
+    # The CHANGE is served per comparable, not just the raw next season --
+    # the distribution the card draws is of movement, which is one column.
+    assert comp["change"] == 2.0
+
+
+def test_a_comparable_needs_a_following_season_on_record(tmp_path):
+    """A comp with no next year carries no "and then what", so it is not a
+    comp. Every 2025 season in this fixture is therefore ineligible (2026 has
+    not been played) -- including `big`'s own, which is why he can never turn
+    up in his own cohort here."""
+    conn = _seed_card_fixture(tmp_path)
+    cohort = build_profile(conn, "big")["cohort"]
+    assert all(c["season"] < 2025 for c in cohort["players"])
+    assert not any(c["player_id"] == "big" and c["season"] == 2025
+                   for c in cohort["players"])
+
+
+def test_the_ppg_band_actually_excludes_a_season_outside_it(tmp_path):
+    """Without a band every season of the position would be a "comparable".
+    `small`'s 2024 is 12.0 ppg against `big`'s 40.0 -- 28 points outside a
+    3-point band -- and must not appear whatever else is true of it."""
+    conn = _seed_card_fixture(tmp_path)
+    ids = {c["player_id"] for c in build_profile(conn, "big")["cohort"]["players"]}
+    assert "small" not in ids
+    # ...and read from the other side, `small`'s own cohort excludes `big`.
+    ids = {c["player_id"] for c in build_profile(conn, "small")["cohort"]["players"]}
+    assert "big" not in ids
+
+
+def test_a_player_with_no_rookie_season_keeps_the_ppg_band_and_says_so(tmp_path):
+    """Missing biography drops the experience band rather than matching one.
+    A wider cohort is fine; a wider cohort presented as a tight one is not,
+    so `exp_band` comes back null to say what happened."""
+    conn = _seed_card_fixture(tmp_path, players=pd.DataFrame([
+        {"gsis_id": "big", "display_name": "Big Swing",
+         "birth_date": None, "rookie_season": None}]))
+    cohort = build_profile(conn, "big")["cohort"]
+    assert cohort["nfl_season"] is None and cohort["exp_band"] is None
+    assert cohort["ppg_band"] == 3.0
+
+
+# -- 5. schedule as a rank --------------------------------------------------
+
+def test_schedule_serves_a_league_rank_and_rank_one_is_the_softest(tmp_path):
+    """The owner asked for a rank in place of a percentile, in those words:
+    "41st percentile" is a number you have to convert before you can use it.
+
+    Note the DIRECTION, which is the opposite of a difficulty rank -- a high
+    `fpa_pg` is a GOOD matchup, so rank 1 goes to the defence that gave up
+    the most. Detroit's receivers hung 48.0 a game on GB and 32.0 on CHI, so
+    from a Detroit receiver's chair GB is the softer of the two.
+    """
+    conn = _seed_card_fixture(tmp_path)
+    sched = build_profile(conn, "big")["schedule"]
+    wk1 = next(r for r in sched if r["week"] == 1)
+    wk2 = next(r for r in sched if r["week"] == 2)
+
+    assert (wk1["opponent"], wk1["fpa_pg"], wk1["rank"]) == ("GB", 48.0, 1)
+    assert (wk2["opponent"], wk2["fpa_pg"], wk2["rank"]) == ("CHI", 32.0, 2)
+    # Three defences in the table, so the denominator is 3 -- and DET, which
+    # this receiver never faces, is the 3rd of them.
+    assert wk1["rank_n"] == 3 and wk2["rank_n"] == 3
+    # `pct` is untouched -- it is what the existing strip renders.
+    assert wk1["pct"] > wk2["pct"]
+    # A bye keeps its nulls on the new keys as well as the old ones.
+    bye = next(r for r in sched if r["opponent"] is None)
+    assert bye["rank"] is None and bye["rank_n"] is None
+
+
+# -- 6. per-game snap share -------------------------------------------------
+
+def _card_snap_counts():
+    """Real-schema snap_counts: pfr ids, per-game rows, playoffs included.
+
+    `big` climbs from 50% to 90% across 2025 -- the story a season mean of
+    70% cannot tell. Week 4 is deliberately missing (he did not play) and
+    there is a week-19 playoff row that must NOT reach the log, whose rows
+    come from the REG-only `weekly` table.
+    """
+    rows = [{"season": 2025, "week": w, "game_type": "REG", "player": "Big Swing",
+             "pfr_player_id": "BigSw00", "position": "WR", "team": "DET",
+             "opponent": "GB", "offense_snaps": 40, "offense_pct": pct}
+            for w, pct in ((1, 0.50), (2, 0.60), (3, 0.70), (5, 0.80),
+                           (6, 0.90), (7, 0.90), (8, 0.90))]
+    rows.append({"season": 2025, "week": 19, "game_type": "DIV",
+                 "player": "Big Swing", "pfr_player_id": "BigSw00",
+                 "position": "WR", "team": "DET", "opponent": "GB",
+                 "offense_snaps": 40, "offense_pct": 0.99})
+    # An offensive line, so line_quality has something to rate.
+    for i, (pfr, name) in enumerate(
+            [("LineA00", "Line A"), ("LineB00", "Line B"), ("LineC00", "Line C"),
+             ("LineD00", "Line D"), ("LineE00", "Line E")]):
+        for season in (2024, 2025):
+            for w in range(1, 9):
+                rows.append({"season": season, "week": w, "game_type": "REG",
+                             "player": name, "pfr_player_id": pfr, "position": "T",
+                             "team": "DET", "opponent": "GB",
+                             "offense_snaps": 60 - i, "offense_pct": 1.0})
+    return pd.DataFrame(rows)
+
+
+def _card_players_with_line():
+    return pd.DataFrame(
+        [{"gsis_id": "big", "display_name": "Big Swing",
+          "birth_date": "2000-03-20", "rookie_season": 2023},
+         {"gsis_id": "small", "display_name": "Small Swing",
+          "birth_date": "1996-10-15", "rookie_season": 2019},
+         {"gsis_id": "short", "display_name": "Short Season",
+          "birth_date": "1999-01-01", "rookie_season": 2022}]
+        + [{"gsis_id": f"ol{i}", "display_name": n,
+            "birth_date": "1995-01-01", "rookie_season": 2018}
+           for i, n in enumerate(["Line A", "Line B", "Line C", "Line D", "Line E"])])
+
+
+def _card_depth_charts():
+    return pd.DataFrame([
+        {"dt": "2026-08-09T07:49:05Z", "team": "DET", "gsis_id": f"ol{i}",
+         "player_name": n, "pos_name": slot, "pos_abb": "T", "pos_rank": 1}
+        for i, (n, slot) in enumerate(zip(
+            ["Line A", "Line B", "Line C", "Line D", "Line E"],
+            ["Left Tackle", "Left Guard", "Center", "Right Guard", "Right Tackle"]))])
+
+
+def test_per_game_snap_share_rides_the_log_and_is_regular_season_only(tmp_path):
+    """A season mean of 70% and a role that climbed 50 -> 90 are the same
+    number and different facts; the card wants the second. Jahmyr Gibbs' 2025
+    on data/nfl.duckdb reads 66, 56, 69, 62, 52, 69, 56, 66, 50, 73, 74, 70,
+    69, 81, 86, 69, 71 -- verified against `snap_counts` game by game.
+
+    REG only: these hang off `game_log`, whose rows come from the REG-only
+    `weekly` table, so a week-19 playoff row would either land on a week the
+    log does not have or collide with an 18-week era's week 19.
+    """
+    conn = _seed_card_fixture(tmp_path, snaps=_card_snap_counts(),
+                              depth=_card_depth_charts(),
+                              players=_card_players_with_line())
+    log = build_profile(conn, "big")["game_log"]
+    by_week = {r["week"]: r for r in log if r["season"] == 2025}
+
+    assert [by_week[w]["snap_pct"] for w in (1, 2, 3)] == [0.5, 0.6, 0.7]
+    assert [by_week[w]["snap_pct"] for w in (6, 7, 8)] == [0.9, 0.9, 0.9]
+    # Week 4 he played and `snap_counts` has no row for him -- the snap table
+    # is a separate scrape from the stat table and does miss games. Null, not
+    # zero: "we don't know" is not "he was never on the field".
+    assert by_week[4]["dnp"] is False and by_week[4]["snap_pct"] is None
+    assert max(by_week) == 8               # no week 19 leaked in from the playoffs
+
+    # A week he did not play at all keeps its null too -- `short` played four
+    # of the season's eight weeks.
+    short = {r["week"]: r for r in build_profile(conn, "short")["game_log"]}
+    assert short[8]["dnp"] is True and short[8]["snap_pct"] is None
+
+
+def test_snap_share_is_keyed_through_the_crosswalk_so_an_unmatched_id_is_null(tmp_path):
+    """The season aggregate can afford a name+team+season join because it is
+    averaging; hanging seventeen individual games off a name join cannot.
+    `oline.reconcile_pfr_to_gsis` is reused for the id resolution (with its
+    position filter lifted -- restricted to the five line spots it resolves
+    849 of data/nfl.duckdb's 5,890 pfr ids and no skill players at all), and
+    what it cannot resolve gets a null rather than somebody else's snaps."""
+    snaps = _card_snap_counts()
+    snaps.loc[snaps["pfr_player_id"] == "BigSw00", "player"] = "Someone Else"
+    conn = _seed_card_fixture(tmp_path, snaps=snaps, depth=_card_depth_charts(),
+                              players=_card_players_with_line())
+    log = build_profile(conn, "big")["game_log"]
+    assert all(r["snap_pct"] is None for r in log)
+
+
+# -- 7. team offensive line -------------------------------------------------
+
+def test_team_line_quality_serves_the_rank_and_its_four_components(tmp_path):
+    """scoring/oline.py had been built, tested and imported by nothing but
+    its own test file since it was written. The composite alone is an opaque
+    0-100, so the four parts ride with it: on data/nfl.duckdb for 2026,
+    Detroit is 21st of 32 at 44.4 -- not because the line is falling apart
+    (continuity 0.815) but because its starters have missed a quarter of
+    their careers between them (availability 0.748)."""
+    conn = _seed_card_fixture(tmp_path, snaps=_card_snap_counts(),
+                              depth=_card_depth_charts(),
+                              players=_card_players_with_line())
+    oline = build_profile(conn, "big")["oline"]
+
+    from scoring.config import CURRENT_SEASON
+    assert oline["season"] == CURRENT_SEASON
+    assert oline["team"] == "DET"
+    assert oline["rank"] == 1 and oline["teams"] == 1   # the only rated line here
+    assert 0.0 <= oline["line_quality"] <= 100.0
+    # Five linemen took every snap in 2025 and all five are still penciled in.
+    assert oline["continuity"] == 1.0
+    assert oline["returning"] == 1.0
+    assert oline["availability"] == 1.0
+    assert oline["experience"] == 8.0                   # 2026 - 2018
+
+
+def test_a_defense_gets_no_offensive_line_because_it_would_mean_nothing(tmp_path):
+    """A defense's own team's offensive line is a fact about the eleven
+    players who leave the field when it comes on. A plausible-looking number
+    that means nothing is worse than a blank."""
+    from scoring.profile import team_line_quality
+    from scoring.oline import line_quality
+    conn = _seed_card_fixture(tmp_path, snaps=_card_snap_counts(),
+                              depth=_card_depth_charts(),
+                              players=_card_players_with_line())
+    lq = line_quality(conn, 2026)
+    assert team_line_quality(lq, 2026, "DET", "DST") is None
+    assert team_line_quality(lq, 2026, "DET", "K") is not None
+    # An unrated team, and a player with no team at all, degrade the same way.
+    assert team_line_quality(lq, 2026, "SEA", "WR") is None
+    assert team_line_quality(lq, 2026, None, "WR") is None
+
+
+# -- 1. age and NFL season --------------------------------------------------
+
+def test_age_is_as_of_opening_week_and_the_nfl_season_is_one_based(tmp_path):
+    """AGE IS AS OF SEPTEMBER 1 of the season year -- opening week -- which is
+    not a convention invented for this card: it is
+    `similarity._age_in_season`, which the stat-twin block has always matched
+    comparables on, imported rather than re-implemented so the two halves of
+    the page cannot disagree.
+
+    `big` is born 2000-03-20 (before September 1, so he turns over inside the
+    off-season) and `small` 1996-10-15 (after it, so he is still the younger
+    number all season). Rookie seasons 2023 and 2019, and `nfl_season` counts
+    a rookie year as the 1st, not the 0th.
+    """
+    from scoring.config import CURRENT_SEASON
+    conn = _seed_card_fixture(tmp_path)
+    big = build_profile(conn, "big")
+    small = build_profile(conn, "small")
+
+    assert big["bio"]["season"] == CURRENT_SEASON       # the season being drafted
+    assert big["bio"]["birth_date"] == "2000-03-20"
+    assert big["bio"]["rookie_season"] == 2023
+    assert big["bio"]["age"] == 26 and big["bio"]["nfl_season"] == 4
+    # Born after September 1: 2026 - 1996 - 1.
+    assert small["bio"]["age"] == 29 and small["bio"]["nfl_season"] == 8
+
+    # And every season row carries the same two facts as of ITS year, which
+    # is what makes a history table readable -- 16 ppg at 21 and 16 ppg at 30
+    # are not the same season.
+    assert _season(big, 2025)["age"] == 25 and _season(big, 2025)["nfl_season"] == 3
+    assert _season(big, 2024)["age"] == 24 and _season(big, 2024)["nfl_season"] == 2
+
+
+def test_a_player_the_players_table_has_never_heard_of_gets_nulls_not_zeros(tmp_path):
+    """Every defense, and any player nflverse has no biography for. "Age 0"
+    is a claim; "age unknown" is the truth."""
+    conn = _seed_card_fixture(tmp_path, players=pd.DataFrame(
+        columns=["gsis_id", "display_name", "birth_date", "rookie_season"]))
+    bio = build_profile(conn, "big")["bio"]
+    assert bio["age"] is None and bio["nfl_season"] is None
+    assert bio["birth_date"] is None and bio["rookie_season"] is None
+    assert _season(build_profile(conn, "big"), 2025)["age"] is None
+
+
+# -- K and DST degrade honestly ---------------------------------------------
+
+def test_a_defense_reaches_none_of_the_new_code_and_raises_in_none_of_it(tmp_path):
+    """A defense has no weekly rows at all, so most of the card is genuinely
+    unavailable for one. Nulls and empty lists rather than zeros, and nothing
+    that raises on the way there."""
+    import json
+    conn = _seed_kicker_fixture(tmp_path)
+    write_table(conn, "adp", pd.DataFrame([
+        {"adp_name": "Kick Guy", "position": "PK", "team": "DAL", "adp": 140.0},
+        {"adp_name": "Amon-Ra St Brown", "position": "WR", "team": "DET", "adp": 5.1},
+        {"adp_name": "Cowboys", "position": "DST", "team": "DAL", "adp": 150.0}]))
+    from scoring import board_cache, profile_cache
+    from scoring.board import build_board
+    board_cache.clear(); profile_cache.clear()
+    settings = _kicker_settings(_kicker_rules())
+    dst_id = build_board(conn, settings=settings).pipe(
+        lambda b: b[b["position"] == "DST"].iloc[0]["player_id"])
+
+    p = build_profile(conn, dst_id, None, settings)
+    json.dumps(p, allow_nan=False)          # nothing unserialisable slipped in
+    assert p["cohort"] is None and p["oline"] is None
+    assert p["bio"] == {"season": 2026, "birth_date": None, "rookie_season": None,
+                        "age": None, "nfl_season": None}
+    assert p["seasons"] == [] and p["game_log"] == [] and p["schedule"] == []
+
+
+def test_a_kicker_gets_every_new_number_a_skill_player_gets(tmp_path):
+    """Kickers score for real now, so their card is a real card: every rank,
+    the cohort and the coefficient, all priced on the league's kicking
+    points. (On data/nfl.duckdb, with the kicking rules restored, Brandon
+    Aubrey's 2025 comes back K4 of 33 by points per game, 13th of 33 on the
+    coefficient, and a cohort of 41 seasons with a median change of -0.6.)
+
+    A second kicker with two seasons is added here rather than to the shared
+    fixture, because a comparable needs a FOLLOWING season on record and the
+    shared fixture has one season in total -- so without him there is no pool
+    for anybody, and `cohort` is hidden the same way it is for a rookie.
+    """
+    conn = _seed_kicker_fixture(tmp_path)
+    existing = conn.execute("SELECT * FROM weekly").df()
+    k2 = pd.DataFrame(
+        [{**dict.fromkeys(existing.columns, 0), "player_id": "k2",
+          "player_display_name": "Other Boot", "position": "K",
+          "recent_team": "PHI", "opponent_team": "DAL", "season": season,
+          "week": w, "fg_made": fg, "fg_att": fg, "fg_long": 38,
+          "fg_made_30_39": fg, "pat_made": 2, "pat_att": 2}
+         for season, fg in ((2024, 2), (2025, 1)) for w in range(1, 11)])
+    write_table(conn, "weekly", pd.concat([existing, k2], ignore_index=True))
+
+    p = _kicker_profile(conn, _kicker_rules())
+    season = p["seasons"][0]
+
+    # k1 is 9.0 a game, k2 is 5.0 in 2025 -- so K1 of the two who qualify.
+    assert season["pos_rank_ppg"] == 1 and season["pos_rank_ppg_n"] == 2
+    # Ten identical weeks: sigma 0, so the coefficient is 0 and he is the
+    # steadiest of them.
+    assert season["cv"] == 0.0 and season["cv_rank"] == 1
+
+    # k2's 2024 (8.0 a game, followed by 5.0) is inside the 3-point band
+    # around k1's 9.0, so the cohort is real and its change is negative.
+    cohort = p["cohort"]
+    assert cohort["position"] == "K" and cohort["n"] == 1
+    assert cohort["players"][0]["change"] == -3.0
+    assert cohort["declined"] == 1
+
+    assert p["bio"]["season"] == 2026
+    # And a kicker's schedule is a rank now too -- two defences conceded
+    # kicking points in this fixture, so the denominator is 2.
+    assert p["schedule"] and p["schedule"][0]["rank_n"] == 2
+
+
+def test_a_kicker_whose_league_prices_no_kicking_still_gets_no_ranks(tmp_path):
+    """The blanking branch is on the RULES, not the position, and everything
+    added here sits downstream of it: no history, so nothing to rank."""
+    from scoring.ppr import DEFAULT_RULES
+    p = _kicker_profile(_seed_kicker_fixture(tmp_path), dict(DEFAULT_RULES))
+    assert p["seasons"] == [] and p["cohort"] is None
+    assert p["bio"]["age"] is None          # no players table in that fixture
+
+
+# -- caching: cross-player work must not be redone per click ----------------
+
+def test_the_line_rating_is_built_once_per_database_not_once_per_click(tmp_path):
+    """`oline.line_quality` costs 0.76s on data/nfl.duckdb -- it reads
+    `snap_counts` whole and rebuilds a name crosswalk -- against a warm
+    profile budget of 0.15s. It is a whole-league, whole-season computation
+    with no per-player component, so it belongs behind the frame cache and is
+    built exactly once per (database, refresh, scoring format). Counting
+    calls proves that; timing the second click would only prove a cache
+    exists."""
+    from scoring import profile_cache
+    conn = _seed_card_fixture(tmp_path, snaps=_card_snap_counts(),
+                              depth=_card_depth_charts(),
+                              players=_card_players_with_line())
+    calls = []
+    real = profile_cache.line_quality
+    profile_cache.line_quality = lambda *a, **k: (calls.append(1), real(*a, **k))[1]
+    try:
+        # `big` is the only one of the three on a team with a rated line, so
+        # he is the one whose payload proves the frame arrived at all.
+        assert build_profile(conn, "big")["oline"] is not None
+        for pid in ("small", "short", "big"):
+            build_profile(conn, pid)
+    finally:
+        profile_cache.line_quality = real
+    assert calls == [1]
+
+
+def test_the_position_rank_frames_are_built_once_per_database_too(tmp_path):
+    """Same argument, same place: ranking every player-season of every
+    position, and assembling the comparable pool, are cross-player
+    computations. Four clicks, one build."""
+    from scoring import profile_cache
+    conn = _seed_card_fixture(tmp_path)
+    ranks, pools = [], []
+    real_r, real_p = profile_cache.season_rank_frame, profile_cache.comparable_pool
+    profile_cache.season_rank_frame = lambda *a, **k: (ranks.append(1), real_r(*a, **k))[1]
+    profile_cache.comparable_pool = lambda *a, **k: (pools.append(1), real_p(*a, **k))[1]
+    try:
+        for pid in ("big", "small", "short", "big"):
+            build_profile(conn, pid)
+    finally:
+        profile_cache.season_rank_frame = real_r
+        profile_cache.comparable_pool = real_p
+    assert ranks == [1] and pools == [1]
+
+
+def test_the_rank_frame_is_priced_by_the_leagues_scoring_not_always_ppr(tmp_path):
+    """The coefficient divides one rules-priced number by another, so a
+    cached frame handed to the wrong league would put a PPR volatility beside
+    a standard-league average. profile_cache keys on the rules; this pins
+    that the numbers actually move with them."""
+    conn = _seed_format_fixture(tmp_path)
+    p = _profiles_by_format(conn)
+    # ppg 20.0/17.0/14.0 with sigma 2.11/1.05/0.0 -> the coefficient shrinks
+    # to nothing as receptions stop being points.
+    assert _season(p["ppr"], 2025)["cv"] == round(2.108185106778921 / 20.0, 3)
+    assert _season(p["half"], 2025)["cv"] == round(1.0540925533894598 / 17.0, 3)
+    assert _season(p["std"], 2025)["cv"] == 0.0

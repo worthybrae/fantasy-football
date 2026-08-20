@@ -70,7 +70,8 @@ def _fold_name(name) -> str:
     return " ".join(p for p in s.split() if p not in _SUFFIXES)
 
 
-def reconcile_pfr_to_gsis(conn) -> pd.DataFrame:
+def reconcile_pfr_to_gsis(conn, *, positions=OL_SNAP_POSITIONS,
+                          snaps: pd.DataFrame | None = None) -> pd.DataFrame:
     """pfr_player_id -> gsis_id for every offensive lineman `snap_counts`
     has ever logged.
 
@@ -86,11 +87,42 @@ def reconcile_pfr_to_gsis(conn) -> pd.DataFrame:
     What's still ambiguous after that, or has no name match at all, is
     dropped rather than guessed at. Callers that need to know how much was
     dropped call `oline_id_coverage`, not `len` on this result.
+
+    `positions` NARROWS the snap rows the crosswalk is built from; the
+    default is this module's own subject, the five line spots, so every
+    existing caller is unchanged. `None` means "every position", which is
+    what the player profile needs: it wants a running back's per-game
+    `offense_pct`, and a mapping restricted to OL_SNAP_POSITIONS resolves
+    849 of the table's 5,890 pfr ids and NONE of the skill players (checked
+    against data/nfl.duckdb: Jahmyr Gibbs' `GibbJa01` is absent from the
+    default mapping and present in the unfiltered one). Unfiltered is also
+    the more accurate `first_season` for anyone whose listed position moved
+    between seasons -- the plausibility filter compares `rookie_season`
+    against the first snap on record, and a position-filtered scan can only
+    ever push that first snap later.
+
+    `snaps` lets a caller that has already read `snap_counts` hand the frame
+    over instead of paying for a second read (0.165s on data/nfl.duckdb) --
+    the same shape `find_twins(season_features=...)` and
+    `season_summaries(snap_share=...)` already take, and for the same
+    reason. scoring/profile_cache.py builds this inside a `_build` that has
+    the table in hand. `conn` is still required: the `players` half of the
+    join is read from it either way.
     """
-    snaps = read_table(conn, "snap_counts")
-    if snaps.empty:
+    if snaps is None:
+        snaps = read_table(conn, "snap_counts")
+    # Column guard, not just `.empty`: this used to be reached only from
+    # line_quality, whose callers all hand it the real nflverse schema. The
+    # profile reaches it on every database the app has, including test
+    # fixtures whose snap_counts is (player, team, season, offense_pct) and
+    # nothing else -- which raised KeyError on `snaps["position"]`. An
+    # unresolvable crosswalk is an empty crosswalk, not an exception.
+    need = {"pfr_player_id", "player", "season"}
+    if positions is not None:
+        need.add("position")
+    if snaps.empty or not need.issubset(snaps.columns):
         return pd.DataFrame(columns=["pfr_player_id", "gsis_id"])
-    ol = snaps[snaps["position"].isin(OL_SNAP_POSITIONS)]
+    ol = snaps if positions is None else snaps[snaps["position"].isin(positions)]
     if ol.empty:
         return pd.DataFrame(columns=["pfr_player_id", "gsis_id"])
 
@@ -100,7 +132,10 @@ def reconcile_pfr_to_gsis(conn) -> pd.DataFrame:
     ids = ids.merge(first_season, on="pfr_player_id")
 
     people = read_table(conn, "players")
-    if people.empty:
+    # Same widened guard as above, same reason: `_experience` already
+    # tolerates a `players` without `rookie_season`; this did not.
+    if people.empty or not {"gsis_id", "display_name",
+                            "rookie_season"}.issubset(people.columns):
         return pd.DataFrame(columns=["pfr_player_id", "gsis_id"])
     people = people[["gsis_id", "display_name", "rookie_season"]].copy()
     people["norm"] = people["display_name"].map(_fold_name)
@@ -165,17 +200,21 @@ def _team_games(snap_counts: pd.DataFrame) -> pd.DataFrame:
         "team_games").reset_index()
 
 
-def _ol_snaps_with_gsis(conn) -> pd.DataFrame:
+def _ol_snaps_with_gsis(conn, snaps: pd.DataFrame | None = None) -> pd.DataFrame:
     """Regular-season O-line snap rows, restricted to the ones that
     reconciled to a `gsis_id`. See `oline_id_coverage` for how much of the
-    table this drops."""
-    snaps = read_table(conn, "snap_counts")
+    table this drops.
+
+    `snaps` is the already-read `snap_counts`; see `line_quality` for why
+    the frame is threaded through rather than read again here."""
+    if snaps is None:
+        snaps = read_table(conn, "snap_counts")
     cols = ["season", "week", "team", "gsis_id", "offense_snaps", "offense_pct"]
     if snaps.empty:
         return pd.DataFrame(columns=cols)
     ol = snaps[(snaps["position"].isin(OL_SNAP_POSITIONS))
                & (snaps["game_type"] == "REG")].copy()
-    mapping = reconcile_pfr_to_gsis(conn)
+    mapping = reconcile_pfr_to_gsis(conn, snaps=snaps)
     return ol.merge(mapping, on="pfr_player_id", how="inner")
 
 
@@ -320,18 +359,27 @@ def _returning(current_starters: pd.DataFrame, prior_five: pd.DataFrame) -> pd.D
     return pd.DataFrame(rows, columns=cols)
 
 
-def line_units(conn, season: int) -> pd.DataFrame:
+def line_units(conn, season: int, *, snaps: pd.DataFrame | None = None,
+               ol_snaps: pd.DataFrame | None = None) -> pd.DataFrame:
     """Per team, the five projected starters for `season`: position, most
     recent snap share, prior-season games played versus possible, career
     availability, and seasons in the league. The detail a manager reads
     before a pick; `line_quality` is the same numbers rolled up to a score.
+
+    `snaps` and `ol_snaps` are the two frames `line_quality` derives on its
+    own account anyway; see its docstring for why they are threaded through.
+    Passing neither reads them here, which is what every existing caller
+    does.
     """
     starters = _current_starters(conn)
     if starters.empty:
         return pd.DataFrame(columns=LINE_UNITS_COLUMNS)
 
-    ol_snaps = _ol_snaps_with_gsis(conn)
-    team_games = _team_games(read_table(conn, "snap_counts"))
+    if snaps is None:
+        snaps = read_table(conn, "snap_counts")
+    if ol_snaps is None:
+        ol_snaps = _ol_snaps_with_gsis(conn, snaps=snaps)
+    team_games = _team_games(snaps)
     avail = _availability(ol_snaps, team_games, season)
     share = _last_season_snap_share(ol_snaps, season)
     exp = _experience(conn, season)
@@ -342,7 +390,8 @@ def line_units(conn, season: int) -> pd.DataFrame:
     return out[LINE_UNITS_COLUMNS]
 
 
-def line_quality(conn, season: int) -> pd.DataFrame:
+def line_quality(conn, season: int, *,
+                 snaps: pd.DataFrame | None = None) -> pd.DataFrame:
     """Per team, a 0-100 O-line rating built from continuity, availability,
     experience and returning-starter share, normalized within position the
     same way `scoring/factors.py` normalizes player factors
@@ -355,9 +404,25 @@ def line_quality(conn, season: int) -> pd.DataFrame:
     Every column this returns besides `line_quality` itself is a component
     part (`*_raw` before normalization, `*_n` after), so the score is
     decomposable rather than a single opaque number.
+
+    ONE READ OF `snap_counts`, ONE CROSSWALK BUILD. This used to read the
+    table three times (twice through `_ol_snaps_with_gsis`, once through
+    `_team_games`) and rebuild the pfr->gsis crosswalk twice, which was
+    invisible while nothing but a test called it and is not invisible now
+    that scoring/profile.py does: it cost 1.54s of a profile's cold cache
+    against 0.76s for the same answer off one read. The frames are threaded
+    down through `_ol_snaps_with_gsis`/`line_units` rather than memoized on
+    the module, so nothing here holds a 144 MB frame alive between calls.
+    `snaps` lets a caller that has already read the table (profile_cache
+    has) skip even the one read; the result is unchanged either way --
+    verified frame-for-frame against the previous implementation for
+    `line_quality`, `line_units` and `reconcile_pfr_to_gsis` across 2024,
+    2025 and 2026 on data/nfl.duckdb.
     """
-    units = line_units(conn, season)
-    ol_snaps = _ol_snaps_with_gsis(conn)
+    if snaps is None:
+        snaps = read_table(conn, "snap_counts")
+    ol_snaps = _ol_snaps_with_gsis(conn, snaps=snaps)
+    units = line_units(conn, season, snaps=snaps, ol_snaps=ol_snaps)
 
     cont = _continuity(ol_snaps, season - 1)
     prior_five = primary_five(ol_snaps, season - 1)

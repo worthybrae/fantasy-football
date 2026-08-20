@@ -53,6 +53,24 @@ season's PPG turned out to be, a quick gut check on what a comparable stat
 line tends to become; rookies and K/DST (no stat history) instead get
 similar-value neighbors from the board.
 
+The profile endpoint also carries seven things the page does not render yet,
+added for a card redesign. Age and NFL season, both as of the season being
+drafted and again on every season row (age is counted to September 1, opening
+week). A per-season positional rank by points per game, over everyone at the
+position with at least 8 games that year, served with the size of that pool.
+A volatility rank beside it, on the coefficient of variation rather than the
+raw standard deviation — a big scorer swings in bigger absolute points
+whether or not he is reliable, so a sigma rank is just a scoring rank wearing
+a different hat — served with the position's median coefficient so the number
+can be read. A cohort of comparable seasons: same position, within 3 points
+per game and one NFL season of the target, restricted to seasons with a
+following year on record, each with how much that player's next year moved.
+The schedule rows gain the opponent's rank out of 32 against the position,
+1 being the softest. The game log gains per-game snap share. And every
+offensive player gets his team's offensive-line rating out of 32, with the
+four parts behind it. Kickers get all of it when the league scores kicking;
+defenses have no weekly rows, so most of it is null for them.
+
 ## Project structure
 
 - `pipeline/` — data ingestion and refresh workflow (`sources.py`, `db.py`,
