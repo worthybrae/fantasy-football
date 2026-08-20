@@ -15,6 +15,7 @@ from scoring.board_cache import cached_build_board
 from scoring.config import DEFAULT_WEIGHTS
 from scoring.draft_model import SUMMARY_FEATURES
 from scoring.draft_sim import DEFAULT_ROLLOUTS, run_sim
+from scoring.game_points import cached_game_points
 from scoring.profile import build_profile
 
 def _int_or_none(value):
@@ -137,6 +138,63 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
     # and 404s -- see sim_status -- rather than crashing.
     _sim_runs: dict[str, dict] = {}
 
+    # THE SEAM BETWEEN THIS MODULE AND THE LIVE DRAFT'S SETTINGS.
+    #
+    # Declared here as a stub and replaced by `register_live_routes` at the
+    # bottom of this function, which owns the live session and its lock. The
+    # stub is what the name holds only during construction; every handler
+    # below runs after create_app has returned, so none of them can observe
+    # it. A missing seam is therefore a wiring bug that shows up as "no live
+    # session, ever", which is why the default is written here explicitly
+    # rather than left to a getattr fallback at the call site.
+    #
+    # WHY AN ACCESSOR AND NOT THE STATE ITSELF: `api/live.py`'s `state` dict
+    # is guarded by a lock that lives in the same closure, and this module
+    # must not learn that discipline. `live_settings()` takes the lock, reads
+    # the one slot, and returns a frozen LeagueSettings off a frozen
+    # DraftSession (both are replaced wholesale via dataclasses.replace, never
+    # mutated in place -- see DraftSession), so what comes back cannot be a
+    # torn read and cannot change underneath the request that got it.
+    #
+    # WHY NOT PERSIST THE LIVE SETTINGS INTO THE `league` TABLE and let
+    # `league.load` keep answering for everybody -- the obvious alternative,
+    # and it was rejected for three reasons. (1) That table is one row PER
+    # SEASON of IMPORTED DRAFT HISTORY, and each row's `pick_order` is that
+    # season's real order; `_slot_from_pick_order` in api/live.py exists
+    # precisely because the newest stored row's order is last year's and
+    # answers confidently and wrongly. Writing a live-fetched row would make
+    # `load()` return it forever after, including long after the draft ends.
+    # (2) A connect to a non-default league builds against a DIFFERENT
+    # database file (`state["league_conn"]`), so a row written there would
+    # never reach the connection these endpoints hold anyway. (3) A session
+    # is transient by design -- it dies with the process unless the small
+    # session record is restored -- and a database row is not, so persisting
+    # would outlive the fact it describes.
+    app.state.live_settings = lambda: None
+
+    def _league_settings(cur):
+        """The league every price on the board and the profile is computed in.
+
+        The live session's real ESPN settings while a draft is connected,
+        the stored `league` row otherwise. Those are two different leagues on
+        the owner's own machine: the stored row is the 2025 import and prices
+        NO KICKING (6 of the 11 kicking stat ids scoring/league.py can map sit
+        in its `unmapped_scoring`, because the row was written before that map
+        understood them), while a connect fetches the current season's roster
+        and scoring live from ESPN. Before this, the draft room was ranking on
+        one and the profile beside it was priced under the other -- a kicker's
+        card came back empty next to a room that had his points.
+
+        The board cache keys on `league.to_json(settings)` and the profile
+        cache on the rules dict, so the two leagues get two entries and
+        neither can ever be served the other's frame. Neither thrashes: a
+        session's settings object is fixed for its whole life (frozen, and
+        only ever replaced by dataclasses.replace on unrelated fields), so
+        every request during one draft produces the identical key.
+        """
+        live = app.state.live_settings()
+        return live if live is not None else league.load(cur)
+
     @app.get("/api/players")
     def players(w_production: float = Query(DEFAULT_WEIGHTS["production"], ge=0),
                 w_role: float = Query(DEFAULT_WEIGHTS["role"], ge=0),
@@ -148,17 +206,32 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
             weights = {"production": w_production, "role": w_role,
                        "environment": w_environment, "schedule": w_schedule,
                        "durability": w_durability}
+            settings = _league_settings(cur)
             try:
                 # cached_build_board (scoring/board_cache.py): this endpoint
                 # alone cost ~1.6-1.9s per request rebuilding the same board
                 # from scratch. The cache key covers weights/settings/drafted/
                 # data-freshness, so a slider change or a pick still produces
                 # a fresh board -- see that module's docstring.
-                board = cached_build_board(cur, weights)
+                board = cached_build_board(cur, weights, settings)
             except ValueError as e:
                 # compute_composite raises when weights sum <= 0 -- reachable
                 # from the UI if every slider is dragged to 0.
                 raise HTTPException(status_code=422, detail=str(e))
+            # Last completed season's points, week by week, for the available
+            # table's inline bar chart (AvailableList.tsx). Priced under the
+            # SAME settings the board was, so the bars and the row's own
+            # `stats`/`proj_points` are in one currency -- and built once per
+            # refresh rather than per request or per pick, which is the whole
+            # argument in scoring/game_points.py. `.map` over a dict leaves
+            # NaN for a player with no rows in that season (a rookie, a
+            # defense, or a kicker in a league that prices no kicking), and
+            # the NaN->None pass below turns that into JSON null: an explicit
+            # "no games last season" the table renders as an empty state,
+            # never as a row of zero-height bars.
+            games = cached_game_points(cur, settings.scoring)
+            board = board.assign(
+                game_points=board["player_id"].map(games.by_player))
             # astype(object) first, else float columns silently revert None -> NaN
             # and FastAPI's JSON encoder rejects NaN
             board = board.astype(object).where(board.notna(), None)
@@ -285,8 +358,12 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
         cur = conn.cursor()
         try:
             # Same board GET /api/players just built (same weights, same
-            # cache key) -- see cached_build_board's docstring.
-            board = cached_build_board(cur, DEFAULT_WEIGHTS)
+            # cache key) -- see cached_build_board's docstring. `settings`
+            # has to come from the same place /api/players gets it, or a
+            # connected draft would put two boards in the cache and pay the
+            # 1.6-1.9s build twice to show the same twelve rows.
+            board = cached_build_board(cur, DEFAULT_WEIGHTS,
+                                       _league_settings(cur))
             n = max(1, min(int(limit), 50))
             top = board.sort_values("rank").head(n)[list(PREVIEW_COLUMNS)]
             top = top.astype(object).where(top.notna(), None)
@@ -308,7 +385,17 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
                        "environment": w_environment, "schedule": w_schedule,
                        "durability": w_durability}
             try:
-                payload = build_profile(cur, player_id, weights)
+                # `settings` passed rather than left to build_profile's own
+                # `league.load` fallback: with a draft connected, this is the
+                # league ESPN says the owner is IN, and every figure on the
+                # card -- points per game, the game log, the volatility rank,
+                # the stat twins and their forecast -- is priced under it.
+                # The visible failure this fixes: the owner's stored league
+                # row prices no kicking, so a kicker's card came back with an
+                # empty history while the room next to it, built on the live
+                # settings, was ranking him on real points.
+                payload = build_profile(cur, player_id, weights,
+                                        _league_settings(cur))
             except ValueError as e:
                 # Same as /api/players -- compute_composite raises when
                 # weights sum <= 0, reachable if every slider is at 0.

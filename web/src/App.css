@@ -2478,6 +2478,109 @@ td:first-child {
 .avail-col-pos { width: 52px; }
 .avail-col-num { width: 78px; text-align: right; }
 
+/* The name column is the only one that flexes, so it is the one that pays
+   for every other column's fixed width -- and it used to pay in ROW HEIGHT.
+   Measured before the bar chart column existed: at a 1024px window the name
+   and its "DET · BYE 6" meta wrapped onto a second line for 66 of the 252
+   rows and those rows grew from 37px to 51px. Adding a column moved that
+   threshold up, to 1 row at 1150px and 156 at 1100px, which is exactly the
+   cost the chart was not allowed to have.
+
+   `max-width: 0` is what lets a cell in an auto-layout table shrink BELOW
+   its content instead of forcing the column wider (the browser hands it
+   whatever the fixed columns leave, and a definite width is also what
+   `text-overflow` needs to have anything to clip against). With nowrap, the
+   row height stops being a function of the window width at all: 37px at
+   every width measured, 1440 down to 960, with the column and without it.
+   What gets clipped first is the end of the line -- the team and bye meta --
+   never the name, which is the right order for a table you scan by name. */
+.avail-table td.avail-col-name {
+  max-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* -- last season's per-game bars --
+
+   THE ONE RULE THIS COLUMN HAS TO OBEY: it must not make the row taller. The
+   global `th, td { height: 32px; padding: 6px 10px }` leaves 20px of content
+   box, so the chart is 18px and the row measures the same 32px with it as
+   without (verified by measuring the rendered table at 1280 and 1440, not by
+   reading this arithmetic back). A taller row means fewer players visible
+   under a thirty-second pick clock, which costs more than the column is
+   worth.
+
+   Width is the bars' own: 18 weeks x (3px bar + 1px gap) = 72px, plus the
+   cell's 20px of padding. Fixed rather than fluid so every row's chart shares
+   one horizontal scale as well as one vertical one -- a nine-game season has
+   to read as half a season, not as a full one drawn wider. */
+.avail-col-games { width: 92px; }
+
+.gamebars {
+  display: flex;
+  align-items: flex-end;
+  gap: 1px;
+  height: 18px;
+  /* Bars are inline-level boxes; without this the line box adds descender
+     space under them and the cell grows past its 20px of content. */
+  line-height: 0;
+}
+
+.gamebar {
+  width: 3px;
+  flex: 0 0 3px;
+  border-radius: 1px;
+}
+
+/* The owner's thresholds, on the existing status tokens: under 10 is a bad
+   week, 10-15 is a startable one, 15+ is why you drafted him. Same three
+   colours the rest of the room already uses for bad/neutral/good, so the
+   chart needs no legend to be read at a glance. */
+.gamebar.is-bad { background: var(--fail); }
+.gamebar.is-mid { background: var(--accent); }
+.gamebar.is-good { background: var(--ok); }
+
+/* A week with no game -- a bye, an injury, a season that started late. A 1px
+   baseline mark, not an absent element: the slot has to stay in place or the
+   weeks after it would slide left and the chart would stop being a calendar.
+   Deliberately NOT a short red bar, which is what a 0-point game he actually
+   played draws (BAR_MIN_PX in AvailableList.tsx) -- the two are different
+   claims. */
+.gamebar.is-none {
+  height: 1px;
+  background: var(--border);
+}
+
+/* No games at all in that season: a rookie, a defense, or a kicker in a
+   league that prices no kicking. The same em dash the ADP/ESPN columns use
+   for "no such number", for the same reason -- an empty cell would read as a
+   season of zeroes. */
+.gamebars-none {
+  color: var(--text-3);
+  font-size: var(--text-sm);
+}
+
+/* The header that says it is not a control. `.avail-th-btn`'s siblings are
+   all buttons that reveal a caret on hover; this one is bare text, and the
+   suffix states outright what its silence implies. Sized and coloured down
+   so it reads as an annotation on the label rather than as a second label,
+   and nowrap for the same reason every other header here is: a two-line
+   header in this table is taller than three body rows. */
+.avail-table th.avail-col-games {
+  white-space: nowrap;
+  cursor: default;
+}
+
+.avail-nosort {
+  margin-left: 5px;
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  color: var(--text-3);
+}
+
 /* No header may wrap. `Lasts to pick 13` in a 78px column stacked into four
    lines and made the header row taller than three body rows -- the horizon
    moved to `.avail-horizon-note` and this keeps any future label from doing

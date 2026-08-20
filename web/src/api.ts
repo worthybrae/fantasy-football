@@ -14,6 +14,19 @@ export interface Player {
   market_rank: number | null; market_spread: number | null; market_sources: MarketSources;
   espn_ppr_rank: number | null;
   stats: BoardStats | null;
+  // Points in each week of the last COMPLETE season -- index 0 is week 1 --
+  // scored under the league's own rules, not always PPR (scoring/game_points.py).
+  // The available table draws it as an inline bar chart.
+  //   * `null` for a player with no rows in that season at all: a rookie,
+  //     every defense (nflverse has no team-defense weekly rows), and a
+  //     kicker in a league that prices no kicking, whose season would
+  //     otherwise be a row of noughts claiming he never scored. Rendered as
+  //     an empty state, never as a flat chart.
+  //   * a `null` ENTRY is a week with no game -- a bye, an injury, a season
+  //     that started late. Different from 0.0, which is a game he played and
+  //     scored nothing in, and the chart draws the two differently.
+  // Same season as `stats.season`: both come from `max(season)` in `weekly`.
+  game_points: (number | null)[] | null;
   rookie: boolean; drafted: boolean;
   avail_pct: number | null; ev: number | null; ev_se: number | null;
   // Model-native rank (VOR order across the whole board), tier (gap-based,

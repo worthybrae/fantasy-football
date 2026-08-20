@@ -1065,3 +1065,251 @@ def test_landing_preview_clamps_an_out_of_range_limit(tmp_path):
     client = _client(tmp_path)
     assert len(client.get("/api/landing/preview?limit=0").json()["players"]) == 1
     assert client.get("/api/landing/preview?limit=999").status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# The league these endpoints price in: the live session's when a draft is
+# connected, the stored `league` row when one is not.
+# ---------------------------------------------------------------------------
+#
+# WHY A KICKER IS THE PROBE. The two leagues differ in the ONE way that is
+# visible end to end without arithmetic: the owner's stored row is the 2025
+# import and prices no kicking (6 of the 11 kicking stat ids scoring/league.py
+# can map sit in its `unmapped_scoring`, written before the map understood
+# them), so a kicker's history is blanked, his `stats.ppg` is 0.0 and his
+# chart is empty. A league fetched live from ESPN at connect prices kicking,
+# and all three fill in. Any other difference between two leagues -- half-PPR
+# against PPR, say -- moves numbers by fractions; this one moves a whole card
+# between "empty" and "populated", which is what the owner actually saw.
+
+def _kicker_app(tmp_path, league_row=None):
+    """The kicker fixture from tests/test_profile.py, behind a real app.
+
+    Reused rather than re-seeded so the endpoint tests and the `build_profile`
+    tests are looking at the same kicker: 10 weeks of 2 field goals from 30-39
+    and 3 extra points, worth 9.0 a game under the owner's real ESPN kicking
+    values and 0.0 under full PPR.
+
+    The fixture's own connection is CLOSED before the app opens the file --
+    DuckDB is single-writer per file and `create_app` opens its own.
+    """
+    from tests.test_profile import _seed_kicker_fixture
+    from scoring import board_cache, game_points, profile_cache
+    conn = _seed_kicker_fixture(tmp_path)
+    if league_row is not None:
+        from scoring import league as league_mod
+        write_table(conn, "league", pd.DataFrame([
+            {"season": league_row.season,
+             "settings_json": league_mod.to_json(league_row)}]))
+    conn.close()
+    # Every one of these keys on the database file, and tmp_path is unique per
+    # test -- cleared anyway because the fixture writes `weekly` without
+    # stamping `meta`, the one staleness gap all three caches document.
+    board_cache.clear()
+    profile_cache.clear()
+    game_points.clear()
+    return TestClient(create_app(str(tmp_path / "kick.duckdb")))
+
+
+def _kicker_league():
+    from tests.test_profile import _kicker_rules, _kicker_settings
+    return _kicker_settings(_kicker_rules())
+
+
+def test_profile_and_board_price_a_kicker_by_the_live_sessions_league(tmp_path):
+    """The defect the owner reported: "for the league shouldn't it be dynamic
+    based on when i enter in url?"
+
+    api/live.py's connect builds the draft room against the roster and scoring
+    it fetches from ESPN with the ids the bookmarklet supplied. These two
+    endpoints read the stored `league` row instead, so the room and the card
+    beside it were two different leagues -- the kicker the room was ranking on
+    real points had an empty profile and a 0.0 season on the board.
+    """
+    client = _kicker_app(tmp_path)
+
+    # No session: exactly what it did before -- there is no league row here,
+    # so `league.load` returns the full-PPR default, which prices no kicking.
+    assert client.app.state.live_settings() is None
+    before = client.get("/api/players/k1/profile").json()
+    assert before["seasons"] == []
+    assert before["game_log"] == []
+    board_before = {p["player_id"]: p
+                    for p in client.get("/api/players").json()["players"]}
+    assert board_before["k1"]["stats"]["ppg"] == 0.0
+    assert board_before["k1"]["game_points"] is None
+
+    # A live session, installed exactly where api/live.py installs it.
+    client.app.state.live_settings = lambda: _kicker_league()
+
+    after = client.get("/api/players/k1/profile").json()
+    assert [s["season"] for s in after["seasons"]] == [2025]
+    assert after["seasons"][0]["ppg"] == 9.0
+    assert len(after["game_log"]) == 10
+    board_after = {p["player_id"]: p
+                   for p in client.get("/api/players").json()["players"]}
+    assert board_after["k1"]["stats"]["ppg"] == 9.0
+    # ...and the chart the available table draws fills in with it, since it is
+    # priced by the same settings the board is.
+    assert board_after["k1"]["game_points"] == [9.0] * 10
+
+    # The skill player beside him is untouched: nothing in this league's
+    # kicking rules changes what a receiver scores.
+    assert board_after["p1"]["stats"]["ppg"] == board_before["p1"]["stats"]["ppg"]
+    assert board_after["p1"]["game_points"] == board_before["p1"]["game_points"]
+
+
+def test_with_no_session_the_endpoints_still_read_the_stored_league_row(tmp_path):
+    """The fallback, which is the normal case: opening a profile with no draft
+    connected must behave exactly as it did -- `league.load(conn)`, the stored
+    row, not the built-in default and not the last session's settings."""
+    client = _kicker_app(tmp_path, league_row=_kicker_league())
+
+    assert client.app.state.live_settings() is None
+    body = client.get("/api/players/k1/profile").json()
+    assert body["seasons"][0]["ppg"] == 9.0
+    row = next(p for p in client.get("/api/players").json()["players"]
+               if p["player_id"] == "k1")
+    assert row["stats"]["ppg"] == 9.0
+    assert row["game_points"] == [9.0] * 10
+
+
+def test_a_live_session_does_not_serve_its_board_to_a_later_request_without_one(tmp_path):
+    """The cache-key half of the same change. Both boards are in one process
+    and one `_cache`, keyed partly on `league.to_json(settings)` -- so the
+    league that asked is the league that gets served, in both directions and
+    however many times the session appears and disappears."""
+    client = _kicker_app(tmp_path)
+
+    def ppg():
+        return next(p for p in client.get("/api/players").json()["players"]
+                    if p["player_id"] == "k1")["stats"]["ppg"]
+
+    assert ppg() == 0.0
+    client.app.state.live_settings = lambda: _kicker_league()
+    assert ppg() == 9.0
+    client.app.state.live_settings = lambda: None
+    assert ppg() == 0.0
+    client.app.state.live_settings = lambda: _kicker_league()
+    assert ppg() == 9.0
+
+
+def test_a_connected_session_does_not_rebuild_the_board_on_every_request(tmp_path):
+    """...and the same key must not THRASH: a session's settings object is
+    fixed for its whole life, so every request during one draft has to hit the
+    same entry. Keyed on anything that varies per request -- a timestamp, a
+    fresh dataclass -- this would rebuild the 1.6-1.9s board on every click of
+    a draft night, which is worse than the bug it fixed."""
+    import scoring.board_cache as bc
+    client = _kicker_app(tmp_path)
+    settings = _kicker_league()
+    client.app.state.live_settings = lambda: settings
+
+    builds = []
+    real = bc.build_board
+    bc.build_board = lambda *a, **k: (builds.append(1), real(*a, **k))[1]
+    try:
+        for _ in range(4):
+            client.get("/api/players")
+        client.get("/api/landing/preview")
+        client.get("/api/players/k1/profile")
+    finally:
+        bc.build_board = real
+    # One build for all six requests -- including the landing preview, which
+    # has to take its settings from the same place or a connected draft pays
+    # the build twice.
+    assert builds == [1]
+
+
+# ---------------------------------------------------------------------------
+# `game_points`: last completed season, one bar per week, for the available
+# table's inline chart (web/src/components/draft/AvailableList.tsx).
+# ---------------------------------------------------------------------------
+
+def _seed_game_points(path):
+    """Three players covering the three shapes the chart has to draw: a full
+    season, a season with holes in it, and a player with no rows at all."""
+    conn = get_conn(path)
+    weekly = pd.DataFrame(
+        [{"player_id": "p1", "player_display_name": "A Star", "position": "WR",
+          "recent_team": "DET", "opponent_team": "GB", "season": 2025,
+          "week": w, "receptions": 8, "receiving_yards": 90, "targets": 10,
+          "carries": 0}
+         for w in range(1, 18)]
+        + [{"player_id": "p2", "player_display_name": "B Gap", "position": "RB",
+            "recent_team": "GB", "opponent_team": "DET", "season": 2025,
+            "week": w, "receptions": 3, "receiving_yards": 20, "targets": 4,
+            "carries": 5}
+           for w in (1, 3, 17)])
+    write_table(conn, "weekly", weekly)
+    write_table(conn, "schedules", pd.DataFrame([
+        {"home_team": "DET", "away_team": "GB", "week": 1,
+         "total_line": 51.0, "spread_line": 3.0}]))
+    write_table(conn, "adp", pd.DataFrame([
+        {"adp_name": "A Star", "position": "WR", "team": "DET", "adp": 5.1},
+        {"adp_name": "B Gap", "position": "RB", "team": "GB", "adp": 40.0},
+        # No weekly rows anywhere: the rookie/defense case.
+        {"adp_name": "C Rookie", "position": "WR", "team": "SF", "adp": 90.0}]))
+    write_table(conn, "depth_charts", pd.DataFrame(
+        columns=["gsis_id", "depth_team", "formation", "week", "position"]))
+    write_table(conn, "snap_counts", pd.DataFrame(
+        columns=["player", "team", "season", "offense_pct"]))
+    conn.close()
+    from scoring import board_cache, game_points
+    board_cache.clear()
+    game_points.clear()
+
+
+def test_players_carry_last_seasons_points_week_by_week(tmp_path):
+    """Indexed by WEEK, not packed by game, and null for a week with no row.
+
+    The chart draws every player against the same slots, so a back who played
+    three games reads as three bars in an otherwise empty season rather than
+    as a full one with short bars -- and a bye or an injury reads as a gap
+    rather than as a nought-point game, which is a different claim.
+    """
+    path = str(tmp_path / "g.duckdb")
+    _seed_game_points(path)
+    rows = {p["name"]: p for p in
+            TestClient(create_app(path)).get("/api/players").json()["players"]}
+
+    # 8 receptions + 90 yards = 8 x 1.0 + 90 x 0.1 = 17.0, every week of 17.
+    assert rows["A Star"]["game_points"] == [17.0] * 17
+    # 3 + 2.0 = 5.0, in weeks 1, 3 and 17 of the same 17-week season.
+    gap = rows["B Gap"]["game_points"]
+    assert len(gap) == 17
+    assert gap == [5.0, None, 5.0] + [None] * 13 + [5.0]
+    # A player with no rows in that season gets JSON null -- an explicit "no
+    # games last season" the table renders as an empty state. Never [] or
+    # [0, 0, ...], both of which read as "played and did not score".
+    assert rows["C Rookie"]["game_points"] is None
+
+
+def test_the_per_game_chart_is_built_once_per_refresh_not_once_per_pick(tmp_path):
+    """The whole reason it is not a `build_board` column: the board cache is
+    keyed on the `drafted` table, so it is thrown away on every pick -- a
+    dozen-plus times an hour on draft night. These arrays depend on nothing a
+    pick can change, so they are keyed like scoring/profile_cache.py is
+    (database + `meta` + the league's rules) and survive it."""
+    import scoring.board_cache as bc
+    import scoring.game_points as gp
+    path = str(tmp_path / "g.duckdb")
+    _seed_game_points(path)
+    client = TestClient(create_app(path))
+
+    boards, games = [], []
+    real_board, real_games = bc.build_board, gp._build
+    bc.build_board = lambda *a, **k: (boards.append(1), real_board(*a, **k))[1]
+    gp._build = lambda *a, **k: (games.append(1), real_games(*a, **k))[1]
+    try:
+        client.get("/api/players")
+        client.get("/api/players")
+        client.post("/api/drafted/p1")
+        client.get("/api/players")
+    finally:
+        bc.build_board, gp._build = real_board, real_games
+
+    # The pick correctly invalidates the board...
+    assert len(boards) == 2
+    # ...and correctly does not invalidate this.
+    assert len(games) == 1

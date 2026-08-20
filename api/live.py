@@ -1453,6 +1453,35 @@ def register_live_routes(app, conn, db_path):
              "restore_error": None}
     lock = threading.Lock()
 
+    def live_settings():
+        """The league the running session is priced under, or None.
+
+        PUBLISHED ON `app.state` (at the bottom of this function) for exactly
+        one consumer: api/main.py's board and profile endpoints, which
+        otherwise price everything on the STORED `league` row -- the newest
+        imported season's, which on the owner's database is 2025 and scores no
+        kicking at all. A connect fetches the real roster and scoring from
+        ESPN (`_league_settings_from_espn`) and builds the session on it, so
+        while a draft is running the room and the profile beside it were
+        working from two different leagues.
+
+        An accessor, not the `state` dict itself, because `state` is only
+        safe to touch under `lock` and that discipline must not leak into
+        another module. One slot is read under the lock and the frozen
+        LeagueSettings hanging off the frozen DraftSession is returned: both
+        are replaced wholesale by dataclasses.replace, never mutated, so the
+        caller cannot see a half-updated session and its answer cannot change
+        underneath the request that asked.
+
+        `getattr` with a None default rather than `session.settings`: a
+        DraftSession built directly by a test may carry no settings at all,
+        and "no settings" has to mean the same thing as "no session" --
+        api/main.py falls back to `league.load` for both.
+        """
+        with lock:
+            session = state["session"]
+        return getattr(session, "settings", None)
+
     def _new_progress(token_path: bool, **facts):
         """Open a progress record for a connect that is about to run.
 
@@ -3300,6 +3329,14 @@ def register_live_routes(app, conn, db_path):
     # stat(). The thread is a daemon and is never joined by the app: create_app
     # must return, and uvicorn must bind its port, without waiting on a
     # 4.1-34.8s board build.
+    # Published before the restore thread starts, not after: a restore
+    # installs a session on a background thread, and a /api/players that
+    # lands in that window must find the accessor already there rather than
+    # the stub api/main.py declared. Set on `app.state` (Starlette's own
+    # per-app namespace) rather than returned, because the return value is
+    # `(state, _recompute)` and a dozen tests unpack exactly those two.
+    app.state.live_settings = live_settings
+
     _saved = load_session_record(db_path)
     if _saved is not None:
         state["restore_thread"] = threading.Thread(

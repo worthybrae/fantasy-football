@@ -4375,3 +4375,40 @@ def test_stopping_during_a_restore_keeps_the_session_stopped(
     body = client.get("/api/live/state").json()
     assert body["active"] is False
     assert body["restoring"] is False
+
+
+def test_the_app_publishes_the_running_sessions_league_settings(tmp_path):
+    """`app.state.live_settings` is the seam api/main.py's board and profile
+    endpoints read, and this is the other end of it.
+
+    Without it those two endpoints price everything on the STORED `league`
+    row -- the newest imported season's, which on the owner's database is 2025
+    and scores no kicking -- while the room beside them ranks on the roster
+    and scoring this connect fetched from ESPN. An accessor rather than the
+    `state` dict itself so the lock discipline stays inside this module; it
+    returns the session's own frozen LeagueSettings, so a caller cannot
+    observe a half-replaced session (they are swapped whole, by
+    dataclasses.replace, never mutated).
+    """
+    from fastapi import FastAPI
+    import dataclasses as _dc
+    from scoring.league import default_settings
+
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    conn = get_conn(path)
+    app = FastAPI()
+    state, _recompute = register_live_routes(app, conn, path)
+
+    # No session at all -- api/main.py falls back to league.load for this.
+    assert app.state.live_settings() is None
+
+    custom = _dc.replace(default_settings(), bench=8)
+    state["session"] = build_session(conn, my_slot=1, settings=custom)
+    assert app.state.live_settings() is custom
+
+    # And a session that ended stops answering, rather than leaving the last
+    # draft's league pricing every profile opened after it.
+    state["session"] = None
+    assert app.state.live_settings() is None
+    conn.close()

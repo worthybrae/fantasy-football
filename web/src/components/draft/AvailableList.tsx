@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react'
+import { memo, useMemo, useState, type ReactNode } from 'react'
 import type { LiveCandidate, Player } from '../../api'
 import { riskTone } from './tone'
 
@@ -21,6 +21,99 @@ function fmtRank(n: number | null): string {
 }
 
 const POSITIONS = ['ALL', 'QB', 'RB', 'WR', 'TE', 'K', 'DST']
+
+// -- last season's per-game bars -------------------------------------------
+//
+// One bar per week of the last complete season, in week order, coloured on
+// the thresholds the owner asked for: under 10 red, 10 to 15 amber, 15 and up
+// green. `Player.game_points` (scoring/game_points.py) is already priced in
+// the league's own scoring, so these are the same points every other number
+// in this row is in.
+//
+// THE THRESHOLDS ARE FIXED, NOT PER-POSITION, AND THAT IS DELIBERATE.
+// Measured on the real 252-player board (data/nfl.duckdb, 2025, the owner's
+// stored PPR scoring, kickers excluded because this league prices none of
+// their stats): 46.5% of games under 10, 20.1% between, 33.4% at 15 or more.
+// It splits hard by position -- quarterbacks 24/19/57 around a median of
+// 16.6, tight ends 63/20/16 around 7.5 -- and that IS the signal, not a
+// defect in it. A tight end who puts up 15 is rarer and worth more than a
+// quarterback who does, and a colour scale rebased per position would say
+// they were the same afternoon. Do not make these relative.
+const BAR_AMBER_FROM = 10
+const BAR_GREEN_FROM = 15
+
+// The bars share ONE vertical scale across every row, so a bad player's best
+// week cannot draw as tall as a stud's. 30 points is the ceiling (anything
+// above it draws full height): on the same 252-player board it clips 3.0% of
+// games, while the 95th percentile is 27.3 and the median 9.2 -- so almost
+// every bar lands inside the scale and the ones that clip are already the
+// unmistakable ones. A per-row maximum was rejected for exactly the reason
+// the fixed colour thresholds were.
+const BAR_CEILING = 30
+// Ceiling in pixels. The row is 32px tall (`th, td { height: 32px }`) with
+// 6px of vertical padding, so 18px is the tallest chart that CANNOT make the
+// row taller -- and a taller row means fewer players on screen under a
+// thirty-second clock, which is the one thing this column is not allowed to
+// cost. Measured after the fact: the row is 32px with the column and 32px
+// without it.
+const BAR_MAX_PX = 18
+// A game that was played always draws something. Without a floor, a 0.0 game
+// (a receiver held catchless, a kicker who missed everything) would be
+// indistinguishable from a week he did not play -- which is a different claim
+// and gets its own, greyer, 1px mark.
+const BAR_MIN_PX = 2
+
+function barHeight(points: number): number {
+  const scaled = Math.round((Math.min(points, BAR_CEILING) / BAR_CEILING) * BAR_MAX_PX)
+  // Math.max also catches the negative weeks -- a quarterback can finish
+  // under zero, and 70 of 2025's real games did. They are floored to the
+  // minimum bar rather than drawn downward: this is a 18px strip in a table
+  // row, not a chart with an axis, and half of it cannot be spent on the 0.4%
+  // of games that go below the line.
+  return Math.max(BAR_MIN_PX, scaled)
+}
+
+function barTone(points: number): string {
+  if (points >= BAR_GREEN_FROM) return 'is-good'
+  if (points >= BAR_AMBER_FROM) return 'is-mid'
+  return 'is-bad'
+}
+
+// Memoized on the array identity: `players` is fetched once and never
+// mutated, so a row's bars are built exactly once no matter how often the
+// table re-filters and re-sorts. Without this, every keystroke in the search
+// box would rebuild up to 250 x 18 = 4,500 spans.
+const GameBars = memo(function GameBars({ points, season }: {
+  points: (number | null)[]
+  season: number | null
+}): ReactNode {
+  const played = points.filter((p): p is number => p !== null)
+  const bad = played.filter((p) => p < BAR_AMBER_FROM).length
+  const mid = played.filter((p) => p >= BAR_AMBER_FROM && p < BAR_GREEN_FROM).length
+  const good = played.filter((p) => p >= BAR_GREEN_FROM).length
+  return (
+    <span
+      className="gamebars"
+      role="img"
+      /* A bar chart is nothing to a screen reader, so it gets the summary a
+         sighted reader takes from the colours instead of a shape it cannot
+         see. */
+      aria-label={`${season ?? 'Last season'}: ${played.length} games, `
+        + `${good} at 15 or more, ${mid} from 10 to 15, ${bad} under 10`}
+    >
+      {points.map((p, i) => (p === null ? (
+        <span key={i} className="gamebar is-none" title={`Week ${i + 1}: no game`} />
+      ) : (
+        <span
+          key={i}
+          className={`gamebar ${barTone(p)}`}
+          style={{ height: `${barHeight(p)}px` }}
+          title={`Week ${i + 1}: ${p.toFixed(1)}`}
+        />
+      )))}
+    </span>
+  )
+})
 
 // -- sorting ---------------------------------------------------------------
 //
@@ -186,6 +279,20 @@ export default function AvailableList({
   // any other default would hide the model's answer behind a click.
   const [sort, setSort] = useState<{ key: SortKey; dir: SortDir }>({ key: 'rank', dir: 'asc' })
 
+  // The season the bars describe, read off the same board rows they ride in
+  // on. `stats.season` and `game_points` are both cut from `max(season)` in
+  // `weekly` (scoring/board.py's _latest_season_stats and
+  // scoring/game_points.py), so they cannot name different years -- and a
+  // header claiming the wrong year would be worse than one claiming none.
+  // Null only until /api/players resolves, or for a board where nobody has a
+  // season at all.
+  const season = useMemo(() => {
+    for (const p of Object.values(players)) {
+      if (p.stats) return p.stats.season
+    }
+    return null
+  }, [players])
+
   const q = search.trim().toLowerCase()
   const visible = candidates.filter((c) => {
     if (pos !== 'ALL' && c.position !== pos) return false
@@ -273,7 +380,26 @@ export default function AvailableList({
           <tr>
             {sortableTh('rank', '#', 'avail-col-rank')}
             {sortableTh('pos', 'Pos', 'avail-col-pos')}
-            {sortableTh('player', 'Player')}
+            {sortableTh('player', 'Player', 'avail-col-name')}
+            {/* The one header in this table that is NOT a control, and it
+                says so rather than sitting there looking like the seven that
+                are. There is no honest single number to sort a distribution
+                by: "most 15-point games" and "fewest under 10" and "highest
+                median" are three different questions, and picking one would
+                make the column quietly answer a question nobody asked. The
+                quantity that DOES summarise a season is already sortable two
+                columns over -- Proj -- and `stats.ppg` is on the profile the
+                name opens. So: no button, no caret, default cursor, and the
+                word in the header. */}
+            <th
+              className="avail-col-games"
+              title={`Points in each ${season ?? 'last season'} game, in week`
+                + ' order. Red under 10, amber 10 to 15, green 15 and up.'
+                + ' A faint mark is a week with no game. Not sortable.'}
+            >
+              <span>{season ?? 'Last'}</span>
+              <span className="avail-nosort">no sort</span>
+            </th>
             {sortableTh('proj', 'Proj', 'avail-col-num')}
             {/* One word. Naming the horizon inline ("Lasts to pick 13")
                 stacked four lines deep in a 78px column and doubled the
@@ -299,7 +425,7 @@ export default function AvailableList({
               <tr key={c.player_id}>
                 <td className="avail-col-rank mono">{c.rank}</td>
                 <td className="avail-col-pos">{posBadge(c.position)}</td>
-                <td>
+                <td className="avail-col-name">
                   {/* A button, not a link: this opens an overlay over the
                       room, and an <a href> here would offer a navigation
                       that no longer happens on click. The board grid keeps
@@ -318,6 +444,25 @@ export default function AvailableList({
                       {player.team} · BYE {player.bye ?? '—'}
                     </span>
                   )}
+                </td>
+                <td className="avail-col-games">
+                  {/* An explicit empty state, never a blank cell. 45 of the
+                      252 players on the real board have no games in the last
+                      complete season -- 25 defenses (nflverse carries no
+                      team-defense weekly rows at all), 17 rookies, and the
+                      kickers of a league that prices no kicking. A blank cell
+                      reads as "did not score"; a dash reads as "nothing to
+                      show", which is the true one. */}
+                  {player?.game_points
+                    ? <GameBars points={player.game_points} season={season} />
+                    : (
+                      <span
+                        className="gamebars-none"
+                        title={`No games in ${season ?? 'the last complete season'}`}
+                      >
+                        —
+                      </span>
+                    )}
                 </td>
                 <td className="avail-col-num mono avail-proj">{Math.round(c.proj_points)}</td>
                 {/* null survive_pct (no roster to survive FOR yet) gets no
@@ -348,8 +493,8 @@ export default function AvailableList({
           })}
           {rows.length === 0 && (
             <tr>
-              {/* 8 = the seven columns above plus the draft button's. */}
-              <td colSpan={8} className="avail-empty">
+              {/* 9 = the eight columns above plus the draft button's. */}
+              <td colSpan={9} className="avail-empty">
                 {candidates.length === 0 ? 'No candidates yet.' : 'No players match this filter.'}
               </td>
             </tr>
