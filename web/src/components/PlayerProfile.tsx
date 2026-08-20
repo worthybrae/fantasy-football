@@ -1,15 +1,22 @@
 import { useEffect, useRef, useState } from 'react'
-import { fetchProfile, type Player, type PlayerProfileData } from '../api'
-import SeasonRangeChart from './SeasonRangeChart'
-import GameLog from './GameLog'
-import SeasonTable from './SeasonTable'
-import SimilarPlayers from './SimilarPlayers'
-import SnapShareChart from './SnapShareChart'
-import StatTiles from './StatTiles'
-import RankingsPanel from './RankingsPanel'
+import { fetchProfile, type Player } from '../api'
 import DepthChartCard from './DepthChartCard'
-import ScheduleCalendar from './ScheduleCalendar'
 import PageSkeleton from './PageSkeleton'
+import SimilarPlayers from './SimilarPlayers'
+import CohortNext from './profile/CohortNext'
+import InjuryStatus from './profile/InjuryStatus'
+import NewsPanel from './profile/NewsPanel'
+import ConsistencyTable from './profile/ConsistencyTable'
+import LineQuality from './profile/LineQuality'
+import MarketRow from './profile/MarketRow'
+import MissingData from './profile/MissingData'
+import RoomGap from './profile/RoomGap'
+import ScheduleRanks from './profile/ScheduleRanks'
+import UsageLine from './profile/UsageLine'
+import ValueNeighbors from './profile/ValueNeighbors'
+import WeekByWeek from './profile/WeekByWeek'
+import VerdictStrip, { type VerdictFigure } from './profile/VerdictStrip'
+import { fmtRank, fmtSigned, hasHistory, ordinal, type ProfileHeader, type ProfilePayload } from './profile/payload'
 
 // Everything the opener already knew about this player, so the profile can
 // paint on the frame it opens instead of behind a skeleton.
@@ -61,18 +68,35 @@ function depthSlotLabel(position: string, depthSlot: number | null): string | nu
   return `${position}${depthSlot}`
 }
 
-// Higher sos_raw/sos_pct = opponents allow more fantasy points at this
-// position = an easier ("softer") schedule; lower = a tougher one.
-function sosLabel(sosRaw: number | null, sosPct: number | null): string {
-  if (sosRaw === null || sosPct === null) return 'SoS —'
-  const direction = sosPct >= 50 ? 'softer' : 'tougher'
-  return `SoS ${sosRaw.toFixed(1)} FPA/g (${sosPct.toFixed(0)}th pct — ${direction})`
+// The verdict, read off the board row -- the /players/:slug route's version
+// of the figure strip, where there is no seed because nothing opened this
+// from a list it had already ranked. Same five facts the sparse artboard
+// leads with, in the same order.
+function headerFigures(h: ProfileHeader): VerdictFigure[] {
+  return [
+    { label: 'Board rank', value: `#${h.rank}`, accent: true },
+    { label: 'Tier', value: h.tier === null || h.tier === undefined ? '—' : `T${h.tier}` },
+    { label: 'Projected', value: h.proj_points === null ? '—' : String(Math.round(h.proj_points)) },
+    { label: 'Over replacement', value: fmtSigned(h.vor) },
+    { label: 'ADP', value: fmtRank(h.market_rank) },
+  ]
+}
+
+// The o-line section's heading, which is about where the player stands
+// relative to the five men in front of him -- a running back runs behind
+// them, a quarterback is protected by them, a kicker only needs them to get
+// the offence close enough.
+function lineHeading(position: string): string {
+  if (position === 'RB') return 'The line he runs behind'
+  if (position === 'QB') return 'The line protecting him'
+  if (position === 'K') return 'The line that gets him in range'
+  return 'The line in front of him'
 }
 
 export default function PlayerProfile({
   playerId, onClose, onToggleDrafted, onSelectPlayer, seed = null, embedded = false,
 }: PlayerProfileProps) {
-  const [profile, setProfile] = useState<PlayerProfileData | null>(null)
+  const [profile, setProfile] = useState<ProfilePayload | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -102,7 +126,11 @@ export default function PlayerProfile({
     setLoading(true)
     setError(null)
     try {
-      const data = await fetchProfile(forPlayerId)
+      // `fetchProfile` is typed against api.ts's PlayerProfileData, which
+      // describes the payload as it was before the card redesign; the seven
+      // keys the card actually reads are named in profile/payload.ts. See
+      // that file for why they live there and not in api.ts.
+      const data = await fetchProfile(forPlayerId) as unknown as ProfilePayload
       if (playerIdRef.current === forPlayerId) setProfile(data)
     } catch (e) {
       if (playerIdRef.current === forPlayerId) {
@@ -149,7 +177,6 @@ export default function PlayerProfile({
   }
 
   const header = profile?.header
-  const depthSlot = header && profile ? depthSlotLabel(header.position, profile.outlook.depth_slot) : null
 
   // Who this page is about, from whichever source knows first: the loaded
   // profile's own header row, or the seed the opener handed over. The two
@@ -162,6 +189,37 @@ export default function PlayerProfile({
   // in for. Without one this is unchanged: skeleton until the request lands.
   if (loading && !profile && !seed) return <PageSkeleton />
 
+  // The strip never re-renders from the response when a seed exists. The
+  // room's figures are the ones the pick is being made on and the payload
+  // cannot reproduce three of them, so swapping them out for the board's
+  // five when the request lands would replace the better numbers with worse
+  // ones and move the reader's eye while it was on them.
+  const figures = seed ? seed.figures : header ? headerFigures(header) : []
+
+  // Meta line, in the design's order: team, depth slot, age, service year,
+  // bye. Age and service year are the payload's alone (`bio`), so the line
+  // grows by two facts when the request lands -- inline, in a line that is
+  // already on screen, rather than as a block that appears and shoves
+  // everything under it down.
+  const meta: string[] = []
+  if (ident) meta.push(ident.team ?? '—')
+  const depthSlot = header && profile
+    ? depthSlotLabel(header.position, profile.outlook.depth_slot) : null
+  if (depthSlot) meta.push(depthSlot)
+  if (profile?.bio.age !== null && profile?.bio.age !== undefined) {
+    meta.push(`age ${profile.bio.age}`)
+  }
+  if (profile?.bio.nfl_season !== null && profile?.bio.nfl_season !== undefined) {
+    meta.push(`${ordinal(profile.bio.nfl_season)} NFL season`)
+  }
+  const bye = profile?.outlook.bye ?? ident?.bye ?? null
+  meta.push(`bye ${bye ?? '—'}`)
+
+  const sparse = profile !== null && !hasHistory(profile)
+  const lastSeason = profile && profile.game_log.length > 0
+    ? Math.max(...profile.game_log.map((g) => g.season))
+    : null
+
   return (
     <div className={`player-page${embedded ? ' player-page-embedded' : ''}`}>
       {!embedded && (
@@ -171,33 +229,34 @@ export default function PlayerProfile({
       )}
       {ident && (
         <div className="pp-header">
-          <div>
-            <h2 className="pp-name">
-              {ident.name}
-              {ident.rookie && <span className="rookie-badge">R</span>}
-            </h2>
-            <p className="drawer-subhead">
+          <div className="pp-ident">
+            <div className="pp-name-row">
               <span className={`pos-badge pos-badge-${ident.position.toLowerCase()}`}>
                 {ident.position}
-              </span>{' '}
-              · {ident.team ?? '—'} · Bye {ident.bye ?? '—'}
-              {depthSlot && <> · {depthSlot}</>}
-              {/* Depth slot and strength of schedule are the two things
-                  only the request can answer, so this tail of the line is
-                  where the wait is admitted -- inline, in a line that is
-                  already on screen, rather than as a block that appears and
-                  then vanishes and moves everything under it. */}
-              {profile
-                ? <>{' · '}{sosLabel(profile.outlook.sos_raw, profile.outlook.sos_pct)}</>
-                : loading && (
-                  <span className="pp-loading-tail">
-                    {' · '}
-                    <span className="pp-loading-dot" aria-hidden="true" />
-                    <span role="status">loading full profile…</span>
-                  </span>
-                )}
+              </span>
+              <h2 className="pp-name">
+                {ident.name}
+                {ident.rookie && <span className="rookie-badge">R</span>}
+              </h2>
+            </div>
+            <p className="mono pp-meta">
+              {meta.join(' · ')}
+              {!profile && loading && (
+                <span className="pp-loading-tail">
+                  {' · '}
+                  <span className="pp-loading-dot" aria-hidden="true" />
+                  <span role="status">loading full profile…</span>
+                </span>
+              )}
             </p>
+            {/* The injury line sits in the header because that is where it
+                changes a pick: a designation can make every number below it
+                irrelevant. Absent from the payload until the change that
+                adds it lands, and absent for every defense after that, so
+                it is read defensively rather than assumed. */}
+            {profile?.status && <InjuryStatus status={profile.status} />}
           </div>
+          <VerdictStrip figures={figures} />
           {onToggleDrafted && header && (
             <button type="button" className="drawer-draft-btn" onClick={handleToggleDraftedClick}>
               {header.drafted ? 'Undo draft' : 'Mark drafted'}
@@ -206,23 +265,7 @@ export default function PlayerProfile({
         </div>
       )}
 
-      {/* The opener's own numbers, rendered before anything has been
-          fetched and never re-rendered from the response -- see ProfileSeed.
-          Same geometry as the confirm dialog's figure row, because it is
-          the same kind of thing: the handful of values the decision is
-          actually made on. */}
-      {seed && seed.figures.length > 0 && (
-        <div className="pp-seed-figures">
-          {seed.figures.map((f) => (
-            <div key={f.label}>
-              <div className="draft-cap">{f.label}</div>
-              <div className={`pp-seed-figure mono${f.accent ? ' is-open' : ''}`}>{f.value}</div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Below the header and the seed's figures, not above them: when this
+      {/* Below the header and the verdict strip, not above them: when this
           arrives it arrives late (the request has to fail first), and a
           block inserted above a header that is already painted would shove
           the whole profile down under the reader's eyes. */}
@@ -230,32 +273,115 @@ export default function PlayerProfile({
 
       {header && profile && (
         <div className="pp-grid">
-          <section className="pp-card pp-span7">
-            <h3>Production</h3>
-            <StatTiles summary={profile.summary} outlook={profile.outlook} position={header.position} />
-          </section>
+          {sparse ? (
+            <>
+              {/* A card with no history makes ONE claim -- the gap between
+                  what the board thinks and what the room charges -- and then
+                  says what is missing and why. Six panels of em-dashes would
+                  be worse than the admission. */}
+              <section className="pp-card pp-span12 pp-card-lead">
+                <h3 className="is-accent">Where this disagrees with the room</h3>
+                <RoomGap rank={header.rank} marketRank={header.market_rank} edge={header.edge} />
+              </section>
 
-          <section className="pp-card pp-span5">
-            <h3>Rankings</h3>
-            <RankingsPanel
-              marketRank={header.market_rank}
-              marketSpread={header.market_spread}
-              sources={header.market_sources}
-            />
-          </section>
+              <section className="pp-card pp-span7">
+                <h3>What this card can’t show, and why</h3>
+                <MissingData payload={profile} />
+                {profile.outlook.implied_points !== null && (
+                  <p className="pp-implied">
+                    <span className="mono pp-implied-value">
+                      {profile.outlook.implied_points.toFixed(1)}
+                    </span>
+                    <span>
+                      points a game implied for {header.team}&apos;s own offence by
+                      this season&apos;s betting lines — the one forward-looking
+                      number that still applies
+                      {header.position === 'DST' && ', though it describes the'
+                        + ' side of the ball that leaves the field when this unit'
+                        + ' comes on'}.
+                    </span>
+                  </p>
+                )}
+              </section>
 
-          {profile.seasons.length > 0 && (
+              <section className="pp-card pp-span5">
+                <h3>Others at this value</h3>
+                <p className="pp-sub">nearest by board rank, not by stat line</p>
+                <ValueNeighbors
+                  players={profile.similar.players}
+                  onSelectPlayer={onSelectPlayer}
+                />
+              </section>
+            </>
+          ) : (
+            <>
+              <section className="pp-card pp-span7">
+                <h3>Season by season</h3>
+                <p className="pp-sub">
+                  volatility is scored per point — spread divided by average, so a
+                  bigger scorer isn’t punished for scoring
+                </p>
+                <ConsistencyTable seasons={profile.seasons} position={header.position} />
+                {/* The old card led with nine stat tiles; the redesign leads
+                    with the verdict instead. The usage they carried is not
+                    lost, it is one line under the seasons it was averaged
+                    from. */}
+                <UsageLine summary={profile.summary} position={header.position} />
+              </section>
+
+              {profile.cohort && (
+                <section className="pp-card pp-span5">
+                  <h3 className="is-accent">What players like him did next</h3>
+                  <CohortNext cohort={profile.cohort} />
+                </section>
+              )}
+
+              {lastSeason !== null && (
+                <section className="pp-card pp-span7">
+                  <h3>{lastSeason} week by week</h3>
+                  <WeekByWeek games={profile.game_log} position={header.position} />
+                </section>
+              )}
+
+              <section className="pp-card pp-span5">
+                <h3>Where the market has him</h3>
+                <MarketRow
+                  marketRank={header.market_rank}
+                  marketSpread={header.market_spread}
+                  sources={header.market_sources}
+                />
+              </section>
+            </>
+          )}
+
+          {/* Everything below here is common to both cards: a defense has a
+              schedule of its own, a rookie has a line in front of him, and
+              neither has to be a special case to say so. Each section is
+              omitted when its own data is empty rather than drawn as a row
+              of dashes. */}
+          {profile.schedule.length > 0 && (
             <section className="pp-card pp-span7">
-              <h3>Avg &amp; volatility by season</h3>
-              <SeasonRangeChart seasons={profile.seasons} position={header.position} />
+              <h3>{profile.bio.season} schedule</h3>
+              <ScheduleRanks weeks={profile.schedule} />
             </section>
           )}
 
-          {['RB', 'WR', 'TE'].includes(header.position) &&
-            profile.seasons.some((s) => s.snap_share !== null) && (
+          {profile.oline && (
             <section className="pp-card pp-span5">
-              <h3>Snap share</h3>
-              <SnapShareChart seasons={profile.seasons} />
+              <h3>{lineHeading(header.position)}</h3>
+              <LineQuality oline={profile.oline} />
+            </section>
+          )}
+
+          {!sparse && (
+            <section className="pp-card pp-span7">
+              <h3>Comparable players</h3>
+              <SimilarPlayers
+                mode={profile.similar.mode}
+                players={profile.similar.players}
+                targetAge={profile.similar.target_age ?? null}
+                onSelectPlayer={onSelectPlayer}
+              />
             </section>
           )}
 
@@ -266,32 +392,20 @@ export default function PlayerProfile({
             </section>
           )}
 
-          {profile.schedule.length > 0 && (
-            <section className="pp-card pp-span7">
-              <h3>2026 matchups</h3>
-              <ScheduleCalendar weeks={profile.schedule} position={header.position} bye={profile.outlook.bye} />
+          {/* News, last in the grid: it is the only section whose length is
+              unbounded, and it is the one a manager reads after the numbers
+              rather than instead of them. Rendered only when the payload
+              actually carries items -- the `news` key arrives with a change
+              landing alongside this card, and is an empty list both for a
+              player nobody wrote about and for every defense. An empty
+              "News" card with a dash in it would be a promise the payload
+              cannot keep. */}
+          {profile.news && profile.news.length > 0 && (
+            <section className="pp-card pp-span12">
+              <h3>Recent news</h3>
+              <NewsPanel items={profile.news} />
             </section>
           )}
-
-          <section className="pp-card pp-span12">
-            <h3>Season history</h3>
-            <SeasonTable seasons={profile.seasons} position={header.position} />
-          </section>
-
-          <section className="pp-card pp-span12">
-            <h3>Game log</h3>
-            <GameLog gameLog={profile.game_log} position={header.position} />
-          </section>
-
-          <section className="pp-card pp-span12">
-            <h3>Similar players</h3>
-            <SimilarPlayers
-              mode={profile.similar.mode}
-              players={profile.similar.players}
-              targetAge={profile.similar.target_age ?? null}
-              onSelectPlayer={onSelectPlayer}
-            />
-          </section>
         </div>
       )}
     </div>

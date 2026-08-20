@@ -1,0 +1,241 @@
+import type { GameLogRow, Player, PlayerProfileData, ScheduleWeek, SeasonSummary } from '../../api'
+
+// The player-card payload as `scoring/profile.py::build_profile` actually
+// serves it today, which is more than `api.ts`'s `PlayerProfileData`
+// describes: commit 7d7e7d1 added `bio`, `cohort`, `oline`, six keys on each
+// season row, `snap_pct` on each game-log row and `rank`/`rank_n` on each
+// schedule week, all of them additively and none of them typed on the way
+// in.
+//
+// Declared HERE rather than merged into `api.ts` on purpose: that file is
+// the shared contract for every view in the app and the payload is being
+// extended by a second, concurrent change (player news and injury status).
+// Two changes editing the same forty lines of interface for two unrelated
+// reasons is a merge conflict for no benefit -- the card that reads these
+// keys is the only thing that needs them named. If the card outlives that
+// concurrency, folding this file into `api.ts` is a copy-paste.
+//
+// EVERY FIELD BELOW WAS READ OFF A REAL PAYLOAD, not off the design, and
+// the two disagree in places (the design's o-line figures are a season old
+// and its cohort caption is hand-written). Nothing here is defaulted or
+// invented: a value the payload nulls is rendered as missing, not as zero.
+
+/** One season row: `SeasonSummary` plus the six the redesign asked for. */
+export interface SeasonRow extends SeasonSummary {
+  /** Age on September 1 of THAT season (not today) -- see `player_bio`. */
+  age: number | null
+  /** 1-based: a rookie year is his 1st NFL season. */
+  nfl_season: number | null
+  /** Positional finish by POINTS PER GAME, and the pool it is out of.
+   *  `pos_finish` (already on `SeasonSummary`) is by total points -- the two
+   *  are different facts and a 12-game season separates them sharply. */
+  pos_rank_ppg: number | null
+  pos_rank_ppg_n: number | null
+  /** Coefficient of variation: week-to-week spread divided by the average.
+   *  See ConsistencyTable for why the card ranks on this and not on
+   *  `ppg_std`. */
+  cv: number | null
+  cv_rank: number | null
+  cv_rank_n: number | null
+  /** The same position-season's median CV, so "0.63" has something to be
+   *  read against. */
+  cv_pos_median: number | null
+}
+
+/** One game-log row plus its own offensive snap share (null on a DNP: he
+ *  took no snaps because he did not play, which is not a share of zero). */
+export interface GameRow extends GameLogRow {
+  snap_pct: number | null
+}
+
+/** One schedule week plus the league rank the owner asked for.
+ *  DIRECTION, because it inverts the intuition: rank 1 is the SOFTEST
+ *  defence -- the one that gave up the most to this position last season --
+ *  out of `rank_n` (32 here). Every label that renders it says so. */
+export interface ScheduleRankWeek extends ScheduleWeek {
+  rank: number | null
+  rank_n: number | null
+}
+
+/** Age and service time as of the season being drafted. All-null for a
+ *  player the `players` table has no row for: every defense, and any rookie
+ *  nflverse has no biography for yet. */
+export interface Bio {
+  season: number
+  birth_date: string | null
+  rookie_season: number | null
+  age: number | null
+  nfl_season: number | null
+}
+
+export interface CohortSeason {
+  player_id: string
+  name: string
+  season: number
+  nfl_season: number | null
+  ppg: number
+  next_ppg: number
+  /** next_ppg - ppg. Negative is a decline. */
+  change: number
+}
+
+/** Seasons like this one, and what they became. The band is served with the
+ *  cohort so the caption can state the recipe instead of asserting it. */
+export interface Cohort {
+  season: number
+  position: string
+  ppg: number
+  nfl_season: number | null
+  ppg_band: number
+  exp_band: number | null
+  min_games: number
+  n: number
+  median_change: number | null
+  declined: number
+  improved: number
+  players: CohortSeason[]
+}
+
+/** The team's offensive line. `rank` is 1 = best, out of `teams`.
+ *  Null for a defense by construction (`team_line_quality`): the o-line is a
+ *  fact about the eleven players who leave the field when the defense comes
+ *  on. Kickers keep it -- their attempts come from their own offence moving
+ *  the ball. */
+export interface LineQualityData {
+  season: number
+  team: string
+  rank: number
+  teams: number
+  line_quality: number | null
+  /** All three of these are shares of one; `experience` is mean seasons in
+   *  the league, a different unit, which is why the card never ranks them
+   *  against each other. */
+  continuity: number | null
+  availability: number | null
+  returning: number | null
+  experience: number | null
+}
+
+/** The board row the profile is built from. `api.ts`'s `Player` is the
+ *  subset /api/players serves to the board table; the profile header is the
+ *  whole row, which also carries the projection and the value over
+ *  replacement the verdict strip leads with (plus `composite`, `proj_scale`,
+ *  `espn_id`, `ffc_rank` and the five raw factors, none of which this card
+ *  reads). */
+export interface ProfileHeader extends Player {
+  proj_points: number | null
+  vor: number | null
+}
+
+/** One headline. `attribution` is the whole reason this is a record and not
+ *  a (headline, url) pair: 'espn_athlete_id' means ESPN tagged the article
+ *  with this player's athlete id, 'name_team_query' means a name+team search
+ *  returned it and we believe it is about him. Those are different claims
+ *  and the card says which is which rather than flattening a good guess into
+ *  a fact. Timestamps are ISO-8601 strings, or null. */
+export interface NewsItem {
+  headline: string
+  url: string
+  published_at: string | null
+  source: string | null
+  attribution: string
+  fetched_at: string | null
+}
+
+/** Sleeper's injury and depth signals, or null for a player it has no row
+ *  for (every defense). NOTHING HERE EVER SAYS HEALTHY: `injury_status` is
+ *  null for a fit player, so the absence of a designation is the absence of
+ *  a claim, not a clean bill of health. */
+export interface PlayerStatus {
+  injury_status: string | null
+  injury_body_part: string | null
+  injury_notes: string | null
+  depth_chart_position: string | null
+  depth_chart_order: number | null
+  news_updated: string | null
+  fetched_at: string | null
+  source: string
+}
+
+/** The attribution value that means ESPN tagged the article itself
+ *  (pipeline/news.py's ATTR_EXACT). Anything else is a name match. */
+export const ATTR_EXACT = 'espn_athlete_id'
+
+export type ProfilePayload =
+  Omit<PlayerProfileData, 'header' | 'seasons' | 'game_log' | 'schedule'> & {
+    header: ProfileHeader
+    seasons: SeasonRow[]
+    game_log: GameRow[]
+    schedule: ScheduleRankWeek[]
+    bio: Bio
+    cohort: Cohort | null
+    oline: LineQualityData | null
+    // OPTIONAL, and read as such everywhere: `news` and `status` are being
+    // added to this payload by a change landing alongside this card. A card
+    // that renders them when they are there and says nothing when they are
+    // not works against both versions of the server -- and against a
+    // database where `make refresh` has not written the two tables yet,
+    // which is the state data/nfl.duckdb is in as this is written. `news` is
+    // an empty list for a player nobody wrote about (and for every defense);
+    // `status` is null for a player Sleeper has no row for.
+    news?: NewsItem[]
+    status?: PlayerStatus | null
+  }
+
+/** The card has a history to show at all. Deliberately a test of the DATA,
+ *  never of the position: a defense has no weekly rows ever, but a kicker
+ *  has them exactly when the league prices kicking (see `build_profile`'s
+ *  `prices_kicking` branch), and a rookie has none yet whatever he plays.
+ *  Branching on position instead would show a kicker six empty panels in a
+ *  league that scores field goals, and would have to be found and changed
+ *  again the next time the scoring rules move. */
+export function hasHistory(p: ProfilePayload): boolean {
+  return p.seasons.length > 0 || p.game_log.length > 0
+}
+
+/** "+3" / "-3" / "—" -- the app's one spelling of a signed whole number
+ *  (see playerSeed.ts, AvailableList.tsx, TopThree.tsx for the others). */
+export function fmtSigned(n: number | null | undefined, digits = 0): string {
+  if (n === null || n === undefined) return '—'
+  const r = digits === 0 ? Math.round(n) : Number(n.toFixed(digits))
+  const body = digits === 0 ? String(Math.abs(r)) : Math.abs(r).toFixed(digits)
+  if (r > 0) return `+${body}`
+  if (r < 0) return `−${body}`
+  return digits === 0 ? '0' : (0).toFixed(digits)
+}
+
+/** One decimal only when the number isn't whole -- ADP consensus is 1.8 but
+ *  a single source is 1. Same rule as AvailableList's own fmtRank. */
+export function fmtRank(n: number | null | undefined): string {
+  if (n === null || n === undefined) return '—'
+  return Number.isInteger(n) ? String(n) : n.toFixed(1)
+}
+
+/** 21 -> "21st". Used wherever a rank is stated in prose ("21st of 32"). */
+export function ordinal(n: number): string {
+  const rem100 = n % 100
+  if (rem100 >= 11 && rem100 <= 13) return `${n}th`
+  switch (n % 10) {
+    case 1: return `${n}st`
+    case 2: return `${n}nd`
+    case 3: return `${n}rd`
+    default: return `${n}th`
+  }
+}
+
+/** Where a rank falls in its own field, as a three-way tone. Terciles, not
+ *  invented cutoffs: "21st of 32" and "7th of 12" mean the same thing here
+ *  and read the same way. */
+export function rankTone(rank: number | null, of: number | null): 'good' | 'mid' | 'bad' {
+  if (rank === null || of === null || of <= 0) return 'mid'
+  if (rank <= of / 3) return 'good'
+  if (rank > (of * 2) / 3) return 'bad'
+  return 'mid'
+}
+
+/** The `--pos-*` hue for a position, as a class that sets `--pos-hue`.
+ *  Charts read that variable so one class colours the bars, the badge and
+ *  the legend swatch together. */
+export function posHueClass(position: string): string {
+  return `pp-hue-${position.toLowerCase()}`
+}

@@ -182,44 +182,82 @@ td:first-child {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
+  /* Wraps rather than crushing: the verdict strip is up to seven cells and
+     the overlay panel is narrower than the standalone page, so on a small
+     window the strip drops under the name instead of squeezing it. */
+  flex-wrap: wrap;
   gap: var(--space-4);
   margin-bottom: var(--space-4);
 }
 
-.pp-name {
-  margin: 0 0 4px;
-  font-size: 28px;
-  letter-spacing: -0.01em;
+.pp-ident {
+  min-width: 0;
 }
 
-/* The seed's figure row (see ProfileSeed in PlayerProfile.tsx): the handful
-   of numbers the opener already had, painted before the profile request has
-   even been answered. Same geometry as `.confirm-figures` -- caption over
-   value, one rule above and below -- because it is the same kind of row.
-   `flex-wrap` because a candidate seeds seven of these and the overlay is
-   narrower than the standalone page. */
-.pp-seed-figures {
+/* Badge, then name, then the meta line under both -- the artboard's order.
+   The badge leads because the position is the first thing that decides
+   whether the rest of the card is worth reading during a pick. */
+.pp-name-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.pp-name {
+  margin: 0;
+  font-size: 23px;
+  letter-spacing: -0.015em;
+}
+
+/* "DET · RB1 · age 24 · 4th NFL season · bye 6". Age and service year are
+   the payload's alone, so this line grows by two facts when the request
+   lands -- inline, on a line already on screen, so nothing below it moves. */
+.pp-meta {
+  margin-top: 5px;
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+/* The verdict strip (see VerdictStrip.tsx): the handful of numbers the pick
+   is actually made on, across the top of the card before any argument for
+   or against them. In the draft room these are the seed's -- painted before
+   the profile request is even issued -- and on /players/:slug they are the
+   board row's. One geometry either way, so the two never read as two
+   different components. `flex-wrap` because a live candidate seeds seven
+   cells and the overlay is narrower than the standalone page. */
+.pp-verdict {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-3) var(--space-5);
-  margin-bottom: var(--space-4);
-  padding: var(--space-3) 0;
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
 }
 
-.pp-seed-figure {
-  font-size: var(--text-md);
+.pp-verdict-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 7px 15px;
+  min-width: 78px;
+  background: var(--bg-0);
+}
+
+.pp-verdict-value {
+  font-size: 18px;
   font-weight: 700;
   color: var(--text-1);
-  margin-top: 2px;
 }
 
 /* Same rule as `.top3-figure.is-open` / `.confirm-figure.is-open`: an open
-   starter or flex slot reads in accent wherever it appears. (It used to
-   name `.avail-fills.is-open` too -- that class left with the available
-   table's roster-slot column.) */
-.pp-seed-figure.is-open {
+   starter or flex slot reads in accent wherever it appears. */
+.pp-verdict-cell.is-open {
+  background: var(--accent-bg);
+}
+
+.pp-verdict-cell.is-open .pp-verdict-value {
   color: var(--accent);
 }
 
@@ -280,6 +318,850 @@ td:first-child {
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--text-2);
+}
+
+/* -- player card: the redesigned in-draft profile --
+
+   Everything from here to `.card-footnote` belongs to the card rebuilt from
+   .design/profile/Main.dc.html and Sparse.dc.html. It draws only on the
+   tokens in index.css: the artboards inline their own copy of that palette,
+   which is a convenience for a standalone HTML file and would be a second
+   source of truth here.
+
+   Tone classes (`is-good`, `is-mid`, `is-bad`, `is-accent`) are scoped under
+   `.player-page` on purpose -- they are the two-word names most likely to
+   collide with something else in a 3,400-line stylesheet. */
+
+.player-page .is-good { color: var(--ok); }
+.player-page .is-bad { color: var(--fail); }
+.player-page .is-accent { color: var(--accent); }
+
+.pp-cap {
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-3);
+}
+
+/* The one-line explanation under a section heading: what the section is
+   measuring, in the words the design chose, before any number is read. */
+.pp-sub {
+  margin: -6px 0 var(--space-3);
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+
+/* The sentence a section earns after its chart -- the reading, not the
+   caption. Always below the thing it is about. */
+.pp-note {
+  margin-top: var(--space-3);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
+/* The right-hand meta of a section heading row: "21st of 32", "avg 1.8". */
+.pp-section-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: -6px 0 var(--space-3);
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+
+.pp-strong {
+  color: var(--text-1);
+  font-weight: 700;
+}
+
+.pp-dim { color: var(--text-3); }
+.pp-r { text-align: right; }
+
+/* One hue per position, set once on a chart's wrapper and read by every mark
+   inside it (`var(--pos-hue)`), so the bars, the legend swatch and the badge
+   above them cannot drift apart. */
+.pp-hue-qb { --pos-hue: var(--pos-qb); }
+.pp-hue-rb { --pos-hue: var(--pos-rb); }
+.pp-hue-wr { --pos-hue: var(--pos-wr); }
+.pp-hue-te { --pos-hue: var(--pos-te); }
+.pp-hue-k { --pos-hue: var(--pos-k); }
+.pp-hue-dst { --pos-hue: var(--pos-dst); }
+
+/* -- season by season -- */
+
+.pp-seasons-row {
+  display: grid;
+  grid-template-columns: 58px 28px 48px 44px minmax(80px, 1fr) 168px;
+  gap: 0 var(--space-2);
+  align-items: center;
+  min-height: 38px;
+  border-top: 1px solid var(--border);
+}
+
+.pp-seasons-head {
+  min-height: 20px;
+  border-top: 0;
+}
+
+.pp-seasons-head .pp-cap:last-child {
+  text-align: right;
+}
+
+.pp-season-year {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+}
+
+.pp-season-year .mono {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--text-2);
+}
+
+.pp-season-age {
+  font-size: 9px;
+  color: var(--text-3);
+}
+
+.pp-season-ppg {
+  font-size: 14.5px;
+  font-weight: 700;
+  color: var(--text-1);
+}
+
+.pp-season-fin {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text-2);
+}
+
+.player-page .pp-season-fin.is-good { color: var(--ok); }
+
+/* Average as a bar, the actual week-to-week spread as the whisker laid over
+   it -- the point of the redesign's first argument. One scale down the whole
+   column (set in ConsistencyTable), so seasons are comparable to each other
+   and not just to themselves. */
+.pp-spread {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.pp-spread-track {
+  position: relative;
+  flex-grow: 1;
+  min-width: 56px;
+  height: 9px;
+}
+
+.pp-spread-bar {
+  position: absolute;
+  left: 0;
+  top: 3px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--pos-hue, var(--text-2));
+}
+
+.pp-spread-whisker {
+  position: absolute;
+  top: 4px;
+  height: 1px;
+  background: var(--text-3);
+}
+
+.pp-spread-whisker::before,
+.pp-spread-whisker::after {
+  content: '';
+  position: absolute;
+  top: -3px;
+  width: 1px;
+  height: 7px;
+  background: var(--text-3);
+}
+
+.pp-spread-whisker::before { left: 0; }
+.pp-spread-whisker::after { right: 0; }
+
+.pp-spread-num {
+  width: 42px;
+  text-align: right;
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+
+/* The steadiness track: his coefficient of variation as a dot, the position
+   median as a tick, on a fixed 0.2-1.2 scale so the tick sits in the same
+   place on every card. */
+.pp-cv {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.pp-cv-track {
+  position: relative;
+  width: 112px;
+  height: 5px;
+  border-radius: 2px;
+  background: var(--bg-2);
+}
+
+.pp-cv-median {
+  position: absolute;
+  top: -3px;
+  width: 1px;
+  height: 11px;
+  background: var(--text-3);
+}
+
+.pp-cv-dot {
+  position: absolute;
+  top: -2px;
+  width: 8px;
+  height: 8px;
+  margin-left: -4px;
+  border-radius: 50%;
+  background: var(--text-2);
+}
+
+.pp-cv-dot.is-good { background: var(--ok); }
+.pp-cv-dot.is-bad { background: var(--fail); }
+
+.pp-cv-rank {
+  width: 46px;
+  text-align: right;
+  font-size: var(--text-xs);
+  font-weight: 700;
+  color: var(--text-3);
+}
+
+.player-page .pp-cv-rank.is-good { color: var(--ok); }
+.player-page .pp-cv-rank.is-bad { color: var(--fail); }
+.pp-cv-empty { width: 100%; }
+
+/* What the points were made of, per game. One dim line under the seasons
+   table -- the old card's nine stat tiles in the space they now deserve. */
+.pp-usage {
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  color: var(--text-2);
+}
+
+.pp-usage .pp-cap {
+  margin-right: 6px;
+}
+
+/* -- last season, week by week -- */
+
+.pp-weeks-legend {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-2);
+  font-size: 10px;
+  color: var(--text-3);
+}
+
+.pp-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.pp-legend-bar {
+  width: 9px;
+  height: 4px;
+  border-radius: 1px;
+  background: var(--pos-hue, var(--text-2));
+}
+
+.pp-legend-line {
+  width: 9px;
+  height: 2px;
+  background: var(--accent);
+}
+
+.pp-weeks-spacer { flex-grow: 1; }
+
+/* Height is duplicated in WeekByWeek.tsx's VIEW_H so the snap line's
+   coordinate space and the bars' pixel box are the same box -- change one
+   and the line detaches from the weeks it describes. */
+.pp-weeks-plot {
+  position: relative;
+  height: 150px;
+}
+
+.pp-weeks-bars {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+}
+
+.pp-week {
+  flex-grow: 1;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.pp-week-val {
+  font-size: 8.5px;
+  font-weight: 700;
+  margin-bottom: 2px;
+  color: var(--text-3);
+}
+
+.player-page .pp-week-val.is-good { color: var(--ok); }
+.player-page .pp-week-val.is-bad { color: var(--fail); }
+
+.pp-week-bar {
+  width: 100%;
+  border-radius: 1px;
+  background: var(--pos-hue, var(--text-2));
+}
+
+.pp-week-bar.is-good { background: var(--ok); }
+.pp-week-bar.is-bad { background: var(--fail); }
+
+/* A week he did not play is a gap in the bars, not a bar of height zero:
+   zero points is a performance, a bye is not. */
+.pp-week-dnp {
+  width: 100%;
+  height: 4px;
+  background: repeating-linear-gradient(
+    -45deg, var(--text-3) 0 2px, transparent 2px 4px);
+}
+
+.pp-weeks-line {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.pp-weeks-line polyline {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.6;
+  stroke-linejoin: round;
+}
+
+.pp-weeks-opps {
+  display: flex;
+  gap: 3px;
+  margin-top: 5px;
+}
+
+.pp-week-opp {
+  flex-grow: 1;
+  min-width: 0;
+  text-align: center;
+  font-size: 8px;
+  letter-spacing: -0.04em;
+  color: var(--text-3);
+}
+
+/* -- what players like him did next -- */
+
+.pp-cohort-plot {
+  position: relative;
+  height: 104px;
+}
+
+.pp-cohort-bars {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.pp-cohort-slot {
+  flex-grow: 1;
+  display: flex;
+  align-items: flex-end;
+  height: 100%;
+}
+
+.pp-cohort-bar {
+  width: 100%;
+  border-radius: 1px 1px 0 0;
+  background: color-mix(in srgb, var(--text-2) 34%, transparent);
+}
+
+/* Zero is the only line that matters on a distribution of CHANGE, so it is
+   drawn over the bars rather than as an axis tick under them. */
+.pp-cohort-zero {
+  position: absolute;
+  top: -4px;
+  bottom: -4px;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--text-1);
+}
+
+.pp-cohort-median {
+  position: absolute;
+  top: -4px;
+  bottom: -4px;
+  width: 1px;
+  background: var(--accent);
+}
+
+.pp-cohort-axis {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 4px;
+  font-size: 9px;
+}
+
+.pp-figures {
+  display: flex;
+  gap: var(--space-5);
+  margin-top: var(--space-3);
+}
+
+.pp-figure {
+  margin-top: 2px;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-1);
+}
+
+/* -- where the market has him -- */
+
+.pp-market-cells {
+  display: flex;
+  gap: 7px;
+}
+
+.pp-market-cell {
+  flex-grow: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 7px 0;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.pp-market-cell.is-empty { opacity: 0.5; }
+
+.pp-market-rank {
+  font-size: var(--text-lg);
+  font-weight: 700;
+  color: var(--text-1);
+}
+
+/* -- the line in front of him -- */
+
+.pp-oline-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.pp-oline-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.pp-oline-label {
+  width: 92px;
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+
+.pp-oline-track {
+  flex-grow: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg-2);
+  overflow: hidden;
+}
+
+.pp-oline-fill {
+  height: 100%;
+  background: var(--text-2);
+}
+
+.pp-oline-value {
+  width: 54px;
+  text-align: right;
+  font-size: var(--text-xs);
+  font-weight: 700;
+  color: var(--text-1);
+}
+
+/* -- the schedule, as ranks -- */
+
+.pp-sched-weeks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.pp-sched-week {
+  flex: 1 1 42px;
+  min-width: 42px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 5px 2px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.pp-sched-week.is-bye { opacity: 0.45; }
+
+.pp-sched-wk {
+  font-size: 9px;
+  color: var(--text-3);
+}
+
+.pp-sched-opp {
+  font-size: 10px;
+  color: var(--text-2);
+}
+
+.pp-sched-rank {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-2);
+}
+
+.player-page .pp-sched-rank.is-good { color: var(--ok); }
+.player-page .pp-sched-rank.is-bad { color: var(--fail); }
+
+/* -- the sparse card: one claim, then what is missing -- */
+
+/* The lead panel of a card with no history. Marked out by its border rather
+   than by a different fill: it is the one claim on the card, and the accent
+   is this app's signal colour, never a data identity. */
+.pp-card-lead {
+  border-color: var(--accent-border);
+}
+
+.pp-gap {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  flex-wrap: wrap;
+}
+
+.pp-gap-claim {
+  display: flex;
+  align-items: baseline;
+  gap: 11px;
+}
+
+.pp-gap-number {
+  font-size: 44px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--text-1);
+}
+
+.player-page .pp-gap-number.is-accent { color: var(--accent); }
+
+.pp-gap-text {
+  max-width: 280px;
+  font-size: var(--text-base);
+  line-height: 1.45;
+  color: var(--text-2);
+}
+
+/* The same gap, drawn: two ticks on one 260-pick rail, so "81 slots" has a
+   length as well as a number. */
+.pp-gap-axis {
+  position: relative;
+  flex-grow: 1;
+  min-width: 240px;
+  height: 42px;
+}
+
+.pp-gap-rail {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 20px;
+  height: 2px;
+  background: var(--bg-2);
+}
+
+.pp-gap-span {
+  position: absolute;
+  top: 20px;
+  height: 2px;
+  background: var(--accent);
+}
+
+.pp-gap-tick {
+  position: absolute;
+  top: 14px;
+  width: 2px;
+  height: 14px;
+  background: var(--text-3);
+}
+
+.pp-gap-tick.is-accent { background: var(--accent); }
+
+.pp-gap-label {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-3);
+}
+
+.player-page .pp-gap-label.is-accent { color: var(--accent); }
+
+.pp-gaps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.pp-gap-item {
+  display: flex;
+  gap: 11px;
+}
+
+.pp-gap-icon {
+  flex-shrink: 0;
+  width: 13px;
+  height: 13px;
+  margin-top: 2px;
+  fill: none;
+  stroke: var(--text-3);
+  stroke-width: 2.2;
+  stroke-linecap: round;
+}
+
+.pp-gap-what {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.pp-gap-why {
+  margin-top: 3px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+
+.pp-implied {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+
+.pp-implied-value {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text-1);
+}
+
+.pp-neighbors {
+  display: flex;
+  flex-direction: column;
+}
+
+/* A button, not a row with an onClick: these are the one place a sparse card
+   can be navigated from, and they have to be reachable by keyboard for the
+   same reason every other control in this room is. */
+.pp-neighbor {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  height: 40px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.pp-neighbor:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.pp-neighbor:not(:disabled):hover {
+  background: var(--bg-2);
+}
+
+.pp-neighbor:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: -2px;
+}
+
+.pp-neighbor-rank {
+  width: 28px;
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+.pp-neighbor-name {
+  flex-grow: 1;
+  font-size: var(--text-base);
+  color: var(--text-1);
+}
+
+.pp-neighbor-adp {
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+.pp-neighbor-edge {
+  width: 38px;
+  text-align: right;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--text-2);
+}
+
+.player-page .pp-neighbor-edge.is-good { color: var(--ok); }
+.player-page .pp-neighbor-edge.is-bad { color: var(--fail); }
+
+/* -- injury line and news feed --
+
+   Both come from the payload keys added alongside this card
+   (`status`, `news`). Neither is ever rendered empty: no designation means
+   no pill, no items means no section. */
+
+.pp-injury {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: 6px;
+}
+
+.pp-injury-pill {
+  padding: 1px 7px;
+  border-radius: 10px;
+  border: 1px solid currentcolor;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  color: var(--text-2);
+}
+
+.player-page .pp-injury-pill.is-bad { color: var(--fail); }
+.player-page .pp-injury-pill.is-accent { color: var(--accent); }
+
+.pp-injury-detail {
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+
+.pp-injury-age {
+  font-size: 10px;
+  color: var(--text-3);
+}
+
+.pp-news-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.pp-news-item {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.pp-news-item:last-child { border-bottom: 0; }
+
+.pp-news-link {
+  font-size: var(--text-base);
+  line-height: 1.4;
+  color: var(--text-1);
+  text-decoration: none;
+}
+
+.pp-news-link:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.pp-news-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+  font-size: 10px;
+  color: var(--text-3);
+}
+
+/* The attribution marker. A name-matched item is a good guess and reads like
+   one; an ESPN-tagged item is a fact and gets the quieter, confident tag. */
+.pp-news-tag {
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-3);
+}
+
+.pp-news-tag.is-exact {
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+/* The season table and the weekly bars stop being readable long before the
+   card does: below this the grid is already one column (see `.pp-span5`),
+   and the two charts give up their fixed columns rather than their rows. */
+@media (max-width: 640px) {
+  .pp-seasons-row {
+    grid-template-columns: 52px 26px 44px 40px minmax(60px, 1fr);
+  }
+
+  .pp-cv {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
+
+  .pp-cv-track { flex-grow: 1; }
 }
 
 .card-footnote {
