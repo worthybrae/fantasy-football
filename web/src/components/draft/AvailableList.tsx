@@ -1,4 +1,4 @@
-import { memo, useMemo, useState, type ReactNode } from 'react'
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { LiveCandidate, Player } from '../../api'
 import { riskTone } from './tone'
 
@@ -210,6 +210,44 @@ function posIndex(position: string): number {
   return i === -1 ? POS_ORDER.length : i
 }
 
+// -- header tooltips: shared type + positioning -----------------------------
+//
+// Every sortable header (SortKey) plus the two non-sortable ones that still
+// carry an explanation -- the games sparkline's header and the draft
+// button's blank one -- share ONE floating tooltip panel rather than each
+// header owning its own. Only one can ever be open (a pointer or a focus
+// ring is only ever in one place), so this is simpler than ten independent
+// popovers and is what a native `title` already behaved like from the
+// reader's side.
+type TipId = SortKey | 'games' | 'draft'
+
+const TIP_DELAY_MS = 130
+const TIP_MARGIN = 8
+
+// Mirrors DraftBoardGrid.tsx's own `popoverStyle` -- `position: fixed` off
+// the trigger's own rect, clamped inside the viewport so the panel never
+// runs off-screen -- with one change: `size` is the tooltip's own MEASURED
+// `getBoundingClientRect` (see the `useLayoutEffect` in AvailableList
+// itself) rather than a guessed constant. That file's popover content is
+// fairly uniform card text and a rough estimate is "close enough to decide
+// which side has room" by its own admission; this file's tooltip copy
+// ranges from one short sentence (posTitle) to a genuinely long paragraph
+// (gamesTitle), where a single guessed height would either clip the long
+// ones or leave the short ones floating with acres of empty space.
+function positionTip(
+  rect: DOMRect, size: { width: number; height: number },
+): { left: number; top: number } {
+  const left = Math.max(
+    TIP_MARGIN,
+    Math.min(rect.left, window.innerWidth - size.width - TIP_MARGIN),
+  )
+  const below = rect.bottom + TIP_MARGIN
+  const top = below + size.height <= window.innerHeight - TIP_MARGIN
+    ? below
+    : Math.max(TIP_MARGIN, rect.top - size.height - TIP_MARGIN)
+  return { left, top }
+}
+
 // -- weeks missed -----------------------------------------------------------
 //
 // How many of last season's 18 weeks were neither the bye nor a game he
@@ -272,6 +310,63 @@ function missedTone(n: number): string {
 // board -- frequent enough to be worth flagging, rare enough that the bold
 // still means something.
 const MISSED_LOUD_FROM = 6
+
+// -- weeks missed pip strip -------------------------------------------------
+//
+// A pip per week (18, always), grouped by STATE rather than drawn in real
+// week order -- deliberately. `Player.bye` is the bye for the UPCOMING
+// season; `game_points` is LAST season's weekly rows. They only agree by
+// coincidence, and on the real board they do not agree often: 157 of 207
+// players "played through" their own `bye` index in `game_points`, which is
+// exactly what comparing two different seasons' schedules would produce.
+// There is nothing in this data that says which of a player's null weeks
+// was actually his bye, so this strip does not pretend to place one -- real
+// week order already lives one column to the left, in the per-week
+// sparkline (GameBars above).
+//
+// What IS knowable, and what this draws: how many weeks he played, that
+// exactly one of the rest is being counted as the bye (missedGames' own
+// `- 1`), and how many are left over as genuinely missed. Grouped, that is
+// three honest counts instead of one dishonest calendar. Memoized on
+// `points`'s identity for the same reason GameBars is: without it every
+// re-filter/re-sort would rebuild up to 250 x 18 = 4,500 spans.
+// The season drawn as 17 marks -- one per game a player could have played
+// -- with the ones he missed in `--fail` at the right end and the rest
+// receding. Seventeen, not eighteen, because the bye is excluded outright:
+// it is a week nobody is penalised for, and the numeral beside this strip
+// already excludes it (missedGames is nulls - 1). Excluding it here too
+// keeps the picture and the number telling the same story, and drops a
+// third pip state that was costing width without earning it.
+//
+// NOT drawn in true week order, and it cannot be. One of the gaps in
+// `game_points` is the bye and nothing available says which: `Player.bye`
+// is the UPCOMING season's bye while `game_points` is last season's, and
+// they disagree for 157 of the 207 players who have both. So the marks are
+// grouped by state rather than sequenced by week. The real week ordering is
+// already on screen -- it is the `2025` sparkline immediately to the left,
+// which draws its gaps where they actually fell.
+const MISSED_PIP_COUNT = 17
+
+const MissedPips = memo(function MissedPips({ missed }: { missed: number }): ReactNode {
+  const bad = Math.max(0, Math.min(MISSED_PIP_COUNT, missed))
+  const ok = MISSED_PIP_COUNT - bad
+  return (
+    <span
+      className="missed-pips"
+      role="img"
+      aria-label={bad === 0
+        ? 'played every game outside the bye'
+        : `${bad} of ${MISSED_PIP_COUNT} games missed`}
+    >
+      {Array.from({ length: ok }, (_, i) => (
+        <span key={`ok-${i}`} className="missed-pip is-played" />
+      ))}
+      {Array.from({ length: bad }, (_, i) => (
+        <span key={`bad-${i}`} className="missed-pip is-missed" />
+      ))}
+    </span>
+  )
+})
 
 // The one value a column sorts on. `null` means "this player has no such
 // number" and is handled by the comparator, never coerced to 0 -- a player
@@ -340,10 +435,14 @@ interface AvailableListProps {
   isMyTurn: boolean
   // The pick the server measured this list against ("pick 18", "the end of
   // the draft"), or null when there is no gain-ranked list yet. Same value
-  // TopThree's hint names -- it is here because the "Lasts" column is a
-  // probability of surviving to THAT pick, not to your immediately-next
-  // one (scoring/draft_sim.horizon_picks skips turns too close to measure),
-  // and an unlabelled 0% reads as the wrong claim.
+  // TopThree's hint names. AvailableList only reads its NULLNESS now (is
+  // there a horizon yet, to gate the toolbar note) -- it used to interpolate
+  // the pick number into "Lasts = chance he's still there at pick 18", which
+  // reads as a promise that pick 18 is the user's own turn. Verified against
+  // the real model it never is (see lastsTitle's own comment below); the
+  // toolbar note and the tooltip now describe the horizon's DISTANCE
+  // instead, which needs only whether one exists, not this string's actual
+  // content.
   horizonLabel: string | null
   // Opens the player's profile over the room (DraftRoom's PlayerOverlay).
   // The whole row is not the target -- only the name -- because every other
@@ -376,6 +475,76 @@ export default function AvailableList({
   // Opens on the server's ranking, which is the whole point of the list --
   // any other default would hide the model's answer behind a click.
   const [sort, setSort] = useState<{ key: SortKey; dir: SortDir }>({ key: 'rank', dir: 'asc' })
+
+  // -- header tooltips: state, positioning, dismissal --
+  //
+  // One tooltip for the whole table, not one per header -- only one can
+  // ever be open at a time (a pointer or a focus ring is only ever in one
+  // place), so a single floating panel driven by "which header, and where"
+  // is simpler than ten independent popovers and is exactly what a native
+  // `title` already behaved like. `rect` is the trigger's own
+  // `getBoundingClientRect`, captured at hover/focus time -- the same
+  // approach `.board-pop`'s `HoverInfo` (DraftBoardGrid.tsx) already uses
+  // for the identical clipping problem.
+  const [tip, setTip] = useState<{ id: TipId; rect: DOMRect } | null>(null)
+  // The tooltip's own measured position, filled in by the layout effect
+  // below once its real size is known -- null between "a tip just opened"
+  // and "its size got measured", which is one synchronous tick, never a
+  // visible state (see that effect's own comment).
+  const [tipPos, setTipPos] = useState<{ left: number; top: number } | null>(null)
+  const tipRef = useRef<HTMLDivElement>(null)
+  const tipTimer = useRef<number | null>(null)
+
+  function clearTipTimer(): void {
+    if (tipTimer.current !== null) {
+      window.clearTimeout(tipTimer.current)
+      tipTimer.current = null
+    }
+  }
+  // Hover gets a short delay -- ~130ms, not the ~1s a native `title` makes a
+  // reader wait, but enough that sweeping the pointer across the header row
+  // doesn't flash a tooltip per column it passes over.
+  function scheduleTip(id: TipId, target: HTMLElement): void {
+    clearTipTimer()
+    const rect = target.getBoundingClientRect()
+    tipTimer.current = window.setTimeout(() => setTip({ id, rect }), TIP_DELAY_MS)
+  }
+  // Keyboard focus skips the delay: a Tab press is already one deliberate,
+  // discrete move, and making its result wait would read as the control
+  // lagging rather than as considerate pacing.
+  function showTipNow(id: TipId, target: HTMLElement): void {
+    clearTipTimer()
+    setTip({ id, rect: target.getBoundingClientRect() })
+  }
+  function hideTip(): void {
+    clearTipTimer()
+    setTip(null)
+  }
+
+  // Positions the tooltip AFTER it renders and BEFORE the browser paints --
+  // `useLayoutEffect`, not `useEffect` -- so the panel's own measured size
+  // can be used instead of a guessed constant. A newly-opened tip's first
+  // render is invisible at (0, 0) (see the JSX below); this effect measures
+  // it and computes where it actually belongs, and that second render,
+  // still inside the same paint, is the only one anyone sees.
+  useLayoutEffect(() => {
+    if (!tip || !tipRef.current) {
+      setTipPos(null)
+      return
+    }
+    const { width, height } = tipRef.current.getBoundingClientRect()
+    setTipPos(positionTip(tip.rect, { width, height }))
+  }, [tip])
+
+  // Same guard `.board-pop`'s own hover effect uses: any scroll -- this
+  // table's own, or the page's -- invalidates the captured trigger rect, so
+  // the tooltip is dropped rather than left hanging over whatever used to
+  // be under it.
+  useEffect(() => {
+    if (!tip) return
+    window.addEventListener('scroll', hideTip, true)
+    return () => window.removeEventListener('scroll', hideTip, true)
+  }, [tip])
 
   // The season the bars describe, read off the same board rows they ride in
   // on. `stats.season` and `game_points` are both cut from `max(season)` in
@@ -416,27 +585,49 @@ export default function AvailableList({
   // how a screen reader gets the same "sorted by, this way" the caret gives
   // everyone else.
   //
-  // `title` lands on the <th>, not the button inside it -- a native tooltip
-  // walks up to the nearest ancestor that carries one, so it fires no matter
-  // where in the cell the pointer sits, and it matches how the (non-sortable)
-  // games header below already does it. This is the same `title` mechanism
-  // every other tooltip in this codebase uses (ClockPanel, TopThree, the
-  // profile tables) -- there is no tooltip component anywhere to reuse
-  // instead, and a plain browser tooltip can't clip inside this table's
-  // scroll region or shift the header layout, which a custom popover would
-  // have risked.
-  function sortableTh(
-    key: SortKey, label: ReactNode, title: string, className?: string,
-  ): ReactNode {
+  // Hover/focus land on the <th> itself, not the button -- `onMouseEnter`
+  // only fires for pointer movement into the element it is attached to (it
+  // does not bubble the way a plain DOM `mouseenter` listener on a parent
+  // would need to), so putting it here makes the whole cell the trigger,
+  // not just the button's own box, matching how the removed `title` used to
+  // fire no matter where in the cell the pointer sat. `onFocus`/`onBlur`
+  // land here too and still catch the button's own focus/blur: React
+  // implements them on `focusin`/`focusout` under the hood, which DO
+  // bubble, so a listener on the <th> sees the <button> inside it gain and
+  // lose focus without needing its own pair of handlers.
+  //
+  // WHY NOT THE NATIVE `title` THIS USED TO BE: ~1s of stationary hover to
+  // appear, no hint beforehand that anything is there, and an unstyled OS
+  // box that can cover the table. See the `.avail-th-tip` section of
+  // App.css and `positionTip` above for the replacement -- one shared
+  // floating panel, positioned off this header's own `getBoundingClientRect`
+  // the same way `.board-pop` (DraftBoardGrid.tsx) already solves the exact
+  // same "must not clip inside a scroll region, must not shift the row"
+  // problem for the main board's cells.
+  function sortableTh(key: SortKey, label: ReactNode, className?: string): ReactNode {
     const active = sort.key === key
     return (
       <th
         className={`${className ?? ''}${active ? ' is-sorted' : ''}`.trim() || undefined}
         aria-sort={active ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}
-        title={title}
+        onMouseEnter={(e) => scheduleTip(key, e.currentTarget)}
+        onMouseLeave={hideTip}
+        onFocus={(e) => showTipNow(key, e.currentTarget)}
+        onBlur={hideTip}
+        onKeyDown={(e) => { if (e.key === 'Escape') hideTip() }}
       >
-        <button type="button" className="avail-th-btn" onClick={() => toggleSort(key)}>
-          <span>{label}</span>
+        <button
+          type="button"
+          className="avail-th-btn"
+          onClick={() => toggleSort(key)}
+          aria-describedby="avail-th-tip"
+        >
+          {/* The dotted underline is the "there is an explanation here"
+              affordance a reader can see before ever hovering -- quiet on
+              purpose, the same weight across all eight sortable headers
+              rather than an icon that would compete with the sort caret
+              right next to it. */}
+          <span className="avail-th-hint">{label}</span>
           {/* The caret is ALWAYS in the markup, transparent until the column
               is the sorted one (or hovered) -- rendering it only when active
               made every header jump sideways by its own width on each sort
@@ -456,12 +647,16 @@ export default function AvailableList({
   }
 
   // Every header's tooltip text, gathered here rather than written inline
-  // eight times over so the wording stays consistent with itself and with
-  // the rest of the room's own voice ("this board" for the model's own rank,
-  // the toolbar's exact "chance he's still there at" phrase for LASTS,
-  // ESPN's own comment on the column above). The owner asked for these
-  // because "I don't always know what the columns mean" -- so each one
-  // states the actual meaning, not a paraphrase of it.
+  // ten times over so the wording stays consistent with itself and with the
+  // rest of the room's own voice (ESPN's own comment on the column above).
+  // The owner asked for these because "I don't always know what the columns
+  // mean" -- so each one states the actual meaning, not a paraphrase of it.
+  // Delivery is `tipCopy`/the shared `.avail-th-tip` panel below, not a
+  // native `title` any more (see sortableTh's own comment) -- only that
+  // mechanism changed; this is the same copy that was already reviewed and
+  // confirmed accurate, except `missedTitle` (the pip strip replaced a bare
+  // number, so its own tooltip has to describe the strip) and `lastsTitle`
+  // (see the comment above that one).
   const rankTitle = "This board's own rank of who to take now. Not ADP and "
     + 'not projected points -- it ranks by how much you gain by taking this '
     + 'player now versus waiting until your next pick, weighted by whether '
@@ -480,23 +675,65 @@ export default function AvailableList({
     + 'under 15 / amber 15-25 / green 25+, kickers and defenses red under 5 / '
     + 'amber 5-10 / green 10+, everyone else red under 10 / amber 10-15 / '
     + 'green 15+. Not sortable.'
-  const missedTitle = 'Weeks without a game last season, excluding the bye -- '
-    + 'injury, inactive, or not starting yet. Not an injury count on its own: '
-    + "a backup who simply wasn't starting yet reads exactly the same here as "
-    + 'a player who was actually hurt.'
+  // Rewritten for the pip strip (MissedPips above): explains what the three
+  // marks mean AND is honest that the strip cannot place the bye in its
+  // real week -- `Player.bye` is next season's, `game_points` is last
+  // season's, and they only happen to agree 157 of 207 times on the real
+  // board, which is exactly what two different seasons' schedules colliding
+  // by chance would produce. See missedGames's own comment for the count
+  // math, which this strip does not change.
+  const missedTitle = 'Weeks without a game last season, drawn as 18 marks: '
+    + 'games played, then one mark for the week counted as the bye, then '
+    + "the rest -- genuinely missed (injury, inactive, or a backup who "
+    + "wasn't starting yet). Grouped by state, not real week order: which "
+    + "gap was actually the bye can't be told apart from the others in this "
+    + 'data, so it is always drawn last rather than in its true spot -- real '
+    + 'week order is already the sparkline immediately to the left. The '
+    + 'number counts only the missed weeks, same as it always has.'
   const projTitle = "Projected fantasy points for the full upcoming season, "
     + "under this league's own scoring."
-  // Repeats the toolbar note's own wording (`chance he's still there at
-  // ${horizonLabel}`) rather than a second phrasing of the same fact, plus
-  // the one thing that note leaves unsaid: what a low number here is FOR.
-  const lastsTitle = `Chance he's still there at ${horizonLabel ?? 'your next pick'}`
-    + ' -- a low percentage is the argument for taking him now.'
+  // NOT "chance he's still there at pick N" any more -- verified against the
+  // real model for an 8-team draft at slot 2 (own turns 2, 15, 18, 31, 34,
+  // 47): the pick this number is measured against came back 13, 27, 27, 29,
+  // 43, every single one somebody else's turn, never the user's own. That
+  // is not a bug in the number -- scoring/draft_sim.horizon_picks/
+  // horizon_ceiling measure a fixed distance (roughly a round to a round
+  // and a half of opponent picks) on purpose, because the user's own next
+  // turn is usually much further off, and at that distance survival reads
+  // ~0% for every row and the ranking loses its signal. The number was
+  // right; the old label just asserted a pick the user was never actually
+  // making. This one names the HORIZON instead of a pick, and says why it
+  // stops there rather than at the user's own turn.
+  const lastsTitle = "Chance he's still on the board roughly a round to a "
+    + "round and a half from now -- not at your own next pick, which is "
+    + 'almost always further off than that. Measured any nearer and nearly '
+    + 'every player would read close to 100% (nothing left to rank by); any '
+    + 'further and nearly every player would read close to 0% (same '
+    + 'problem, the other way) -- this is the furthest point out that still '
+    + 'tells the rows apart. A low percentage is the argument for taking '
+    + 'him now.'
   const adpTitle = 'Average draft position across the consensus of public '
     + 'sources -- where the market as a whole takes him.'
   const espnTitle = "ESPN's own ranking, shown so you can see where this "
     + "board disagrees with the platform you're drafting on."
   const draftColTitle = "Draft this player onto your roster. Only enabled on "
     + 'your turn.'
+
+  // One shared floating panel (below, `.avail-th-tip`) reads from this
+  // instead of each header carrying its own `title` -- see sortableTh's
+  // comment for why.
+  const tipCopy: Record<TipId, string> = {
+    rank: rankTitle,
+    pos: posTitle,
+    player: playerTitle,
+    games: gamesTitle,
+    missed: missedTitle,
+    proj: projTitle,
+    lasts: lastsTitle,
+    adp: adpTitle,
+    espn: espnTitle,
+    draft: draftColTitle,
+  }
 
   return (
     <div className="avail">
@@ -524,7 +761,8 @@ export default function AvailableList({
         {horizonLabel !== null && (
           <div className="avail-horizon-note">
             <span className="avail-horizon-key">Lasts</span>
-            {` = chance he's still there at ${horizonLabel}`}
+            {" = chance he's still on the board roughly a round to a round "
+              + 'and a half from now'}
           </div>
         )}
       </div>
@@ -532,9 +770,9 @@ export default function AvailableList({
       <table className="avail-table">
         <thead>
           <tr>
-            {sortableTh('rank', '#', rankTitle, 'avail-col-rank')}
-            {sortableTh('pos', 'Pos', posTitle, 'avail-col-pos')}
-            {sortableTh('player', 'Player', playerTitle, 'avail-col-name')}
+            {sortableTh('rank', '#', 'avail-col-rank')}
+            {sortableTh('pos', 'Pos', 'avail-col-pos')}
+            {sortableTh('player', 'Player', 'avail-col-name')}
             {/* The one header in this table that is NOT a control, and it
                 says so rather than sitting there looking like the seven that
                 are. There is no honest single number to sort a distribution
@@ -544,30 +782,43 @@ export default function AvailableList({
                 quantity that DOES summarise a season is already sortable two
                 columns over -- Proj -- and `stats.ppg` is on the profile the
                 name opens. So: no button, no caret, default cursor, and the
-                word in the header. */}
-            <th className="avail-col-games" title={gamesTitle}>
-              <span>{season ?? 'Last'}</span>
+                word in the header. Still gets the same tooltip treatment as
+                every sortable one (mouse only -- nothing here is focusable,
+                same as it was under the native `title`). */}
+            <th
+              className="avail-col-games"
+              onMouseEnter={(e) => scheduleTip('games', e.currentTarget)}
+              onMouseLeave={hideTip}
+            >
+              <span className="avail-th-hint">{season ?? 'Last'}</span>
               <span className="avail-nosort">no sort</span>
             </th>
             {/* Placed immediately after the sparkline it is drawn from --
-                absence sits next to the per-week chart that shows it. */}
-            {sortableTh('missed', 'Missed', missedTitle, 'avail-col-num')}
-            {sortableTh('proj', 'Proj', projTitle, 'avail-col-num')}
-            {/* One word. Naming the horizon inline ("Lasts to pick 13")
-                stacked four lines deep in a 78px column and doubled the
-                header's height -- the note in the toolbar carries that
-                detail instead, where there is room for it on one line.
-                The detail itself is not optional: without it a reader
-                takes this for "lasts to my next pick", which at a wheel
-                or a short gap is a different pick entirely. */}
-            {sortableTh('lasts', 'Lasts', lastsTitle, 'avail-col-num')}
-            {sortableTh('adp', 'ADP', adpTitle, 'avail-col-num')}
+                absence sits next to the per-week chart that shows it. Wider
+                than the other numeric columns on purpose -- see
+                `.avail-col-missed` in App.css -- to fit the pip strip
+                (MissedPips above) next to its number without growing the
+                32px row. */}
+            {sortableTh('missed', 'Missed', 'avail-col-missed')}
+            {sortableTh('proj', 'Proj', 'avail-col-num')}
+            {/* One word. A header naming the horizon at all ("Lasts to pick
+                13") reads as a promise that pick 13 is the user's own turn,
+                which it verifiably never is (see lastsTitle's own comment)
+                -- so the header stays bare and the horizon lives in the
+                toolbar note and the tooltip instead, as a DISTANCE rather
+                than a pick number. */}
+            {sortableTh('lasts', 'Lasts', 'avail-col-num')}
+            {sortableTh('adp', 'ADP', 'avail-col-num')}
             {/* ESPN's own PPR rank, always on screen next to this board's
                 `#` and the market's ADP -- the owner asked to be able to see
                 where ESPN has a player against where this board has him,
                 without going into the profile for it. */}
-            {sortableTh('espn', 'ESPN', espnTitle, 'avail-col-num')}
-            <th className="avail-col-btn" title={draftColTitle} />
+            {sortableTh('espn', 'ESPN', 'avail-col-num')}
+            <th
+              className="avail-col-btn"
+              onMouseEnter={(e) => scheduleTip('draft', e.currentTarget)}
+              onMouseLeave={hideTip}
+            />
           </tr>
         </thead>
         <tbody>
@@ -619,17 +870,23 @@ export default function AvailableList({
                 </td>
                 {/* Unknown (no `game_points` at all -- see missedGames above)
                     renders the same em-dash the sparkline's own empty state
-                    uses, never a 0: a defense or an unpriced rookie has no
-                    counted season, not a clean one. `is-loud` and the inline
-                    colour are the only two things this cell adds on top of
-                    the shared `avail-col-num` sizing every numeric column
-                    already gets. */}
-                <td
-                  className={`avail-col-num mono avail-missed${
-                    missed !== null && missed >= MISSED_LOUD_FROM ? ' is-loud' : ''}`}
-                  style={missed === null ? undefined : { color: missedTone(missed) }}
-                >
-                  {missed === null ? '—' : missed}
+                    uses, never a 0 or an empty strip: a defense or an
+                    unpriced rookie has no counted season, not a clean one. */}
+                <td className="avail-col-missed">
+                  {player?.game_points
+                    ? (
+                      <span className="avail-missed-wrap">
+                        <MissedPips missed={missed ?? 0} />
+                        <span
+                          className={`avail-missed-num mono${
+                            missed !== null && missed >= MISSED_LOUD_FROM ? ' is-loud' : ''}`}
+                          style={missed === null ? undefined : { color: missedTone(missed) }}
+                        >
+                          {missed}
+                        </span>
+                      </span>
+                    )
+                    : <span className="gamebars-none">—</span>}
                 </td>
                 <td className="avail-col-num mono avail-proj">{Math.round(c.proj_points)}</td>
                 {/* null survive_pct (no roster to survive FOR yet) gets no
@@ -669,6 +926,29 @@ export default function AvailableList({
           )}
         </tbody>
       </table>
+
+      {/* The one floating tooltip, shared by every header above -- see the
+          state/effects near the top of this component and `.avail-th-tip`
+          in App.css. Only mounted while something is actually hovered or
+          focused; visible only once `tipPos` is known (the
+          `useLayoutEffect` above measures it in the same tick this mounts,
+          so nobody ever sees the (0, 0) frame in between). Fixed
+          positioning is the load-bearing part -- it escapes `.draft-main`'s
+          own scroll region entirely rather than being clipped inside it,
+          the same reason `.board-pop` (DraftBoardGrid.tsx) is fixed too. */}
+      {tip && (
+        <div
+          id="avail-th-tip"
+          ref={tipRef}
+          role="tooltip"
+          className="avail-th-tip"
+          style={tipPos
+            ? { left: tipPos.left, top: tipPos.top, visibility: 'visible' }
+            : { left: 0, top: 0, visibility: 'hidden' }}
+        >
+          {tipCopy[tip.id]}
+        </div>
+      )}
     </div>
   )
 }

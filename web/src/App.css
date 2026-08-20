@@ -2194,6 +2194,19 @@ button.pick-ticker-pick:hover {
 }
 .avail-col-pos { width: 52px; }
 .avail-col-num { width: 78px; text-align: right; }
+/* Wide enough for 18 pips (6px + 1px gap each, MissedPips in
+   AvailableList.tsx) plus a two-digit number and the cell's own 20px of
+   padding -- 125 + 6 + 16 + 20 = 167, rounded up for breathing room. Left-
+   aligned (the default, unlike `.avail-col-num`'s right-align): the strip
+   reads left to right like the sparkline next to it, not as a number
+   anchored to the column's right edge. */
+/* 17 pips at a 5px pitch (85px) plus the numeral. Deliberately close to
+   `.avail-col-games`'s 92px: the strip and the sparkline are two views of
+   the same season and should read as a pair. An earlier 18-pip, 6px-dot
+   version measured 172px -- nearly double the sparkline, and the widest
+   column in the table after the player's name, for a value that is 0 for
+   most of the board. */
+.avail-col-missed { width: 132px; }
 
 /* The name column is the only one that flexes, so it is the one that pays
    for every other column's fixed width -- and it used to pay in ROW HEIGHT.
@@ -2386,6 +2399,46 @@ button.pick-ticker-pick:hover {
   opacity: 0.45;
 }
 
+/* -- header tooltips: replaces the native `title` every header used to
+   carry (AvailableList.tsx's sortableTh has the full story). -- */
+
+/* The visible affordance: a quiet dotted underline under the header's own
+   label, present on every header that carries an explanation, so a reader
+   can see one is there before ever hovering it -- not a second icon bolted
+   onto eight headers, which is louder than the owner asked for. */
+.avail-th-hint {
+  border-bottom: 1px dotted var(--text-3);
+}
+
+/* Fixed positioning (not absolute) is the point, same reasoning `.board-pop`
+   (DraftBoardGrid.tsx, see its own comment) already established for the
+   main board's popover: it escapes `.draft-main`'s own scroll-region
+   clipping entirely, since neither it nor any ancestor sets a transform
+   that would give `fixed` a closer containing block. Left/top arrive as
+   inline styles, computed by AvailableList's own `positionTip` off the
+   header's rect and the panel's own measured size. */
+.avail-th-tip {
+  position: fixed;
+  z-index: 60;
+  width: max-content;
+  max-width: 300px;
+  padding: 7px 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+  line-height: 1.5;
+  /* Never the thing under the pointer -- a tooltip a mouse could enter
+     would keep the header's own `mouseleave` from ever firing, which is how
+     a tooltip gets stuck open. */
+  pointer-events: none;
+}
+
 /* Rows aren't clickable in this table (the draft button is the only
    action) -- overrides the global `tbody tr { cursor: pointer }`, which
    exists for the main board's row-opens-a-drawer behavior and would
@@ -2454,25 +2507,59 @@ button.pick-ticker-pick:hover {
   color: var(--text-3);
 }
 
-/* Weeks missed last season (AvailableList.tsx's missedGames/missedTone).
-   Base size matches every other numeric column; colour and weight are set
-   inline per cell (missedTone's color-mix ramp, --text-3 at 0 climbing to
-   --fail as the count grows) so 0 -- where most of the board sits -- reads
-   as quiet as ADP/ESPN's own muted numbers above, and only a genuinely high
-   count earns attention. This is not the "loud column" the comment above
-   `.avail-proj` warns against re-adding: that was about reintroducing an
-   argumentative figure like the deleted gain_now ("this is THE pick"), not
-   about colour on a numeric cell at all -- LASTS already colours its own
-   cell inline with riskTone for the same reason this column does. */
-.avail-missed {
+/* Weeks missed last season, as a pip strip beside its own number
+   (AvailableList.tsx's MissedPips/missedGames/missedTone). */
+.avail-missed-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.missed-pips {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  /* Pips are inline-level boxes; without this the line box adds descender
+     space under them, same reason `.gamebars` sets it above. */
+  line-height: 0;
+}
+
+/* Both states share one fixed footprint, so the 17 pips occupy the same
+   total width in every row regardless of how the count splits between
+   them -- the strip's length is the season, not the damage. */
+.missed-pip {
+  width: 4px;
+  height: 4px;
+  flex: 0 0 4px;
+  border-radius: 1px;
+}
+
+/* Played: dim and receding, the same job `--text-3` already does everywhere
+   else in this table for "unremarkable, most of the board looks like
+   this". */
+.missed-pip.is-played {
+  background: var(--text-3);
+}
+
+/* Missed: full --fail, no ramp of its own -- the ramp already lives on the
+   number beside it (below), and seventeen 4px pips is too small a canvas to
+   draw a second one. */
+.missed-pip.is-missed {
+  background: var(--fail);
+}
+
+/* The number beside the strip: same colour ramp and "big number gets
+   heavier" weight idiom the old single-cell version used (missedTone's
+   color-mix ramp, --text-3 at 0 climbing to --fail; the same
+   `.plan-cliff-value.is-loud`/`.plan-avail-value.is-drop` weight-on-large-
+   values idiom for `.is-loud`) -- moved from the whole `<td>` onto just this
+   `<span>` now that the pips carry their own fixed palette instead of
+   inheriting the cell's. */
+.avail-missed-num {
   font-size: var(--text-sm);
 }
 
-/* The same "big number gets heavier" idiom `.plan-cliff-value.is-loud`/
-   `.plan-avail-value.is-drop` use elsewhere in this app: past
-   MISSED_LOUD_FROM the cell also picks up weight, so a real absence pops on
-   shape as well as on the colour ramp above -- not colour alone. */
-.avail-missed.is-loud {
+.avail-missed-num.is-loud {
   font-weight: 700;
 }
 
