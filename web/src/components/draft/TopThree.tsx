@@ -94,7 +94,7 @@ function reasonFor(c: RankedCandidate, horizonLabel: string | null): string {
   const at = horizonLabel ?? 'the turn this list is measured against'
 
   const slot =
-    c.fills === '—' ? 'has no roster spot open right now'
+    c.fills === '—' ? 'has no roster slot open right now'
       : c.fills === 'BENCH' ? 'would only add bench depth'
         : `fills your open ${c.fills} slot`
 
@@ -110,7 +110,7 @@ function reasonFor(c: RankedCandidate, horizonLabel: string | null): string {
   if (survive >= 55) {
     return `He ${slot} and is worth ${fmtSigned(c.gain_now)} now, but he is a ${survive}% bet to still be there at ${at} -- fine to wait if you want someone else first.`
   }
-  return `He ${slot} and is worth ${fmtSigned(c.gain_now)} over the best replacement there -- only a ${survive}% chance he lasts to ${at}, so this is the one to take now.`
+  return `He ${slot} and is worth ${fmtSigned(c.gain_now)} more than the best option likely to still be there at ${at} -- only a ${survive}% chance he lasts that long, so this is the one to take now.`
 }
 
 // The list on screen was ranked for an older pick than the one on the clock
@@ -246,9 +246,14 @@ export default function TopThree({
                   Draft
                 </button>
               </div>
+              {/* Caption wording is shared verbatim with ConfirmPick's
+                  figure row and playerSeed's profile seed -- see
+                  AvailableList.tsx's comment for what each one means and
+                  why it reads the way it does. Three surfaces, one label
+                  per quantity: rename them together or not at all. */}
               <div className="top3-figures">
                 <div>
-                  <div className="draft-cap">Gain now</div>
+                  <div className="draft-cap">Gain vs waiting</div>
                   <div className="top3-figure mono">{fmtSigned(c.gain_now)}</div>
                 </div>
                 <div>
@@ -263,7 +268,7 @@ export default function TopThree({
                   </div>
                 </div>
                 <div>
-                  <div className="draft-cap">Fills</div>
+                  <div className="draft-cap">Roster slot</div>
                   <div className={`top3-figure mono${fillsIsOpenSlot(c.fills) ? ' is-open' : ''}`}>
                     {c.fills}
                   </div>

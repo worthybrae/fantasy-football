@@ -22,12 +22,13 @@ import PageSkeleton from './PageSkeleton'
 // skeleton it always did.
 //
 // `figures` is pre-formatted, in display order, by whoever opened the
-// profile. Deliberately not raw numbers: the live room's figures (gain now,
-// survival, what slot he fills) come from /api/live/state's ranked list,
-// carry rounding and sign rules this component has no business knowing, and
-// are not even defined outside a draft. A label/value pair is the widest
-// contract that stays honest. `accent` marks the one figure worth
-// highlighting (an open starter slot, same rule as `.avail-fills.is-open`).
+// profile. Deliberately not raw numbers: the live room's figures (gain vs
+// waiting, survival, which roster slot he fills) come from
+// /api/live/state's ranked list, carry rounding and sign rules this
+// component has no business knowing, and are not even defined outside a
+// draft. A label/value pair is the widest contract that stays honest.
+// `accent` marks the one figure worth highlighting (an open starter slot,
+// same rule as `.top3-figure.is-open`).
 export interface ProfileSeed {
   name: string
   position: string

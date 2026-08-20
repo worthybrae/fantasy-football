@@ -8,8 +8,8 @@ import type { ProfileSeed } from '../PlayerProfile'
 //
 // Three builders because the room holds three different rows about the same
 // player and they carry different things: the ranked list's LiveCandidate
-// (gain now, survival, what slot he fills -- the numbers the pick is
-// actually made on, but no name or team at all), the board grid's
+// (gain vs waiting, survival, which roster slot he fills -- the numbers the
+// pick is actually made on, but no name or team at all), the board grid's
 // BoardPlayer (a landed pick: what he cost against ADP, his VOR, his
 // projection), and the one-time /api/players join table's Player (identity,
 // tier, ADP, the model's own rank). Each seeds what it knows and no more --
@@ -35,8 +35,9 @@ function fmtTier(tier: number | null | undefined): string {
   return tier === null || tier === undefined ? '—' : `T${tier}`
 }
 
-// Same rule as `.avail-fills.is-open` -- FLEX counts as a starting slot,
-// `BENCH` and gain.py's `—` do not.
+// Same rule as `.top3-figure.is-open` / `.confirm-figure.is-open` -- FLEX
+// counts as a starting slot, `BENCH` and gain.py's `—` do not. (The
+// available table's own copy of this rule went with its Roster slot column.)
 function fillsIsOpenSlot(fills: string | null): boolean {
   return fills !== null && fills !== 'BENCH' && fills !== '—'
 }
@@ -53,16 +54,18 @@ export function seedFromCandidate(c: LiveCandidate, player: Player | undefined):
     team: player?.team ?? null,
     bye: player?.bye ?? null,
     rookie: player?.rookie ?? false,
+    // Same captions as TopThree's cards and ConfirmPick's dialog, word
+    // for word -- see AvailableList.tsx's comment for what each means.
     figures: [
       { label: 'Proj', value: String(Math.round(c.proj_points)) },
-      { label: 'Over repl', value: fmtSigned(c.vor_points) },
-      { label: 'Gain now', value: fmtSigned(c.gain_now) },
+      { label: 'Over replacement', value: fmtSigned(c.vor_points) },
+      { label: 'Gain vs waiting', value: fmtSigned(c.gain_now) },
       // Deliberately not "Lasts to pick N" here: the horizon that number is
       // measured against is a sentence DraftRoom builds, and a figure
       // caption in a 6-column strip has no room for it. The list this
       // overlay opened from carries the labelled version.
       { label: 'He lasts', value: c.survive_pct === null ? '—' : `${Math.round(c.survive_pct)}%` },
-      { label: 'Fills', value: c.fills ?? '—', accent: fillsIsOpenSlot(c.fills) },
+      { label: 'Roster slot', value: c.fills ?? '—', accent: fillsIsOpenSlot(c.fills) },
       { label: 'ADP', value: fmtRank(player?.market_rank ?? null) },
       { label: 'Tier', value: fmtTier(player?.tier) },
     ],
@@ -83,7 +86,7 @@ export function seedFromBoardPlayer(p: BoardPlayer, player: Player | undefined):
     rookie: player?.rookie ?? false,
     figures: [
       { label: 'Proj/g', value: p.proj_ppg === null ? '—' : p.proj_ppg.toFixed(1) },
-      { label: 'Over repl', value: fmtSigned(p.vor) },
+      { label: 'Over replacement', value: fmtSigned(p.vor) },
       { label: 'ADP', value: fmtRank(p.market_rank) },
       { label: 'vs ADP', value: fmtSigned(p.value) },
       { label: 'Tier', value: fmtTier(p.tier) },

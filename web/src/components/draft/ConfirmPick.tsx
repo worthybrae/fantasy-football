@@ -21,8 +21,9 @@ function fmtSigned(n: number | null): string {
 // duplicated from AvailableList.tsx/TopThree.tsx -- same rule, same reason
 // to keep it in sync: an open starter/flex slot reads in accent, `BENCH`
 // and gain.py's `—` read muted. Folded-in review finding: this dialog's
-// own Fills figure was left plain while both other views already applied
-// the rule -- one meaning, drawn the same way everywhere it appears.
+// own Roster slot figure was left plain while both other views already
+// applied the rule -- one meaning, drawn the same way everywhere it
+// appears.
 function fillsIsOpenSlot(fills: string | null): boolean {
   return fills !== null && fills !== 'BENCH' && fills !== '—'
 }
@@ -95,15 +96,17 @@ export default function ConfirmPick({
           <span className="confirm-player-name">{player?.name ?? candidate.player_id}</span>
           {player && <span className="confirm-player-team mono">{player.team}</span>}
         </div>
+        {/* Same captions as TopThree's cards and playerSeed's seed row,
+            deliberately word-for-word -- see AvailableList.tsx's comment. */}
         <div className="confirm-figures">
           <div>
-            <div className="draft-cap">Fills</div>
+            <div className="draft-cap">Roster slot</div>
             <div className={`confirm-figure mono${fillsIsOpenSlot(candidate.fills) ? ' is-open' : ''}`}>
               {candidate.fills ?? '—'}
             </div>
           </div>
           <div>
-            <div className="draft-cap">Gain now</div>
+            <div className="draft-cap">Gain vs waiting</div>
             <div className="confirm-figure mono">{fmtSigned(candidate.gain_now)}</div>
           </div>
           {rosterAfter && (
