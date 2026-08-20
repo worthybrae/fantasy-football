@@ -1,8 +1,8 @@
 """Refresh all data sources into DuckDB. Run: python -m pipeline.refresh"""
 import sys
 import pandas as pd
-from pipeline import sources
-from pipeline.db import get_conn, write_table, record_freshness
+from pipeline import news, sources
+from pipeline.db import get_conn, read_table, record_freshness, write_table
 from scoring.config import CURRENT_SEASON, HISTORY_SEASONS
 
 # Which of the three scoring-format tokens ('ppr' | 'half' | 'std') each
@@ -37,6 +37,18 @@ def _fetch_multi_format(fetch_fn, formats, *args) -> pd.DataFrame:
 
 def main() -> int:
     conn = get_conn()
+
+    # Both news jobs want the same 249 board rows, and building the board
+    # costs ~1.5s, so build it at most once per refresh -- and only if a news
+    # job actually runs, which is why this is a closure and not a local
+    # computed above the job table.
+    _pool = {}
+
+    def news_pool():
+        if "pool" not in _pool:
+            _pool["pool"] = news.news_pool(conn)
+        return _pool["pool"]
+
     jobs = {
         "weekly": lambda: sources.fetch_weekly(HISTORY_SEASONS),
         "snap_counts": lambda: sources.fetch_snap_counts(HISTORY_SEASONS),
@@ -53,6 +65,17 @@ def main() -> int:
         "fp_ecr": lambda: _fetch_multi_format(
             sources.fetch_fp_ecr, FORMATS_BY_SOURCE["fp_ecr"]),
         "sleeper_ids": sources.fetch_sleeper_ids,
+        # LAST, and in this order, on purpose. Both read the board, which
+        # reads almost every table above them, so they have to run after
+        # those are current; and player_news is the slow one (~223 Google
+        # News queries), so a refresh interrupted part-way still has every
+        # cheap source and the injury table done.
+        "player_status": lambda: news.fetch_player_status(news_pool()),
+        # `existing` is what makes the TTL skip and the carry-on-failure
+        # behaviour possible: write_table does CREATE OR REPLACE, so rows we
+        # do not re-fetch have to be handed back in or they are gone.
+        "player_news": lambda: news.fetch_player_news(
+            news_pool(), existing=read_table(conn, "player_news")),
     }
     summary = []
     any_failed = False

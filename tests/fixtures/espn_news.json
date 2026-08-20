@@ -1,0 +1,282 @@
+{
+ "header": "NFL News",
+ "articles": [
+  {
+   "headline": "Tracking 2026 NFL hold-ins: Vita Vea resolves contract situation",
+   "description": "More on the four players who sat out portions of camp during their contract situations.",
+   "published": "2026-08-20T00:51:16Z",
+   "type": "Story",
+   "categories": [
+    {
+     "id": 1979,
+     "type": "team",
+     "team": {
+      "id": 1,
+      "description": "Atlanta Falcons"
+     }
+    },
+    {
+     "id": 444378,
+     "type": "athlete",
+     "athleteId": 4430807,
+     "athlete": {
+      "id": 4430807,
+      "description": "Bijan Robinson"
+     }
+    },
+    {
+     "id": 1805,
+     "type": "team",
+     "team": {
+      "id": 8,
+      "description": "Detroit Lions"
+     }
+    },
+    {
+     "id": 438406,
+     "type": "athlete",
+     "athleteId": 4429795,
+     "athlete": {
+      "id": 4429795,
+      "description": "Jahmyr Gibbs"
+     }
+    },
+    {
+     "id": 2091,
+     "type": "team",
+     "team": {
+      "id": 27,
+      "description": "Tampa Bay Buccaneers"
+     }
+    },
+    {
+     "id": 184511,
+     "type": "athlete",
+     "athleteId": 3134362,
+     "athlete": {
+      "id": 3134362,
+      "description": "Vita Vea"
+     }
+    },
+    {
+     "id": 2610,
+     "type": "team",
+     "team": {
+      "id": 24,
+      "description": "Los Angeles Chargers"
+     }
+    },
+    {
+     "id": 450998,
+     "type": "athlete",
+     "athleteId": 4431442,
+     "athlete": {
+      "id": 4431442,
+      "description": "Tuli Tuipulotu"
+     }
+    }
+   ],
+   "links": {
+    "web": {
+     "href": "https://www.espn.com/nfl/story/_/id/49490010/2026-training-camp-holdin-tracking-updates-bijan-robinson-jahmyr-gibbs-vita-vea-tuli-tuipulotu"
+    }
+   }
+  },
+  {
+   "headline": "Bucs, DT Vita Vea agree to 1-year extension to end hold-in",
+   "description": "Two-time Pro Bowl defensive tackle Vita Vea and the Tampa Bay Buccaneers have agreed on a one-year extension that guarantees him $30 million, sources told ESPN on Wednesday.",
+   "published": "2026-08-20T00:56:46Z",
+   "type": "HeadlineNews",
+   "categories": [
+    {
+     "id": 2091,
+     "type": "team",
+     "team": {
+      "id": 27,
+      "description": "Tampa Bay Buccaneers"
+     }
+    },
+    {
+     "id": 184511,
+     "type": "athlete",
+     "athleteId": 3134362,
+     "athlete": {
+      "id": 3134362,
+      "description": "Vita Vea"
+     }
+    }
+   ],
+   "links": {
+    "web": {
+     "href": "https://www.espn.com/nfl/story/_/id/49664105/bucs-dt-vita-vea-agree-1-year-extension-end-hold-in"
+    }
+   }
+  },
+  {
+   "headline": "2026 Dallas Cowboys training camp: Latest intel, updates",
+   "description": "Catch up on our daily updates from Cowboys training camp, including intel on QBs, position battles and potential breakouts.",
+   "published": "2026-08-19T23:05:29Z",
+   "type": "Story",
+   "categories": [
+    {
+     "id": 1298,
+     "type": "team",
+     "team": {
+      "id": 6,
+      "description": "Dallas Cowboys"
+     }
+    },
+    {
+     "id": 153118,
+     "type": "athlete",
+     "athleteId": 2577417,
+     "athlete": {
+      "id": 2577417,
+      "description": "Dak Prescott"
+     }
+    },
+    {
+     "id": 435005,
+     "type": "athlete",
+     "athleteId": 4241389,
+     "athlete": {
+      "id": 4241389,
+      "description": "CeeDee Lamb"
+     }
+    },
+    {
+     "id": 529504,
+     "type": "athlete",
+     "athleteId": 4426354,
+     "athlete": {
+      "id": 4426354,
+      "description": "George Pickens"
+     }
+    },
+    {
+     "id": 470208,
+     "type": "athlete",
+     "athleteId": 4361579,
+     "athlete": {
+      "id": 4361579,
+      "description": "Javonte Williams"
+     }
+    },
+    {
+     "id": 484948,
+     "type": "athlete",
+     "athleteId": 4683848,
+     "athlete": {
+      "id": 4683848,
+      "description": "Donovan Ezeiruaku"
+     }
+    }
+   ],
+   "links": {
+    "web": {
+     "href": "https://www.espn.com/nfl/story/_/id/49376535/dallas-cowboys-training-camp-2026-intel-updates"
+    }
+   }
+  },
+  {
+   "headline": "Colts TE Tyler Warren injures groin in practice",
+   "description": "Colts star tight end Tyler Warren sustained a groin injury in Wednesday's joint practice and did not return.",
+   "published": "2026-08-20T00:33:53Z",
+   "type": "HeadlineNews",
+   "categories": [
+    {
+     "id": 2942,
+     "type": "team",
+     "team": {
+      "id": 11,
+      "description": "Indianapolis Colts"
+     }
+    }
+   ],
+   "links": {
+    "web": {
+     "href": "https://www.espn.com/nfl/story/_/id/49664278/colts-tight-end-tyler-warren-injures-groin-practice"
+    }
+   }
+  },
+  {
+   "headline": "Article with no web link",
+   "description": "More on the four players who sat out portions of camp during their contract situations.",
+   "published": "not-a-timestamp",
+   "type": "Story",
+   "categories": [
+    {
+     "id": 1979,
+     "type": "team",
+     "team": {
+      "id": 1,
+      "description": "Atlanta Falcons"
+     }
+    },
+    {
+     "id": 444378,
+     "type": "athlete",
+     "athleteId": 4430807,
+     "athlete": {
+      "id": 4430807,
+      "description": "Bijan Robinson"
+     }
+    },
+    {
+     "id": 1805,
+     "type": "team",
+     "team": {
+      "id": 8,
+      "description": "Detroit Lions"
+     }
+    },
+    {
+     "id": 438406,
+     "type": "athlete",
+     "athleteId": 4429795,
+     "athlete": {
+      "id": 4429795,
+      "description": "Jahmyr Gibbs"
+     }
+    },
+    {
+     "id": 2091,
+     "type": "team",
+     "team": {
+      "id": 27,
+      "description": "Tampa Bay Buccaneers"
+     }
+    },
+    {
+     "id": 184511,
+     "type": "athlete",
+     "athleteId": 3134362,
+     "athlete": {
+      "id": 3134362,
+      "description": "Vita Vea"
+     }
+    },
+    {
+     "id": 2610,
+     "type": "team",
+     "team": {
+      "id": 24,
+      "description": "Los Angeles Chargers"
+     }
+    },
+    {
+     "id": 450998,
+     "type": "athlete",
+     "athleteId": 4431442,
+     "athlete": {
+      "id": 4431442,
+      "description": "Tuli Tuipulotu"
+     }
+    }
+   ],
+   "links": {
+    "web": {}
+   }
+  }
+ ]
+}

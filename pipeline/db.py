@@ -23,6 +23,11 @@ UNIVERSAL_TABLES = frozenset({
     "weekly", "snap_counts", "depth_charts", "players", "schedules",
     "adp", "espn_adp", "fp_ecr", "cbs_ranks", "mfl_adp",
     "historic_adp", "historic_espn_cs", "sleeper_ids", "meta", "model_backtest",
+    # Player news + injury signals (pipeline/news.py). Universal, not
+    # per-league: an article about Ja'Marr Chase says the same thing in
+    # every league, so a new league's file should be seeded with whatever
+    # has already been fetched rather than starting with an empty feed.
+    "player_news", "player_status",
 })
 
 def get_conn(path: str = DEFAULT_PATH) -> duckdb.DuckDBPyConnection:
