@@ -3,9 +3,11 @@ import { useNavigate } from 'react-router-dom'
 import { connectWithToken, fetchConnectProgress, fetchLiveState,
          type ConnectProgress, type LiveState, type TokenConnectParams } from '../api'
 import { BOOKMARKLET } from '../lib/bookmarklet'
-import BoardPreview from '../components/BoardPreview'
 import ConnectScreen from '../components/ConnectScreen'
 import ReadinessStrip from '../components/ReadinessStrip'
+// This page's own stylesheet, not App.css: see the header comment in it for
+// why, and for why every class below is `lp-` prefixed.
+import '../landing.css'
 
 // The front door, and the bookmarklet onboarding.
 //
@@ -49,6 +51,101 @@ function tokenFromHash(hash: string) {
   if (!leagueId || !teamId || !swid || !token) return null
   return { leagueId, teamId, swid, token, season: p.get('season') || '' }
 }
+
+// ---------------------------------------------------------------------------
+// The page's content. Every number below is a real reading off this tool, and
+// each one names where it came from, because a marketing claim that has gone
+// stale is worse than a weaker claim that is still true.
+// ---------------------------------------------------------------------------
+
+// The hero's board. Measured on 2026-08-19 against data/nfl.duckdb with the
+// same three functions the live room runs -- build_board -> build_pool ->
+// survival(n_rollouts=400) -> gain.rank_available -- for this state:
+//
+//   8-team PPR (the app's own league defaults), my slot 2, ON THE CLOCK at
+//   pick 15 (round 2), the first fourteen players off the board in ESPN ADP
+//   order, my one earlier pick a running back. Horizon: pick 27, which is
+//   what horizon_target returns for that state, and survival is counted to
+//   exactly that pick.
+//
+// Full measured rows (vor / gain / survival), tool's own ranking order:
+//   1 Rashee Rice    WR  57.3  +21.22   1.75%
+//   2 Trey McBride   TE  65.4  +11.34   5.00%
+//   3 Brock Bowers   TE  63.6   +9.49  68.25%
+//   4 Omarion Hampton RB 71.1   +7.59   1.50%
+//   6 Josh Allen     QB  76.0   +3.39  92.75%
+//
+// Four of those are shown, ordered by value rather than by the tool's rank,
+// because the point of the panel is that the two columns run in opposite
+// directions: the most valuable player on the board is the one it is
+// cheapest to wait on. Figures are rounded the way the room rounds them
+// (ConfirmPick.fmtSigned: signed, no decimals).
+const PROOF_ROWS = [
+  { pos: 'QB', name: 'Josh Allen', vor: '+76', gain: '+3', tone: 'bad', take: false },
+  { pos: 'RB', name: 'Omarion Hampton', vor: '+71', gain: '+8', tone: '', take: false },
+  { pos: 'TE', name: 'Trey McBride', vor: '+65', gain: '+11', tone: 'good', take: true },
+  { pos: 'WR', name: 'Rashee Rice', vor: '+57', gain: '+21', tone: 'good', take: true },
+]
+
+// Four things a ranked list structurally cannot tell you. Each `proof` is a
+// reading, not an adjective; `note` is the part that makes the reading mean
+// something, and in two cases it is the caveat rather than the boast.
+const FEATURES = [
+  {
+    n: '01',
+    title: 'It prices waiting, not just value',
+    body: 'Every board ranks players by how good they are. This one measures what '
+      + 'passing actually costs you — the gap between a player and the best one at '
+      + 'his position the model still expects to be there when you pick again.',
+    // Same row as the hero panel, same measurement.
+    proof: 'Josh Allen · +76 over replacement · +3 gain vs waiting',
+    note: 'the biggest number on the board, attached to the wrong pick',
+  },
+  {
+    n: '02',
+    title: 'It simulates the picks between now and your turn',
+    body: 'Value only means anything against what will survive. Every time a pick '
+      + 'lands, the draft ahead of you is run 400 times, opponent by opponent, out '
+      + 'to a turn far enough away for the difference to be real — and every player '
+      + 'is priced against the best one likely to still be on the board there.',
+    // api/live.py SURVIVAL_ROLLOUTS = 400, one survival() pass per recompute,
+    // and a recompute is queued on every pick the socket reports.
+    proof: '400 simulated runs a pick · every opponent modelled',
+    // The honest half. scoring/draft_model.cold_start_fits is what a league
+    // with no imported draft history gets, which is every first connect and
+    // every mock: one market-following model shared by all opponents. The
+    // per-manager fits only exist once the league's own past drafts are in
+    // (api/live.py's `history` stage says which of the two you got).
+    note: 'a market-following model for every opponent by default; a separate model '
+      + 'per manager once your league’s own past drafts are imported',
+  },
+  {
+    n: '03',
+    title: 'It knows consistency, not just averages',
+    body: 'Two backs average twenty points. One gives you twenty every week; the '
+      + 'other gives you five and then fifty. Consistency is scored per point of '
+      + 'production, so a big scorer is not punished for scoring, and ranked '
+      + 'against everyone else at the position.',
+    // scoring/profile_cache: 2025, 8-game qualifier. RB3 of 97 on points per
+    // game; coefficient-of-variation rank 28 of 95 (95, not 97, because two
+    // qualifying backs scored <= 0 a game and have no coefficient at all).
+    proof: 'Jahmyr Gibbs 2025 · RB3 of 97 by points a game · 28th steadiest of 95',
+    note: 'on raw week-to-week spread the same season ranks 97th of 97 — apparently '
+      + 'the most volatile back in the league',
+  },
+  {
+    n: '04',
+    title: 'It knows what seasons like this became',
+    body: 'For any player it finds every comparable season since 2016 — same '
+      + 'production, same point in a career — and shows what those players did the '
+      + 'year after. A projection is a guess. This is a record.',
+    // scoring/profile_cache.comparable_pool, Gibbs' 2025 at the +-3 ppg /
+    // +-1 year band; 2016 is scoring/config.HISTORY_SEASONS' floor. The 21.5
+    // is ESPN's own 2026 projection for him: 365.3 points over 17 games.
+    proof: '19 comparable seasons · median −2.8 points a game · 13 of 19 declined',
+    note: 'Gibbs’ own comparables, against the 21.5 a game ESPN projects for him',
+  },
+]
 
 export default function Landing() {
   const [gate, setGate] = useState<Gate>('idle')
@@ -200,6 +297,24 @@ export default function Landing() {
     setAttempt((n) => n + 1)
   }, [])
 
+  // What every call-to-action on this page does.
+  //
+  // There is no payment integration and no hosted signup, so a button that
+  // implied either would be lying about what happens next. What actually
+  // starts a draft -- free or paid, mock or real -- is the bookmarklet, and
+  // the honest thing a CTA can do is put it in front of you. So all four
+  // buttons scroll to the setup block and nothing else claims to happen.
+  //
+  // `smooth` only when the visitor has not asked for less motion; a page
+  // that ignores that preference to animate a scroll is the exact case the
+  // preference exists for.
+  const toSetup = useCallback(() => {
+    const el = document.getElementById('setup')
+    if (!el) return
+    const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    el.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'start' })
+  }, [])
+
   // The screen this whole task is about. It replaces the page rather than
   // sitting above it, and it stays up until the work is genuinely finished --
   // including the two stages that land after the connect returns (the socket
@@ -223,19 +338,21 @@ export default function Landing() {
   }
 
   return (
-    <main className="landing">
-      <header className="landing-bar">
-        <span className="landing-mark">
-          <span className="landing-pip" aria-hidden="true" />
+    <main className="lp">
+      <header className="lp-bar">
+        <span className="lp-mark">
+          <span className="lp-pip" aria-hidden="true" />
           Draft Helper
         </span>
-        <span className="landing-where mono">running on this machine</span>
+        <span className="lp-bar-price">
+          Mock drafts free · <span className="mono">$4.99</span> a real draft
+        </span>
       </header>
 
       {gate === 'live' && (
-        <div className="landing-band landing-band-live">
+        <div className="lp-band lp-band-live">
           <span>Your draft is synced.</span>
-          <button className="landing-band-action" onClick={() => navigate('/draft')}>
+          <button className="lp-band-action" onClick={() => navigate('/draft')}>
             Go to the board
           </button>
         </div>
@@ -247,31 +364,108 @@ export default function Landing() {
           setup" is the way to this page, and it clears the token first so
           this view is the pitch again rather than a half-dead connect. */}
       {error !== null && gate === 'idle' && (
-        <div className="landing-band landing-band-error">
+        <div className="lp-band lp-band-error">
           <span>Couldn’t connect: {error}</span>
-          <button className="landing-band-action" onClick={() => setError(null)}>
+          <button className="lp-band-action" onClick={() => setError(null)}>
             Dismiss
           </button>
         </div>
       )}
 
-      <section className="landing-hero">
-        <h1 className="landing-title">
-          Your draft board,
-          <br />
-          on the clock.
-        </h1>
-        <p className="landing-lede">
-          Click one bookmark inside your ESPN draft room and the board follows
-          every pick — tiers, value over replacement, and who will not last
-          until your next turn. Your ESPN password never leaves ESPN.
-        </p>
+      {/* -- the argument, and the proof of it, above the fold -- */}
+      <section className="lp-sec lp-hero">
+        <div className="lp-hero-copy">
+          <p className="lp-cap lp-cap-accent">For ESPN fantasy leagues</p>
+          {/* Two sentences, two blocks rather than one string with a <br>:
+              `text-wrap: balance` balances a block, so with a line break
+              inside one block the second sentence broke after "who" and hung
+              two words on their own line. As separate blocks each sentence
+              balances itself, at every width. */}
+          <h1 className="lp-title">
+            <span>ESPN tells you who’s best.</span>
+            <span>This tells you who to take.</span>
+          </h1>
+          <p className="lp-lede">
+            Every draft board ranks players. None of them price what it costs to
+            wait. Draft Helper replaces your ESPN draft room with one that
+            measures both — and simulates the picks between now and your next
+            turn to work out the difference.
+          </p>
+          <div className="lp-cta-row">
+            <button className="lp-cta" onClick={toSetup}>Try it in a mock draft</button>
+            <span className="lp-cta-note">free, no account</span>
+          </div>
+        </div>
+
+        {/* Not a screenshot and not an illustration: a board this tool
+            actually produced, with the state it was produced from written
+            underneath it. See PROOF_ROWS for the full measurement. */}
+        <aside className="lp-proof">
+          <div className="lp-proof-head">
+            <span className="lp-cap lp-cap-accent">Round 2, on the clock</span>
+            <span className="lp-proof-sub">what every other board says, against what this one says</span>
+          </div>
+          {PROOF_ROWS.map((r) => (
+            <div className={r.take ? 'lp-proof-row is-take' : 'lp-proof-row'} key={r.name}>
+              <span className="lp-proof-who">
+                <span className={`lp-pos lp-pos-${r.pos.toLowerCase()}`}>{r.pos}</span>
+                <span className="lp-proof-name">{r.name}</span>
+              </span>
+              <span className="lp-proof-fig">
+                <span className="lp-cap">Over replacement</span>
+                <span className="lp-proof-num mono">{r.vor}</span>
+              </span>
+              <span className="lp-proof-fig">
+                <span className="lp-cap">Gain vs waiting</span>
+                <span className={`lp-proof-num mono${r.tone ? ` is-${r.tone}` : ''}`}>{r.gain}</span>
+              </span>
+            </div>
+          ))}
+          <p className="lp-proof-foot">
+            Josh Allen is the most valuable player on that board and the
+            cheapest one to pass on. The next quarterback is nearly as good, and
+            across 400 simulated runs to the next turn Allen was still on the
+            board 93% of the time. Rashee Rice, worth nineteen points less, was
+            there 2% — so the tool takes Rice and lets Allen come back round.
+            <span className="lp-proof-src">
+              8-team PPR, my slot on the clock at pick 15, the first fourteen
+              picks gone in ESPN ADP order. Survival counted to pick 27, over
+              400 simulated drafts — the same numbers the room shows on the
+              night.
+            </span>
+          </p>
+        </aside>
       </section>
 
-      <BoardPreview />
+      {/* -- what a ranked list cannot do -- */}
+      <section className="lp-sec">
+        <div className="lp-lead">
+          <p className="lp-cap">What it knows that ESPN doesn’t</p>
+          <h2 className="lp-h2">Four things a rankings list structurally cannot tell you.</h2>
+        </div>
+        <div className="lp-grid">
+          {FEATURES.map((f) => (
+            <article className="lp-card" key={f.n}>
+              <div className="lp-card-head">
+                <span className="lp-card-n mono">{f.n}</span>
+                <h3 className="lp-card-title">{f.title}</h3>
+              </div>
+              <p className="lp-card-body">{f.body}</p>
+              <div className="lp-proof-line">
+                <p className="lp-proof-line-value mono">{f.proof}</p>
+                <p className="lp-proof-line-note">{f.note}</p>
+              </div>
+            </article>
+          ))}
+        </div>
+      </section>
 
-      <section className="landing-install">
-        <div className="landing-install-cta">
+      {/* -- how it works, and the objection everyone has -- */}
+      <section className="lp-sec lp-split" id="setup">
+        <div className="lp-lead">
+          <p className="lp-cap">How it works</p>
+          <h2 className="lp-h2">One click from the draft room you’re already in.</h2>
+
           {/* The real javascript: link, present from first paint so a drag to
               the bookmarks bar copies IT, not this page's URL (setting the href
               after mount was too late -- the drag grabbed localhost instead).
@@ -280,43 +474,169 @@ export default function Landing() {
               bookmarklet.ts), so a single-quoted href is safe; onclick returns
               false so a stray click here does nothing -- it is a drag target,
               not a button. */}
-          <span
-            className="landing-bookmark-wrap"
-            dangerouslySetInnerHTML={{
-              __html:
-                "<a class='landing-bookmark' title='Drag me to your bookmarks bar' "
-                + "onclick='return false' href='" + BOOKMARKLET + "'>"
-                + "<span aria-hidden='true'>⚓</span>&nbsp;Draft&nbsp;Helper</a>",
-            }}
-          />
-          <span className="landing-bookmark-hint">← drag this to your bookmarks bar</span>
+          <div className="lp-bookmark-row">
+            <span
+              dangerouslySetInnerHTML={{
+                __html:
+                  "<a class='lp-bookmark' title='Drag me to your bookmarks bar' "
+                  + "onclick='return false' href='" + BOOKMARKLET + "'>"
+                  + "<span aria-hidden='true'>⚓</span>&nbsp;Draft&nbsp;Helper</a>",
+              }}
+            />
+            <span className="lp-bookmark-hint">← drag this to your bookmarks bar</span>
+          </div>
+
+          {/* Numbered because this genuinely is a sequence: each step is only
+              possible once the one above it is done. */}
+          <ol className="lp-steps">
+            <li className="lp-step">
+              <span className="lp-step-n mono">1</span>
+              <span>
+                Drag the button above to your bookmarks bar. Once, ever — press{' '}
+                <kbd>⌘⇧B</kbd> / <kbd>Ctrl⇧B</kbd> first if the bar is hidden.
+              </span>
+            </li>
+            <li className="lp-step">
+              <span className="lp-step-n mono">2</span>
+              <span>
+                Open your ESPN draft room — a mock counts — and click{' '}
+                <strong>⚓ Draft&nbsp;Helper</strong> there. Your board is built,
+                priced and ranked before the first pick lands.
+              </span>
+            </li>
+            <li className="lp-step">
+              <span className="lp-step-n mono">3</span>
+              <span>
+                Draft from the window it opens. Clock, board, roster and
+                recommendation in one place, and every pick you make is sent to
+                ESPN and counted only once ESPN confirms it.
+              </span>
+            </li>
+          </ol>
         </div>
 
-        {/* Numbered because this genuinely is a sequence: each step is only
-            possible once the one above it is done. */}
-        <ol className="landing-steps">
-          <li>
-            <span className="landing-step-n mono">1</span>
-            <span>
-              Show your bookmarks bar if it’s hidden (<kbd>⌘⇧B</kbd> /{' '}
-              <kbd>Ctrl⇧B</kbd>), then drag the button up to it.
-            </span>
-          </li>
-          <li>
-            <span className="landing-step-n mono">2</span>
-            <span>Open your ESPN draft room. A mock draft works too.</span>
-          </li>
-          <li>
-            <span className="landing-step-n mono">3</span>
-            <span>
-              Click <strong>⚓ Draft&nbsp;Helper</strong> there. Your board opens
-              in a new window and starts following the draft.
-            </span>
-          </li>
-        </ol>
+        <div className="lp-trust">
+          <h2 className="lp-trust-head">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--ok)"
+                 strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M12 3l7.5 3v5.5c0 4.4-3.1 8.4-7.5 9.5-4.4-1.1-7.5-5.1-7.5-9.5V6z" />
+            </svg>
+            Your ESPN password never reaches this app
+          </h2>
+          <p>
+            There is no account to create and no password to hand over. The
+            bookmarklet runs on ESPN’s own page, where you are already signed in,
+            and asks ESPN for the draft token its own draft room uses. What
+            arrives here is that token plus the ids already sitting in your draft
+            room’s address bar — league, team, member, season. Your ESPN login
+            cookie stays in your browser.
+          </p>
+          <div className="lp-rule" />
+          <p>
+            That token is held for the draft, in a file only your own user can
+            read, and dropped twelve hours later. It is what lets a crash
+            mid-draft rejoin on its own instead of asking you for anything.
+          </p>
+          <div className="lp-rule" />
+          <p>
+            This window opens its own connection to ESPN’s draft socket, so draft
+            here rather than in ESPN’s room — one team drafting from two sessions
+            is a fight neither needs. Every pick goes back over that socket and
+            your league sees an ordinary draft.
+          </p>
+        </div>
       </section>
 
-      <ReadinessStrip />
+      {/* -- pricing -- */}
+      <section className="lp-sec">
+        <div className="lp-lead">
+          <p className="lp-cap">Pricing</p>
+          <h2 className="lp-h2">Practise for nothing. Pay once, for the draft that counts.</h2>
+        </div>
+        <div className="lp-plans">
+          <div className="lp-plan">
+            <div className="lp-plan-head">
+              <span className="lp-plan-name">Mock drafts</span>
+              <span className="lp-plan-price mono">Free</span>
+              <span className="lp-plan-unit">always</span>
+            </div>
+            <p className="lp-plan-blurb">
+              The whole tool, with nothing held back. As many as you like.
+            </p>
+            <ul className="lp-plan-items">
+              {['Every ranking and every recommendation',
+                'Full player cards, history and comparables',
+                'Picks sent to ESPN exactly as in a real draft'].map((t) => (
+                <li key={t}>
+                  <Tick />
+                  <span>{t}</span>
+                </li>
+              ))}
+            </ul>
+            <button className="lp-plan-btn" onClick={toSetup}>Start a mock draft</button>
+          </div>
+
+          <div className="lp-plan lp-plan-paid">
+            <div className="lp-plan-head">
+              <span className="lp-plan-name">Your real draft</span>
+              <span className="lp-plan-price mono">$4.99</span>
+              <span className="lp-plan-unit">per draft</span>
+            </div>
+            <p className="lp-plan-blurb">
+              One league, one draft night. No subscription, nothing to cancel.
+            </p>
+            <ul className="lp-plan-items">
+              {['Everything in mocks, on the night it counts',
+                'One price per draft, not per season',
+                'Still no account and no password'].map((t) => (
+                <li key={t}>
+                  <Tick />
+                  <span>{t}</span>
+                </li>
+              ))}
+            </ul>
+            <button className="lp-plan-btn" onClick={toSetup}>Use it for a real draft</button>
+          </div>
+        </div>
+        {/* Said plainly rather than left for someone to discover: there is no
+            payment integration in this build at all, so a page that implied a
+            charge would be describing software that does not exist. */}
+        <p className="lp-plans-note">
+          Payment isn’t switched on yet — nothing on this page can charge you,
+          and until it is, a real draft runs on the same free path a mock does.
+          Both buttons take you to the setup above.
+        </p>
+      </section>
+
+      <footer className="lp-foot">
+        <span>
+          Not affiliated with ESPN. Works with any ESPN fantasy football league
+          whose draft room you can open.
+        </span>
+        <button className="lp-cta" onClick={toSetup}>Try a mock draft</button>
+      </footer>
+
+      {/* An operator's panel, not part of the pitch: it reports whether this
+          machine's data has been refreshed and prints the command when it has
+          not. It renders nothing unless the helper answers, so a visitor never
+          sees it -- and whoever is running the helper still needs it on the one
+          night it matters. */}
+      <div className="lp-ops">
+        <ReadinessStrip />
+      </div>
     </main>
+  )
+}
+
+/** The green check in the pricing lists. Inline because it is the only icon
+ *  used more than once here, and a shared component beats six copies of the
+ *  same path drifting apart. */
+function Tick() {
+  return (
+    <svg className="lp-tick" width="11" height="11" viewBox="0 0 24 24" fill="none"
+         stroke="var(--ok)" strokeWidth="3.4" strokeLinecap="round"
+         strokeLinejoin="round" aria-hidden="true">
+      <path d="M20 6L9 17l-5-5" />
+    </svg>
   )
 }
