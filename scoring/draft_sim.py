@@ -537,24 +537,29 @@ def _must_fill_mask(pool, indices, counts, settings, turns_left: int):
     """Which of `indices` fill a starter slot this roster can no longer defer,
     or None when the constraint does not bind (which is nearly always).
 
-    A CORRECTION TO THE FIT, NOT PART OF IT. Deliberately not expressed as a
-    coefficient, because there is no measurement behind a coefficient here --
-    see below for what the fit actually saw. This is the floor that
-    `_roster_cap` is the ceiling of, and it is here for the same stated
+    A ROSTER RULE, NOT A CORRECTION TO ANY PARTICULAR FIT. This is the floor
+    that `_roster_cap` is the ceiling of, and it is here for the same stated
     reason: "learned coefficients cannot express a hard ceiling, so it is
     imposed as a mask instead." A manager with two picks left and an empty
     kicker and defense slot takes a kicker and a defense. That is not a
-    tendency to be fitted, it is what the roster rules leave them.
+    tendency to be fitted, it is what the roster rules leave them. That
+    argument is the whole justification and it holds for every fit, good or
+    bad -- KEEP THIS EVEN AFTER THE DEFENSE COEFFICIENT IS RE-FITTED. It is
+    also one half of a shared definition: `must_fill_positions` is called from
+    here and from `gain.need_kind`, which are required not to disagree about
+    when a slot stops being deferrable, so deleting this side would
+    desynchronise the ranking from the simulator.
 
-    WHAT WENT WRONG WITHOUT IT. `COLD_START_PRIOR`'s `pos_DST` is -11.14, and
-    every per-manager fit on this deployment's own database shrinks to that
-    same value. Measured on the real 249-player pool (8 teams, 15 rounds),
-    `_run_draft` run out to all 120 picks, 8 seeds, with the real fitted
-    betas and again with cold-start: EXACTLY ONE defense was drafted per
-    simulated draft, every time at pick 113 -- and pick 113 is my own slot's
-    round-15 pick, taken by `_greedy_choice`. No modelled opponent drafted a
-    defense at any pick of any of the sixteen simulations, so 7 of the 8
-    simulated teams finished the draft with an empty DST starter slot.
+    WHAT WENT WRONG WITHOUT IT, on the fit as it stands today.
+    `COLD_START_PRIOR`'s `pos_DST` is -11.14, and every per-manager fit on
+    this deployment's own database shrinks to that same value. Measured on the
+    real 249-player pool (8 teams, 15 rounds), `_run_draft` run out to all 120
+    picks, 8 seeds, with the real fitted betas and again with cold-start:
+    EXACTLY ONE defense was drafted per simulated draft, every time at pick
+    113 -- and pick 113 is my own slot's round-15 pick, taken by
+    `_greedy_choice`. No modelled opponent drafted a defense at any pick of
+    any of the sixteen simulations, so 7 of the 8 simulated teams finished the
+    draft with an empty DST starter slot.
 
     Downstream that made every defense unpickable by construction: `survival`
     runs these same opponents, so DST availability came back at 1.000 at pick
@@ -564,23 +569,31 @@ def _must_fill_mask(pool, indices, counts, settings, turns_left: int):
     and an owner following it literally reaches the last round without a
     defense.
 
-    WHY THE COEFFICIENT IS NOT EVIDENCE, which is what makes a correction
-    honest rather than a thumb on the scale. `draft_picks` on this database
-    holds 712 rows over six seasons and NOT ONE of them is a DST: the
-    positions present are WR/RB/TE/QB/K only. Every season is missing exactly
-    eight picks -- 2020 [60, 68, 72, 90, 102, 113, 126, 127], 2025
-    [98, 99, 100, 104, 106, 107, 108, 112], and so on, eight per season,
-    always in the late rounds -- while all 8 kickers are recorded every year.
-    Those eight are the eight defenses, dropped somewhere in the ESPN import.
-    So the fit saw defenses in every choice set and saw one chosen zero
-    times, and drove `pos_DST` as negative as the ridge allowed. The number
-    is a correct fit to data in which the event is unobservable; it is not a
-    measurement of how anybody drafts. Its own comment reads "nobody drafts a
-    defense in round two" -- the data behind it could not have said anything
-    else, and the real drafts it was taken from filled all eight defense
-    slots every year, between picks 60 and 127. (The import is the real bug
-    and it is not in this file; nothing here can fix it, and nothing here
-    should pretend the coefficient means more than it does.)
+    WHY THAT FAILURE IS NOT A FACT ABOUT DRAFTERS, and why it is expected to
+    go away. The fit that produced `pos_DST` ran on a `draft_picks` table
+    holding 712 rows over six seasons with NOT ONE DST among them -- the
+    positions present were WR/RB/TE/QB/K only, every season missing exactly
+    eight late picks (2020 [60, 68, 72, 90, 102, 113, 126, 127], 2025
+    [98, 99, 100, 104, 106, 107, 108, 112], and so on) while all 8 kickers
+    were recorded every year. Those gaps were the defenses: the importer's
+    `_is_real_pick` tested `playerId > 0`, and ESPN's D/ST ids are negative by
+    design, so it threw every one away. The fit saw defenses in every choice
+    set, saw one chosen zero times, and drove `pos_DST` as negative as the
+    ridge allowed -- a correct fit to data in which the event is
+    unobservable, not a measurement of how anybody drafts.
+
+    THAT IMPORT BUG IS FIXED (9b90610); the coefficient is not, because
+    nobody has re-imported and re-fitted. So the failure described above is
+    still live on today's database, and it is expected to disappear once
+    `make espn-import && make fit-managers` is run: on reconstructed defense
+    picks the pooled `pos_DST` moved -9.77 -> +2.81, a sign flip that is
+    robust even though its magnitude is not (see `COLD_START_PRIOR`'s comment
+    for both biases). WHEN THAT HAPPENS THIS MASK BECOMES INERT RATHER THAN
+    WRONG -- opponents will start taking defenses on their own, and a
+    constraint that binds no earlier than pick 106 will simply stop being
+    reached. Do not read its inertness as a reason to delete it: the roster
+    floor at the top of this docstring is why it exists, and that never
+    depended on the coefficient.
 
     WHAT IT FIXES, measured the same way. All 8 defenses are drafted in all
     16 simulations, none of the 8 teams finishes short at any starter
@@ -610,10 +623,11 @@ def _must_fill_mask(pool, indices, counts, settings, turns_left: int):
     the eight gaps each season leaves in `draft_picks`, which are the eight
     defenses by elimination (every other position is fully accounted for, and
     2025's 112 rows are 120 minus 8). So a defense's urgency in rounds 9-14
-    is still understated and `gain_now` for one is still 0.00 there. Closing
-    that needs the import fixed so the fit can see the real timing; picking a
-    number for it here would be inventing the measurement this whole
-    docstring exists to say we do not have.
+    is still understated and `gain_now` for one is still 0.00 there. The way
+    to close that is a re-import and a re-fit, which will let the fit read the
+    real timing off real picks instead of a mask asserting it. Widening this
+    mask to cover rounds 9-14 by hand would be inventing exactly the
+    measurement that is now one `make` target away.
 
     `turns_left` is this slot's remaining picks including the current one
     (see `_turns_left`). Returns None, never an empty mask, when the

@@ -201,10 +201,18 @@ _GAME_STAT_COLS = {
 # above stay exactly the twelve keys they were. Additive on purpose: an
 # existing client indexes the keys it knows by name and ignores the rest, so
 # a QB's row growing five zero-valued kicking keys changes nothing it renders,
-# while a kicker's row finally carries the numbers behind its points. There
-# is no frontend column config for these yet -- `stat_line` is what shows a
-# kicker's game today; these are here so the client can be given one without
-# a second pass over the backend.
+# while a kicker's row finally carries the numbers behind its points.
+#
+# NOTHING ON THE FRONTEND READS THESE FIVE TODAY, and that is not an oversight
+# waiting on a config file. The per-position stat-column tables that would have
+# consumed them (`web/src/statColumns.ts`, feeding `GameLog.tsx` and
+# `SeasonTable.tsx`) were never wired into the rebuilt player card and have
+# been deleted. What the card actually renders per game is `stat_line`, which
+# `_stat_line` already builds with a real K branch, so a kicker's week reads
+# "2/2 FG, long 56 - 2/2 XP" rather than a row of receiving zeros. These keys
+# stay because they are the structured form of that same line and cost one
+# groupby -- a client that wants columns can have them without a second pass
+# over the backend. They are not declared in `web/src/api.ts`'s `GameStats`.
 _KICK_STAT_COLS = {
     "fg_made": "fg_made", "fg_att": "fg_att", "fg_long": "fg_long",
     "pat_made": "pat_made", "pat_att": "pat_att",
@@ -1223,10 +1231,23 @@ def build_profile(conn, player_id: str, weights: dict | None = None,
         # produces exactly the column of zeros this was written to hide -- so
         # the test is `prices_kicking(rules)`, not `position == "K"`.
         #
-        # DST is not mentioned because it does not reach here: it has no
-        # weekly rows at all, so `season_summaries` and `game_log` return
-        # empty on their own. Defensive scoring is not derivable from this
-        # database (see scoring/league.py's `from_espn`), so that stays true.
+        # DST is not mentioned because it does not reach here: `weekly` holds
+        # no defense rows at all, so `season_summaries` and `game_log` return
+        # empty on their own and a defense's profile has no season table and
+        # no game log to blank.
+        #
+        # THAT IS NOW TRUE FOR A DIFFERENT REASON THAN IT USED TO BE. This
+        # comment used to say defensive scoring "is not derivable from this
+        # database", and bc7b714 made it derivable: `from_espn` reads a
+        # league's D/ST rules out of `pointsOverrides["16"]` and
+        # `ppr.compute_dst_points` scores ESPN's own per-week D/ST stat lines
+        # from the `dst_weekly` table. What did NOT change is this function:
+        # `dst_weekly` is keyed by team and ESPN stat id and is read by
+        # `board.dst_team_history` only. Nothing joins it to `weekly`, so a
+        # defense still has nothing per-game to show HERE. Giving one a game
+        # log means teaching `_player_weekly` about `dst_weekly`, which is a
+        # real piece of work and not a config toggle -- and note `dst_weekly`
+        # is absent entirely until `make refresh` has run its job.
         seasons = []
         logs = []
     else:
