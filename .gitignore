@@ -169,6 +169,12 @@ cython_debug/
 
 data/
 data/espn_state.json
+# The live-session record (api/live.py's save_session_record). Named
+# after whatever DRAFT_DB_PATH points at, so it normally lands under
+# data/ and is already covered -- this line is for the case where it
+# does not, because the file holds an ESPN draftSecurity token and a
+# SWID and must never be committed.
+*.live-session.json
 .venv/
 __pycache__/
 web/node_modules/

@@ -3773,3 +3773,605 @@ def test_inactive_state_carries_the_autodraft_key(tmp_path):
     body = client.get("/api/live/state").json()
     assert body["active"] is False
     assert "autodraft" in body and body["autodraft"] is None
+
+
+# --- Surviving a restart: the saved session record ---------------------------
+#
+# An API restart mid-draft used to lose the whole live session -- the socket,
+# the listener, the resolved slot and the connect parameters -- and the only
+# way back was to go to the ESPN tab and click the bookmarklet again, on a
+# thirty-second clock. `drafted` was always durable (it is written to the
+# league's own file); what was lost was the session's identity. These pin the
+# record that closes that gap, and, just as importantly, what it does NOT
+# hold and when it is deleted.
+
+def _record_path(path):
+    from api.live import session_record_path
+    return session_record_path(path)
+
+
+def test_the_session_record_round_trips_and_is_readable_only_by_its_owner(tmp_path):
+    """The record carries the five connect fields plus the resolved slot,
+    and nothing wider: no espn_s2 (it never reaches this process at all --
+    see TokenBody's docstring), and mode 0600, because a file holding a
+    token that can send SELECT on somebody's live draft must not be readable
+    by other accounts on the machine."""
+    import os
+    from api.live import load_session_record, save_session_record
+
+    db = str(tmp_path / "nfl.duckdb")
+    written = save_session_record(db, league_id="1", team_id="2", season="2026",
+                                  swid="{X}", token="1953383334", my_slot=7)
+    assert written == _record_path(db)
+    assert oct(os.stat(written).st_mode & 0o777) == oct(0o600)
+
+    record = load_session_record(db)
+    assert record["league_id"] == "1"
+    assert record["team_id"] == "2"
+    assert record["season"] == "2026"
+    assert record["swid"] == "{X}"
+    assert record["token"] == "1953383334"
+    assert record["my_slot"] == 7
+    # Exactly these keys. A record that grows a field is a decision to widen
+    # what sits on disk, and it should have to change this line to do it.
+    assert set(record) == {"version", "saved_at", "league_id", "team_id",
+                           "season", "swid", "token", "my_slot"}
+    assert "espn_s2" not in json.dumps(record)
+
+
+def test_the_record_path_follows_the_database_the_app_was_opened_with(tmp_path):
+    """DRAFT_DB_PATH is how a second instance runs against a copy (the whole
+    test suite does it). A fixed record path would have a scratch server
+    restore the real draft, or delete its token."""
+    from api.live import session_record_path
+    a = session_record_path(str(tmp_path / "real.duckdb"))
+    b = session_record_path(str(tmp_path / "scratch.duckdb"))
+    assert a != b
+    assert a.startswith(str(tmp_path / "real.duckdb"))
+
+
+def test_a_record_too_old_to_carry_a_live_token_is_ignored_and_deleted(tmp_path):
+    """ESPN's draftSecurity token dies with its draft. A record older than
+    the age bound describes a draft that is over, so restoring it would
+    spend up to 34.8s rebuilding a board for a token ESPN will refuse -- and
+    leaving it on disk would leave the token there for ever. Deleting on
+    read is the only automatic bound on that, for a draft that was never
+    stopped cleanly."""
+    import os
+    from datetime import timedelta
+    from api.live import (SESSION_RECORD_MAX_AGE_SECONDS, load_session_record,
+                          save_session_record)
+    from datetime import datetime, timezone
+
+    db = str(tmp_path / "nfl.duckdb")
+    save_session_record(db, league_id="1", team_id="2", season="2026",
+                        swid="{X}", token="tok", my_slot=7)
+    just_inside = (datetime.now(timezone.utc)
+                   + timedelta(seconds=SESSION_RECORD_MAX_AGE_SECONDS - 60))
+    assert load_session_record(db, now=just_inside) is not None
+    assert os.path.exists(_record_path(db))
+
+    past = (datetime.now(timezone.utc)
+            + timedelta(seconds=SESSION_RECORD_MAX_AGE_SECONDS + 60))
+    assert load_session_record(db, now=past) is None
+    assert not os.path.exists(_record_path(db)), \
+        "an expired token was left on disk"
+
+
+def test_a_damaged_or_incomplete_record_is_no_session_rather_than_a_crash(tmp_path):
+    """A restore is a convenience; the API has to come up either way. Every
+    unusable record reads as "no saved session", never an exception out of
+    create_app."""
+    from api.live import load_session_record, save_session_record
+
+    db = str(tmp_path / "nfl.duckdb")
+    assert load_session_record(db) is None            # nothing saved at all
+
+    Path(_record_path(db)).write_text("{not json")
+    assert load_session_record(db) is None
+
+    Path(_record_path(db)).write_text(json.dumps(
+        {"version": 999, "league_id": "1", "team_id": "2", "swid": "{X}",
+         "token": "t", "saved_at": "2026-08-19T00:00:00+00:00"}))
+    assert load_session_record(db) is None            # a version we don't know
+
+    save_session_record(db, league_id="1", team_id="notanumber", season="2026",
+                        swid="{X}", token="t")
+    assert load_session_record(db) is None, \
+        "a non-numeric team id must be refused here, as it is on connect"
+
+
+def _seed_league_one_with_slot_seven(path, leagues_root):
+    """League 1's own file, with team 2 drafting from slot 7 (deliberately
+    not slot 2). draft_teams/draft_order are LEAGUE_TABLES, so they have to
+    live on the league's file, not on the shared one."""
+    from pipeline.leagues import provision_league
+    lg_path = provision_league("1", universal_path=path, root=leagues_root)
+    lg = get_conn(lg_path)
+    write_table(lg, "draft_teams", pd.DataFrame([
+        {"season": 2025, "team_id": 1, "manager": "m1", "slot": None},
+        {"season": 2025, "team_id": 2, "manager": "m2", "slot": None}]))
+    write_table(lg, "draft_order", pd.DataFrame([
+        {"slot": 1, "manager": "m1", "is_me": False},
+        {"slot": 7, "manager": "m2", "is_me": True}]))
+    lg.close()
+    return lg_path
+
+
+def _fake_socket(seen, stops, frames=()):
+    """A run_socket_listener that opens, replays `frames`, and then STAYS
+    connected until its stop_event is set -- the same shape the real one
+    has, which is what makes listener_alive/socket_alive mean anything in
+    these tests. Records the ids and token it was handed, so a restore can
+    be checked to have reconnected to the same draft with the same token.
+    """
+    def fake(listener, league_id, team_id, swid, token, on_change=None,
+             stop_event=None, on_activity=None, on_socket=None):
+        seen.append({"league_id": league_id, "team_id": team_id,
+                     "swid": swid, "token": token})
+        stops.append(stop_event)
+        if on_socket is not None:
+            class _Handle:
+                def alive(self):
+                    return True
+
+                def send(self, text):
+                    pass
+            on_socket(_Handle())
+        prev = 0
+        for frame in frames:
+            listener.on_frame(frame)
+            if on_activity is not None:
+                on_activity()
+            count = len(listener.picks().rows)
+            if count != prev:
+                prev = count
+                if on_change is not None:
+                    on_change()
+        if stop_event is not None:
+            stop_event.wait(timeout=10)
+    return fake
+
+
+@pytest.mark.skipif(not _SOCKET_FIXTURE.exists(), reason="no draft capture")
+def test_connect_token_saves_the_session_and_stop_deletes_it(
+        tmp_path, monkeypatch, _isolated_leagues_root):
+    """The bookmarklet connect is the only path that has a token to save,
+    and an explicit stop is the user saying the draft is over for them -- so
+    the token must not outlive it on disk."""
+    import os
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    _seed_league_one_with_slot_seven(path, _isolated_leagues_root)
+
+    seen, stops = [], []
+    monkeypatch.setattr("api.live.run_socket_listener", _fake_socket(seen, stops))
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    client = TestClient(create_app(path))
+    try:
+        resp = client.post("/api/live/connect-token", json={
+            "leagueId": "1", "teamId": "2", "swid": "{X}",
+            "token": "1953383334", "season": "2026"})
+        assert resp.status_code == 200
+
+        from api.live import load_session_record
+        record = load_session_record(path)
+        assert record is not None
+        assert (record["league_id"], record["team_id"], record["swid"],
+                record["token"], record["season"]) == \
+            ("1", "2", "{X}", "1953383334", "2026")
+        # The slot connect resolved, saved with it -- so a restart does not
+        # depend on relearning it from a socket that may be dead.
+        assert record["my_slot"] == 7
+    finally:
+        client.post("/api/live/stop")
+        for ev in stops:
+            if ev is not None:
+                ev.set()
+    assert not os.path.exists(_record_path(path)), \
+        "stopping the session left the draft token on disk"
+
+
+@pytest.mark.skipif(not _SOCKET_FIXTURE.exists(), reason="no draft capture")
+def test_a_second_app_on_the_same_database_restores_the_session_by_itself(
+        tmp_path, monkeypatch, _isolated_leagues_root):
+    """The whole point. A new app object over the same database -- what a
+    restarted process gets -- must come back to the same league, team, slot
+    and picks with nobody clicking anything, and must reopen the socket with
+    the same token.
+
+    This is the in-process version; the real one (uvicorn started, killed
+    and started again) is in the task report, because a test that constructs
+    a second app is not by itself proof that a process restart works.
+    """
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path, extra_players=[
+        {"player_id": "p2", "name": "B Runner", "position": "RB",
+         "team": "DET", "espn_id": 4430807},
+        {"player_id": "p3", "name": "C Slot", "position": "WR",
+         "team": "GB", "espn_id": 4426515},
+    ])
+    _seed_league_one_with_slot_seven(path, _isolated_leagues_root)
+
+    seen, stops = [], []
+    monkeypatch.setattr("api.live.run_socket_listener",
+                        _fake_socket(seen, stops, _first_n_selected_frames(3)))
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    first = TestClient(create_app(path))
+    try:
+        assert first.post("/api/live/connect-token", json={
+            "leagueId": "1", "teamId": "2", "swid": "{X}",
+            "token": "1953383334", "season": "2026"}).status_code == 200
+        assert _wait_until(
+            lambda: first.get("/api/live/state").json()["picks_made"] == 3)
+        before = first.get("/api/live/state").json()
+        assert before["my_slot"] == 7
+    finally:
+        # The "restart": the old app object is simply abandoned, exactly as
+        # a killed process abandons its in-memory state. Its listener thread
+        # is asked to stop the way a kill would end it -- without going
+        # through /api/live/stop, which would delete the record on purpose.
+        for ev in stops:
+            if ev is not None:
+                ev.set()
+        seen.clear()
+
+    # The restored socket replays NOTHING. Whatever picks_made reads after
+    # the restore therefore came out of the league's own `drafted` table and
+    # not out of a convenient replay -- which is the half of this that was
+    # already durable, and has to be shown to still be.
+    monkeypatch.setattr("api.live.run_socket_listener", _fake_socket(seen, stops))
+    second = TestClient(create_app(path))
+    try:
+        assert _wait_until(
+            lambda: second.get("/api/live/state").json()["active"], timeout=30), \
+            "the restore never produced a session"
+        after = second.get("/api/live/state").json()
+        assert after["my_slot"] == 7
+        assert after["picks_made"] == 3          # still in the league's file
+        assert after["restoring"] is False
+        assert after["restore_error"] is None
+        assert after["token_received"] is True
+        # Reconnected to the same draft, as the same team, with the same
+        # token -- the four fields that exist nowhere else.
+        assert _wait_until(lambda: len(seen) == 1)
+        assert seen[0] == {"league_id": "1", "team_id": "2", "swid": "{X}",
+                           "token": "1953383334"}
+    finally:
+        second.post("/api/live/stop")
+        for ev in stops:
+            if ev is not None:
+                ev.set()
+
+
+def test_a_restore_against_an_expired_token_says_to_click_the_bookmark_again(
+        tmp_path, monkeypatch, _isolated_leagues_root):
+    """The case most likely to actually happen: ESPN's token is minted per
+    draft and does not outlive it, so a restart after the draft ended (or a
+    record for a draft since cancelled) meets a token ESPN refuses.
+
+    That must be bounded and loud. The REAL run_socket_listener runs here --
+    only the socket underneath it is stubbed to fail the handshake -- so
+    this pins the actual give-up rule (MAX_EMPTY_RECONNECTS frameless
+    attempts) and the actual sentence the user is shown, not a stand-in for
+    them.
+    """
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    _seed_league_one_with_slot_seven(path, _isolated_leagues_root)
+
+    from api.live import save_session_record
+    save_session_record(path, league_id="1", team_id="2", season="2026",
+                        swid="{X}", token="expired", my_slot=7)
+
+    attempts = []
+
+    def refuse(url, cookie_header):
+        attempts.append(url)
+        raise OSError("HTTP 401")
+
+    monkeypatch.setattr("pipeline.draft_socket._connect", refuse)
+    # The real backoff is 2s between attempts; the rule under test is the
+    # count, not the wall clock, so the wait is shortened rather than the
+    # test being made to take ten seconds.
+    monkeypatch.setattr("pipeline.draft_socket.RECONNECT_BACKOFF_SECONDS", 0.01)
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    client = TestClient(create_app(path))
+    try:
+        assert _wait_until(
+            lambda: client.get("/api/live/state").json()["active"], timeout=30), \
+            "the restore never rebuilt the session"
+        # It gives up rather than reconnecting for ever...
+        assert _wait_until(
+            lambda: client.get("/api/live/state").json()["listener_error"],
+            timeout=15), "an expired token never surfaced an error"
+        body = client.get("/api/live/state").json()
+        from pipeline.draft_socket import MAX_EMPTY_RECONNECTS
+        assert len(attempts) == MAX_EMPTY_RECONNECTS
+        # ...and says the one thing the owner can act on.
+        assert "token may have expired" in body["listener_error"]
+        assert "click the Draft Helper bookmark" in body["listener_error"]
+        assert body["socket_alive"] is False
+        assert _wait_until(
+            lambda: client.get("/api/live/state").json()["listener_alive"] is False)
+        # The board is still there. A dead socket costs the live feed, not
+        # the draft: the picks and the slot came back regardless, which is
+        # why the restore builds the session before it tries the socket.
+        assert body["my_slot"] == 7
+        # The failed connect stage carries the same instruction for the
+        # connect screen, with the hint a live connect would have given.
+        prog = client.get("/api/live/connect-progress").json()
+        assert prog["phase"] == "failed"
+        assert prog["error"]["stage"] == "socket"
+        assert "bookmark" in prog["error"]["hint"]
+    finally:
+        client.post("/api/live/stop")
+
+
+@pytest.mark.skipif(not _SOCKET_FIXTURE.exists(), reason="no draft capture")
+def test_the_browser_observer_path_clears_a_saved_token(
+        tmp_path, monkeypatch, _isolated_leagues_root):
+    """The record must describe the CURRENT session or nothing at all. The
+    browser path holds no token of its own, so a connect through it has to
+    take the old one out rather than leave a restart reconnecting to a
+    session that is no longer live."""
+    import os
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    _seed_league_one_with_slot_seven(path, _isolated_leagues_root)
+
+    from api.live import save_session_record
+    save_session_record(path, league_id="1", team_id="2", season="2026",
+                        swid="{X}", token="tok", my_slot=7)
+    monkeypatch.setattr("api.live.run_listener", lambda *a, **k: None)
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    client = TestClient(create_app(path))
+    try:
+        assert client.post("/api/live/connect", json={
+            "url": "https://fantasy.espn.com/football/draft?leagueId=1"
+                   "&seasonId=2026&teamId=2"}).status_code == 200
+        assert not os.path.exists(_record_path(path))
+    finally:
+        client.post("/api/live/stop")
+
+
+def test_the_saved_slot_is_a_fallback_and_never_overrides_a_live_one(
+        tmp_path, monkeypatch, _isolated_leagues_root):
+    """Precedence, both ways round. ESPN's pick order and the league's own
+    draft_order are current; a saved slot may be a draft order ago. So the
+    live answer wins whenever there is one -- and the saved one is used only
+    where nothing else can answer at all, which is the mock-draft case the
+    slot was originally read off the socket for."""
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    _seed_league_one_with_slot_seven(path, _isolated_leagues_root)
+
+    from api.live import save_session_record
+    save_session_record(path, league_id="1", team_id="2", season="2026",
+                        swid="{X}", token="tok", my_slot=6)
+    seen, stops = [], []
+    monkeypatch.setattr("api.live.run_socket_listener", _fake_socket(seen, stops))
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    client = TestClient(create_app(path))
+    try:
+        assert _wait_until(
+            lambda: client.get("/api/live/state").json()["active"], timeout=30)
+        # draft_order says slot 7 for team 2 and it is read fresh, so the
+        # stale 6 in the record loses.
+        assert client.get("/api/live/state").json()["my_slot"] == 7
+    finally:
+        client.post("/api/live/stop")
+        for ev in stops:
+            if ev is not None:
+                ev.set()
+
+    # Now the case nothing else can answer: no draft history for this league
+    # at all, which is exactly a mock draft.
+    from pipeline.leagues import league_db_path
+    lg = get_conn(league_db_path("1", root=_isolated_leagues_root))
+    write_table(lg, "draft_teams", pd.DataFrame(
+        columns=["season", "team_id", "manager", "slot"]))
+    write_table(lg, "draft_order", pd.DataFrame(columns=["slot", "manager"]))
+    lg.close()
+    save_session_record(path, league_id="1", team_id="2", season="2026",
+                        swid="{X}", token="tok", my_slot=6)
+    seen2, stops2 = [], []
+    monkeypatch.setattr("api.live.run_socket_listener", _fake_socket(seen2, stops2))
+    client2 = TestClient(create_app(path))
+    try:
+        assert _wait_until(
+            lambda: client2.get("/api/live/state").json()["active"], timeout=30)
+        assert client2.get("/api/live/state").json()["my_slot"] == 6, \
+            "with nothing live to resolve from, the saved slot is the only " \
+            "thing that knows which column is ours"
+    finally:
+        client2.post("/api/live/stop")
+        for ev in stops2:
+            if ev is not None:
+                ev.set()
+
+
+def test_state_says_restoring_rather_than_looking_like_no_draft(
+        tmp_path, monkeypatch, _isolated_leagues_root):
+    """The honest cost of rebuilding in the background: for the 4.1-34.8s a
+    build takes, /api/live/state is on its inactive branch. Without this key
+    that is indistinguishable from "no draft is running" -- the room would
+    tell the owner nothing is happening at the moment something is."""
+    import threading
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    _seed_league_one_with_slot_seven(path, _isolated_leagues_root)
+
+    from api.live import save_session_record
+    save_session_record(path, league_id="1", team_id="2", season="2026",
+                        swid="{X}", token="tok", my_slot=7)
+
+    # Hold the restore inside the board build, where a real one spends most
+    # of its time, and look at what a poll sees while it is in there.
+    inside, release = threading.Event(), threading.Event()
+
+    def slow_build(*a, **k):
+        # `build_session` here is this module's own import, bound at import
+        # time, so monkeypatching api.live's name does not recurse into it.
+        inside.set()
+        release.wait(timeout=10)
+        return build_session(*a, **k)
+
+    seen, stops = [], []
+    monkeypatch.setattr("api.live.build_session", slow_build)
+    monkeypatch.setattr("api.live.run_socket_listener", _fake_socket(seen, stops))
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    client = TestClient(create_app(path))
+    try:
+        assert inside.wait(timeout=10), "the restore never started building"
+        body = client.get("/api/live/state").json()
+        assert body["active"] is False
+        assert body["restoring"] is True
+        assert body["restore_error"] is None
+        release.set()
+        assert _wait_until(
+            lambda: client.get("/api/live/state").json()["active"], timeout=30)
+        assert client.get("/api/live/state").json()["restoring"] is False
+    finally:
+        release.set()
+        client.post("/api/live/stop")
+        for ev in stops:
+            if ev is not None:
+                ev.set()
+
+
+def test_a_restore_that_cannot_rebuild_says_so_instead_of_saying_no_draft(
+        tmp_path, monkeypatch, _isolated_leagues_root):
+    """A restore that dies before it has a listener has no listener_error to
+    hang off, and reporting nothing would be indistinguishable from "there
+    was no draft" -- the exact silence this whole change exists to remove."""
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    _seed_league_one_with_slot_seven(path, _isolated_leagues_root)
+
+    from api.live import save_session_record
+    save_session_record(path, league_id="1", team_id="2", season="2026",
+                        swid="{X}", token="tok", my_slot=7)
+
+    def boom(*a, **k):
+        raise RuntimeError("the board would not build")
+
+    monkeypatch.setattr("api.live.build_session", boom)
+    monkeypatch.setattr("api.live.run_socket_listener",
+                        lambda *a, **k: pytest.fail("a failed restore opened a socket"))
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    client = TestClient(create_app(path))
+    assert _wait_until(
+        lambda: client.get("/api/live/state").json()["restore_error"], timeout=30)
+    body = client.get("/api/live/state").json()
+    assert body["active"] is False
+    assert body["restoring"] is False
+    assert "the board would not build" in body["restore_error"]
+
+
+@pytest.mark.skipif(not _SOCKET_FIXTURE.exists(), reason="no draft capture")
+def test_the_last_pick_of_the_draft_deletes_the_saved_token(
+        tmp_path, monkeypatch, _isolated_leagues_root):
+    """A token is worthless once its draft ends -- ESPN refuses it -- so it
+    goes the moment that becomes true, rather than waiting out the age
+    bound. A one-round, three-team league so the fixture's three real picks
+    finish it."""
+    import os
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path, extra_players=[
+        {"player_id": "p2", "name": "B Runner", "position": "RB",
+         "team": "DET", "espn_id": 4430807},
+        {"player_id": "p3", "name": "C Slot", "position": "WR",
+         "team": "GB", "espn_id": 4426515},
+    ])
+    lg_path = _seed_league_one_with_slot_seven(path, _isolated_leagues_root)
+    tiny = league_mod.LeagueSettings(
+        season=2026, teams=3, starters={"WR": 1}, flex_slots=0, bench=0,
+        scoring={"receptions": 0.5}, draft_type="SNAKE")
+    lg = get_conn(lg_path)
+    write_table(lg, "league", pd.DataFrame([
+        {"season": 2026, "league_id": "1",
+         "settings_json": league_mod.to_json(tiny)}]))
+    write_table(lg, "draft_order", pd.DataFrame([
+        {"slot": i, "manager": f"m{i}", "is_me": i == 1} for i in (1, 2, 3)]))
+    lg.close()
+
+    seen, stops = [], []
+    monkeypatch.setattr("api.live.run_socket_listener",
+                        _fake_socket(seen, stops, _first_n_selected_frames(3)))
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    client = TestClient(create_app(path))
+    try:
+        assert client.post("/api/live/connect-token", json={
+            "leagueId": "1", "teamId": "2", "swid": "{X}",
+            "token": "tok", "season": "2026"}).status_code == 200
+        assert _wait_until(
+            lambda: client.get("/api/live/state").json()["picks_made"] == 3)
+        assert _wait_until(lambda: not os.path.exists(_record_path(path))), \
+            "the token outlived the draft it was minted for"
+    finally:
+        client.post("/api/live/stop")
+        for ev in stops:
+            if ev is not None:
+                ev.set()
+
+
+def test_stopping_during_a_restore_keeps_the_session_stopped(
+        tmp_path, monkeypatch, _isolated_leagues_root):
+    """POST /api/live/stop while the rebuild is still running has to win. It
+    bumps `generation` and nothing else -- no connect sequence moves -- so
+    without the generation half of the guard the restore would finish a few
+    seconds later and bring a session back up underneath the user who had
+    just stopped it."""
+    import threading
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    _seed_league_one_with_slot_seven(path, _isolated_leagues_root)
+
+    from api.live import save_session_record
+    save_session_record(path, league_id="1", team_id="2", season="2026",
+                        swid="{X}", token="tok", my_slot=7)
+
+    inside, release = threading.Event(), threading.Event()
+
+    def slow_build(*a, **k):
+        # `build_session` here is this module's own import, bound at import
+        # time, so monkeypatching api.live's name does not recurse into it.
+        inside.set()
+        release.wait(timeout=10)
+        return build_session(*a, **k)
+
+    monkeypatch.setattr("api.live.build_session", slow_build)
+    monkeypatch.setattr("api.live.run_socket_listener",
+                        lambda *a, **k: pytest.fail(
+                            "a stopped restore opened a socket anyway"))
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    client = TestClient(create_app(path))
+    assert inside.wait(timeout=10), "the restore never started building"
+    assert client.post("/api/live/stop").status_code == 200
+    release.set()
+    # Give the restore every chance to finish and register; it must not.
+    assert not _wait_until(
+        lambda: client.get("/api/live/state").json()["active"], timeout=5), \
+        "the restore re-registered a session the user had stopped"
+    body = client.get("/api/live/state").json()
+    assert body["active"] is False
+    assert body["restoring"] is False

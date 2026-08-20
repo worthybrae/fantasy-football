@@ -8,6 +8,7 @@ session builds them once and every refresh costs only `survival` plus
 """
 import dataclasses
 import hashlib
+import json
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -543,6 +544,209 @@ class TokenBody(BaseModel):
     swid: str
     token: str
     season: str
+
+
+
+# --- Surviving a restart -----------------------------------------------------
+#
+# WHAT A RESTART ACTUALLY LOSES, measured against this file rather than
+# assumed. `drafted` is already durable: every pick is written to the league's
+# own DuckDB file by the listener path (apply_picks in _launch_listener's
+# on_change), so the board itself survives. `build_session` rebuilds everything
+# else from that same database -- board, pool, betas, crosswalk, slot_managers,
+# settings, board_by_id -- and the connect path re-fetches team names and
+# league settings from ESPN, and `seed` is the pinned DEFAULT_SEED constant, so
+# it comes back identical. What is NOT derivable is the four fields the
+# bookmarklet delivered (leagueId, teamId, swid, token) plus the season the
+# ESPN fetches need: they exist nowhere in the database, nowhere in any URL
+# this process kept, and cannot be re-minted here -- minting needs espn_s2,
+# which by design never reaches this process. `my_slot` is recomputable in the
+# ordinary case (ESPN's pickOrder, or imported draft history) but NOT in the
+# case this tool is most often pointed at: a mock draft, whose managers appear
+# in no history and whose slot was learned from the socket's own round-1
+# ordering (_slot_from_socket). With a dead token there are no frames to
+# relearn it from, so it is saved too.
+#
+# WHERE, and why not in the league's own DuckDB file, which already holds
+# `drafted` for that league:
+#
+#   1. A RESTART MUST FIND IT WITHOUT ALREADY KNOWING THE LEAGUE. Which league
+#      was live is exactly what a restarted process does not know.
+#      pipeline/leagues.py provisions a file per league and data/leagues
+#      currently holds twenty of them at ~28MB each; opening every one to look
+#      for a session row would be slow and would take a single-writer lock on
+#      each. This record sits at a path derived from the one database
+#      create_app already opened (see session_record_path), so finding it is
+#      one stat() and the league id is inside it.
+#   2. SECRETS MUST NOT BE COPIED. provision_league seeds each new league's
+#      file by copying UNIVERSAL_TABLES out of this same database
+#      (pipeline/leagues.py). A `live_session` table there would be one
+#      classification mistake away from having the token duplicated into every
+#      league file ever provisioned, permanently. A separate file cannot be
+#      picked up by that loop at all.
+#   3. IT MUST BE DELETABLE AND MODE-RESTRICTED. 0600 and unlink are
+#      properties a file has and a row does not: a DELETE leaves the value in
+#      the database file's freed pages, and DuckDB has no per-row permissions.
+#
+# WHAT THIS PUTS ON DISK, AND WHY THAT IS A DELIBERATE CHANGE OF POSTURE.
+# TokenBody's docstring just above is the whole design of the bookmarklet: the
+# espn_s2 account session never leaves the user's browser, and only a per-draft
+# nonce plus public ids reach this process. live_connect_token's own comment on
+# state["token"] used to finish that sentence -- "In memory only: a draft token
+# is a short-lived nonce, and writing it to disk is the one thing that would
+# turn a breach into a leak." This code writes it to disk, so that comment was
+# rewritten rather than left to contradict what the code now does. The trade,
+# stated here so nobody widens it by accident:
+#
+#   ON DISK: leagueId, teamId, season, swid, the draftSecurity token, the
+#   resolved slot, and a timestamp. NOT espn_s2 -- it has never reached this
+#   process and still does not.
+#
+#   WHAT SOMEBODY WHO READS THE FILE CAN DO: open ESPN's draft socket as this
+#   team and send SELECT -- make this user's picks -- for as long as the draft
+#   is running. That is a WRITE capability on one draft, not account access:
+#   `swid` is the account's public GUID (ESPN puts it in its own URLs) and is
+#   not a credential on its own, and the token is scoped to this one draft and
+#   refused once it ends. They cannot log in, read the account, or reach any
+#   other league.
+#
+#   WHY IT IS STILL WORTH IT: there is no reconnect without the token and no
+#   way to re-mint it here, so "restore the session with the owner touching
+#   nothing" and "never write the token" are mutually exclusive.
+#
+#   HOW THE EXPOSURE IS BOUNDED: mode 0600, owner-only, written whole via
+#   os.replace, next to a database that already holds this league's entire
+#   draft. Deleted when the draft's last pick lands, when /api/live/stop runs,
+#   when a connect replaces it with a session that has no token (the
+#   browser-observer path), and when a restore finds it older than
+#   SESSION_RECORD_MAX_AGE_SECONDS.
+SESSION_RECORD_SUFFIX = ".live-session.json"
+SESSION_RECORD_VERSION = 1
+
+# A draft runs a couple of hours and ESPN's draftSecurity token is minted per
+# draft (TokenBody's docstring calls it a two-hour nonce). A record older than
+# this describes a draft that is over, so restoring it would spend 4.1-34.8s
+# rebuilding a board for a token ESPN is going to refuse. Twelve hours rather
+# than two: the job of this number is to bound how long a dead token can sit on
+# disk after a draft that was never stopped cleanly (browser closed, laptop
+# slept), and erring generous costs one visible, actionable failure while
+# erring tight loses a live draft that ran long.
+SESSION_RECORD_MAX_AGE_SECONDS = 12 * 3600
+
+
+def session_record_path(db_path: str) -> str:
+    """Where this deployment's live-session record lives.
+
+    Derived from the app's own database path rather than being a constant,
+    because DRAFT_DB_PATH is how a second instance runs against a copy (see
+    pipeline/db.DEFAULT_PATH) -- the whole test suite and every scratch server
+    does exactly that. A fixed path would have one of those restore the
+    other's draft, or worse, delete its token.
+    """
+    return str(db_path) + SESSION_RECORD_SUFFIX
+
+
+def save_session_record(db_path, league_id, team_id, season, swid, token,
+                        my_slot=None) -> str:
+    """Write (or replace) the live-session record. Returns its path.
+
+    Created with mode 0600 at open() time, not chmod-ed afterwards: a chmod
+    leaves a window in which the token is world-readable. Written to a
+    temporary file and os.replace-d into place so a concurrent reader can only
+    ever see a complete record -- a half-written one parses as garbage, which
+    load_session_record correctly treats as "no session", and losing a live
+    draft to a torn read would be a real bug rather than a theoretical one.
+    """
+    path = session_record_path(db_path)
+    tmp = f"{path}.tmp"
+    body = {
+        "version": SESSION_RECORD_VERSION,
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "league_id": str(league_id),
+        "team_id": str(team_id),
+        "season": str(season or ""),
+        "swid": str(swid),
+        "token": str(token),
+        "my_slot": None if my_slot is None else int(my_slot),
+    }
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        json.dump(body, fh)
+    os.replace(tmp, path)
+    return path
+
+
+def load_session_record(db_path, now=None):
+    """The saved session, or None if there is not a usable one.
+
+    EVERY failure is None, never an exception: no file at all (the normal case
+    -- every start that is not a mid-draft restart), a truncated or hand-edited
+    file, a version this build does not know, a record missing a field the
+    socket cannot open without, a non-numeric team id, or one too old to still
+    carry a live token. A restore is a convenience and the API has to come up
+    either way, so nothing in here is allowed to stop it.
+
+    A record found too old is DELETED, not merely ignored. That is the only
+    automatic bound on how long the token stays on disk when a draft was never
+    stopped cleanly, and an expired token has no value worth keeping.
+
+    `now` is injectable so the age rule is testable without touching a clock;
+    production passes nothing.
+    """
+    path = session_record_path(db_path)
+    try:
+        with open(path) as fh:
+            record = json.load(fh)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        # Unreadable, or not JSON. Left in place rather than deleted: this is
+        # somebody's token, and a transient read failure must not be the
+        # reason it is thrown away.
+        return None
+    if (not isinstance(record, dict)
+            or record.get("version") != SESSION_RECORD_VERSION):
+        return None
+    if not all(record.get(k) for k in ("league_id", "team_id", "swid", "token")):
+        return None
+    try:
+        int(record["team_id"])
+    except (TypeError, ValueError):
+        # The socket path has no browser JOIN to learn the team from and
+        # _slot_for_team compares integers -- the same up-front rejection
+        # live_connect_token makes on the way in.
+        return None
+    try:
+        saved_at = datetime.fromisoformat(record.get("saved_at") or "")
+    except ValueError:
+        saved_at = None
+    now = now or datetime.now(timezone.utc)
+    if saved_at is None or saved_at.tzinfo is None:
+        # No usable timestamp means the age rule can never fire for this
+        # record, i.e. the token would sit on disk forever. Treated as
+        # expired, which is also what a hand-mangled record deserves.
+        clear_session_record(db_path)
+        return None
+    if (now - saved_at).total_seconds() > SESSION_RECORD_MAX_AGE_SECONDS:
+        clear_session_record(db_path)
+        return None
+    return record
+
+
+def clear_session_record(db_path) -> None:
+    """Forget the saved session.
+
+    Missing is success: every caller is a path that cannot know whether a
+    record exists (a stop with no session, a browser connect that never had a
+    token, the last pick of a draft nobody connected with a token). Any OTHER
+    OSError propagates deliberately -- a token this failed to delete is still
+    readable on disk, and that is worth a 500 on /api/live/stop or a recorded
+    listener_error rather than a silent success.
+    """
+    try:
+        os.unlink(session_record_path(db_path))
+    except FileNotFoundError:
+        pass
 
 
 def _resolve_league_id(url: str) -> str:
@@ -1110,9 +1314,23 @@ def _espn_id_for(board_row) -> int | None:
 
 
 def register_live_routes(app, conn, db_path):
-    """Mount live-draft endpoints. In-process state only, same lifetime as
-    `create_app`'s connection -- a restart mid-draft means starting again,
-    which is correct: the cached pool would be stale anyway.
+    """Mount live-draft endpoints.
+
+    In-process state, with ONE exception. Everything in `state` below lives
+    and dies with `create_app`'s connection, and that used to be the whole
+    story -- "a restart mid-draft means starting again, which is correct:
+    the cached pool would be stale anyway", as this docstring said until the
+    restart resilience work. Half of that was right and half was not. The
+    cached pool genuinely is disposable: it is rebuilt from the database in
+    4.1-34.8s and comes back identical. But the session's IDENTITY is not
+    rebuildable at all -- the league, team, swid and draftSecurity token
+    came from the bookmarklet and exist nowhere else -- so losing it meant
+    going back to the ESPN tab and clicking the bookmark again, mid-draft,
+    on a thirty-second clock, for every crash and every restart.
+    So those few fields are written to disk (see save_session_record, and
+    the security note above it for exactly what that costs), and
+    _restore_saved_session at the bottom of this function rebuilds the rest
+    on a background thread at startup.
 
     `db_path` is the app's own database file -- the same one `conn` was
     opened against in `create_app`. It is passed (rather than derived from
@@ -1211,7 +1429,28 @@ def register_live_routes(app, conn, db_path):
              # thread dying, its recompute worker finishing) must not write
              # over the record of the connect that replaced it. A counter and
              # not the object itself because the object is what it guards.
-             "connect_seq": 0}
+             "connect_seq": 0,
+             # The startup restore's own thread (see _restore_saved_session),
+             # or None when there was no saved session to restore. Kept for
+             # exactly two reasons: /api/live/state reports `restoring` off
+             # its is_alive(), which is the only thing that tells the room
+             # "your draft is coming back" apart from "there is no draft",
+             # and a test can join it instead of sleeping. Never joined by
+             # the app itself -- it is a daemon and the API must come up
+             # without waiting for it, which is the whole point of it being
+             # a thread.
+             "restore_thread": None,
+             # Why the restore could not rebuild the session, if it failed
+             # before it ever reached a listener (a board build that raised,
+             # a league file that would not open). Separate from
+             # listener_error, which needs a listener to exist to be set --
+             # a restore that dies in build_session has none, and without
+             # this key that failure is indistinguishable from "no draft was
+             # running", which is the exact silence this whole change is
+             # about. The socket refusing an expired token is NOT this: that
+             # happens after the listener is registered, and is reported
+             # through listener_error, exactly as it always was.
+             "restore_error": None}
     lock = threading.Lock()
 
     def _new_progress(token_path: bool, **facts):
@@ -1222,6 +1461,15 @@ def register_live_routes(app, conn, db_path):
         growing a list one row at a time. `facts` are what the caller
         already knows before any work happens (the league and team ids off
         the token); everything else is added as it is discovered.
+
+        Returns `(progress, seq)`. The sequence number is returned rather
+        than only captured in the closure because the startup restore runs
+        the same work on a thread nobody is waiting on, and has to be able
+        to check -- at the instant it registers its listener -- whether a
+        real connect has superseded it in the meantime (see
+        _launch_listener's `guard_seq`). The two HTTP callers ignore it:
+        they hold the request thread, so their own supersession is already
+        handled by _connect_work's _stop_listener.
         """
         with lock:
             state["connect_seq"] += 1
@@ -1241,7 +1489,7 @@ def register_live_routes(app, conn, db_path):
         progress = ConnectProgress(_connect_plan(token_path, had_listener),
                                    publish)
         progress.fact(**facts)      # the first publish, which registers it
-        return progress
+        return progress, seq
 
     def _stop_listener(timeout: float = LISTENER_STOP_TIMEOUT) -> bool:
         """Signal the active listener thread to stop and wait for it to exit.
@@ -1643,8 +1891,76 @@ def register_live_routes(app, conn, db_path):
                 "starters": dict(settings.starters),
                 "flex_slots": settings.flex_slots, "bench": settings.bench}
 
+    def _remember_my_slot(league_id, slot) -> None:
+        """Update the saved session's slot, if this session is the saved one.
+
+        UPDATES ONLY -- it never creates a record. Two guards, and both are
+        load-bearing rather than defensive padding:
+
+          * the record file must already exist, so a slot resolved by a
+            session started some other way (the browser observer, or
+            /api/live/start) can never write a token-bearing record, and a
+            record /api/live/stop just deleted is never resurrected by a
+            late frame from the listener it was stopping;
+          * state["token"] must still name THIS league, because that dict is
+            what the record is rebuilt from and it is replaced by every
+            token connect -- writing another league's slot into this
+            league's record would silently mis-seat the restored board.
+
+        Failures are swallowed. This runs on the frame-reading thread, and an
+        unwritable record is worth losing one restart's saved slot -- which
+        the socket relearns from ESPN's JOIN replay anyway, whenever the
+        token is still good -- rather than killing the listener mid-draft.
+        """
+        if not os.path.exists(session_record_path(db_path)):
+            return
+        with lock:
+            tok = state.get("token")
+        if not tok or str(tok.get("league_id")) != str(league_id):
+            return
+        try:
+            save_session_record(db_path, league_id=tok["league_id"],
+                                team_id=tok["team_id"], season=tok["season"],
+                                swid=tok["swid"], token=tok["token"],
+                                my_slot=slot)
+        except OSError:      # noqa: BLE001 -- see the docstring
+            pass
+
+    def _socket_run_fn(league_id, team_id, swid, token, progress):
+        """The bookmarklet path's `run_fn`, for _launch_listener.
+
+        One factory rather than the same closure written out at each call
+        site: the live connect and the startup restore open the same socket
+        the same way, and the reason _connect_work exists -- two copies of a
+        connect's steps will drift -- applies here unchanged.
+        """
+        def run_fn(listener, on_change, on_activity, stop_event):
+            def _on_socket(handle):
+                # Published once, right after run_socket_listener's first
+                # successful connect (see SocketHandle's own docstring in
+                # pipeline/draft_socket.py). Identity-guarded exactly like
+                # every other write in this closure family: if a newer
+                # /api/live/connect-token has already superseded this
+                # listener by the time the connect finishes, this callback
+                # must not resurrect a socket for a session that is no
+                # longer the active one.
+                with lock:
+                    if state["listener"] is listener:
+                        state["socket"] = handle
+                # After the block, never inside it: `lock` is a plain Lock
+                # and ConnectProgress takes it (see its docstring). This is
+                # the first and only moment ESPN itself has accepted the
+                # token -- the handshake behind run_socket_listener's first
+                # successful connect -- so it is the honest place to say so.
+                progress.ok("socket", "connected")
+
+            run_socket_listener(listener, league_id, team_id, swid, token,
+                                on_change=on_change, stop_event=stop_event,
+                                on_activity=on_activity, on_socket=_on_socket)
+        return run_fn
+
     def _launch_listener(work_conn, league_conn, league_id, session, run_fn,
-                         progress=None):
+                         progress=None, guard_seq=None, guard_gen=None):
         """Register a built session's listener thread and start it.
 
         `run_fn(listener, on_change, stop_event)` is what actually opens and
@@ -1654,6 +1970,32 @@ def register_live_routes(app, conn, db_path):
         back-fill, the identity guard that keeps a superseded listener's
         in-flight callback a no-op, the listener_error capture, and the state
         registration + generation bump.
+
+        `guard_seq` (a connect sequence number from _new_progress) makes the
+        registration conditional, and returns None instead of a body when it
+        no longer holds. Only the startup restore passes one, and it is what
+        makes the restore safe against a bookmarklet click landing while the
+        restore is still building:
+
+          * a connect that starts BEFORE this registration has already
+            bumped connect_seq in _new_progress, which is the first thing
+            either connect endpoint does -- so the check below, made inside
+            the same critical section as the registration itself, sees it
+            and this restore stands down;
+          * a connect that starts AFTER this registration runs
+            _stop_listener (in _connect_work) with this listener already in
+            `state`, so it is stopped and joined the ordinary way.
+
+        There is no third interleaving, which is why the check has to be
+        inside the lock with the state.update rather than before it. The two
+        HTTP callers pass nothing and register unconditionally, exactly as
+        before.
+
+        `guard_gen` is the session generation the same way, and it catches
+        the one supersession a connect sequence cannot see: POST
+        /api/live/stop bumps `generation` and nothing else, so a user who
+        stops the draft during the seconds a restore is still building would
+        otherwise have the restore bring a session back up underneath them.
         """
         progress = progress or _NO_PROGRESS
         listener = DraftListener(session.crosswalk)
@@ -1662,6 +2004,15 @@ def register_live_routes(app, conn, db_path):
         # session object rather than mutating it. `current` is that one
         # mutable cell, closed over by the callbacks one-to-one with `listener`.
         current = {"session": session}
+        # How many picks this draft has in total, for the "the draft is
+        # finished, so delete the saved token" check in on_change. Read once
+        # here rather than per pick: `settings` is fixed for a session's
+        # lifetime (the my_slot back-fill replaces the session but never its
+        # settings). getattr with a 0 default because live_start builds
+        # sessions whose settings a test may leave as None -- 0 disables the
+        # check rather than raising on the frame-reading thread.
+        total_picks = ((getattr(session.settings, "teams", 0) or 0)
+                       * (getattr(session.settings, "rounds", 0) or 0))
 
         # The recompute request queue -- coalescing, depth one. search_pick
         # (this engine's predecessor) was seconds-slow; running it inline in
@@ -1811,6 +2162,19 @@ def register_live_routes(app, conn, db_path):
             with lock:
                 if state["listener"] is listener:
                     state["session"] = new
+            # Write the slot into the saved session, so a restart does not
+            # have to relearn it. This branch runs at most once per session
+            # (it returns False immediately for a session that already has a
+            # slot), and it is the ONLY place the slot is ever discovered in
+            # the case that needs it most: a mock draft, whose managers are
+            # in no imported history and whose pickOrder ESPN may not
+            # publish, where _slot_from_socket read it off the socket's own
+            # round-1 ordering. With an expired token there are no frames to
+            # read it from a second time, so without this the restored board
+            # would not know which column is ours. Outside the lock above
+            # because it is file I/O -- the same rule ConnectProgress's
+            # callers follow for `lock`.
+            _remember_my_slot(league_id, resolved)
             return True
 
         def pump():
@@ -1867,8 +2231,24 @@ def register_live_routes(app, conn, db_path):
                 # the raw espn id shows up here). Same identity guard as every
                 # other write.
                 with lock:
-                    if state["listener"] is listener:
+                    mine = state["listener"] is listener
+                    if mine:
                         state["unmapped"] = live.unmapped
+                # The draft is over, so the saved token is worthless -- ESPN
+                # refuses it from here on -- and there is nothing left for a
+                # restart to reconnect to. Deleted at the moment that becomes
+                # true rather than left to the age rule, so the file with the
+                # token in it is gone the second it stops being useful. This
+                # is the listener path, the one writer of `drafted`; it adds
+                # no writer and no table. `>=`, not `==`: the pick count is
+                # max(pick_no) (see PICKS_MADE_SQL), which a manually
+                # inserted row can push past the last snake slot. on_change
+                # only fires when the pick count MOVED, so this runs once at
+                # the end of a draft and not on every later frame. Outside
+                # the lock above because it is a syscall, and nothing reads
+                # the record under `lock`.
+                if mine and total_picks and made >= total_picks:
+                    clear_session_record(db_path)
                 # Hand off to the worker instead of searching here -- this
                 # callback runs on the socket read thread and must return fast.
                 request_recompute(current["session"], made)
@@ -1916,15 +2296,34 @@ def register_live_routes(app, conn, db_path):
         finally:
             c0.close()
         with lock:
-            state.update({"session": session, "listener": listener,
-                          "listener_thread": thread, "listener_stop": stop_event,
-                          "recompute_thread": recompute_thread,
-                          "listener_error": None, "recompute_error": None,
-                          "league_conn": league_conn,
-                          "candidates": [], "as_of_pick": None,
-                          "horizon_pick": None,
-                          "unmapped": [], "last_poll_at": None})
-            state["generation"] = state.get("generation", 0) + 1
+            # Superseded before we ever registered (see `guard_seq`). Nothing
+            # has been published yet -- neither thread is started, so there
+            # is nothing to stop -- and the connection this build opened is
+            # ours alone to close, which happens just below.
+            superseded = (guard_seq is not None
+                          and (state["connect_seq"] != guard_seq
+                               or state["generation"] != guard_gen))
+            if not superseded:
+                state.update({"session": session, "listener": listener,
+                              "listener_thread": thread,
+                              "listener_stop": stop_event,
+                              "recompute_thread": recompute_thread,
+                              "listener_error": None, "recompute_error": None,
+                              "league_conn": league_conn,
+                              "candidates": [], "as_of_pick": None,
+                              "horizon_pick": None,
+                              "unmapped": [], "last_poll_at": None})
+                state["generation"] = state.get("generation", 0) + 1
+        if superseded:
+            # DuckDB tolerates a second connection to a file already open in
+            # this process (verified against the duckdb 1.5.5 this project
+            # pins: two connections, one writing, both fine -- it shares the
+            # database instance), so the connect that beat us has already
+            # reopened this league's file and closing ours cannot pull it
+            # out from under anyone.
+            if league_conn is not None:
+                league_conn.close()
+            return None
         recompute_thread.start()
         # ONE recompute at launch, when the slot is already known. Without it
         # nothing ever asked for a ranking until a pick landed:
@@ -2035,6 +2434,21 @@ def register_live_routes(app, conn, db_path):
                         # every other false/null default here (see
                         # listener_alive's own comment just above).
                         "draft_started": False,
+                        # THE ONE THING THAT MAKES A BACKGROUND RESTORE
+                        # HONEST. After a restart with a saved session there
+                        # genuinely is no session yet -- build_session takes
+                        # 4.1-34.8s (see its docstring) and the API answers
+                        # requests throughout -- so this branch is what a
+                        # poll sees for those seconds. Without this key it
+                        # is indistinguishable from "no draft is running",
+                        # which is the exact silence the restore exists to
+                        # remove: the owner would be told nothing is
+                        # happening at the moment something is. `restore_
+                        # error` is the other half, for a restore that got
+                        # as far as trying and could not rebuild at all.
+                        "restoring": (state["restore_thread"] is not None
+                                      and state["restore_thread"].is_alive()),
+                        "restore_error": state["restore_error"],
                         "settings": _league_settings_payload(None),
                         "my_roster": []}
             snapshot = dict(state)
@@ -2251,6 +2665,17 @@ def register_live_routes(app, conn, db_path):
             "autodraft": autodraft,
             "token_received": snapshot.get("token") is not None,
             "ms_remaining": ms_remaining,
+            # Present on both branches with the same meaning, same
+            # convention as listener_alive and autodraft: a session exists,
+            # so whatever the restore was doing is over. It reads off the
+            # same thread handle rather than a hardcoded False because the
+            # restore losing a race to a real connect (see _launch_listener's
+            # guard_seq) leaves the thread finishing up for a moment after
+            # the connect's session is already live, and reporting that
+            # honestly costs nothing.
+            "restoring": (snapshot["restore_thread"] is not None
+                          and snapshot["restore_thread"].is_alive()),
+            "restore_error": snapshot["restore_error"],
             "settings": _league_settings_payload(session.settings),
             "my_roster": my_roster,
         }
@@ -2616,12 +3041,22 @@ def register_live_routes(app, conn, db_path):
                           "listener": None,
                           "listener_thread": None, "listener_stop": None,
                           "recompute_thread": None, "listener_error": None,
-                          "recompute_error": None})
+                          "recompute_error": None, "restore_error": None})
+        # An explicit stop is the user saying this draft is over for them, so
+        # the saved token goes with it -- there is nothing left that a restart
+        # should silently reconnect to. Done AFTER the listener is stopped, so
+        # its own last on_change (which can also delete the record, at the end
+        # of a draft) cannot race a recreate; and outside `lock`, because it
+        # is a syscall and nothing reads the record under the lock.
+        # Deliberately not swallowed: a token this failed to delete is still
+        # on disk, and the user who pressed stop deserves to hear that rather
+        # than a quiet 200.
+        clear_session_record(db_path)
         return {"active": False, "listener_stopped": stopped}
 
     @app.post("/api/live/connect")
     def live_connect(body: ConnectBody):
-        progress = _new_progress(token_path=False)
+        progress, _seq = _new_progress(token_path=False)
         progress.begin("token")
         # Validate the one thing that can be invalid (the league id) BEFORE
         # tearing down a working listener -- an invalid request must never
@@ -2649,6 +3084,13 @@ def register_live_routes(app, conn, db_path):
             run_listener(listener, body.url, STATE_PATH,
                          on_change=on_change, stop_event=stop_event)
 
+        # The saved session, if there was one, described a session this one
+        # has just replaced -- and this path holds no token of its own to
+        # save in its place, since it watches a socket the user's own browser
+        # opened. So the record goes, rather than being left to restore a
+        # session that is no longer the live one on the next restart: the
+        # record must always describe the CURRENT session or nothing at all.
+        clear_session_record(db_path)
         return _launch_listener(work_conn, league_conn, league_id, session,
                                 run_fn, progress=progress)
 
@@ -2667,7 +3109,7 @@ def register_live_routes(app, conn, db_path):
         the reason the browser-window fallback (`/api/live/connect`) can be
         avoided whenever the drafter can click a bookmark.
         """
-        progress = _new_progress(token_path=True, league_id=body.leagueId)
+        progress, _seq = _new_progress(token_path=True, league_id=body.leagueId)
         progress.begin("token")
         # NOTHING about this step reaches ESPN: the token is a per-draft nonce
         # the bookmarklet already minted on ESPN's own page, and the first
@@ -2700,43 +3142,168 @@ def register_live_routes(app, conn, db_path):
         work_conn, league_conn, session = _connect_work(
             progress, body.leagueId, team_id, body.season)
 
-        def run_fn(listener, on_change, on_activity, stop_event):
-            def _on_socket(handle):
-                # Published once, right after run_socket_listener's first
-                # successful connect (see SocketHandle's own docstring in
-                # pipeline/draft_socket.py). Identity-guarded exactly like
-                # every other write in this closure family: if a newer
-                # /api/live/connect-token has already superseded this
-                # listener by the time the connect finishes, this callback
-                # must not resurrect a socket for a session that is no
-                # longer the active one.
-                with lock:
-                    if state["listener"] is listener:
-                        state["socket"] = handle
-                # After the block, never inside it: `lock` is a plain Lock
-                # and ConnectProgress takes it (see its docstring). This is
-                # the first and only moment ESPN itself has accepted the
-                # token -- the handshake behind run_socket_listener's first
-                # successful connect -- so it is the honest place to say so.
-                progress.ok("socket", "connected")
-
-            run_socket_listener(listener, body.leagueId, body.teamId, body.swid,
-                                body.token, on_change=on_change,
-                                stop_event=stop_event, on_activity=on_activity,
-                                on_socket=_on_socket)
+        run_fn = _socket_run_fn(body.leagueId, body.teamId, body.swid,
+                                body.token, progress)
 
         # Record the token so /api/live/state's token_received stays truthful
-        # for the connect screen. In memory only: a draft token is a
-        # short-lived nonce, and writing it to disk is the one thing that
-        # would turn a breach into a leak. Set before launch;
-        # _launch_listener's own state.update never touches "token".
+        # for the connect screen. Set before launch; _launch_listener's own
+        # state.update never touches "token".
         with lock:
             state["token"] = {
                 "league_id": body.leagueId, "team_id": body.teamId,
                 "swid": body.swid, "token": body.token, "season": body.season,
                 "received_at": datetime.now(timezone.utc).isoformat(),
             }
+        # And to disk, which is the whole of this session that a restart
+        # cannot rebuild for itself (see save_session_record, and the long
+        # note above it for exactly what that costs -- including why the
+        # older comment here, "in memory only ... writing it to disk is the
+        # one thing that would turn a breach into a leak", is no longer what
+        # this code does). Written AFTER the build succeeded and before the
+        # listener starts, so a connect that died in build_session leaves
+        # whatever was already saved alone rather than replacing a working
+        # session with one that has just proved unbuildable.
+        #
+        # Best-effort: a record that cannot be written costs the next restart
+        # its automatic reconnect, and the owner can still click the
+        # bookmarklet -- strictly better than failing a connect that
+        # otherwise worked, on a thirty-second pick clock.
+        try:
+            save_session_record(
+                db_path, league_id=body.leagueId, team_id=body.teamId,
+                season=body.season, swid=body.swid, token=body.token,
+                my_slot=session.my_slot)
+        except OSError:      # noqa: BLE001 -- see above
+            pass
         return _launch_listener(work_conn, league_conn, body.leagueId, session,
                                 run_fn, progress=progress)
+
+    def _restore_saved_session(record):
+        """Rebuild the session the previous process was running, and reopen
+        its socket, from the record on disk.
+
+        WHEN: on a thread started at app construction, not inline and not on
+        the first request that needs a session. All three were weighed and
+        the reasons are worth keeping.
+
+          * Inline at startup. build_session is 4.1-34.8s against the real
+            database (see its own docstring), 27.5-30.7s of that fit_all.
+            The API would answer nothing for that whole window -- not
+            /api/live/state, not the connect screen, and not
+            /api/live/connect-token, which is the manual way out of a
+            restore that is going to fail. Blocking the one escape hatch on
+            the operation most likely to need it is the wrong order.
+          * Lazily, on the first request that needs a session. The room
+            polls /api/live/state every 2.5s (web/src/pages/DraftRoom.tsx),
+            so the rebuild would land inside one poll and pile ~14 more
+            behind it, with nothing anywhere able to say what is being
+            waited for.
+          * This. The API is up immediately; /api/live/state answers
+            `active: false, restoring: true` while the rebuild runs, and the
+            room's existing poll loop picks the session up the moment it
+            lands -- it already treats active:false as a transient state and
+            recovers on its own, so no client change is needed for this to
+            work (only to say something nicer than "Not connected" during
+            it).
+
+        The cost, stated rather than hidden: for those seconds the room DOES
+        look disconnected. `restoring` is the whole answer to that, and it
+        is why the key exists.
+
+        WHAT IT TRUSTS FROM THE RECORD: the four connect fields and the
+        season, which cannot be rebuilt from anything (see the note above
+        save_session_record). Not the board, not the pool, not the settings,
+        not the manager fits -- _connect_work rebuilds all of those from the
+        league's own database and re-fetches ESPN's settings and team names
+        exactly as a click would, so a restored session is not a stale
+        snapshot of the old one, it is the same session built again. The
+        saved slot is used ONLY as a fallback (see below).
+
+        FAILURE IS THE EXPECTED CASE, not the edge case. ESPN's
+        draftSecurity token is minted per draft and dies with it, so a
+        restore against an expired token is the normal outcome of restarting
+        after the draft finished, or of a record whose draft has since been
+        cancelled. It is bounded and loud already:
+        run_socket_listener gives up after MAX_EMPTY_RECONNECTS (5)
+        frameless attempts at RECONNECT_BACKOFF_SECONDS (2s) apart and
+        raises "the draft token may have expired; click the Draft Helper
+        bookmark again to mint a fresh one", which pump() records as
+        listener_error and fails the `socket` progress stage with the same
+        hint a live connect would give. So the failure surfaces on
+        /api/live/state within ~10s, with the exact sentence that tells the
+        owner what to do, and never as a silent dead session or a loop.
+        """
+        league_id = record["league_id"]
+        with lock:
+            # Captured before any work, and re-checked at the instant this
+            # registers (see _launch_listener's guard_gen): /api/live/stop
+            # bumps this and nothing else, so it is the only way to notice
+            # that the user stopped the draft while the rebuild was running.
+            generation = state["generation"]
+        progress, seq = _new_progress(token_path=True, league_id=league_id)
+        progress.begin("token")
+        # Read off disk, not off ESPN -- the same thing live_connect_token's
+        # own token row means, and equally not a statement that the token is
+        # still good. It is the `socket` row that reports whether ESPN
+        # accepted it, here exactly as there.
+        progress.ok("token", f"restored · team {record['team_id']} · "
+                             f"season {record['season'] or '?'}")
+        progress.fact(restored=True)
+        try:
+            work_conn, league_conn, session = _connect_work(
+                progress, league_id, int(record["team_id"]), record["season"])
+        except Exception as exc:      # noqa: BLE001 -- this is a bare daemon
+            # thread with no request to raise into, and a restore that dies
+            # in the board build has no listener for listener_error to hang
+            # off. Recorded so the failure is visible on /api/live/state
+            # instead of being a process that came up saying "no draft".
+            # _connect_work has already marked the stage it died on.
+            with lock:
+                if state["connect_seq"] == seq:
+                    state["restore_error"] = f"{type(exc).__name__}: {exc}"
+            return
+        # The saved slot, and ONLY when this connect could not work one out
+        # for itself. Precedence deliberately that way round: ESPN's own
+        # pickOrder and the league's draft_order are current, and a draft
+        # order re-randomised since the record was written must win over it.
+        # The saved value is what covers the case nothing else can -- a mock
+        # draft, where the slot was originally read off the socket's round-1
+        # ordering (_slot_from_socket) and there are no frames to read it
+        # from again when the token is dead.
+        if session.my_slot is None and record.get("my_slot") is not None:
+            session = dataclasses.replace(session,
+                                          my_slot=int(record["my_slot"]))
+            progress.fact(my_slot=int(session.my_slot))
+        with lock:
+            # Same in-memory token record a live connect keeps, so
+            # /api/live/state's token_received is true for a restored
+            # session too -- the landing page reads it to offer the board
+            # rather than the install guide (web/src/pages/Landing.tsx).
+            state["token"] = {
+                "league_id": league_id, "team_id": record["team_id"],
+                "swid": record["swid"], "token": record["token"],
+                "season": record["season"],
+                "received_at": record.get("saved_at"),
+            }
+        _launch_listener(work_conn, league_conn, league_id, session,
+                         _socket_run_fn(league_id, record["team_id"],
+                                        record["swid"], record["token"],
+                                        progress),
+                         progress=progress, guard_seq=seq,
+                         guard_gen=generation)
+
+    # The restart-resilience entry point, and the only thing in this file
+    # that runs without a request behind it. Nothing happens at all unless a
+    # record is actually on disk, which is true only between a bookmarklet
+    # connect and the end of that draft -- so every ordinary start, and every
+    # test that builds an app against a scratch database, skips this in one
+    # stat(). The thread is a daemon and is never joined by the app: create_app
+    # must return, and uvicorn must bind its port, without waiting on a
+    # 4.1-34.8s board build.
+    _saved = load_session_record(db_path)
+    if _saved is not None:
+        state["restore_thread"] = threading.Thread(
+            target=_restore_saved_session, args=(_saved,), daemon=True)
+        state["restore_thread"].start()
 
     return state, _recompute
