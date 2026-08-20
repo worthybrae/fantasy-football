@@ -217,8 +217,8 @@ td:first-child {
 
 /* Same rule as `.top3-figure.is-open` / `.confirm-figure.is-open`: an open
    starter or flex slot reads in accent wherever it appears. (It used to
-   name `.avail-fills.is-open` too -- that column left the available table
-   when Fills did.) */
+   name `.avail-fills.is-open` too -- that class left with the available
+   table's roster-slot column.) */
 .pp-seed-figure.is-open {
   color: var(--accent);
 }
@@ -1595,6 +1595,27 @@ td:first-child {
 }
 .avail-col-pos { width: 52px; }
 .avail-col-num { width: 78px; text-align: right; }
+
+/* No header may wrap. `Lasts to pick 13` in a 78px column stacked into four
+   lines and made the header row taller than three body rows -- the horizon
+   moved to `.avail-horizon-note` and this keeps any future label from doing
+   the same thing again. */
+.avail-table th .avail-th-btn { white-space: nowrap; }
+
+/* The horizon note: pushed to the far right of the toolbar, where the
+   removed "hide players I can't start" toggle used to sit. */
+.avail-horizon-note {
+  margin-left: auto;
+  font-size: var(--text-sm);
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+.avail-horizon-key {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--text-2);
+}
 .avail-col-btn { width: 78px; }
 
 /* Every header except the draft button's is a sortable control
@@ -1868,8 +1889,8 @@ td:first-child {
 
 /* The best of the three, called out the same way `.board-col-mine` calls
    out the viewer's own column -- an accent border, not a fill, so it reads
-   as "the top pick" without competing with the fills/survive colors inside
-   the card. */
+   as "the top pick" without competing with the roster-slot and survival
+   colors inside the card. */
 .top3-card-lead {
   border-color: var(--accent-border);
 }
@@ -2020,9 +2041,10 @@ td:first-child {
 }
 
 /* Same rule as `.top3-figure.is-open` -- an open starter/flex slot reads in
-   accent here too (folded-in review finding: this dialog's own Fills figure
-   was the one place still left plain). `.avail-fills.is-open` was the third
-   member of this set until the available table dropped its Fills column. */
+   accent here too (folded-in review finding: this dialog's own Roster slot
+   figure was the one place still left plain). `.avail-fills.is-open` was
+   the third member of this set until the available table dropped that
+   column. */
 .confirm-figure.is-open {
   color: var(--accent);
 }

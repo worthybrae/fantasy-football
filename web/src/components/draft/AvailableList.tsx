@@ -30,12 +30,31 @@ const POSITIONS = ['ALL', 'QB', 'RB', 'WR', 'TE', 'K', 'DST']
 // -- the `#` column and the default sort here -- counts down, and it still
 // picks and orders the three recommendation cards above this table, which
 // explain the pick in a sentence. What changed is that the table stopped
-// showing the working: "Gain now", "Over repl" and "Fills" were three
-// columns nobody could read without a paragraph of explanation, so they
-// were deliberately deleted at the owner's request. They were NOT lost in a
-// refactor -- do not "restore" them. If a number here ever needs defending
-// again, the place for it is TopThree's sentence, not a fourth column of
-// jargon. (Removing `fills` also removed the accent treatment that marked
+// showing the working: three columns nobody could read without a paragraph
+// of explanation, so they were deliberately deleted at the owner's request
+// ("im not sure what they even are"). They were NOT lost in a refactor --
+// do not "restore" them. If a number here ever needs defending again, the
+// place for it is TopThree's sentence, not a fourth column of jargon.
+//
+// The same three figures DO still appear on the surfaces this table opens
+// -- the recommendation cards, the confirm dialog, the profile overlay's
+// seed row -- and the same complaint applied to their captions there, so
+// they were renamed rather than abbreviated further. One label per
+// quantity, everywhere:
+//   `gain_now`    -> "Gain vs waiting"  (what taking him now is worth
+//                    against the best survivor at his position at the
+//                    measured horizon -- signed, and honestly negative when
+//                    waiting is the better play, which "Cost to wait" would
+//                    have inverted)
+//   `vor_points`  -> "Over replacement" (the app already says "value over
+//                    replacement" in prose on the landing page, the board
+//                    preview and TopThree's own fallback hint; this is just
+//                    that phrase unabbreviated)
+//   `fills`       -> "Roster slot"      (not bare "Slot": this room already
+//                    uses "slot" for the user's own DRAFT slot)
+// Renaming any of them in one place only is the exact inconsistency the
+// rename existed to remove.
+// (Removing `fills` also removed the accent treatment that marked
 // an open starter slot; that signal lives on in RosterPanel, which is where
 // a reader looks for "what do I still need" anyway. It is deliberately not
 // re-drawn here.)
@@ -241,6 +260,12 @@ export default function AvailableList({
             </button>
           ))}
         </div>
+        {horizonLabel !== null && (
+          <div className="avail-horizon-note">
+            <span className="avail-horizon-key">Lasts</span>
+            {` = chance he's still there at ${horizonLabel}`}
+          </div>
+        )}
       </div>
 
       <table className="avail-table">
@@ -250,15 +275,14 @@ export default function AvailableList({
             {sortableTh('pos', 'Pos', 'avail-col-pos')}
             {sortableTh('player', 'Player')}
             {sortableTh('proj', 'Proj', 'avail-col-num')}
-            {/* Header names the horizon when there is one; the column is
-                "chance he is still on the board at that pick". Without the
-                label a reader takes it for "lasts to my next pick", which
-                at a wheel or a short gap is a different pick entirely. */}
-            {sortableTh(
-              'lasts',
-              horizonLabel !== null ? `Lasts to ${horizonLabel}` : 'Lasts',
-              'avail-col-num',
-            )}
+            {/* One word. Naming the horizon inline ("Lasts to pick 13")
+                stacked four lines deep in a 78px column and doubled the
+                header's height -- the note in the toolbar carries that
+                detail instead, where there is room for it on one line.
+                The detail itself is not optional: without it a reader
+                takes this for "lasts to my next pick", which at a wheel
+                or a short gap is a different pick entirely. */}
+            {sortableTh('lasts', 'Lasts', 'avail-col-num')}
             {sortableTh('adp', 'ADP', 'avail-col-num')}
             {/* ESPN's own PPR rank, always on screen next to this board's
                 `#` and the market's ADP -- the owner asked to be able to see
