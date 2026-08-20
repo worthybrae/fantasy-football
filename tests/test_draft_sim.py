@@ -627,6 +627,54 @@ def test_picks_until_my_next_turn_is_zero_at_the_snake_turn():
     assert _picks_until_my_next_turn(slots, 0, 1) == 14
 
 
+def test_opportunity_gap_looks_through_the_snake_turn():
+    """The turn's honest gap of 0 is poison as an opportunity-cost horizon.
+
+    `_next_turn_survivors(available, 0)` returns the whole pool, so every
+    position's best available player is his own forgone alternative and
+    scores `delta(i) - delta(i) == 0.0` exactly. All position leaders tie at
+    zero, the strict `>` in `_greedy_choice` keeps whichever came first, and
+    that shortlist is ordered by RAW POINTS -- handing every turn pick to
+    the highest projected scorer regardless of position, which is a
+    quarterback essentially always. `_opportunity_gap` skips over my
+    consecutive picks and reports the first gap that can actually cost me
+    something.
+    """
+    from scoring.draft_sim import (_opportunity_gap,
+                                   _picks_until_my_next_turn, snake_slots)
+    slots = snake_slots(8, 4)
+    assert [i for i, s in enumerate(slots) if s == 1] == [0, 15, 16, 31]
+    # Offset 15 is the first half of slot 1's back-to-back. The raw gap is
+    # 0; the pair jointly forgoes what the following 14 picks take.
+    assert _picks_until_my_next_turn(slots, 15, 1) == 0
+    assert _opportunity_gap(slots, 15, 1) == 14
+    assert _opportunity_gap(slots, 0, 1) == 14
+    # Never 0 anywhere on the board -- that is the whole point.
+    for my in range(1, 9):
+        gaps = [_opportunity_gap(slots, o, my)
+                for o, s in enumerate(slots) if s == my]
+        assert 0 not in gaps, f"slot {my} still has a degenerate gap: {gaps}"
+        # The last pick of the draft forgoes nothing, and that stays None.
+        assert gaps[-1] is None
+    # A slot that never picks back-to-back must be untouched by the fix.
+    for o, s in enumerate(slots):
+        if s == 4 and _picks_until_my_next_turn(slots, o, 4):
+            assert _opportunity_gap(slots, o, 4) == \
+                _picks_until_my_next_turn(slots, o, 4)
+
+
+def test_opportunity_gap_is_none_when_the_turn_ends_the_draft():
+    """Looking through a back-to-back must not invent a horizon that isn't
+    there. When the pair IS the last two picks, nothing follows them, so the
+    answer is None -- the same "nothing to forgo" that `_greedy_choice`
+    already handles by comparing raw roster value."""
+    from scoring.draft_sim import _opportunity_gap, snake_slots
+    slots = snake_slots(8, 3)
+    assert [i for i, s in enumerate(slots) if s == 1] == [0, 15, 16]
+    assert _opportunity_gap(slots, 15, 1) is None
+    assert _opportunity_gap(slots, 16, 1) is None
+
+
 def test_snake_slots_reverses_every_other_round():
     assert snake_slots(4, 3) == [1, 2, 3, 4, 4, 3, 2, 1, 1, 2, 3, 4]
 

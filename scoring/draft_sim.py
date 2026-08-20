@@ -734,6 +734,38 @@ def _picks_until_my_next_turn(slots, offset, my_slot):
     return None
 
 
+def _opportunity_gap(slots, offset, my_slot):
+    """The opportunity-cost horizon for this pick: how many other teams pick
+    before the board can next be taken from me.
+
+    At the snake turn a team picks twice in a row, so
+    `_picks_until_my_next_turn` is a truthful 0 -- nothing is taken from me
+    between those two picks. Feeding that 0 to `_greedy_choice` is the
+    problem: `_next_turn_survivors(available, 0)` returns the ENTIRE pool, so
+    every position's best available player is his own forgone alternative and
+    scores `delta(i) - delta(i) == 0.0` exactly. Every position leader ties at
+    zero, the strict `>` keeps whichever came first, and the shortlist is
+    sorted by RAW POINTS -- so the turn pick silently went to the highest
+    projected scorer on the board regardless of position. That is a
+    quarterback essentially always (top QB 369.7 vs top RB 364.9 on today's
+    board), and it measured: slot 8 took a QB at pick 8, again at 24, again
+    at 40, drafted no running back until round 6, and finished 240 points of
+    roster value behind slot 5 -- last of the eight slots.
+
+    Back-to-back picks are one combined selection of two players, and what I
+    decline across the PAIR is what the following gap exposes. So skip over
+    consecutive picks of mine and report the first real gap; `None` still
+    means no next turn at all, where there is genuinely nothing to forgo.
+    """
+    for j in range(offset + 1, len(slots)):
+        if slots[j] == my_slot:
+            gap = j - offset - 1
+            if gap > 0:
+                return gap
+            offset = j          # consecutive pick: look through to the next
+    return None
+
+
 def _next_turn_survivors(pool, available, gap):
     """Who is plausibly still on the board when I pick again.
 
@@ -753,8 +785,8 @@ def _greedy_choice(pool, available, roster, settings, caps, gap=None):
     """My in-rollout policy: the available, cap-legal player whose roster
     value most exceeds what I could get at his position when I pick again.
 
-    `gap` is how many other teams pick before my next turn
-    (`_picks_until_my_next_turn`). Given it, each candidate is scored against
+    `gap` is how many other teams pick before the board can next be taken
+    from me (`_opportunity_gap`). Given it, each candidate is scored against
     the best player at his own position expected to survive that long, which
     is the opportunity cost of taking him now. Without it -- my last pick of
     the draft -- there is no next turn to forgo, and candidates are compared
@@ -927,7 +959,7 @@ def _run_draft(pool, settings, slot_managers, my_slot, taken, betas, rng,
             else:
                 choice = _greedy_choice(
                     pool, available, roster, settings, caps,
-                    gap=_picks_until_my_next_turn(slots, offset, my_slot))
+                    gap=_opportunity_gap(slots, offset, my_slot))
         else:
             beta = betas.get(slot_managers.get(slot))
             if beta is None:
