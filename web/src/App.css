@@ -2454,6 +2454,28 @@ button.pick-ticker-pick:hover {
   color: var(--text-3);
 }
 
+/* Weeks missed last season (AvailableList.tsx's missedGames/missedTone).
+   Base size matches every other numeric column; colour and weight are set
+   inline per cell (missedTone's color-mix ramp, --text-3 at 0 climbing to
+   --fail as the count grows) so 0 -- where most of the board sits -- reads
+   as quiet as ADP/ESPN's own muted numbers above, and only a genuinely high
+   count earns attention. This is not the "loud column" the comment above
+   `.avail-proj` warns against re-adding: that was about reintroducing an
+   argumentative figure like the deleted gain_now ("this is THE pick"), not
+   about colour on a numeric cell at all -- LASTS already colours its own
+   cell inline with riskTone for the same reason this column does. */
+.avail-missed {
+  font-size: var(--text-sm);
+}
+
+/* The same "big number gets heavier" idiom `.plan-cliff-value.is-loud`/
+   `.plan-avail-value.is-drop` use elsewhere in this app: past
+   MISSED_LOUD_FROM the cell also picks up weight, so a real absence pops on
+   shape as well as on the colour ramp above -- not colour alone. */
+.avail-missed.is-loud {
+  font-weight: 700;
+}
+
 .avail-empty {
   text-align: center;
   color: var(--text-3);

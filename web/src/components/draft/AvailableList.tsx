@@ -25,22 +25,46 @@ const POSITIONS = ['ALL', 'QB', 'RB', 'WR', 'TE', 'K', 'DST']
 // -- last season's per-game bars -------------------------------------------
 //
 // One bar per week of the last complete season, in week order, coloured on
-// the thresholds the owner asked for: under 10 red, 10 to 15 amber, 15 and up
-// green. `Player.game_points` (scoring/game_points.py) is already priced in
-// the league's own scoring, so these are the same points every other number
-// in this row is in.
+// thresholds that depend on POSITION. `Player.game_points`
+// (scoring/game_points.py) is already priced in the league's own scoring, so
+// these are the same points every other number in this row is in.
 //
-// THE THRESHOLDS ARE FIXED, NOT PER-POSITION, AND THAT IS DELIBERATE.
-// Measured on the real 252-player board (data/nfl.duckdb, 2025, the owner's
-// stored PPR scoring, kickers excluded because this league prices none of
-// their stats): 46.5% of games under 10, 20.1% between, 33.4% at 15 or more.
-// It splits hard by position -- quarterbacks 24/19/57 around a median of
-// 16.6, tight ends 63/20/16 around 7.5 -- and that IS the signal, not a
-// defect in it. A tight end who puts up 15 is rarer and worth more than a
-// quarterback who does, and a colour scale rebased per position would say
-// they were the same afternoon. Do not make these relative.
-const BAR_AMBER_FROM = 10
-const BAR_GREEN_FROM = 15
+// THE THRESHOLDS ARE NOW PER-POSITION, AND THAT IS DELIBERATE -- the owner
+// asked for it directly. This block used to argue the opposite ("do not make
+// these relative"), and the numbers that old argument cited are exactly why
+// it flipped. Measured on the real 252-player board (data/nfl.duckdb, 2025,
+// the owner's stored PPR scoring, kickers excluded because this league
+// prices none of their stats): on the OLD fixed 10/15 split, quarterbacks
+// came out 24/19/57 around a median of 16.6 -- 57% of every quarterback's
+// games rendered green, which is not a signal at that position, it is the
+// column's default state. Tight ends came out 63/20/16 around a median of
+// 7.5, the opposite failure: a tight end who clears 15 is rare and worth
+// noticing, and on a scale built for quarterbacks he almost never could. A
+// tight end's 15-point week and a quarterback's were never the same
+// afternoon; per-position cut points are how the column now says so, where
+// refusing to have any used to just paint the QB half of the table green.
+//
+// RB/WR/TE keep the original 10/15 split, and the original reasoning for it
+// (a good tight end week is rarer and worth more than the same number from a
+// running back) still holds unchanged for them. QB moves to 15/25, shifted
+// up in the same 1:2 amber:green ratio the original split used, sized so the
+// position's own measured median (16.6, cited above) lands just past the new
+// amber floor instead of deep inside the old green zone. K and DST move to
+// 5/10 -- both score on a much smaller scale than every other position (a
+// good defensive or kicking week is worth a fraction of a good receiver's),
+// so the split has to be smaller too; 5/10 keeps the same 1:2 ratio, sized
+// down rather than re-derived from scratch.
+const BAR_THRESHOLDS: Record<string, { amberFrom: number; greenFrom: number }> = {
+  QB: { amberFrom: 15, greenFrom: 25 },
+  K: { amberFrom: 5, greenFrom: 10 },
+  DST: { amberFrom: 5, greenFrom: 10 },
+}
+// RB, WR, TE, and anything the server ever sends that isn't one of the three
+// positions above -- the original 10/15 split.
+const BAR_THRESHOLDS_DEFAULT = { amberFrom: 10, greenFrom: 15 }
+function barThresholds(position: string): { amberFrom: number; greenFrom: number } {
+  return BAR_THRESHOLDS[position] ?? BAR_THRESHOLDS_DEFAULT
+}
 
 // The bars share ONE vertical scale across every row, so a bad player's best
 // week cannot draw as tall as a stud's. 30 points is the ceiling (anything
@@ -73,9 +97,10 @@ function barHeight(points: number): number {
   return Math.max(BAR_MIN_PX, scaled)
 }
 
-function barTone(points: number): string {
-  if (points >= BAR_GREEN_FROM) return 'is-good'
-  if (points >= BAR_AMBER_FROM) return 'is-mid'
+function barTone(points: number, position: string): string {
+  const { amberFrom, greenFrom } = barThresholds(position)
+  if (points >= greenFrom) return 'is-good'
+  if (points >= amberFrom) return 'is-mid'
   return 'is-bad'
 }
 
@@ -83,30 +108,35 @@ function barTone(points: number): string {
 // mutated, so a row's bars are built exactly once no matter how often the
 // table re-filters and re-sorts. Without this, every keystroke in the search
 // box would rebuild up to 250 x 18 = 4,500 spans.
-const GameBars = memo(function GameBars({ points, season }: {
+const GameBars = memo(function GameBars({ points, season, position }: {
   points: (number | null)[]
   season: number | null
+  position: string
 }): ReactNode {
+  const { amberFrom, greenFrom } = barThresholds(position)
   const played = points.filter((p): p is number => p !== null)
-  const bad = played.filter((p) => p < BAR_AMBER_FROM).length
-  const mid = played.filter((p) => p >= BAR_AMBER_FROM && p < BAR_GREEN_FROM).length
-  const good = played.filter((p) => p >= BAR_GREEN_FROM).length
+  const bad = played.filter((p) => p < amberFrom).length
+  const mid = played.filter((p) => p >= amberFrom && p < greenFrom).length
+  const good = played.filter((p) => p >= greenFrom).length
   return (
     <span
       className="gamebars"
       role="img"
       /* A bar chart is nothing to a screen reader, so it gets the summary a
          sighted reader takes from the colours instead of a shape it cannot
-         see. */
+         see. Thresholds are per-position (barThresholds above), so the
+         summary names the actual cut points for THIS row rather than a
+         number that might not be the one its colours used. */
       aria-label={`${season ?? 'Last season'}: ${played.length} games, `
-        + `${good} at 15 or more, ${mid} from 10 to 15, ${bad} under 10`}
+        + `${good} at ${greenFrom} or more, ${mid} from ${amberFrom} to ${greenFrom}, `
+        + `${bad} under ${amberFrom}`}
     >
       {points.map((p, i) => (p === null ? (
         <span key={i} className="gamebar is-none" title={`Week ${i + 1}: no game`} />
       ) : (
         <span
           key={i}
-          className={`gamebar ${barTone(p)}`}
+          className={`gamebar ${barTone(p, position)}`}
           style={{ height: `${barHeight(p)}px` }}
           title={`Week ${i + 1}: ${p.toFixed(1)}`}
         />
@@ -152,17 +182,21 @@ const GameBars = memo(function GameBars({ points, season }: {
 // a reader looks for "what do I still need" anyway. It is deliberately not
 // re-drawn here.)
 
-type SortKey = 'rank' | 'pos' | 'player' | 'proj' | 'lasts' | 'adp' | 'espn'
+type SortKey = 'rank' | 'pos' | 'player' | 'missed' | 'proj' | 'lasts' | 'adp' | 'espn'
 type SortDir = 'asc' | 'desc'
 
 // The direction a column gets on its FIRST click -- "best first" for that
 // particular column, which is not the same arrow everywhere: rank/ADP/ESPN
 // are ranks (1 is best, so ascending), proj/lasts are quantities (bigger is
-// better, so descending). Clicking an already-sorted header flips it, so
-// both directions stay reachable on every column; this only decides which
-// one you land on without having to click twice.
+// better, so descending). MISSED follows the rank/ADP/ESPN logic, not
+// proj/lasts's -- 0 missed games is the best outcome a row can have, so its
+// first click is ascending too, same as a rank where 1 is best. Clicking an
+// already-sorted header flips it, so both directions stay reachable on every
+// column; this only decides which one you land on without having to click
+// twice.
 const NATURAL_DIR: Record<SortKey, SortDir> = {
-  rank: 'asc', pos: 'asc', player: 'asc', proj: 'desc', lasts: 'desc', adp: 'asc', espn: 'asc',
+  rank: 'asc', pos: 'asc', player: 'asc', missed: 'asc', proj: 'desc', lasts: 'desc', adp: 'asc',
+  espn: 'asc',
 }
 
 // Position sorts in the pill row's order (QB, RB, WR, TE, K, DST), not
@@ -176,6 +210,69 @@ function posIndex(position: string): number {
   return i === -1 ? POS_ORDER.length : i
 }
 
+// -- weeks missed -----------------------------------------------------------
+//
+// How many of last season's 18 weeks were neither the bye nor a game he
+// played -- injury, inactivity, or (for a backup) simply not being the
+// starter yet. `game_points` always carries exactly 18 entries when it
+// carries any at all (scoring/game_points.py, index 0 = week 1), and every
+// player has exactly one bye among his nulls, so missed = (null count) - 1.
+// Floored at 0 rather than allowed negative: a player traded mid-season can
+// have ZERO null entries (he played 18 game-weeks across two teams with no
+// single bye week of his own to subtract), and that is a real 0, not a sign
+// something else went wrong.
+//
+// `null` here (never 0) means UNKNOWN, not "missed nothing" -- `game_points`
+// itself is null for 45 of 252 players on the real board (every D/ST, plus
+// rookies and kickers with no priced weekly history), who have no season to
+// count absences out of at all. A pure function so the sort column and the
+// rendered cell read off the literal same number, the same discipline
+// `sortValue` below already keeps for every other column.
+function missedGames(points: (number | null)[] | null | undefined): number | null {
+  if (!points) return null
+  const nulls = points.filter((p) => p === null).length
+  return Math.max(0, nulls - 1)
+}
+
+// Colour ramp for the MISSED cell: recedes to --text-3 at 0, where most of
+// the board sits, and pops toward --fail as the count climbs -- the same
+// color-mix idiom PlanTab's cliffTone uses for its own recede-vs-pop cells
+// (that file's comment explains the technique), reused rather than
+// reinvented because it is already this app's answer to "most values here
+// are small and unremarkable, a few are large and are the entire point of
+// the column."
+//
+// A 10-game absence and a 14-game one (Najee Harris's real 2025 number) do
+// not need to read as two different shades of bad -- both clamp to full
+// --fail, because past a point the column's only job is "this player was
+// not on the field".
+//
+// Where the colour ramp saturates. MEASURED, not guessed, on the real
+// 2025 board (184 of 252 players carry weekly rows; the rest -- every
+// defense, rookies, unpriced kickers -- have no number at all and render as
+// an em-dash): the median player missed 1 game, p75 is 5, p90 is 9, p95 is
+// 12 and the worst is 16. A ceiling of 10 puts 7.6% of the board at full
+// intensity, so the top of the ramp stays the genuinely notable group. An
+// earlier ceiling of 6 saturated 21.7% of players -- over a fifth of the
+// column rendering identical maximum red, which is exactly the contrast
+// this column exists to provide.
+const MISSED_CEILING = 10
+function missedTone(n: number): string {
+  const k = Math.max(0, Math.min(1, n / MISSED_CEILING))
+  return `color-mix(in srgb, var(--fail) ${Math.round(k * 100)}%, var(--text-3))`
+}
+
+// The same "big number gets heavier" idiom `.plan-cliff-value.is-loud` and
+// `.plan-avail-value.is-drop` already use, so a real absence pops on shape
+// as well as colour -- not colour alone, which a colourblind reader or a
+// dim/greyscale screenshot loses entirely. Set below the colour ramp's own
+// ceiling on purpose: by the time a cell reads fully red it should already
+// be bold too, not still waiting on one more missed game to earn it. Six of
+// a 17-game season is a third of the year missed and covers 21.7% of the
+// board -- frequent enough to be worth flagging, rare enough that the bold
+// still means something.
+const MISSED_LOUD_FROM = 6
+
 // The one value a column sorts on. `null` means "this player has no such
 // number" and is handled by the comparator, never coerced to 0 -- a player
 // no market source covers is not ADP 0, i.e. the best pick on the board.
@@ -188,6 +285,7 @@ function sortValue(
     case 'rank': return c.rank
     case 'pos': return posIndex(c.position)
     case 'player': return (player?.name ?? c.player_id).toLowerCase()
+    case 'missed': return missedGames(player?.game_points)
     case 'proj': return c.proj_points
     case 'lasts': return c.survive_pct
     case 'adp': return player?.market_rank ?? null
@@ -317,12 +415,25 @@ export default function AvailableList({
   // pick clock and has to stay tabbable, and `aria-sort` on the header is
   // how a screen reader gets the same "sorted by, this way" the caret gives
   // everyone else.
-  function sortableTh(key: SortKey, label: ReactNode, className?: string): ReactNode {
+  //
+  // `title` lands on the <th>, not the button inside it -- a native tooltip
+  // walks up to the nearest ancestor that carries one, so it fires no matter
+  // where in the cell the pointer sits, and it matches how the (non-sortable)
+  // games header below already does it. This is the same `title` mechanism
+  // every other tooltip in this codebase uses (ClockPanel, TopThree, the
+  // profile tables) -- there is no tooltip component anywhere to reuse
+  // instead, and a plain browser tooltip can't clip inside this table's
+  // scroll region or shift the header layout, which a custom popover would
+  // have risked.
+  function sortableTh(
+    key: SortKey, label: ReactNode, title: string, className?: string,
+  ): ReactNode {
     const active = sort.key === key
     return (
       <th
         className={`${className ?? ''}${active ? ' is-sorted' : ''}`.trim() || undefined}
         aria-sort={active ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}
+        title={title}
       >
         <button type="button" className="avail-th-btn" onClick={() => toggleSort(key)}>
           <span>{label}</span>
@@ -343,6 +454,49 @@ export default function AvailableList({
       </th>
     )
   }
+
+  // Every header's tooltip text, gathered here rather than written inline
+  // eight times over so the wording stays consistent with itself and with
+  // the rest of the room's own voice ("this board" for the model's own rank,
+  // the toolbar's exact "chance he's still there at" phrase for LASTS,
+  // ESPN's own comment on the column above). The owner asked for these
+  // because "I don't always know what the columns mean" -- so each one
+  // states the actual meaning, not a paraphrase of it.
+  const rankTitle = "This board's own rank of who to take now. Not ADP and "
+    + 'not projected points -- it ranks by how much you gain by taking this '
+    + 'player now versus waiting until your next pick, weighted by whether '
+    + 'your roster can actually start him.'
+  const posTitle = "The player's position."
+  const playerTitle = 'Name, NFL team, and bye week.'
+  // Position-dependent colour cut points (barThresholds above) mean a flat
+  // "red under 10, green 15+" claim would be wrong for a QB, K, or DST row --
+  // this spells out all three splits rather than one that only fits 3 of 6
+  // positions.
+  const gamesTitle = `Fantasy points scored in each week of the ${season ?? 'last complete'} `
+    + "season, under this league's own scoring, in week order. A gap (faint "
+    + 'mark) is a week with no game. A short bar down at the floor is a game '
+    + 'he played and scored little or nothing in -- the two are drawn '
+    + 'differently on purpose. Colour depends on position: quarterbacks red '
+    + 'under 15 / amber 15-25 / green 25+, kickers and defenses red under 5 / '
+    + 'amber 5-10 / green 10+, everyone else red under 10 / amber 10-15 / '
+    + 'green 15+. Not sortable.'
+  const missedTitle = 'Weeks without a game last season, excluding the bye -- '
+    + 'injury, inactive, or not starting yet. Not an injury count on its own: '
+    + "a backup who simply wasn't starting yet reads exactly the same here as "
+    + 'a player who was actually hurt.'
+  const projTitle = "Projected fantasy points for the full upcoming season, "
+    + "under this league's own scoring."
+  // Repeats the toolbar note's own wording (`chance he's still there at
+  // ${horizonLabel}`) rather than a second phrasing of the same fact, plus
+  // the one thing that note leaves unsaid: what a low number here is FOR.
+  const lastsTitle = `Chance he's still there at ${horizonLabel ?? 'your next pick'}`
+    + ' -- a low percentage is the argument for taking him now.'
+  const adpTitle = 'Average draft position across the consensus of public '
+    + 'sources -- where the market as a whole takes him.'
+  const espnTitle = "ESPN's own ranking, shown so you can see where this "
+    + "board disagrees with the platform you're drafting on."
+  const draftColTitle = "Draft this player onto your roster. Only enabled on "
+    + 'your turn.'
 
   return (
     <div className="avail">
@@ -378,9 +532,9 @@ export default function AvailableList({
       <table className="avail-table">
         <thead>
           <tr>
-            {sortableTh('rank', '#', 'avail-col-rank')}
-            {sortableTh('pos', 'Pos', 'avail-col-pos')}
-            {sortableTh('player', 'Player', 'avail-col-name')}
+            {sortableTh('rank', '#', rankTitle, 'avail-col-rank')}
+            {sortableTh('pos', 'Pos', posTitle, 'avail-col-pos')}
+            {sortableTh('player', 'Player', playerTitle, 'avail-col-name')}
             {/* The one header in this table that is NOT a control, and it
                 says so rather than sitting there looking like the seven that
                 are. There is no honest single number to sort a distribution
@@ -391,16 +545,14 @@ export default function AvailableList({
                 columns over -- Proj -- and `stats.ppg` is on the profile the
                 name opens. So: no button, no caret, default cursor, and the
                 word in the header. */}
-            <th
-              className="avail-col-games"
-              title={`Points in each ${season ?? 'last season'} game, in week`
-                + ' order. Red under 10, amber 10 to 15, green 15 and up.'
-                + ' A faint mark is a week with no game. Not sortable.'}
-            >
+            <th className="avail-col-games" title={gamesTitle}>
               <span>{season ?? 'Last'}</span>
               <span className="avail-nosort">no sort</span>
             </th>
-            {sortableTh('proj', 'Proj', 'avail-col-num')}
+            {/* Placed immediately after the sparkline it is drawn from --
+                absence sits next to the per-week chart that shows it. */}
+            {sortableTh('missed', 'Missed', missedTitle, 'avail-col-num')}
+            {sortableTh('proj', 'Proj', projTitle, 'avail-col-num')}
             {/* One word. Naming the horizon inline ("Lasts to pick 13")
                 stacked four lines deep in a 78px column and doubled the
                 header's height -- the note in the toolbar carries that
@@ -408,19 +560,20 @@ export default function AvailableList({
                 The detail itself is not optional: without it a reader
                 takes this for "lasts to my next pick", which at a wheel
                 or a short gap is a different pick entirely. */}
-            {sortableTh('lasts', 'Lasts', 'avail-col-num')}
-            {sortableTh('adp', 'ADP', 'avail-col-num')}
+            {sortableTh('lasts', 'Lasts', lastsTitle, 'avail-col-num')}
+            {sortableTh('adp', 'ADP', adpTitle, 'avail-col-num')}
             {/* ESPN's own PPR rank, always on screen next to this board's
                 `#` and the market's ADP -- the owner asked to be able to see
                 where ESPN has a player against where this board has him,
                 without going into the profile for it. */}
-            {sortableTh('espn', 'ESPN', 'avail-col-num')}
-            <th className="avail-col-btn" />
+            {sortableTh('espn', 'ESPN', espnTitle, 'avail-col-num')}
+            <th className="avail-col-btn" title={draftColTitle} />
           </tr>
         </thead>
         <tbody>
           {rows.map((c) => {
             const player = players[c.player_id]
+            const missed = missedGames(player?.game_points)
             return (
               <tr key={c.player_id}>
                 <td className="avail-col-rank mono">{c.rank}</td>
@@ -454,7 +607,7 @@ export default function AvailableList({
                       reads as "did not score"; a dash reads as "nothing to
                       show", which is the true one. */}
                   {player?.game_points
-                    ? <GameBars points={player.game_points} season={season} />
+                    ? <GameBars points={player.game_points} season={season} position={c.position} />
                     : (
                       <span
                         className="gamebars-none"
@@ -463,6 +616,20 @@ export default function AvailableList({
                         —
                       </span>
                     )}
+                </td>
+                {/* Unknown (no `game_points` at all -- see missedGames above)
+                    renders the same em-dash the sparkline's own empty state
+                    uses, never a 0: a defense or an unpriced rookie has no
+                    counted season, not a clean one. `is-loud` and the inline
+                    colour are the only two things this cell adds on top of
+                    the shared `avail-col-num` sizing every numeric column
+                    already gets. */}
+                <td
+                  className={`avail-col-num mono avail-missed${
+                    missed !== null && missed >= MISSED_LOUD_FROM ? ' is-loud' : ''}`}
+                  style={missed === null ? undefined : { color: missedTone(missed) }}
+                >
+                  {missed === null ? '—' : missed}
                 </td>
                 <td className="avail-col-num mono avail-proj">{Math.round(c.proj_points)}</td>
                 {/* null survive_pct (no roster to survive FOR yet) gets no
@@ -493,8 +660,9 @@ export default function AvailableList({
           })}
           {rows.length === 0 && (
             <tr>
-              {/* 9 = the eight columns above plus the draft button's. */}
-              <td colSpan={9} className="avail-empty">
+              {/* 10 = the nine columns above (rank, pos, player, games,
+                  missed, proj, lasts, adp, espn) plus the draft button's. */}
+              <td colSpan={10} className="avail-empty">
                 {candidates.length === 0 ? 'No candidates yet.' : 'No players match this filter.'}
               </td>
             </tr>
