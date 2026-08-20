@@ -308,8 +308,8 @@ def test_available_by_vor_empty_when_nobody_is_left():
     out = available_by_vor(pool, np.array([True]))
     assert out.empty
     assert list(out.columns) == ["player_id", "position", "proj_points",
-                                 "vor_points", "gain_now", "survive_pct",
-                                 "fills", "rank"]
+                                 "vor_points", "gain_now", "plan_steer",
+                                 "survive_pct", "fills", "rank"]
 
 
 class _pool:
@@ -320,3 +320,69 @@ class _pool:
         self.position = np.array(position, dtype=object)
         self.points = np.array(points, dtype=float)
         self.vor = np.array(vor, dtype=float)
+
+
+def test_plan_steer_is_absent_and_inert_without_a_plan():
+    """Every existing caller passes no plan_bias, so the default path must be
+    bit-identical to what it was before steering existed -- not merely
+    similar. A steer that leaks in at 0.0-ish rather than exactly 0.0 would
+    reorder ties silently."""
+    pool = _pool(player_id=["a", "b", "c"], position=["RB", "WR", "QB"],
+                 points=[200.0, 190.0, 260.0], vor=[50.0, 48.0, 55.0])
+    taken = np.zeros(3, dtype=bool)
+    surv = np.array([0.5, 0.5, 0.5])
+    out = rank_available(pool, settings(), taken, {}, surv)
+    assert list(out["plan_steer"]) == [0.0, 0.0, 0.0]
+    same = rank_available(pool, settings(), taken, {}, surv, plan_bias={})
+    pd.testing.assert_frame_equal(out, same)
+    pd.testing.assert_frame_equal(
+        out, rank_available(pool, settings(), taken, {}, surv, plan_bias=None))
+
+
+def test_plan_steer_moves_the_order_without_touching_the_reported_gain():
+    """`gain_now` is displayed in the room and read as a points figure. The
+    steer is allowed to change WHERE a row sorts and never what its gain
+    says it is -- otherwise the number the user checks the tool against
+    quietly stops being the measured one."""
+    pool = _pool(player_id=["rb", "wr"], position=["RB", "WR"],
+                 points=[200.0, 190.0], vor=[50.0, 46.0])
+    taken = np.zeros(2, dtype=bool)
+    surv = np.array([0.5, 0.5])
+    plain = rank_available(pool, settings(), taken, {}, surv)
+    assert list(plain["player_id"]) == ["rb", "wr"], "RB leads unaided"
+
+    steered = rank_available(pool, settings(), taken, {}, surv,
+                             plan_bias={"WR": 1.0})
+    assert list(steered["player_id"]) == ["wr", "rb"], "the plan moved it"
+    # ...but every gain_now is the same number it was, per player.
+    before = dict(zip(plain["player_id"], plain["gain_now"]))
+    after = dict(zip(steered["player_id"], steered["gain_now"]))
+    assert before == after
+    assert dict(zip(steered["player_id"], steered["plan_steer"]))["rb"] == 0.0
+
+
+def test_plan_steer_is_bounded_by_a_real_edge():
+    """The steer is priced at PLAN_STEER_POINTS so that a genuine gap still
+    wins outright -- the cliffs it is derived from run to 86 points, and a
+    plan must not talk you off a player who is that much better."""
+    from scoring.gain import PLAN_STEER_POINTS
+    pool = _pool(player_id=["rb", "wr"], position=["RB", "WR"],
+                 points=[260.0, 190.0], vor=[50.0 + 2 * PLAN_STEER_POINTS, 46.0])
+    out = rank_available(pool, settings(), np.zeros(2, dtype=bool), {},
+                         np.array([0.5, 0.5]), plan_bias={"WR": 1.0})
+    assert list(out["player_id"]) == ["rb", "wr"]
+
+
+def test_plan_steer_cannot_resurrect_a_capped_position():
+    """A capped row carries NEED_WEIGHTS["capped"] == 0.0, and the steer is
+    weighted by the same factor, so full plan confidence in a position I have
+    no room for still adds exactly nothing. Without that weighting the steer
+    would lift unpickable rows off the bottom of the board."""
+    pool = _pool(player_id=["k1", "rb"], position=["K", "RB"],
+                 points=[130.0, 200.0], vor=[20.0, 5.0])
+    out = rank_available(pool, settings(), np.zeros(2, dtype=bool),
+                         {"K": 1}, np.array([0.9, 0.9]),
+                         plan_bias={"K": 1.0})
+    assert list(out["player_id"]) == ["rb", "k1"], "capped K still sorts last"
+    steer = dict(zip(out["player_id"], out["plan_steer"]))
+    assert steer["k1"] == 0.0

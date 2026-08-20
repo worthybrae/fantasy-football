@@ -274,6 +274,37 @@ from scoring.gain import available_by_vor, rank_available
 from scoring.plan import build_plan
 
 
+def _plan_bias_for_round(plan, my_slot, my_picks_made):
+    """The plan's read on the round I am about to pick in, as position ->
+    confidence, or None when there is nothing trustworthy to steer by.
+
+    Joined on ROUND NUMBER, never on how stale the plan is. The plan and the
+    ranking run on separate workers at different speeds, so the plan is
+    routinely a pick or two behind -- but "round 4 goes to a running back"
+    does not stop being the plan's claim because two other teams have picked
+    since. What would break it is a round mismatch, so the round I am
+    actually about to fill (`my_picks_made`, the count of my own picks so
+    far) is what selects the entry.
+
+    Guarded on `my_slot` because a plan is slot-specific in a way candidates
+    are not: reconnecting as a different team leaves the previous session's
+    plan in `state` for the ~4s a new one takes to build, and steering the
+    new team's board with the old team's plan is worse than not steering it.
+    `is_past` entries return None for the same reason -- an entry describing
+    a pick already made is a record, not a recommendation, and its 100% is
+    certainty about the past rather than confidence about the future.
+    """
+    if not plan or plan.get("my_slot") != my_slot:
+        return None
+    for entry in plan.get("rounds_plan", []):
+        if entry.get("round") == my_picks_made + 1:
+            if entry.get("is_past"):
+                return None
+            return {d["position"]: d["pct"] / 100.0
+                    for d in entry.get("positions", [])} or None
+    return None
+
+
 def _ordinal(n: int) -> str:
     """1 -> '1st'. For the one sentence the connect screen exists to say --
     "you pick 2nd of 8" -- which reads as a seat, not as a field value."""
@@ -1685,8 +1716,20 @@ def register_live_routes(app, conn, db_path):
                 n_rollouts=SURVIVAL_ROLLOUTS, seed=session.seed,
                 taken_order=taken_order, on_the_clock=on_the_clock,
                 horizon=h)["avail_pct"].to_numpy()
+            # Read under the lock, like every other cross-worker read
+            # here: the plan worker writes `state["plan"]` whole, so an
+            # unlocked read could observe a plan from one session next to a
+            # slot from another.
+            with lock:
+                # How many picks I have made, from `counts` rather than
+                # the roster's `indices`: the two are the same number by
+                # construction (every pick increments exactly one position
+                # count) and `counts` is already in hand above.
+                plan_bias = _plan_bias_for_round(
+                    state["plan"], session.my_slot, sum(counts.values()))
             frame = rank_available(session.pool, session.settings, taken,
-                                   counts, avail, my_turns_left)
+                                   counts, avail, my_turns_left,
+                                   plan_bias=plan_bias)
         finally:
             cur.close()
         with lock:
@@ -2511,6 +2554,8 @@ def register_live_routes(app, conn, db_path):
         with lock:
             state["generation"] += 1
             state.update({"session": session, "candidates": [],
+                          "plan": None, "plan_as_of_pick": None,
+                          "plan_error": None,
                           "as_of_pick": None, "horizon_pick": None,
                           "unmapped": [], "last_poll_at": None,
                           "recompute_error": None})
@@ -3192,6 +3237,8 @@ def register_live_routes(app, conn, db_path):
             # the identity guard, it does not touch anything the thread
             # itself might still hold open.
             state.update({"session": None, "candidates": [],
+                          "plan": None, "plan_as_of_pick": None,
+                          "plan_error": None,
                           "as_of_pick": None, "horizon_pick": None,
                           "unmapped": [], "last_poll_at": None,
                           "listener": None,

@@ -783,7 +783,8 @@ def test_recompute_tells_the_ranking_how_many_picks_i_have_left(tmp_path, monkey
                         lambda *a, **k: ({4: {"counts": {}}}, []))
     monkeypatch.setattr("api.live.survival", _fake_survival_frame)
 
-    def capture(pool, settings, taken, counts, survive, turns_left=None):
+    def capture(pool, settings, taken, counts, survive, turns_left=None,
+                plan_bias=None):
         seen["turns_left"] = turns_left
         return _fake_candidates_frame("x")
 
@@ -4485,3 +4486,63 @@ def test_plan_and_ranking_keep_separate_pick_counts(tmp_path):
                      "cliffs": [], "best_available": []}
     state["plan_as_of_pick"] = 17
     assert TestClient(app).get("/api/live/plan").json()["as_of_pick"] == 17
+
+
+def _plan_for(my_slot=2, rounds=None):
+    return {"my_slot": my_slot, "rounds_plan": rounds if rounds is not None else [
+        {"round": 1, "pick": 2, "is_past": True, "actual": "RB",
+         "positions": [{"position": "RB", "pct": 100}]},
+        {"round": 2, "pick": 15, "is_past": False, "actual": None,
+         "positions": [{"position": "WR", "pct": 70},
+                       {"position": "RB", "pct": 30}]},
+        {"round": 3, "pick": 18, "is_past": False, "actual": None,
+         "positions": [{"position": "TE", "pct": 94}]},
+    ]}
+
+
+def test_plan_bias_selects_the_round_i_am_about_to_fill():
+    from api.live import _plan_bias_for_round
+    plan = _plan_for()
+    # One pick made -> I am filling round 2.
+    assert _plan_bias_for_round(plan, 2, 1) == {"WR": 0.7, "RB": 0.3}
+    # Two made -> round 3.
+    assert _plan_bias_for_round(plan, 2, 2) == {"TE": 0.94}
+
+
+def test_plan_bias_refuses_a_plan_built_for_another_slot():
+    """Reconnecting as a different team leaves the previous session's plan in
+    `state` for the several seconds a new one takes. A plan is slot-specific
+    in a way the candidate list is not, so steering the new team's board with
+    the old team's plan is worse than not steering it at all."""
+    from api.live import _plan_bias_for_round
+    assert _plan_bias_for_round(_plan_for(my_slot=7), 2, 1) is None
+    assert _plan_bias_for_round(None, 2, 1) is None
+    assert _plan_bias_for_round({}, 2, 1) is None
+
+
+def test_plan_bias_ignores_a_round_already_played():
+    """An `is_past` entry is a record of what happened, not a recommendation.
+    Its 100% is certainty about the past; steering by it would push the board
+    toward repeating a pick already made."""
+    from api.live import _plan_bias_for_round
+    assert _plan_bias_for_round(_plan_for(), 2, 0) is None
+
+
+def test_plan_bias_is_none_past_the_end_of_the_plan():
+    from api.live import _plan_bias_for_round
+    assert _plan_bias_for_round(_plan_for(), 2, 9) is None
+    empty = _plan_for(rounds=[{"round": 1, "pick": 2, "is_past": False,
+                               "actual": None, "positions": []}])
+    assert _plan_bias_for_round(empty, 2, 0) is None
+
+
+def test_plan_bias_tolerates_a_plan_that_lags_the_draft():
+    """The plan worker is ~4s and the ranking worker ~1s, so the plan is
+    routinely a pick or two behind. That staleness must not disable the
+    steer: "round 3 goes to a tight end" does not stop being the plan's
+    claim because two other teams picked since it was built. The join is on
+    round number and nothing else."""
+    from api.live import _plan_bias_for_round
+    stale = _plan_for()
+    stale["as_of_pick"] = 4           # built long before the current pick
+    assert _plan_bias_for_round(stale, 2, 2) == {"TE": 0.94}

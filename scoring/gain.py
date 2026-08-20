@@ -23,6 +23,28 @@ import pandas as pd
 from scoring.config import NEED_WEIGHTS
 from scoring.draft_sim import FLEX_POSITIONS, _roster_cap, must_fill_positions
 
+# How many points of gain a position the plan is fully confident in is worth
+# on top of its measured `gain_now`, when the caller passes a `plan_bias`.
+#
+# Chosen from measurement, and the measurement is worth stating plainly
+# because it does NOT show what the steer was hoped to show. Simulating 50
+# drafts per cell across slots 1/2/5/8 at steer strengths 0, 5, 10, 20 and
+# 40, the change in end-of-draft roster value ranged from -17 to +15 points
+# on rosters of ~2500 -- while the 95% confidence interval on a difference
+# at that sample size is +/-19 to +/-26. Every result sat inside the noise.
+# Steering the ranking toward the plan does not measurably improve the
+# roster at any strength tested.
+#
+# It is applied anyway, at a strength the sweep showed no degradation for,
+# for a reason that is about the room rather than the roster: the plan and
+# the recommendation list are two views of the same model, and a user who
+# reads "round 3 is for a tight end" directly above a list headed by a
+# receiver is being shown a contradiction the model does not actually have.
+# What the steer buys is coherence between the two panels, and it is priced
+# low enough that a genuinely large edge -- the cliffs it is derived from run
+# to 86 points -- still wins outright.
+PLAN_STEER_POINTS = 10.0
+
 _NO_SLOT = "—"
 
 
@@ -163,7 +185,7 @@ def available_by_vor(pool, taken) -> pd.DataFrame:
     machinery -- just the pool minus `taken` -- so it gets its own, much
     smaller function instead.
 
-    Same eight-column shape `rank_available` returns (this is what keeps
+    Same nine-column shape `rank_available` returns (this is what keeps
     `LiveCandidate` one shape on the frontend, not two payload types to
     branch on): `gain_now`, `survive_pct` and `fills` are `None`, not `0.0`,
     `0.0` and `""` -- a fabricated zero here would print as a real
@@ -175,7 +197,8 @@ def available_by_vor(pool, taken) -> pd.DataFrame:
     available = np.flatnonzero(~np.asarray(taken))
     if available.size == 0:
         return pd.DataFrame(columns=["player_id", "position", "proj_points",
-                                     "vor_points", "gain_now", "survive_pct",
+                                     "vor_points", "gain_now", "plan_steer",
+                                     "survive_pct",
                                      "fills", "rank"])
     rows = [{
         "player_id": pool.player_id[idx],
@@ -183,6 +206,12 @@ def available_by_vor(pool, taken) -> pd.DataFrame:
         "proj_points": float(pool.points[idx]),
         "vor_points": float(pool.vor[idx]),
         "gain_now": None,
+        # 0.0 rather than None, unlike its neighbours: the others are None
+        # because this function genuinely cannot know them without a roster,
+        # while a steer of exactly nothing is the true and complete answer
+        # here -- there is no plan to steer toward, so nothing about this
+        # frame's ordering was influenced by one.
+        "plan_steer": 0.0,
         "survive_pct": None,
         "fills": None,
     } for idx in available]
@@ -193,19 +222,32 @@ def available_by_vor(pool, taken) -> pd.DataFrame:
 
 
 def rank_available(pool, settings, taken, counts: dict, survive,
-                   turns_left: int | None = None) -> pd.DataFrame:
-    """The available pool, ranked by gain_now descending.
+                   turns_left: int | None = None,
+                   plan_bias: dict | None = None) -> pd.DataFrame:
+    """The available pool, ranked by gain_now (plus any plan steer) descending.
 
     `taken` is the pool-aligned boolean mask of players already drafted,
     `counts` my own roster's position counts, `survive` the pool-aligned
     probability each player is still there at my next pick, `turns_left` my
     remaining picks including the one on the clock (None = unknown, which
     turns the deferral rule off -- see `need_kind`).
+
+    `plan_bias` maps position -> the draft plan's confidence (0-1) that this
+    round goes to that position, from `scoring.plan.build_plan`. Given it,
+    each row also carries `plan_steer` and the SORT uses gain_now +
+    plan_steer -- but `gain_now` itself is left exactly as measured, and it
+    is `gain_now` the room displays. Folding the steer into it would have
+    been simpler and is the wrong trade: the column is documented, is read
+    as a points figure, and is the number a user checks the tool against.
+    A separate column keeps the displayed quantity honest and lets the room
+    mark which rows the plan moved. Without `plan_bias`, `plan_steer` is
+    0.0 for every row and the ordering is bit-identical to before.
     """
     available = np.flatnonzero(~np.asarray(taken))
     if available.size == 0:
         return pd.DataFrame(columns=["player_id", "position", "proj_points",
-                                     "vor_points", "gain_now", "survive_pct",
+                                     "vor_points", "gain_now", "plan_steer",
+                                     "survive_pct",
                                      "fills", "rank"])
     survive = np.asarray(survive, dtype=float)
 
@@ -232,6 +274,12 @@ def rank_available(pool, settings, taken, counts: dict, survive,
             "proj_points": float(pool.points[idx]),
             "vor_points": float(pool.vor[idx]),
             "gain_now": weight * (float(pool.vor[idx]) - next_best[pos]),
+            # Weighted by `need` like the gain itself, which is what keeps a
+            # steer off a position I cannot use: NEED_WEIGHTS["capped"] is
+            # 0.0, so a plan bias can never resurrect a capped row from the
+            # bottom of the board into contention.
+            "plan_steer": (weight * PLAN_STEER_POINTS
+                           * float((plan_bias or {}).get(pos, 0.0))),
             "survive_pct": float(survive[idx]) * 100.0,
             "fills": fills_slot(settings, counts, pos, turns_left),
             # Not part of the result -- dropped after the sort below.
@@ -273,9 +321,14 @@ def rank_available(pool, settings, taken, counts: dict, survive,
     # longer be deferred they stop being deferred and rank on merit -- which
     # on the real board is a kicker at rank 1 in round 14 and a defense at
     # rank 1 in round 15.
-    out = pd.DataFrame(rows).sort_values(
-        ["capped", "deferred", "gain_now"],
+    out = pd.DataFrame(rows)
+    # The steer moves the ORDER, never the reported gain. Held in a scratch
+    # column so the sort can read the combined figure while `gain_now` stays
+    # the measured one; dropped with the other two scratch keys below.
+    out["_ranked_by"] = out["gain_now"] + out["plan_steer"]
+    out = out.sort_values(
+        ["capped", "deferred", "_ranked_by"],
         ascending=[True, True, False]).drop(
-            columns=["capped", "deferred"]).reset_index(drop=True)
+            columns=["capped", "deferred", "_ranked_by"]).reset_index(drop=True)
     out["rank"] = out.index + 1
     return out
