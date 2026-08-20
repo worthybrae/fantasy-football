@@ -1413,6 +1413,52 @@ td:first-child {
   background: var(--border);
 }
 
+/* The Available / Snake Board switch, in the top bar since the 38px strip
+   it used to have below it bought two buttons a full row of the ranked
+   list's height and a second horizontal rule 38px under the first.
+   `align-self: stretch` is what keeps them reading as tabs rather than as
+   toolbar buttons: full bar height means the active tab's 2px underline
+   lands exactly on the bar's own bottom border, joining the control to the
+   region it switches. The bar's own 16px gap must not open between the two
+   tabs -- adjacent tabs share an edge -- hence the explicit zero here. */
+.draft-topbar-tabs {
+  align-self: stretch;
+  display: flex;
+  gap: 0;
+  /* Cancels the bar's flex gap on this side only: the tab strip's own left
+     padding already separates it from the title separator, and 16px on top
+     of that reads as a gap in the strip. */
+  margin: 0 calc(-1 * var(--space-2));
+}
+
+/* Tighter than the freestanding strip's var(--space-5): the top bar is a
+   single-row budget shared with the league line, the pick counter and the
+   status pill, and 24px per side per tab was 96px of it. */
+.draft-topbar-tabs .draft-tab {
+  padding: 0 var(--space-4);
+}
+
+/* "1234 players in the pool" -- the old `.draft-tab-hint`, which was
+   right-aligned on the strip that no longer exists. Quiet enough not to
+   compete with the league line it now sits beside, and first to go when the
+   bar runs out of room (see the narrow-viewport rule below). */
+.draft-topbar-hint {
+  font-size: var(--text-xs);
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+/* The bar now carries the view switch as well as the league line, the pick
+   counter and the status pill, and it is a single non-wrapping row. The
+   hint is the one thing on it that nothing depends on -- a pool size that
+   never changes mid-draft -- so it is what gets dropped when the viewport
+   cannot seat all of it. Everything else stays. */
+@media (max-width: 1100px) {
+  .draft-topbar-hint {
+    display: none;
+  }
+}
+
 /* The league-identity line between the title separator and the pick
    counter (the design mock's "Bragging Rights Only · 8 teams · PPR") --
    only the team count and scoring format, never a league name: no endpoint
@@ -1532,22 +1578,10 @@ td:first-child {
   min-height: 0;
 }
 
-.draft-main-col {
-  display: flex;
-  flex-direction: column;
-  flex-grow: 1;
-  min-width: 0;
-}
-
-.draft-tabs {
-  flex-shrink: 0;
-  display: flex;
-  align-items: stretch;
-  height: 38px;
-  background: var(--bg-1);
-  border-bottom: 1px solid var(--border);
-}
-
+/* Lives in `.draft-topbar` now -- the `.draft-tabs` strip that used to wrap
+   these is gone, not merely restyled. Everything below is unchanged from
+   what that strip's tabs already looked like; the top bar supplies the
+   height and the background instead. */
 .draft-tab {
   display: flex;
   align-items: center;
@@ -1574,20 +1608,13 @@ td:first-child {
   border-bottom-color: var(--accent);
 }
 
-.draft-tab-spacer {
-  flex-grow: 1;
-}
-
-.draft-tab-hint {
-  display: flex;
-  align-items: center;
-  padding-right: var(--space-4);
-  font-size: var(--text-xs);
-  color: var(--text-3);
-}
-
+/* One element, not the two the old strip needed: `.draft-main-col` existed
+   only to stack the tab strip above this, and with the strip in the top bar
+   it wrapped a single child. Merged -- `min-width: 0` is the flex-row
+   constraint it contributed, the rest was always this rule's. */
 .draft-main {
   flex-grow: 1;
+  min-width: 0;
   min-height: 0;
   overflow-y: auto;
 }
@@ -1628,6 +1655,126 @@ td:first-child {
 
 .draft-rail-loading {
   padding: var(--space-4);
+}
+
+/* -- last-drafted ticker (bottom rail) -- */
+
+/* A stock-ticker strip that never moves. Same footprint as one -- a fixed
+   bar across the very bottom of the room, mono pick numbers, one row of
+   entries -- but no marquee, no scroll, no transition: it repaints when
+   DraftRoom's 2.5s board poll lands a new pick and is otherwise perfectly
+   still. That is the whole point. It sits directly under a ranked list read
+   under a 30-second clock, and animation in the bottom of that eye pulls
+   attention off the pick being made.
+
+   Outside `.draft-body` (see DraftRoom's JSX) so it spans the main column
+   and the roster rail both, and `flex-shrink: 0` inside `.draft-room`'s
+   column so the two scroll regions above give up the height, not this. */
+.pick-ticker {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  height: 34px;
+  padding: 0 var(--space-4);
+  background: var(--bg-1);
+  border-top: 1px solid var(--border);
+}
+
+.pick-ticker-label {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.pick-ticker-empty {
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+/* Newest at the left. The list is capped at eight in PickTicker.tsx, so
+   this never scrolls in practice -- `overflow: hidden` is the guard for the
+   narrow viewport where eight entries genuinely do not fit, and dropping
+   the oldest off the right edge is the correct casualty there. */
+.pick-ticker-list {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+  overflow: hidden;
+  list-style: none;
+}
+
+.pick-ticker-item {
+  flex-shrink: 0;
+  padding-left: var(--space-2);
+  border-left: 1px solid var(--border);
+}
+
+.pick-ticker-item:first-child {
+  padding-left: 0;
+  border-left: 0;
+}
+
+/* The freshest pick, and your own picks. Both are static tints rather than
+   a flash, for the same reason the strip does not scroll. */
+.pick-ticker-item.is-newest .pick-ticker-name {
+  color: var(--text-1);
+}
+
+.pick-ticker-item.is-newest .pick-ticker-no {
+  color: var(--accent);
+}
+
+.pick-ticker-item.is-mine .pick-ticker-team {
+  color: var(--accent);
+}
+
+.pick-ticker-pick {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 2px 4px;
+  background: none;
+  border: 0;
+  border-radius: var(--radius);
+  font: inherit;
+  color: inherit;
+  text-align: left;
+}
+
+button.pick-ticker-pick {
+  cursor: pointer;
+}
+
+button.pick-ticker-pick:hover {
+  background: var(--bg-2);
+}
+
+.pick-ticker-no {
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+.pick-ticker-name {
+  overflow: hidden;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pick-ticker-team {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--text-xs);
+  color: var(--text-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* -- clock panel -- */

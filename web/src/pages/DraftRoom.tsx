@@ -9,6 +9,7 @@ import RosterPanel, { type RosterSlot } from '../components/draft/RosterPanel'
 import TopThree from '../components/draft/TopThree'
 import AvailableList from '../components/draft/AvailableList'
 import ConfirmPick, { type PickStatus } from '../components/draft/ConfirmPick'
+import PickTicker from '../components/draft/PickTicker'
 import PlayerOverlay, { type OverlayTarget } from '../components/draft/PlayerOverlay'
 import { seedFromBoardPlayer, seedFromCandidate, seedFromPlayer } from '../components/draft/playerSeed'
 import DraftBoardGrid from '../components/DraftBoardGrid'
@@ -147,9 +148,9 @@ export default function DraftRoom() {
   const [board, setBoard] = useState<LiveBoard | null>(null)
   const [boardError, setBoardError] = useState<string | null>(null)
   const [players, setPlayers] = useState<Record<string, Player>>({})
-  // Task 7 owns this state and the toggle handlers, since it renders the tab
-  // strip -- Task 9 adds only the auto-switch (jumping to Available the
-  // moment you come on the clock) on top of what's here.
+  // Which of the two main-column views is showing. The toggle for it lives
+  // in the top bar (see the header below); the auto-switch that jumps back
+  // to Available the moment you come on the clock is in the poll.
   const [tab, setTab] = useState<Tab>('available')
 
   // The on_the_clock slot seen on the *previous* successful poll, so the
@@ -272,8 +273,8 @@ export default function DraftRoom() {
     }
   }, [])
 
-  // The tab strip's right-aligned hint (see the mock) -- Task 7's, since it
-  // owns the strip itself. This is also `players`' only read site in this
+  // The tab group's hint (see the mock), now riding in the top bar beside
+  // the tabs themselves. This is also `players`' only read site in this
   // task: the join table is fetched here for Task 8's AvailableList/TopThree
   // to consume once they exist, but nothing else in this shell needs a
   // player's name or team yet.
@@ -506,6 +507,40 @@ export default function DraftRoom() {
             panel links here too, with the instruction. */}
         <Link to="/" className="draft-topbar-title">Draft Helper</Link>
         <span className="draft-topbar-sep" aria-hidden="true" />
+        {/* The two views, in the top bar rather than on a strip of their own
+            below it. They were a 38px `.draft-tabs` row spanning the main
+            column, which cost the ranked list a row of height and put a
+            second horizontal rule directly under the first one for the sake
+            of two buttons. Same buttons, same handlers, same `.draft-tab`
+            styling -- they are full-bar height here so the active tab's
+            underline lands on the top bar's own bottom border, which is what
+            makes them still read as tabs over the region they switch. */}
+        <nav className="draft-topbar-tabs" aria-label="Draft views">
+          <button
+            type="button"
+            className={`draft-tab${tab === 'available' ? ' is-active' : ''}`}
+            onClick={() => setTab('available')}
+          >
+            Available
+          </button>
+          <button
+            type="button"
+            className={`draft-tab${tab === 'board' ? ' is-active' : ''}`}
+            onClick={() => setTab('board')}
+          >
+            Snake Board
+          </button>
+        </nav>
+        {/* Rendered on both tabs, not just Available. The pool size does not
+            change mid-draft, so a hint that came and went with the tab would
+            shift the league line and everything after it sideways every time
+            the view was switched -- under a clock, in the bar that carries
+            the pick counter. */}
+        {tabHint && <span className="draft-topbar-hint">{tabHint}</span>}
+        {/* Gated on the same condition as the league line it divides off --
+            an unconditional rule here would leave a stray tick of border
+            hanging after the tabs on a room with no session behind it. */}
+        {state?.active && <span className="draft-topbar-sep" aria-hidden="true" />}
         {state?.active && (
           <span className="draft-topbar-league">
             {state.settings.teams} teams
@@ -603,85 +638,65 @@ export default function DraftRoom() {
           same role="status", no reflow. */}
 
       <div className="draft-body">
-        <div className="draft-main-col">
-          <div className="draft-tabs">
-            <button
-              type="button"
-              className={`draft-tab${tab === 'available' ? ' is-active' : ''}`}
-              onClick={() => setTab('available')}
-            >
-              Available
-            </button>
-            <button
-              type="button"
-              className={`draft-tab${tab === 'board' ? ' is-active' : ''}`}
-              onClick={() => setTab('board')}
-            >
-              Snake Board
-            </button>
-            <span className="draft-tab-spacer" />
-            <span className="draft-tab-hint">{tabHint}</span>
-          </div>
-          <div className="draft-main">
-            {tab === 'available'
+        <div className="draft-main">
+          {tab === 'available'
+            ? (
+              // TopThree ABOVE AvailableList's own filter row/table --
+              // the mock draws the filter row first (search+pills, then
+              // top three, then the table). Deliberately not matched:
+              // under a 30-second clock the recommendation is what the
+              // eye needs first, and the search/position filter is a
+              // browsing tool that belongs attached to the table it
+              // filters, which is where AvailableList already puts it.
+              // Reviewed and confirmed as a conscious deviation from the
+              // mock, not an oversight -- do not "fix" this back to
+              // match the mock's own ordering.
+              <>
+                <TopThree
+                  candidates={state?.candidates ?? []}
+                  players={players}
+                  onDraft={handleDraftClick}
+                  isMyTurn={isMyTurn}
+                  horizonLabel={horizonLabel}
+                  recompute={recompute}
+                  onOpenPlayer={handleOpenCandidate}
+                />
+                <AvailableList
+                  candidates={state?.candidates ?? []}
+                  players={players}
+                  onDraft={handleDraftClick}
+                  isMyTurn={isMyTurn}
+                  horizonLabel={horizonLabel}
+                  onOpenPlayer={handleOpenCandidate}
+                />
+              </>
+            )
+            : board?.active
               ? (
-                // TopThree ABOVE AvailableList's own filter row/table --
-                // the mock draws the filter row first (search+pills, then
-                // top three, then the table). Deliberately not matched:
-                // under a 30-second clock the recommendation is what the
-                // eye needs first, and the search/position filter is a
-                // browsing tool that belongs attached to the table it
-                // filters, which is where AvailableList already puts it.
-                // Reviewed and confirmed as a conscious deviation from the
-                // mock, not an oversight -- do not "fix" this back to
-                // match the mock's own ordering.
-                <>
-                  <TopThree
-                    candidates={state?.candidates ?? []}
-                    players={players}
-                    onDraft={handleDraftClick}
-                    isMyTurn={isMyTurn}
-                    horizonLabel={horizonLabel}
-                    recompute={recompute}
-                    onOpenPlayer={handleOpenCandidate}
-                  />
-                  <AvailableList
-                    candidates={state?.candidates ?? []}
-                    players={players}
-                    onDraft={handleDraftClick}
-                    isMyTurn={isMyTurn}
-                    horizonLabel={horizonLabel}
-                    onOpenPlayer={handleOpenCandidate}
-                  />
-                </>
+                // `.board-tab` only pads the grid, same padding the mock's
+                // own snake-board panel uses -- `.board-wrap` itself is
+                // DraftBoardGrid's own horizontal scroll container (per
+                // its own CSS comment), and it flows straight in
+                // `.draft-main`'s existing overflow-y: auto region rather
+                // than opening a second, nested vertical scroller -- the
+                // same "no second scroll container" call the ranked
+                // available table already makes (see App.css, the comment
+                // above `.avail-col-rank`) so the page itself never
+                // scrolls and there is exactly one vertical scroll
+                // container per tab.
+                <div className="board-tab">
+                  {boardError && <p className="error draft-error-banner">{boardError}</p>}
+                  <DraftBoardGrid board={board} onOpenPlayer={handleOpenBoardPlayer} />
+                </div>
               )
-              : board?.active
-                ? (
-                  // `.board-tab` only pads the grid, same padding the mock's
-                  // own snake-board panel uses -- `.board-wrap` itself is
-                  // DraftBoardGrid's own horizontal scroll container (per
-                  // its own CSS comment), and it flows straight in
-                  // `.draft-main`'s existing overflow-y: auto region rather
-                  // than opening a second, nested vertical scroller -- the
-                  // same "no second scroll container" call the ranked
-                  // available table already makes (see App.css, the comment
-                  // above `.avail-col-rank`) so the page itself never
-                  // scrolls and there is exactly one vertical scroll
-                  // container per tab.
-                  <div className="board-tab">
-                    {boardError && <p className="error draft-error-banner">{boardError}</p>}
-                    <DraftBoardGrid board={board} onOpenPlayer={handleOpenBoardPlayer} />
-                  </div>
-                )
-                // No board yet: either still loading (boardError null) or
-                // the fetch itself failed before a first board ever landed
-                // (nothing stale to fall back to, unlike the branch above).
-                : (
-                  <p className="rail-empty draft-main-placeholder">
-                    {boardError ?? 'Waiting for the draft board…'}
-                  </p>
-                )}
-          </div>
+              // No board yet: either still loading (boardError null) or
+              // the fetch itself failed before a first board ever landed
+              // (nothing stale to fall back to, unlike the branch above).
+              : (
+                <p className="rail-empty draft-main-placeholder">
+                  {boardError ?? 'Waiting for the draft board…'}
+                </p>
+              )}
         </div>
 
         <aside className="draft-rail">
@@ -710,6 +725,12 @@ export default function DraftRoom() {
           )}
         </aside>
       </div>
+
+      {/* The room's bottom rail, outside `.draft-body` so it spans the main
+          column AND the roster rail and stays put while both scroll inside
+          themselves. Fed by the board poll that was already running for the
+          snake board -- no second endpoint, no second interval. */}
+      <PickTicker board={board} onOpenPlayer={handleOpenBoardPlayer} />
 
       {/* Before ConfirmPick, deliberately. Both sit on the same z-index tier
           (`.player-overlay` and `.confirm-overlay` are both 40 -- one modal
