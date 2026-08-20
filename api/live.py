@@ -271,6 +271,7 @@ from scoring.config import CURRENT_SEASON
 from scoring.draft_sim import (_drafted_state, _seed_rosters, horizon_picks,
                                horizon_target, snake_slots, survival)
 from scoring.gain import available_by_vor, rank_available
+from scoring.plan import build_plan
 
 
 def _ordinal(n: int) -> str:
@@ -1346,6 +1347,13 @@ def register_live_routes(app, conn, db_path):
              # its own: a horizon left over from a previous session would
              # caption the new one's list with the old one's pick number.
              "horizon_pick": None,
+             # The draft plan (scoring/plan.py) and the pick it was built
+             # against. Kept apart from `candidates`/`as_of_pick` because the
+             # two move on different clocks: a ranking is ~1-1.5s and must
+             # land before the user acts, a plan is ~4s and describes rounds
+             # they will not reach for twenty minutes. Sharing the recompute
+             # worker would have made every ranking wait behind a plan.
+             "plan": None, "plan_as_of_pick": None, "plan_error": None,
              # Bumped by live_start and live_stop. A stop/start cycle resets
              # as_of_pick to None, which blinds the pick-count guard below --
              # a stale _recompute launched under the old session would see
@@ -1695,6 +1703,45 @@ def register_live_routes(app, conn, db_path):
             # waiting until pick 31" because a pick landed in between. The
             # pair is written together or not at all.
             state["horizon_pick"] = int(horizon)
+
+    def _compute_plan(session, picks_made):
+        """Build the draft plan and store it, unless superseded meanwhile.
+
+        Mirrors `_recompute`'s guards exactly and for the same reasons -- see
+        its docstring for the generation/as_of_pick argument. The state it
+        writes is separate throughout: a plan computed against a board that
+        has since moved is as wrong as a stale ranking, but the two are
+        allowed to disagree about which pick they describe, because they are
+        recomputed on different clocks. Serving them from one `as_of_pick`
+        would force the slower of the pair to caption the faster.
+
+        Like `_recompute`, this returns immediately without a resolved slot:
+        the whole plan is "what should I do at MY turns", which is not a
+        question that has an answer without knowing which turns are mine.
+        """
+        if session.my_slot is None:
+            return
+        with lock:
+            generation = state["generation"]
+            active_conn = state["league_conn"] or conn
+        cur = active_conn.cursor()
+        try:
+            taken, taken_order = _drafted_state(cur, session.pool)
+            plan = build_plan(session.pool, session.settings,
+                              session.slot_managers, session.my_slot, taken,
+                              session.betas, session.seed,
+                              taken_order=taken_order)
+        finally:
+            cur.close()
+        with lock:
+            if state["generation"] != generation:
+                return          # session stopped/restarted while computing
+            if (state["plan_as_of_pick"] is not None
+                    and state["plan_as_of_pick"] > picks_made):
+                return          # superseded while we were computing
+            state["plan"] = plan
+            state["plan_as_of_pick"] = picks_made
+            state["plan_error"] = None
 
     def _provision_and_build(league_id, team_id, settings=None, progress=None):
         """Open (provisioning if needed) the connection this league's session
@@ -2229,6 +2276,7 @@ def register_live_routes(app, conn, db_path):
                             made = c2.execute(
                                 PICKS_MADE_SQL).fetchone()[0]
                             request_recompute(current["session"], made)
+                            request_plan(current["session"], made)
                     finally:
                         c2.close()
 
@@ -2281,6 +2329,7 @@ def register_live_routes(app, conn, db_path):
                 # Hand off to the worker instead of searching here -- this
                 # callback runs on the socket read thread and must return fast.
                 request_recompute(current["session"], made)
+                request_plan(current["session"], made)
 
             try:
                 run_fn(listener, on_change, on_activity, stop_event)
@@ -2308,8 +2357,50 @@ def register_live_routes(app, conn, db_path):
                                    "the Draft Helper bookmark again -- it "
                                    "mints a fresh token.")
 
+        # The plan's own coalescing slot and worker. Same latest-wins
+        # shape as the recompute pair above, deliberately NOT the same
+        # thread: build_plan simulates 120 full drafts (~4s), and queueing
+        # that ahead of a ranking would mean the user watches a stale
+        # recommendation list for four seconds after every pick. Two
+        # independent depth-one slots let the fast answer overtake the slow
+        # one, which is exactly the behaviour wanted -- the ranking is what
+        # they act on now, the plan is context for rounds away.
+        plan_cv = threading.Condition()
+        plan_pending = {"session": None, "made": None}
+
+        def request_plan(sess, made):
+            with plan_cv:
+                plan_pending["session"] = sess
+                plan_pending["made"] = made
+                plan_cv.notify()
+
+        def plan_worker():
+            while not stop_event.is_set():
+                with plan_cv:
+                    while plan_pending["made"] is None and not stop_event.is_set():
+                        plan_cv.wait(timeout=0.5)
+                    if stop_event.is_set():
+                        return
+                    sess, made = plan_pending["session"], plan_pending["made"]
+                    plan_pending["session"] = plan_pending["made"] = None
+                with lock:
+                    if state["listener"] is not listener:
+                        continue
+                # Guarded for the same reason recompute_worker is: this loop
+                # is the thread's whole body, so an escaping exception ends
+                # the plan for the rest of the draft with nothing reporting
+                # it. Recorded rather than re-raised, and cleared by the next
+                # success, so one bad pick row costs one plan.
+                try:
+                    _compute_plan(sess, made)
+                except Exception as exc:      # noqa: BLE001 -- see above
+                    with lock:
+                        if state["listener"] is listener:
+                            state["plan_error"] = f"{type(exc).__name__}: {exc}"
+
         thread = threading.Thread(target=pump, daemon=True)
         recompute_thread = threading.Thread(target=recompute_worker, daemon=True)
+        plan_thread = threading.Thread(target=plan_worker, daemon=True)
         # Pick count as of launch, for the one recompute this function
         # requests below. Read HERE -- on the connect handler's own thread,
         # on the connection it just built this session with, and BEFORE that
@@ -2354,6 +2445,7 @@ def register_live_routes(app, conn, db_path):
                 league_conn.close()
             return None
         recompute_thread.start()
+        plan_thread.start()
         # ONE recompute at launch, when the slot is already known. Without it
         # nothing ever asked for a ranking until a pick landed:
         # request_recompute was called only from on_change (a pick) and from
@@ -2383,6 +2475,7 @@ def register_live_routes(app, conn, db_path):
         # names our team -- that path is unchanged and still needed.
         if session.my_slot is not None:
             request_recompute(session, made_at_launch)
+            request_plan(session, made_at_launch)
             progress.begin("ranking")
         else:
             # Terminal, and honestly so: with no slot there is nothing to rank
@@ -2741,6 +2834,40 @@ def register_live_routes(app, conn, db_path):
             return {"phase": "idle", "stages": [], "facts": {},
                     "error": None, "elapsed_ms": 0}
         return body
+
+    @app.get("/api/live/plan")
+    def live_plan():
+        """The draft plan for my slot: positions by round, and the cliffs why.
+
+        Read-only over `state`, like live_board -- the work happens on the
+        plan worker, never on this request. Three distinguishable answers,
+        because the room has to render all three differently:
+
+          active False   -- no session at all.
+          plan None      -- a session, but no plan yet. Either the slot is
+                            still unresolved (a plan is "what do I do at MY
+                            turns", which has no answer without them) or the
+                            first ~4s of simulation is still running. Both
+                            are `pending: true`, because from the room's side
+                            they are the same thing: wait, do not show an
+                            error, do not reserve space that will jump.
+          plan present   -- the fields scoring.plan.build_plan returns,
+                            spread at the top level.
+
+        `as_of_pick` is the plan's OWN pick count, not the ranking's -- the
+        two are recomputed on separate workers and are expected to differ by
+        a pick or two mid-draft. Serving the ranking's number here would
+        caption a four-second-old plan with a one-second-old pick.
+        """
+        with lock:
+            if state["session"] is None:
+                return {"active": False, "pending": False, "plan": None}
+            plan = state["plan"]
+            error = state["plan_error"]
+            if plan is None:
+                return {"active": True, "pending": True, "plan": None,
+                        "error": error}
+            return {"active": True, "pending": False, "error": error, **plan}
 
     @app.get("/api/live/board")
     def live_board():

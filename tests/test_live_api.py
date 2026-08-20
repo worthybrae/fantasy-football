@@ -4412,3 +4412,76 @@ def test_the_app_publishes_the_running_sessions_league_settings(tmp_path):
     state["session"] = None
     assert app.state.live_settings() is None
     conn.close()
+
+
+def _plan_app(tmp_path):
+    """An app plus the `state` its routes read, so a test can install a plan
+    without running the four-second simulation that produces one."""
+    from fastapi import FastAPI
+    from pipeline.db import get_conn
+    app = FastAPI()
+    path = str(tmp_path / "plan.duckdb")
+    state, _ = register_live_routes(app, get_conn(path), path)
+    return app, state
+
+
+def test_plan_endpoint_reports_inactive_before_a_session(tmp_path):
+    from fastapi.testclient import TestClient
+    app, _ = _plan_app(tmp_path)
+    assert TestClient(app).get("/api/live/plan").json() == {
+        "active": False, "pending": False, "plan": None}
+
+
+def test_plan_endpoint_is_pending_while_the_first_plan_is_building(tmp_path):
+    """A session with no plan yet must read as "wait", never as an error and
+    never as an empty plan. The room reserves no space for it until it
+    arrives, so the two have to be distinguishable."""
+    from fastapi.testclient import TestClient
+    app, state = _plan_app(tmp_path)
+    state["session"] = _live_session()
+    body = TestClient(app).get("/api/live/plan").json()
+    assert body["active"] is True and body["pending"] is True
+    assert body["plan"] is None and body["error"] is None
+
+
+def test_plan_endpoint_spreads_the_plan_at_the_top_level(tmp_path):
+    """The room reads `rounds_plan` and `cliffs` straight off the response
+    body. Nesting them under a `plan` key would be a silent contract break --
+    the fetch still succeeds and the tab renders empty."""
+    from fastapi.testclient import TestClient
+    app, state = _plan_app(tmp_path)
+    state["session"] = _live_session()
+    state["plan"] = {
+        "my_slot": 2, "teams": 8, "rounds": 15, "n_drafts": 120,
+        "as_of_pick": 17,
+        "rounds_plan": [{"round": 1, "pick": 2, "is_past": True,
+                         "actual": "RB",
+                         "positions": [{"position": "RB", "pct": 100}]}],
+        "cliffs": [{"round": 1, "pick": 2,
+                    "by_position": {"QB": 0.0, "RB": 86.4,
+                                    "WR": 85.1, "TE": 0.0}}],
+        "best_available": [],
+    }
+    state["plan_as_of_pick"] = 17
+    body = TestClient(app).get("/api/live/plan").json()
+    assert body["pending"] is False and body["active"] is True
+    assert body["my_slot"] == 2 and body["rounds"] == 15
+    assert body["rounds_plan"][0]["actual"] == "RB"
+    assert body["cliffs"][0]["by_position"]["RB"] == 86.4
+    # Its own pick count, not the ranking's -- the two workers run on
+    # different clocks and are expected to disagree mid-draft.
+    assert body["as_of_pick"] == 17
+
+
+def test_plan_and_ranking_keep_separate_pick_counts(tmp_path):
+    """`state["as_of_pick"]` captions the candidate list; the plan carries
+    its own. A plan four seconds behind must never be labelled with the
+    ranking's fresher number."""
+    from fastapi.testclient import TestClient
+    app, state = _plan_app(tmp_path)
+    state["session"] = _live_session()
+    state["as_of_pick"] = 31            # ranking has moved on
+    state["plan"] = {"my_slot": 2, "as_of_pick": 17, "rounds_plan": [],
+                     "cliffs": [], "best_available": []}
+    state["plan_as_of_pick"] = 17
+    assert TestClient(app).get("/api/live/plan").json()["as_of_pick"] == 17
