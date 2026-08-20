@@ -498,6 +498,126 @@ export async function fetchBoard(): Promise<LiveBoard> {
   return res.json()
 }
 
+// -- live draft plan (the "Plan" tab, GET /api/live/plan) -------------------
+//
+// Answers "given my draft slot, which positions should I take in which
+// round, and why" -- the round-by-round prediction plus the positional
+// cliffs (points of projected value lost by waiting one more round) that
+// explain it. Server cost is ~4s (120 simulated drafts) and the plan only
+// changes when a pick lands, so DraftRoom refetches it on `picks_made` changing rather than on
+// the 2.5s state/board timer -- see its own poll effect.
+
+export interface PlanPositionShare {
+  position: string
+  pct: number
+}
+
+// One round of the round-by-round plan. `positions` is sorted descending by
+// `pct` and only carries positions above a small server-side threshold, so
+// its length runs 1 to 4 -- QB/RB/WR/TE **and** K/DST all legitimately
+// appear here (unlike `cliffs`/`best_available` below): a real roster needs
+// one of each late, and the plan predicts them the same as any other
+// position.
+//
+// `is_past`/`actual` is the one distinction the whole tab exists to make
+// obvious: `is_past: true` means this pick already happened in the live
+// draft and `actual` names what was actually taken -- settled fact, not
+// prediction. `actual` is null exactly when `is_past` is false.
+export interface PlanRound {
+  round: number
+  pick: number
+  is_past: boolean
+  actual: string | null
+  positions: PlanPositionShare[]
+}
+
+// Points of projected value lost by waiting one more round at that
+// position, keyed by QB/RB/WR/TE only -- K and DST never carry a cliff.
+// `0.0` is common and meaningful ("costs nothing to wait"), never a
+// placeholder for "unknown".
+export interface PlanCliffRound {
+  round: number
+  pick: number
+  by_position: Record<string, number>
+}
+
+// The best projected points still on the board at that position/round --
+// what `PlanCliffRound.by_position` is the round-over-round drop of. Same
+// QB/RB/WR/TE-only keying as the cliff it backs.
+export interface PlanBestAvailableRound {
+  round: number
+  pick: number
+  by_position: Record<string, number>
+}
+
+// `cliffs`/`best_available` carry one entry per round, same `round`/`pick`
+// keys as `rounds_plan`, but can run SHORTER than it: the last round has no
+// "next round" to wait for, so there is nothing to measure a cliff against.
+// Always join these against `rounds_plan` by `round` -- never by array
+// index -- and render a round with no matching cliff entry as an empty
+// cliff row rather than dropping it.
+//
+// Every field here is required: a plan missing its slot or its rounds is
+// exactly the `pending` case below, not a `ready` one with holes in it.
+export interface LivePlan {
+  my_slot: number
+  teams: number
+  rounds: number
+  n_drafts: number
+  as_of_pick: number
+  rounds_plan: PlanRound[]
+  cliffs: PlanCliffRound[]
+  best_available: PlanBestAvailableRound[]
+}
+
+// GET /api/live/plan always answers 200, in one of three shapes:
+//   1. no draft session at all --
+//      {"active": false, "pending": false, "plan": null}
+//   2. a session, but no plan yet -- the slot isn't resolved, or the first
+//      ~4s of simulation is still running (indistinguishable from here, and
+//      meant to be: both are a quiet loading state, never an error) --
+//      {"active": true, "pending": true, "plan": null, "error": null}
+//   3. a ready plan -- its fields ride at the TOP LEVEL of the body, not
+//      nested under `plan` (which is absent in this shape entirely) --
+//      {"active": true, "pending": false, "error": null,
+//       "my_slot": 2, "teams": 8, ..., "rounds_plan": [...], ...}
+// Normalized here into one discriminated union so nothing downstream has to
+// juggle `active`/`pending`/the top-level-vs-nested split itself.
+export type PlanFetchResult =
+  | { status: 'inactive' }
+  | { status: 'pending'; error: string | null }
+  // `error` is NOT "the plan failed" here -- it is the last REBUILD
+  // attempt's own error, and can be set even on a `ready` result when a
+  // previous good plan is still being served underneath it. Render it as a
+  // small non-blocking notice beside the tab's content, never in place of
+  // it.
+  | { status: 'ready'; plan: LivePlan; error: string | null }
+
+export async function fetchPlan(): Promise<PlanFetchResult> {
+  const res = await fetch('/api/live/plan')
+  if (!res.ok) {
+    throw new Error(`Failed to load the draft plan (${res.status}): ${await detailText(res)}`)
+  }
+  const body = await res.json()
+  const error = typeof body.error === 'string' ? body.error : null
+  if (!body.active) return { status: 'inactive' }
+  if (!Array.isArray(body.rounds_plan)) return { status: 'pending', error }
+  return {
+    status: 'ready',
+    error,
+    plan: {
+      my_slot: body.my_slot,
+      teams: body.teams,
+      rounds: body.rounds,
+      n_drafts: body.n_drafts,
+      as_of_pick: body.as_of_pick,
+      rounds_plan: body.rounds_plan,
+      cliffs: Array.isArray(body.cliffs) ? body.cliffs : [],
+      best_available: Array.isArray(body.best_available) ? body.best_available : [],
+    },
+  }
+}
+
 // The connect screen's only call. `board_fingerprint` identifies the pool
 // build the session locked in, not shown to the user -- what the connect
 // screen actually shows is a slot number, but that comes from a follow-up
