@@ -128,33 +128,60 @@ _TEAM_ALIASES = {"LAR": "LA", "WSH": "WAS", "JAC": "JAX",
 
 
 def google_news_query(name: str, team) -> str:
-    """The search string for one player: quoted full name plus team nickname.
+    """The search string for one player: quoted full name, team nickname,
+    and the bare word "football".
 
-    NAME + TEAM, AND NOTHING ELSE. This shape was measured, not guessed --
-    NFL names collide (the Bills quarterback Josh Allen and the Jaguars
-    Josh Allen are the canonical case), and the obvious fixes are not all
-    improvements. Counting how many of the returned headlines are about the
-    Buffalo quarterback, two independent runs on 2026-08-19:
+    NAME + TEAM + "football". Every term in that is there because it was
+    measured, and the terms that are NOT there were measured too. NFL names
+    collide (the Bills quarterback Josh Allen and the Jaguars Josh Allen are
+    the canonical case), and the obvious fixes are not all improvements.
 
-        Josh Allen                             102 items,  74 relevant
-        Josh Allen Bills                       102 items,  89 relevant
-        Josh Allen Bills QB fantasy football   100 items,  75 relevant
-        "Josh Allen"            (quoted)       102 items,  77 relevant
-        "Josh Allen" Bills      (quoted)       102 items,  93 relevant
+    Two metrics, because they answer different questions. First, how many of
+    the returned headlines name the player at all -- four players, measured
+    twice independently on 2026-08-19, ~100 items in every cell:
 
-    So adding the TEAM is a real gain -- ~74% to ~90% precision at no cost
-    in volume, quoted or not. Adding the POSITION or "fantasy football"
-    makes it WORSE, not better: those terms pull in generic fantasy-football
-    roundups that merely mention the player. Do not "improve" this by adding
-    them back, and do not simplify it back to a bare name. Quoting the name
-    costs nothing (same 102 items) and stops a two-word name from matching
-    the two words separately, so it stays.
+        query                       no suffix   + "football"   + "fantasy football"
+        "Josh Allen" Bills             90%          97%              80%
+        "Tyler Warren" Colts           92%          92%              77%
+        "Puka Nacua" Rams              95%          97%              88%
+        "Brock Bowers" Raiders         94%          97%              78%
 
-    ~10% of these items are still about somebody else, which is why every
-    row they produce is stamped ATTR_NAME. That marker, not a filter, is how
-    the uncertainty is carried downstream -- a filter cannot help, because
-    two players with the same name produce headlines with the same words in
-    them. (The specific Josh Allen collision has softened since 2024, when
+    "football" helps or is neutral in every case -- about 93% to 96% overall
+    -- and costs nothing in volume. "FANTASY football" is a different thing
+    entirely and is WORSE than no suffix at all, in all four cases.
+
+    THAT DISTINCTION IS THE TRAP IN THIS FUNCTION, so read it before
+    editing: the two variants look like the same idea and one of them is
+    wrong. Bare "football" filters OUT namesakes who play another sport or
+    none. "fantasy football" pulls IN generic fantasy roundups, mock drafts
+    and start/sit columns that merely mention the player in passing -- which
+    is why an earlier version of this query measured 89 relevant items
+    without it and 75 with it. Do not reach for the fantasy variant. The
+    POSITION is out for the same reason it was: it measured worse.
+
+    Second metric, the collision itself, since surname-counting cannot see
+    it (both Josh Allens have the same surname). Classifying every item by
+    which player it is actually about:
+
+        "Josh Allen" Bills             102 items, 0 about the Jaguars player
+        "Josh Allen" Bills football    100 items, 0 about the Jaguars player
+
+    So "football" does not reintroduce the wrong player. (A crude
+    team-keyword regex appears to show precision FALLING from 91% to 81%
+    here; reading all 19 of the items it flags shows every one of them is
+    about the Buffalo quarterback -- headlines like "Josh Allen wants to put
+    it all on himself" name no team. The regex is the thing that is wrong,
+    not the query. Recorded so nobody re-derives that false alarm.)
+
+    Quoting the name costs nothing (same ~100 items) and stops a two-word
+    name from matching the two words separately, so it stays. Do not
+    simplify this back to a bare name.
+
+    A few percent of these items are still about somebody else, which is why
+    every row they produce is stamped ATTR_NAME. That marker, not a filter,
+    is how the uncertainty is carried downstream -- a filter cannot help,
+    because two players with the same name produce headlines out of the same
+    words. (The specific Josh Allen collision has softened since 2024, when
     the Jaguars player started going by Josh Hines-Allen: on 2026-08-19 the
     bare query returned no Jaguars items at all. It has not vanished --
     tests/fixtures/google_news_josh_allen.xml holds a real one that came
@@ -162,7 +189,7 @@ def google_news_query(name: str, team) -> str:
     himself.)
     """
     nickname = TEAM_NICKNAMES.get(_TEAM_ALIASES.get(str(team), str(team)))
-    q = f'"{name}"' + (f" {nickname}" if nickname else "")
+    q = f'"{name}"' + (f" {nickname}" if nickname else "") + " football"
     return GOOGLE_NEWS_URL.format(query=quote_plus(q))
 
 
@@ -272,16 +299,27 @@ def parse_espn_news(payload: dict, by_espn_id: dict) -> list[dict]:
 def parse_sleeper_status(payload: dict, pool: pd.DataFrame) -> pd.DataFrame:
     """Structured injury signals for the pool, matched by (name, position).
 
-    WHY NAME MATCHING HERE, when Sleeper publishes a `gsis_id` and the task
-    brief said that made the join exact: it does not, today. Measured on the
-    live payload (12,221 players, 2026-08-19), only 180 of the 1,061 active
-    fantasy-position players with a team carry a gsis_id, and 61 of the top
-    300 by search_rank -- Bijan Robinson, Jahmyr Gibbs and Ja'Marr Chase all
-    have gsis_id AND espn_id null. Joining on gsis_id would silently drop
-    four fifths of the board, including the first three players off it. That
-    is also why this does not extend `sources.parse_sleeper`/`sleeper_ids`,
-    which requires both ids to be non-null and therefore describes mostly
-    retired players (1,316 rows, only 184 of them on a roster).
+    DO NOT "FIX" THIS TO JOIN ON `gsis_id`. Sleeper's schema publishes a
+    `gsis_id` field on every player object, which makes it look like the
+    obvious, exact key into this codebase's `player_id` -- it is the first
+    thing anyone reading the API will reach for, and it is wrong. The field
+    exists; it is mostly EMPTY. Measured on the live payload (12,221
+    players, 2026-08-19):
+
+        active, rostered, fantasy-position players   1061
+          with gsis_id                                180   (17%)
+          with espn_id                                238
+          with neither                                823
+        top 300 by Sleeper search_rank: gsis_id        61
+
+    Bijan Robinson, Jahmyr Gibbs and Ja'Marr Chase -- the first, second and
+    fifth players on this board -- all have gsis_id AND espn_id null. A
+    gsis_id join therefore does not fail loudly; it silently drops four
+    fifths of the pool, starting with the top of it, and every one of those
+    players just shows no injury at all. That is also why this does not
+    extend `sources.parse_sleeper`/`sleeper_ids`, which requires BOTH ids
+    non-null and so describes mostly retired players (1,316 rows, only 184
+    of them on a roster).
 
     The name match is safe HERE in a way the news query is not: it is
     restricted to Sleeper's active, rostered fantasy players, and in that
@@ -305,9 +343,15 @@ def parse_sleeper_status(payload: dict, pool: pd.DataFrame) -> pd.DataFrame:
             "depth_chart_order": p.get("depth_chart_order"),
             # Sleeper's own "when did this player last make news" stamp, in
             # epoch MILLIseconds. Kept because it is the cheapest freshness
-            # signal there is. NOT kept: injury_start_date, which the brief
-            # listed as useful but which is null for all 12,221 players.
+            # signal there is.
             "news_updated": p.get("news_updated"),
+            # DELIBERATELY ABSENT: `injury_start_date`. It is a documented
+            # field on every Sleeper player object and reads like exactly
+            # what an injury panel wants ("out since when?"), but it is null
+            # for ALL 12,221 players in the live payload -- not sparse,
+            # empty (measured 2026-08-19). Adding it back would put a column
+            # of nulls in the table and an always-blank line in the UI. If
+            # Sleeper ever starts populating it, re-measure first.
         })
     sleeper = pd.DataFrame(rows, columns=["sleeper_id", "_norm", "position",
                                           "injury_status", "injury_body_part",

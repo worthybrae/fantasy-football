@@ -54,14 +54,32 @@ def _fetch_from(bodies, calls=None, fail=()):
 
 # --------------------------------------------------------------- the query
 
-def test_query_is_quoted_name_plus_team_nickname():
-    """The measured shape. Name + team took Josh Allen's feed from ~74% to
-    ~90% relevant; position and 'fantasy football' took it back DOWN to 75%,
-    so neither belongs here. See google_news_query's docstring."""
+def test_query_is_quoted_name_plus_team_nickname_plus_football():
+    """The measured shape, term by term. See google_news_query's docstring
+    for the numbers behind each one."""
     url = google_news_query("Josh Allen", "BUF")
     assert "%22Josh+Allen%22" in url          # the name is a quoted phrase
-    assert "Bills" in url
-    assert "QB" not in url and "fantasy" not in url
+    assert "Bills" in url                     # team: ~74% -> ~90%
+    assert url.endswith("+football&hl=en-US&gl=US&ceid=US:en") or "+football&" in url
+    assert "QB" not in url                    # position: measured worse
+
+
+def test_the_query_says_football_and_never_fantasy_football():
+    """THE TRAP. 'football' and 'fantasy football' look like the same idea
+    and one of them is wrong.
+
+    Bare 'football' filters OUT namesakes who play another sport: across
+    four players it took surname-relevance from 90/92/95/94% to 97/92/97/97%
+    at no cost in volume. 'fantasy football' pulls IN mock drafts and
+    start/sit columns that merely mention the player -- the same four
+    players measured 80/77/88/78%, worse than no suffix at all.
+
+    So this asserts the presence of one and the absence of the other in the
+    same test, on purpose: a later edit that reaches for the fantasy variant
+    fails here rather than quietly costing 15 points of precision."""
+    url = google_news_query("Brock Bowers", "LV")
+    assert "football" in url
+    assert "fantasy" not in url.lower()
 
 
 def test_query_speaks_nflverse_team_abbreviations():
@@ -74,8 +92,11 @@ def test_query_speaks_nflverse_team_abbreviations():
 
 
 def test_query_for_an_unknown_team_is_still_a_usable_name_search():
+    """No nickname (an unmapped or missing team) drops that term only -- the
+    name and the sport still narrow the search."""
     url = google_news_query("Some Rookie", None)
     assert "%22Some+Rookie%22" in url
+    assert "football" in url
 
 
 # ------------------------------------------------------- Google News feed
