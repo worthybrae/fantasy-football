@@ -166,3 +166,45 @@ def test_cliffs_cover_only_the_positions_a_cliff_means_something_for():
     # Nothing in rounds_plan is restricted that way.
     listed = {d["position"] for e in plan["rounds_plan"] for d in e["positions"]}
     assert listed <= set(POSITIONS)
+
+
+def test_build_plan_yields_when_asked_and_reports_it_as_none():
+    """The plan and the live ranking are both Python simulation loops, so
+    under the GIL they do not share a core politely: the ranking measured
+    1.23s alone and 4.38s while a plan was building, which is what made the
+    available list read two picks stale. The plan is the one that yields --
+    the ranking is what the user acts on while the clock runs."""
+    calls = {"n": 0}
+
+    def abort_immediately():
+        calls["n"] += 1
+        return True
+
+    assert build_plan(taken_order=[], n_drafts=50,
+                      should_abort=abort_immediately, **_args()) is None
+    # Checked BEFORE the first draft, not after -- a plan that always ran one
+    # full draft before noticing would still block the ranking it is yielding
+    # to, just for less time.
+    assert calls["n"] == 1
+
+
+def test_build_plan_checks_the_abort_once_per_draft():
+    """Between whole drafts, never inside one: a mid-draft abort would leave
+    a half-counted round in the aggregate, and the counts are what the
+    percentages are computed from."""
+    seen = {"n": 0}
+
+    def never_abort():
+        seen["n"] += 1
+        return False
+
+    plan = build_plan(taken_order=[], n_drafts=7,
+                      should_abort=never_abort, **_args())
+    assert plan is not None
+    assert seen["n"] == 7
+
+
+def test_build_plan_without_an_abort_hook_is_unchanged():
+    a, b = _args(), _args()
+    assert (build_plan(taken_order=[], n_drafts=6, **a)
+            == build_plan(taken_order=[], n_drafts=6, should_abort=None, **b))

@@ -273,6 +273,13 @@ from scoring.draft_sim import (_drafted_state, _seed_rosters, horizon_picks,
 from scoring.gain import available_by_vor, rank_available
 from scoring.plan import build_plan
 
+# How many times the plan worker re-attempts a build that keeps getting
+# pre-empted by rankings before dropping the request and waiting for the
+# next pick to queue a fresh one. Generous, because an attempt costs nothing
+# until the draft actually goes quiet, and cheap to be wrong about: a
+# dropped request is replaced by the very next pick.
+PLAN_BUILD_ATTEMPTS = 40
+
 
 def _plan_bias_for_round(plan, my_slot, my_picks_made):
     """The plan's read on the round I am about to pick in, as position ->
@@ -1385,6 +1392,15 @@ def register_live_routes(app, conn, db_path):
              # they will not reach for twenty minutes. Sharing the recompute
              # worker would have made every ranking wait behind a plan.
              "plan": None, "plan_as_of_pick": None, "plan_error": None,
+             # Set the moment a ranking is requested, cleared when one is
+             # stored. The plan worker yields on it: see _compute_plan and
+             # build_plan's `should_abort`. Without it the two workers are
+             # simply two Python simulation loops competing for the GIL, and
+             # the ranking measured 3.5x slower (1.23s -> 4.38s) whenever a
+             # plan happened to be building -- which, since both fired on
+             # every pick, was most of the draft. That is what made the
+             # available list read two picks stale.
+             "ranking_wanted": False,
              # Bumped by live_start and live_stop. A stop/start cycle resets
              # as_of_pick to None, which blinds the pick-count guard below --
              # a stale _recompute launched under the old session would see
@@ -1761,30 +1777,51 @@ def register_live_routes(app, conn, db_path):
         Like `_recompute`, this returns immediately without a resolved slot:
         the whole plan is "what should I do at MY turns", which is not a
         question that has an answer without knowing which turns are mine.
+
+        Returns True when the plan is settled for this request (stored, or
+        deliberately discarded as superseded) and False when it yielded to a
+        ranking and should be retried -- see `plan_worker`.
         """
         if session.my_slot is None:
-            return
+            return True         # nothing to build, and retrying cannot help
         with lock:
             generation = state["generation"]
             active_conn = state["league_conn"] or conn
+        # The cursor is opened, read from, and closed BEFORE the simulation
+        # -- not held across it. `_drafted_state` is the only database work
+        # this function does; keeping the cursor open through 2.5s of pure
+        # numpy would pin a cursor on the league's connection for the whole
+        # build, against the ranking worker reading the same connection on
+        # every pick.
         cur = active_conn.cursor()
         try:
             taken, taken_order = _drafted_state(cur, session.pool)
-            plan = build_plan(session.pool, session.settings,
-                              session.slot_managers, session.my_slot, taken,
-                              session.betas, session.seed,
-                              taken_order=taken_order)
         finally:
             cur.close()
+
+        def _yield_to_ranking():
+            """Give up this plan the moment a ranking is wanted. Called once
+            per simulated draft by build_plan."""
+            with lock:
+                return bool(state["ranking_wanted"])
+
+        plan = build_plan(session.pool, session.settings,
+                          session.slot_managers, session.my_slot, taken,
+                          session.betas, session.seed,
+                          taken_order=taken_order,
+                          should_abort=_yield_to_ranking)
+        if plan is None:
+            return False        # yielded to a ranking; the worker retries
         with lock:
             if state["generation"] != generation:
-                return          # session stopped/restarted while computing
+                return True     # session stopped/restarted -- do not retry
             if (state["plan_as_of_pick"] is not None
                     and state["plan_as_of_pick"] > picks_made):
-                return          # superseded while we were computing
+                return True     # superseded by a newer plan -- do not retry
             state["plan"] = plan
             state["plan_as_of_pick"] = picks_made
             state["plan_error"] = None
+        return True
 
     def _provision_and_build(league_id, team_id, settings=None, progress=None):
         """Open (provisioning if needed) the connection this league's session
@@ -2151,6 +2188,12 @@ def register_live_routes(app, conn, db_path):
         pending = {"session": None, "made": None}
 
         def request_recompute(sess, made):
+            # Raised here rather than inside the worker so it is set the
+            # instant a pick lands, not once the worker gets scheduled -- a
+            # plan already mid-build has to hear about it immediately, which
+            # is the whole point of the flag.
+            with lock:
+                state["ranking_wanted"] = True
             with recompute_cv:
                 pending["session"] = sess
                 pending["made"] = made
@@ -2224,6 +2267,21 @@ def register_live_routes(app, conn, db_path):
                             state["recompute_error"] = None
                         ranked = len(state["candidates"])
                     progress.ok("ranking", f"{ranked} ranked")
+                finally:
+                    # Lower the plan worker's yield flag here, and on EVERY
+                    # path -- not inside _recompute, which has three early
+                    # returns (no resolved slot, superseded generation,
+                    # superseded pick count). Clearing on only its success
+                    # path would leave the flag stuck high and starve the
+                    # plan permanently, which is the same bug as starving
+                    # the ranking, just pointed the other way. Set to
+                    # whether ANOTHER request is already queued rather than
+                    # a flat False, so a pick landing mid-ranking keeps the
+                    # plan yielding instead of racing the next ranking.
+                    with recompute_cv:
+                        queued = pending["made"] is not None
+                    with lock:
+                        state["ranking_wanted"] = queued
 
         def _resolve_slot(c2) -> bool:
             """Resolve my_slot from ESPN's pick order, history, or the
@@ -2417,6 +2475,18 @@ def register_live_routes(app, conn, db_path):
                 plan_pending["made"] = made
                 plan_cv.notify()
 
+        def _wait_for_quiet():
+            """Block until no ranking is wanted. Sleeps on `stop_event`
+            rather than spinning: a busy-wait here would burn the very CPU
+            the ranking is trying to use, and measured 11x WORSE than the
+            contention it was meant to cure."""
+            while not stop_event.is_set():
+                with lock:
+                    if not state["ranking_wanted"]:
+                        return True
+                stop_event.wait(0.05)
+            return False
+
         def plan_worker():
             while not stop_event.is_set():
                 with plan_cv:
@@ -2429,17 +2499,36 @@ def register_live_routes(app, conn, db_path):
                 with lock:
                     if state["listener"] is not listener:
                         continue
-                # Guarded for the same reason recompute_worker is: this loop
-                # is the thread's whole body, so an escaping exception ends
-                # the plan for the rest of the draft with nothing reporting
-                # it. Recorded rather than re-raised, and cleared by the next
-                # success, so one bad pick row costs one plan.
-                try:
-                    _compute_plan(sess, made)
-                except Exception as exc:      # noqa: BLE001 -- see above
-                    with lock:
-                        if state["listener"] is listener:
-                            state["plan_error"] = f"{type(exc).__name__}: {exc}"
+                # Build in the gaps between rankings, retrying after each
+                # yield. Retrying is not optional: a ranking is requested on
+                # EVERY pick and a plan takes ~2.5s, so a worker that gave
+                # up on being pre-empted and waited for the next request
+                # would be pre-empted again by that request's own ranking,
+                # and would never once finish a plan for the whole draft.
+                # The retries are what make the yield a deferral rather than
+                # a cancellation. Bounded so a pathological burst of picks
+                # cannot spin this thread for the rest of the session -- the
+                # next pick queues a fresh request anyway.
+                for _ in range(PLAN_BUILD_ATTEMPTS):
+                    if not _wait_for_quiet():
+                        return                  # shutting down
+                    with plan_cv:
+                        if plan_pending["made"] is not None:
+                            break               # a newer pick supersedes this
+                    # Guarded for the same reason recompute_worker is: this
+                    # loop is the thread's whole body, so an escaping
+                    # exception ends the plan for the rest of the draft with
+                    # nothing reporting it. Recorded rather than re-raised,
+                    # and cleared by the next success.
+                    try:
+                        if _compute_plan(sess, made):
+                            break
+                    except Exception as exc:  # noqa: BLE001 -- see above
+                        with lock:
+                            if state["listener"] is listener:
+                                state["plan_error"] = \
+                                    f"{type(exc).__name__}: {exc}"
+                        break
 
         thread = threading.Thread(target=pump, daemon=True)
         recompute_thread = threading.Thread(target=recompute_worker, daemon=True)

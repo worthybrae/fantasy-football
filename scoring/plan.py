@@ -71,8 +71,19 @@ def _best_by_position(pool, gone):
 
 
 def build_plan(pool, settings, slot_managers, my_slot, taken, betas, seed,
-               taken_order=None, n_drafts=PLAN_DRAFTS) -> dict:
+               taken_order=None, n_drafts=PLAN_DRAFTS, should_abort=None):
     """Simulate the rest of the draft `n_drafts` times and report the plan.
+
+    `should_abort`, when given, is called once per simulated draft and
+    returning True makes this give up and return None. It exists because
+    this function is slow enough to matter to something else: measured on
+    the real board, the live ranking takes 1.23s alone but 4.38s while a
+    plan is building -- 3.5x slower, from CPython's GIL, since both are
+    Python-level simulation loops. The ranking is what the user acts on
+    while the clock runs; the plan describes rounds twenty minutes away. So
+    the plan yields, checking between whole drafts (never mid-draft, which
+    would leave a half-counted round in the aggregate) and returning None
+    for the caller to retry in the next lull.
 
     Resumes from exactly the state `_run_draft` resumes from -- see its
     contract for what `taken`/`taken_order` must agree on. Rounds already
@@ -95,6 +106,8 @@ def build_plan(pool, settings, slot_managers, my_slot, taken, betas, seed,
     counted = [0] * len(my_offsets)
 
     for k in range(n_drafts):
+        if should_abort is not None and should_abort():
+            return None
         rng = np.random.default_rng(int(seed) + k)
         record = []
         _run_draft(pool, settings, slot_managers, my_slot, taken, betas, rng,
