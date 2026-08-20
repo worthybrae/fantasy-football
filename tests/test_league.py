@@ -173,21 +173,63 @@ def test_reading_kicking_leaves_the_skill_positions_scoring_untouched():
     assert {k: v for k, v in s.items() if k in DEFAULT_RULES} == DEFAULT_RULES
 
 
-def test_team_defense_items_stay_unmapped_rather_than_being_priced_wrong():
-    """Every defensive id is identified in scoring/league.py and mapped by
-    none of them, for reasons recorded there. Two failure modes are pinned:
+def test_team_defense_items_are_read_from_the_slot_16_override_not_points():
+    """The failure mode this pins: every defensive item ESPN publishes carries
+    `points: 0.0`, with the real value in `pointsOverrides["16"]`. A parser
+    that reads `points` -- which this one did -- prices a whole position at
+    nothing and says so nowhere.
 
-      * their real value lives in `pointsOverrides`, keyed by the D/ST
-        lineup slot, and `points` is 0.0 -- so a mapping that read `points`
-        would price a whole position at nothing and say so nowhere;
-      * 101 and 102 are the kickoff- and punt-return touchdown, and nflverse
-        carries one `special_teams_tds` column covering both, so pricing
-        the pair would score every return touchdown twice.
+    `dst_scoring` is keyed by ESPN stat id, not by an nflverse column, because
+    the stat values come from ESPN too (pipeline/sources.fetch_espn_dst). No
+    column has to be identified, so no column can be identified wrong; see
+    scoring/ppr.DEFAULT_DST_RULES for the 3744-defense-week reconciliation
+    against ESPN's own scored totals.
     """
     s = _kicking_settings()
-    for stat_id in ("99", "95", "89", "128", "101", "102"):
-        assert stat_id in s.unmapped_scoring
+    assert s.dst_scoring == {"99": 1.0, "95": 2.0, "89": 5.0, "128": 5.0,
+                             "101": 6.0, "102": 6.0}
+    # Not one of them leaked into the skill-position rules, and nothing was
+    # priced at zero by reading `points` off an override item.
     assert "special_teams_tds" not in s.scoring
     assert "def_sacks" not in s.scoring and "def_interceptions" not in s.scoring
-    # Nothing was priced at zero by reading `points` off an override item.
     assert all(v != 0.0 for v in s.scoring.values())
+
+
+def test_an_id_that_also_scores_for_a_skill_player_stays_unmapped():
+    """An id leaves `unmapped_scoring` only when it is FULLY accounted for.
+
+    99/95/89/128 score for the defense slot and nothing else (`points` 0.0),
+    so once `dst_scoring` prices them there is nothing left to report.
+
+    101 and 102 are the kickoff- and punt-return touchdown and are worth 6
+    points to ANY player -- a wide receiver who returns a kick scores them.
+    That half is still unmappable, because nflverse carries one
+    `special_teams_tds` column covering both, so pricing the pair would score
+    every return touchdown twice. Being scored for defenses does not make
+    them scored for everybody, and reporting otherwise would be the quiet
+    kind of wrong.
+    """
+    s = _kicking_settings()
+    for stat_id in ("99", "95", "89", "128"):
+        assert stat_id not in s.unmapped_scoring
+        assert stat_id in s.dst_scoring
+    for stat_id in ("101", "102"):
+        assert stat_id in s.unmapped_scoring
+        assert stat_id in s.dst_scoring
+
+
+def test_dst_scoring_absent_from_a_stored_row_is_none_not_empty():
+    """`None` means "this row predates D/ST parsing" and resolves to ESPN's
+    default D/ST scoring; `{}` means "this league scores no defense". Every
+    `league` row on this deployment's database is the first case, so
+    defaulting the missing key to `{}` would silently zero every defense.
+    """
+    import json
+    s = _kicking_settings()
+    blob = json.loads(league.to_json(s))
+    assert blob["dst_scoring"] == s.dst_scoring
+    blob.pop("dst_scoring")
+    assert league.from_json(json.dumps(blob)).dst_scoring is None
+    assert league.default_settings().dst_scoring is None
+    # A league with no defensive item anywhere really does score no defense.
+    assert _settings().dst_scoring == {}

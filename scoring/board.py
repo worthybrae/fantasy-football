@@ -55,7 +55,8 @@ from scoring import factors, league
 from scoring.composite import compute_composite, apply_vor, assign_tiers
 from scoring.config import DEFAULT_WEIGHTS, RECENCY_WEIGHTS
 from scoring.market import add_market, select_format
-from scoring.ppr import compute_ppr_points, normalize_rules, prices_kicking
+from scoring.ppr import (compute_dst_points, compute_ppr_points,
+                         normalize_rules, prices_defense, prices_kicking)
 from scoring.similarity import player_season_features
 
 _SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
@@ -64,6 +65,10 @@ _NEUTRAL_FACTORS_FOR_KDST = ["production", "durability", "role", "schedule"]
 # The subset of those a kicker gets back once the league actually prices
 # kicking -- see `_neutral_factors` for the argument, factor by factor.
 _KICKER_FACTORS_THAT_BECOME_REAL = ["production", "durability", "schedule"]
+# The subset a DEFENSE gets back once there is a real defensive history to
+# compute it from. One factor, not three, and `_neutral_factors` says why the
+# other two stay pinned even though the data now exists for them.
+_DST_FACTORS_THAT_BECOME_REAL = ["production"]
 _ADP_POSITION_ALIASES = {"PK": "K"}
 _ADP_TEAM_ALIASES = {"LAR": "LA", "WSH": "WAS", "JAC": "JAX", "SD": "LAC", "OAK": "LV", "STL": "LA"}
 
@@ -124,14 +129,45 @@ def adp_match_key(name, position, team=None):
     return f"{position}|{_norm_name(name)}"
 
 
-def _neutral_factors(position: str, rules: dict | None) -> list:
+def _neutral_factors(position: str, rules: dict | None,
+                     dst_rules: dict | None = None,
+                     dst_history: bool = False) -> list:
     """Which factors this position must have pinned to 50 under `rules`.
 
-    DST: all four, always. There is no team-defense row in `weekly` to
-    compute production, durability or schedule from, and no defensive
-    scoring this app can express (scoring/league.py's `from_espn` gives the
-    measurements). A defense's numbers here would be fabricated, not
-    computed, so nothing changes for DST and nothing should.
+    DST with no defensive history on hand (`dst_history` False -- an empty or
+    absent `dst_weekly` table, which is every database until a refresh has run
+    the new job): all four, exactly as before. Same answer if the league
+    prices no defense at all (`prices_defense({})`).
+
+    DST with a real history -- ONE of the four comes back, and only one:
+
+      * production: a recency-weighted per-game average of the defense's own
+        points, scored under this league's D/ST rules from the stat line ESPN
+        serves (`scoring.ppr.compute_dst_points` over `dst_weekly`). This is
+        the number that separates defenses and the whole reason the position
+        was neutral before -- there was nothing to compute it from.
+
+      * durability stays neutral, and this is NOT the kicker argument with a
+        different noun. A kicker's durability is real because kickers get
+        hurt and miss weeks. A DEFENSE plays every game its team plays,
+        always: games/possible is 17/17 for all 32 of them, so the factor is
+        a constant. Releasing it would add no signal and would only spend the
+        composite's durability weight on a tie.
+
+      * role stays neutral for the same structural reason it does for
+        kickers: `factors.role_factor` blends depth-chart rank with share of
+        team targets+carries, and a defense has neither. There is nothing to
+        release.
+
+      * schedule stays neutral, and this one is a deliberate omission rather
+        than an impossibility -- worth naming so nobody re-derives the old
+        "it cannot be done". Strength of schedule for a defense IS now
+        computable (opponents' defensive points conceded, joined through
+        `weekly`'s `opponent_team`), and it is probably the strongest single
+        signal about a defense. It is left out because it is a second
+        feature, not a smaller part of this one, and shipping it untested
+        beside a change that has to leave QB/RB/WR/TE byte-identical is how
+        the careful half gets broken by the ambitious half.
 
     K under a league that prices no kicking: all four, unchanged. Every
     kicking column is unscored, so `production` is a recency-weighted
@@ -166,6 +202,9 @@ def _neutral_factors(position: str, rules: dict | None) -> list:
         kicking does not touch it.
     """
     if position == "DST":
+        if dst_history and prices_defense(dst_rules):
+            return [f for f in _NEUTRAL_FACTORS_FOR_KDST
+                    if f not in _DST_FACTORS_THAT_BECOME_REAL]
         return _NEUTRAL_FACTORS_FOR_KDST
     if position == "K" and prices_kicking(rules):
         return [f for f in _NEUTRAL_FACTORS_FOR_KDST
@@ -579,6 +618,125 @@ def _latest_season_stats(weekly: pd.DataFrame,
     return latest[["player_id", "stats", "league_ppg", "ppr_ppg"]]
 
 
+# The zero-valued half of a `stats` dict for a defense. A defense really did
+# have 0 carries and 0 targets, so these are facts rather than placeholders --
+# but they are here to keep the dict's KEY SET identical to the one
+# `_latest_season_stats` builds for everybody else. Every consumer reads that
+# column with `.get(...)` on a known key set (the API serializes it straight
+# to JSON), and a defense whose dict was missing half of them would be a
+# second shape flowing through the same field.
+_DST_EMPTY_STAT_KEYS = ("carries", "rush_yards", "targets", "receptions",
+                        "rec_yards", "tds", "completions", "attempts",
+                        "pass_yards", "pass_tds", "interceptions")
+
+
+def dst_team_history(dst_weekly: pd.DataFrame,
+                     dst_rules: dict | None = None) -> pd.DataFrame:
+    """Per-team defensive history, keyed by `team` rather than `player_id`.
+
+    Defenses reach the board through the ADP feed, with a synthesized
+    `player_id` (`_add_adp_only_players`), and join to everything else on
+    `team` -- environment and bye already do. So does this.
+
+    Columns:
+      * `dst_production_raw` -- recency-weighted points per game under this
+        league's D/ST rules. Same arithmetic as `factors.production_factor`,
+        weight for weight (RECENCY_WEIGHTS over per-season ppg), so a defense
+        and a running back are measured on the same scale before
+        `normalize_within_position` turns both into percentiles.
+      * `dst_stats` -- the latest season's line, same dict shape
+        `_latest_season_stats` builds.
+      * `dst_league_ppg` / `dst_espn_ppg` -- the latest season per game in
+        this league's D/ST scoring and in ESPN's own (`applied_total`, which
+        is what leaguedefaults/3 scored it). `build_board` divides one by the
+        other to convert `espn_proj` for a defense, which is exactly what
+        `projection_scale` does for a skill player -- with the DENOMINATOR
+        corrected. Full PPR is the currency ESPN's SKILL projections are
+        published in; full PPR scores no defense at all, so for a defense the
+        published currency is ESPN's default D/ST rules, and that is what
+        `applied_total` carries.
+    """
+    empty = pd.DataFrame(columns=["team", "dst_production_raw", "dst_stats",
+                                  "dst_league_ppg", "dst_espn_ppg"])
+    if dst_weekly is None or dst_weekly.empty or "team" not in dst_weekly.columns:
+        return empty
+    wk = dst_weekly.dropna(subset=["team"]).copy()
+    if wk.empty:
+        return empty
+    wk["points"] = compute_dst_points(wk, dst_rules)
+    seasons = wk.groupby(["team", "season"], as_index=False).agg(
+        points=("points", "sum"), espn_points=("applied_total", "sum"),
+        games=("week", "nunique"))
+    seasons["ppg"] = seasons["points"] / seasons["games"]
+    seasons["espn_ppg"] = seasons["espn_points"] / seasons["games"]
+
+    seasons["w"] = seasons["season"].map(RECENCY_WEIGHTS).fillna(0.0)
+    seasons["wppg"] = seasons["ppg"] * seasons["w"]
+    agg = seasons.groupby("team", as_index=False).agg(
+        wsum=("wppg", "sum"), wtot=("w", "sum"))
+    agg["dst_production_raw"] = agg["wsum"] / agg["wtot"].replace(0, np.nan)
+
+    latest = seasons[seasons["season"] == seasons["season"].max()].copy()
+    latest["dst_stats"] = latest.apply(lambda r: {
+        "season": int(r["season"]), "games": int(r["games"]),
+        "ppg": round(float(r["ppg"]), 1), "points": round(float(r["points"]), 1),
+        **{k: 0 for k in _DST_EMPTY_STAT_KEYS},
+    }, axis=1)
+    latest = latest.rename(columns={"ppg": "dst_league_ppg",
+                                    "espn_ppg": "dst_espn_ppg"})
+    out = agg[["team", "dst_production_raw"]].merge(
+        latest[["team", "dst_stats", "dst_league_ppg", "dst_espn_ppg"]],
+        on="team", how="left")
+    return out
+
+
+def _apply_dst_history(uni: pd.DataFrame, dst_rules: dict | None,
+                       dst_history: bool) -> pd.DataFrame:
+    """Give DST rows the `stats` line and `proj_scale` a defense can now have.
+
+    Runs AFTER `_latest_season_stats` and `projection_scale`, and overwrites
+    only DST rows, on purpose: neither of those functions is touched, so the
+    QB/RB/WR/TE half of the board is not merely expected to be unchanged, it
+    cannot be reached from here at all.
+
+    `stats` was NaN for every defense (there are no DST rows in `weekly` to
+    merge), which meant `projections()` skipped its second rung and dropped
+    any defense ESPN does not project onto POSITION_FLOOR -- a flat 100.0 for
+    all of them.
+
+    `proj_scale` converts ESPN's `espn_proj` into this league's D/ST scoring,
+    the same ratio `projection_scale` builds for skill players and for the
+    same reason, but with the right denominator: full PPR prices nothing a
+    defense does, so ESPN's DEFAULT D/ST rules -- what `applied_total`
+    carries -- are the currency `espn_proj` is published in for a defense.
+    A league scoring exactly ESPN's defaults gets 1.0 and nothing moves; the
+    owner's league is that league, verified item for item.
+
+    `_MIN_PPG_FOR_SCALE` guards the denominator here as it does there: a
+    defense whose ESPN-scored season averaged under a point a game gives a
+    ratio built on noise, so it keeps 1.0.
+    """
+    if not dst_history:
+        return uni
+    is_dst = (uni["position"] == "DST").to_numpy()
+    if not is_dst.any():
+        return uni
+
+    have_stats = is_dst & uni["dst_stats"].notna().to_numpy()
+    if have_stats.any():
+        uni.loc[have_stats, "stats"] = uni.loc[have_stats, "dst_stats"]
+
+    league_ppg = pd.to_numeric(uni["dst_league_ppg"], errors="coerce").to_numpy(dtype=float)
+    espn_ppg = pd.to_numeric(uni["dst_espn_ppg"], errors="coerce").to_numpy(dtype=float)
+    usable = (is_dst & np.isfinite(league_ppg) & np.isfinite(espn_ppg)
+              & (espn_ppg >= _MIN_PPG_FOR_SCALE))
+    if usable.any():
+        scale = uni["proj_scale"].to_numpy(dtype=float).copy()
+        scale[usable] = league_ppg[usable] / espn_ppg[usable]
+        uni["proj_scale"] = scale
+    return uni
+
+
 def build_board(conn, weights: dict | None = None,
                 settings: "league.LeagueSettings | None" = None) -> pd.DataFrame:
     # The weekly table reaches back to 2016 for profiles/stat twins, but the
@@ -588,6 +746,12 @@ def build_board(conn, weights: dict | None = None,
     # veterans for decade-old injuries.
     settings = settings or league.load(conn)
     rules = settings.scoring
+    # `settings.dst_scoring` is None for every league row written before ESPN's
+    # `pointsOverrides` were parsed -- including the six on this deployment's
+    # own database. None is "not specified", which `compute_dst_points`
+    # resolves to ESPN's default D/ST scoring, NOT to zero. See
+    # scoring/league.LeagueSettings.dst_scoring.
+    dst_rules = settings.dst_scoring
     # The consensus ADP is scoring-format-aware: FFC/FantasyPros/MFL/CBS each
     # publish a per-format feed, and the board reflects the LEAGUE's format so
     # both the recommendations and the +/- vs ADP are right for PPR, half-PPR
@@ -608,6 +772,10 @@ def build_board(conn, weights: dict | None = None,
     sleeper = read_table(conn, "sleeper_ids")
     mfl = read_table(conn, "mfl_adp")
     cbs = read_table(conn, "cbs_ranks")
+    # Absent until a refresh has run the `dst_weekly` job, and absent is the
+    # whole no-op condition below: an empty frame gives an empty history,
+    # `dst_history` is False, and every DST row takes the path it took before.
+    dst = dst_team_history(read_table(conn, "dst_weekly"), dst_rules)
 
     uni = _build_universe(weekly)
     uni["norm"] = uni["name"].map(_norm_name)
@@ -653,6 +821,22 @@ def build_board(conn, weights: dict | None = None,
     byes = factors.bye_weeks(sched) if not sched.empty else pd.DataFrame(columns=["team", "bye"])
     uni = uni.merge(byes, on="team", how="left")
 
+    # Defenses join their own history on `team`, the same key environment and
+    # bye just used, and it lands in the SAME `production_raw` column every
+    # other position uses -- so `normalize_within_position` turns it into a
+    # DST-internal percentile exactly as it does for RBs, and no other
+    # position's normalization can see it. Merged here rather than up with the
+    # `weekly` factors because it is keyed on team, not player_id.
+    dst_history = not dst.empty
+    if dst_history:
+        uni = uni.merge(dst, on="team", how="left")
+        is_dst = uni["position"] == "DST"
+        uni.loc[is_dst, "production_raw"] = uni.loc[is_dst, "dst_production_raw"]
+    else:
+        for col in ("dst_production_raw", "dst_stats",
+                    "dst_league_ppg", "dst_espn_ppg"):
+            uni[col] = pd.NA
+
     # -- normalize each factor to 0-100 within position (NaN -> 50) --
     for raw_col, col in [("production_raw", "production"), ("durability_raw", "durability"),
                          ("role_raw", "role"), ("env_raw", "environment"), ("sos_raw", "schedule")]:
@@ -668,7 +852,8 @@ def build_board(conn, weights: dict | None = None,
     # `rookie` is meaningless for both regardless (they enter from ADP by
     # design, not because they lack NFL history), so force it False.
     for pos, neutral in (("K", _neutral_factors("K", rules)),
-                         ("DST", _neutral_factors("DST", rules))):
+                         ("DST", _neutral_factors("DST", rules, dst_rules,
+                                                  dst_history))):
         mask = uni["position"] == pos
         if neutral:
             uni.loc[mask, neutral] = 50.0
@@ -688,6 +873,7 @@ def build_board(conn, weights: dict | None = None,
     # dropped by `_BOARD_COLUMNS` at the end.
     uni = uni.merge(_latest_season_stats(weekly, rules), on="player_id", how="left")
     uni["proj_scale"] = projection_scale(uni, rules)
+    uni = _apply_dst_history(uni, dst_rules, dst_history)
 
     # -- score --
     uni["composite"] = compute_composite(uni, weights or DEFAULT_WEIGHTS)

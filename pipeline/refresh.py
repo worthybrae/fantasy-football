@@ -3,7 +3,7 @@ import sys
 import pandas as pd
 from pipeline import news, sources
 from pipeline.db import get_conn, read_table, record_freshness, write_table
-from scoring.config import CURRENT_SEASON, HISTORY_SEASONS
+from scoring.config import CURRENT_SEASON, HISTORY_SEASONS, RECENCY_WEIGHTS
 
 # Which of the three scoring-format tokens ('ppr' | 'half' | 'std') each
 # format-aware source's fetcher actually supports -- see the per-source
@@ -62,6 +62,14 @@ def main() -> int:
         "cbs_ranks": lambda: _fetch_multi_format(
             sources.fetch_cbs, FORMATS_BY_SOURCE["cbs_ranks"]),
         "espn_adp": lambda: sources.fetch_espn_adp(CURRENT_SEASON),  # PPR-only; not format-aware
+        # ESPN's own per-week D/ST stat lines -- the only source of team-defense
+        # rows anywhere in this pipeline, since nflverse `weekly` carries
+        # individual defenders and no defense. Scoped to the board's scoring
+        # window (RECENCY_WEIGHTS), not HISTORY_SEASONS: that is exactly the
+        # span `scoring.board` weights, and each season is a separate ~1MB
+        # request, so fetching 2016 would cost seven more calls for rows
+        # nothing reads.
+        "dst_weekly": lambda: sources.fetch_espn_dst(sorted(RECENCY_WEIGHTS)),
         "fp_ecr": lambda: _fetch_multi_format(
             sources.fetch_fp_ecr, FORMATS_BY_SOURCE["fp_ecr"]),
         "sleeper_ids": sources.fetch_sleeper_ids,

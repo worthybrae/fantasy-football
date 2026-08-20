@@ -484,3 +484,136 @@ def test_refresh_formats_by_source_matches_verified_support():
     assert set(FORMATS_BY_SOURCE["fp_ecr"]) == {"ppr", "half", "std"}
     assert set(FORMATS_BY_SOURCE["cbs_ranks"]) == {"ppr", "std"}
     assert set(FORMATS_BY_SOURCE["mfl_adp"]) == {"ppr", "std"}
+
+
+# ------------------------------------------------- ESPN team-defense stats
+
+def _dst_fixture():
+    """Three real defenses, weeks 1-4 of 2025, taken verbatim from ESPN's
+    `leaguedefaults/3?view=kona_player_info` response for slot 16 -- plus the
+    season-aggregate and projection blocks the parser has to drop."""
+    import json
+    from pathlib import Path
+    path = Path(__file__).parent / "fixtures" / "espn_dst_2025.json"
+    return json.loads(path.read_text())
+
+
+def test_parse_espn_dst_keeps_the_scored_weeks_and_drops_the_rest():
+    from pipeline.sources import parse_espn_dst
+    df = parse_espn_dst(_dst_fixture())
+    # 3 defenses x weeks 1-4. The season aggregate (scoringPeriodId 0) would
+    # double every total if kept beside the weeks; the projection blocks
+    # (statSourceId 1) are a different question entirely.
+    assert len(df) == 12
+    assert sorted(df["week"].unique()) == [1, 2, 3, 4]
+    assert set(df["season"]) == {2025}
+    assert set(df["team"]) == {"DEN", "HOU", "SEA"}
+    assert set(df["espn_id"]) == {-16007, -16034, -16026}
+
+
+def test_parse_espn_dst_reads_the_season_off_the_stat_block():
+    """Not off the URL year, which routinely disagrees: asking ESPN for
+    season 2026 in August 2026 returns 2025's completed weeks."""
+    from pipeline.sources import parse_espn_dst
+    payload = {"players": [{"player": {
+        "id": -16007, "proTeamId": 7, "fullName": "Broncos D/ST", "stats": [
+            {"statSourceId": 0, "scoringPeriodId": 4, "seasonId": 2024,
+             "appliedTotal": 3.0, "stats": {"99": 3.0}}]}}]}
+    df = parse_espn_dst(payload)
+    assert df["season"].tolist() == [2024]
+
+
+def test_scoring_a_defense_reproduces_espns_own_total_exactly():
+    """The whole basis for scoring defenses without identifying a single
+    stat: ESPN hands over the values and the point values keyed by the same
+    ids, so `sum(stat x points)` IS ESPN's arithmetic. Checked here on real
+    weeks; checked at scale (3744 defense-weeks, 0 mismatches) in the note on
+    scoring.ppr.DEFAULT_DST_RULES.
+
+    `applied_total` is scored under leaguedefaults/3's rules, and
+    DEFAULT_DST_RULES is a live read of exactly those rules -- so the two
+    must agree to the bit, not merely to a tolerance.
+    """
+    from pipeline.sources import parse_espn_dst
+    from scoring.ppr import DEFAULT_DST_RULES, compute_dst_points
+    df = parse_espn_dst(_dst_fixture())
+    assert (compute_dst_points(df, DEFAULT_DST_RULES) == df["applied_total"]).all()
+    # None means "not specified" and resolves to the same default.
+    assert (compute_dst_points(df) == df["applied_total"]).all()
+    # {} means "this league scores no defense" -- a different answer.
+    assert (compute_dst_points(df, {}) == 0.0).all()
+
+
+def test_a_tiered_rule_is_an_ordinary_column_times_points():
+    """The thing that used to make defenses unscorable: points allowed is a
+    nine-way step function. ESPN emits the bucket already decided, one-hot
+    per game, so it is a `column x points` rule like any other.
+
+    Texans week 2 conceded 20 points, which lands in the 18-21 band (statId
+    121) -- worth 0 in this scoring, which is why 121 is NOT in
+    DEFAULT_DST_RULES at all. Texans week 4 conceded 0, which is statId 89,
+    worth 5. Broncos week 2 conceded 29, statId 123, worth -1.
+    """
+    from pipeline.sources import parse_espn_dst
+    from scoring.ppr import DEFAULT_DST_RULES
+    df = parse_espn_dst(_dst_fixture()).set_index(["team", "week"])
+    tiers = ["89", "90", "91", "92", "121", "122", "123", "124", "125"]
+    # A tier no defense landed in has no column at all: ESPN omits a stat id
+    # from a week's line when it is zero, so absent means zero here.
+    assert "stat_125" not in df.columns
+    for key in df.index:
+        hot = [t for t in tiers
+               if f"stat_{t}" in df.columns and df.loc[key, f"stat_{t}"] == 1.0]
+        assert len(hot) == 1, f"{key} is not one-hot across the tier family"
+    assert df.loc[("HOU", 2), "stat_120"] == 20.0
+    assert df.loc[("HOU", 2), "stat_121"] == 1.0
+    assert "121" not in DEFAULT_DST_RULES
+    assert df.loc[("HOU", 4), "stat_120"] == 0.0
+    assert df.loc[("HOU", 4), "stat_89"] == 1.0
+    assert DEFAULT_DST_RULES["89"] == 5.0
+    assert df.loc[("DEN", 2), "stat_120"] == 29.0
+    assert df.loc[("DEN", 2), "stat_123"] == 1.0
+    assert DEFAULT_DST_RULES["123"] == -1.0
+
+
+def test_fetch_espn_dst_asks_for_the_defense_slot_and_raises_on_empty(monkeypatch):
+    """Without `filterSlotIds` the endpoint answers 200 with the 50 most-owned
+    PLAYERS and not one defense -- a healthy-looking fetch that silently
+    empties the table. Both halves of the guard are pinned."""
+    import json
+    from pipeline import sources
+    seen = {}
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return self._payload
+
+    def fake_get(url, headers=None, timeout=None):
+        seen["url"] = url
+        seen["filter"] = json.loads(headers["X-Fantasy-Filter"])
+        return _Resp(_dst_fixture())
+
+    monkeypatch.setattr(sources.requests, "get", fake_get)
+    df = sources.fetch_espn_dst([2025])
+    assert len(df) == 12
+    assert seen["filter"]["players"]["filterSlotIds"]["value"] == [16]
+    assert "leaguedefaults/3" in seen["url"] and "2025" in seen["url"]
+
+    monkeypatch.setattr(sources.requests, "get",
+                        lambda *a, **k: _Resp({"players": []}))
+    with pytest.raises(ValueError):
+        sources.fetch_espn_dst([2025])
+
+
+def test_dst_weekly_is_registered_as_a_universal_table():
+    """A table in neither set is treated as universal by provisioning anyway,
+    so the classification has to be explicit. What a defense did in week 4 is
+    the same fact in every league; the LEAGUE-specific half is the price list
+    in `league.settings_json`."""
+    from pipeline.db import LEAGUE_TABLES, UNIVERSAL_TABLES
+    assert "dst_weekly" in UNIVERSAL_TABLES
+    assert "dst_weekly" not in LEAGUE_TABLES

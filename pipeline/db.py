@@ -23,6 +23,12 @@ UNIVERSAL_TABLES = frozenset({
     "weekly", "snap_counts", "depth_charts", "players", "schedules",
     "adp", "espn_adp", "fp_ecr", "cbs_ranks", "mfl_adp",
     "historic_adp", "historic_espn_cs", "sleeper_ids", "meta", "model_backtest",
+    # ESPN's per-week D/ST stat lines (pipeline/sources.fetch_espn_dst).
+    # Universal for the same reason `weekly` is: what the Broncos defense did
+    # in week 4 is the same fact in every league. The LEAGUE-specific half is
+    # the price list, which lives in `league.settings_json` as `dst_scoring`,
+    # and the two are only combined at scoring time.
+    "dst_weekly",
     # Player news + injury signals (pipeline/news.py). Universal, not
     # per-league: an article about Ja'Marr Chase says the same thing in
     # every league, so a new league's file should be seeded with whatever

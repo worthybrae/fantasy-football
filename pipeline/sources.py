@@ -206,6 +206,126 @@ def fetch_espn_adp(year: int, limit: int = 500) -> pd.DataFrame:
         raise ValueError("no rows parsed - upstream schema drift?")
     return df
 
+
+# ESPN's D/ST lineup slot. The player endpoint above answers with the 50
+# most-owned players in the whole league unless the filter narrows it, and
+# defenses are nowhere near that list -- so without `filterSlotIds` this
+# returns a healthy 200 carrying zero defenses, the same silent-empty failure
+# mode `pipeline/espn_league.PLAYERS_FILTER` exists to prevent. 40 comfortably
+# covers 32 teams; `sortPercOwned` only makes the truncation predictable if it
+# ever matters.
+ESPN_DST_SLOT = 16
+ESPN_DST_FILTER = json.dumps({"players": {
+    "filterSlotIds": {"value": [ESPN_DST_SLOT]}, "limit": 40,
+    "sortPercOwned": {"sortAsc": False, "sortPriority": 1}}})
+
+# The stat blocks worth keeping out of a D/ST payload.
+#   statSourceId 0  = what actually happened. 1 is ESPN's projection, which
+#                     is a different question and is already answered for
+#                     defenses by `espn_proj` on the `espn_adp` table.
+#   scoringPeriodId = the NFL week; 0 is the season aggregate, which is a sum
+#                     of the weekly rows and would double every total if kept
+#                     beside them.
+_ESPN_ACTUAL_STATS = 0
+_ESPN_SEASON_AGGREGATE = 0
+
+_DST_KEY_COLUMNS = ["season", "week", "espn_id", "team", "applied_total"]
+
+
+def parse_espn_dst(payload: dict) -> pd.DataFrame:
+    """One row per defense per week, carrying ESPN's own raw D/ST stat line.
+
+    Wide, one column per ESPN stat id (`scoring.ppr.dst_stat_column` names
+    them, so the writer and `compute_dst_points` cannot drift). Wide rather
+    than long because every consumer wants `sum(stat x points)` over a
+    defense's weeks, which is one vectorised pass over columns and a
+    self-join in long form.
+
+    `season` comes from the STAT BLOCK's own `seasonId`, never from the URL
+    year. They disagree, routinely and on purpose: asking ESPN for season
+    2026 in August 2026 returns 2025's completed weeks, because 2026 has not
+    been played. Keying on the URL year would file last season's games under
+    this one.
+
+    `applied_total` is ESPN's own scored total for that week, under
+    leaguedefaults/3's rules. It is kept beside the raw stats deliberately --
+    it is the check that our scoring is ESPN's scoring (summing
+    `scoring.ppr.DEFAULT_DST_RULES` over these columns reproduces it exactly,
+    0 mismatches in 3744 defense-weeks) and the honest fallback for a league
+    whose own D/ST rules we do not have.
+
+    ESPN omits a stat id from a week's line entirely when it is zero for that
+    game, so the union of ids across a season decides the columns and any
+    gap is filled with 0.0 -- absent means zero here, not missing.
+    """
+    from pipeline.espn_league import ESPN_PRO_TEAMS
+    from scoring.ppr import dst_stat_column
+
+    rows = []
+    for entry in (payload.get("players") or []):
+        player = entry.get("player", entry)
+        if player.get("id") is None:
+            continue
+        team = ESPN_PRO_TEAMS.get(player.get("proTeamId"))
+        for block in (player.get("stats") or []):
+            if block.get("statSourceId") != _ESPN_ACTUAL_STATS:
+                continue
+            if (block.get("scoringPeriodId") or 0) == _ESPN_SEASON_AGGREGATE:
+                continue
+            row = {"season": int(block.get("seasonId")),
+                   "week": int(block.get("scoringPeriodId")),
+                   "espn_id": int(player["id"]),
+                   "team": team,
+                   "applied_total": float(block.get("appliedTotal") or 0.0)}
+            for stat_id, value in (block.get("stats") or {}).items():
+                row[dst_stat_column(stat_id)] = float(value)
+            rows.append(row)
+
+    if not rows:
+        return pd.DataFrame(columns=_DST_KEY_COLUMNS)
+    df = pd.DataFrame(rows)
+    stat_cols = sorted((c for c in df.columns if c not in _DST_KEY_COLUMNS),
+                       key=lambda c: int(c.rsplit("_", 1)[1]))
+    df[stat_cols] = df[stat_cols].fillna(0.0)
+    # A defense cannot play twice in a week. ESPN has served more than one
+    # block for the same (season, week) before -- the season-aggregate id
+    # appears twice in the 2026 payload -- so collapse rather than trust it,
+    # keeping the first, and sort so the table is stable across refreshes.
+    df = df.drop_duplicates(["season", "week", "espn_id"], keep="first")
+    return df.sort_values(["season", "week", "espn_id"]).reset_index(
+        drop=True)[_DST_KEY_COLUMNS + stat_cols]
+
+
+def fetch_espn_dst(seasons) -> pd.DataFrame:
+    """Per-week D/ST stat lines for `seasons`, stacked into one frame.
+
+    Same host, same endpoint and same default league (3) as `fetch_espn_adp`
+    -- which matters beyond tidiness: `espn_proj` for a defense is that
+    league's projection, so a defense's history and its projection are quoted
+    in the same currency and `scoring.board.projection_scale` can convert
+    between that and the owner's rules honestly.
+
+    A season that returns nothing raises rather than being skipped: the whole
+    failure mode this guards against is a filtered player endpoint answering
+    200 with an empty list, which looks like a healthy fetch and silently
+    empties the table (see ESPN_DST_FILTER).
+    """
+    frames = []
+    for season in seasons:
+        resp = requests.get(ESPN_URL.format(year=season),
+                            headers={**UA, "X-Fantasy-Filter": ESPN_DST_FILTER},
+                            timeout=60)
+        resp.raise_for_status()
+        df = parse_espn_dst(resp.json())
+        if df.empty:
+            raise ValueError(f"no D/ST rows parsed for {season} "
+                             "- upstream schema drift?")
+        frames.append(df)
+    out = pd.concat(frames, ignore_index=True)
+    out = out.drop_duplicates(["season", "week", "espn_id"], keep="first")
+    return out.sort_values(["season", "week", "espn_id"]).reset_index(drop=True)
+
+
 # IS_PPR is a binary flag (1 = PPR-scored leagues, 0 = standard), not a
 # scoring-format enum, so MFL has no half-PPR ADP export at all -- there is
 # no third value to ask for (verified: IS_PPR=1 and IS_PPR=0 both return

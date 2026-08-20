@@ -936,8 +936,8 @@ def test_a_kickers_factors_stay_neutral_until_the_league_prices_kicking():
     moment his kicks are worth points; `role` never does, because
     `factors.role_factor` blends depth-chart rank with share of team
     targets+carries and the second half is structurally zero for every
-    kicker. A defense gets nothing back under any rules -- there is no
-    team-defense row in `weekly` to compute one from.
+    kicker. A defense's release is decided by a different input entirely --
+    see the DST test below -- and never by the skill-position `rules`.
     """
     from scoring.board import _neutral_factors, _NEUTRAL_FACTORS_FOR_KDST
     from scoring.ppr import DEFAULT_RULES
@@ -947,8 +947,63 @@ def test_a_kickers_factors_stay_neutral_until_the_league_prices_kicking():
     assert _neutral_factors("K", DEFAULT_RULES) == _NEUTRAL_FACTORS_FOR_KDST
     assert _neutral_factors("K", kicking) == ["role"]
 
+    # A league's kicking rules say nothing about its defenses, and with no
+    # `dst_weekly` on hand a defense is exactly as neutral as it always was.
     assert _neutral_factors("DST", None) == _NEUTRAL_FACTORS_FOR_KDST
     assert _neutral_factors("DST", kicking) == _NEUTRAL_FACTORS_FOR_KDST
+
+
+def test_a_defense_gets_production_back_only_once_there_is_a_history():
+    """Two conditions, both required, and only ONE factor released.
+
+    `durability` is deliberately still pinned even though `dst_weekly` could
+    compute it: a defense plays every game its team plays, so games/possible
+    is 17/17 for all 32 and the factor is a constant. `role` has nothing to
+    compute from. `schedule` is left for separate work -- see
+    `_neutral_factors`.
+    """
+    from scoring.board import (_neutral_factors, _NEUTRAL_FACTORS_FOR_KDST,
+                               _DST_FACTORS_THAT_BECOME_REAL)
+    assert _DST_FACTORS_THAT_BECOME_REAL == ["production"]
+    # History present and the league prices defense (None = ESPN's defaults).
+    assert _neutral_factors("DST", None, None, True) == \
+        ["durability", "role", "schedule"]
+    # History present but this league scores no defense at all.
+    assert _neutral_factors("DST", None, {}, True) == _NEUTRAL_FACTORS_FOR_KDST
+    # League prices defense but there is no history to compute from.
+    assert _neutral_factors("DST", None, None, False) == _NEUTRAL_FACTORS_FOR_KDST
+
+
+def test_dst_team_history_scores_a_defense_under_the_leagues_own_rules():
+    """Keyed on `team`, not `player_id`: defenses reach the board from the ADP
+    feed with a synthesized id, and join everything else on team already."""
+    import pandas as pd
+    from scoring.board import dst_team_history
+    # Two teams, two seasons, one stat: 3 sacks a week at 1 point each.
+    rows = [{"season": season, "week": week, "espn_id": espn_id, "team": team,
+             "applied_total": 6.0, "stat_99": 3.0}
+            for season, weight in ((2024, 0.3), (2025, 0.5))
+            for team, espn_id in (("DEN", -16007), ("HOU", -16034))
+            for week in (1, 2)]
+    hist = dst_team_history(pd.DataFrame(rows), {"99": 2.0})
+    assert sorted(hist["team"]) == ["DEN", "HOU"]
+    row = hist[hist["team"] == "DEN"].iloc[0]
+    # 6 points a week under this league's rules, every season -> 6.0 ppg.
+    # approx, not ==: the recency weighting divides by 0.3 + 0.5, exactly as
+    # `factors.production_factor` does for a running back.
+    assert row["dst_production_raw"] == pytest.approx(6.0)
+    assert row["dst_stats"]["season"] == 2025
+    assert row["dst_stats"]["games"] == 2
+    assert row["dst_stats"]["points"] == 12.0
+    # The board's `stats` dict has one key set for every position.
+    assert row["dst_stats"]["receptions"] == 0
+    # ESPN scored the same weeks at 6.0 too, so the conversion factor is 1.0.
+    assert row["dst_league_ppg"] == 6.0 and row["dst_espn_ppg"] == 6.0
+    # A league that scores no defense gets zeros, not ESPN's defaults.
+    zero = dst_team_history(pd.DataFrame(rows), {})
+    assert zero[zero["team"] == "DEN"].iloc[0]["dst_production_raw"] == 0.0
+    # No data at all is not an error, it is "nothing to release".
+    assert dst_team_history(pd.DataFrame()).empty
 
 
 def test_a_kicker_needs_most_of_a_season_before_his_ppg_is_extrapolated():
@@ -989,3 +1044,70 @@ def test_a_kicker_needs_most_of_a_season_before_his_ppg_is_extrapolated():
         # changing him would move a board the owner is drafting from.
         wr = short.assign(position="WR", name="WR Guy")
         assert projections(_NoEspn(), wr).iloc[0] == 11.2 * GAMES
+
+
+def _seed_with_two_defenses(tmp_path, with_dst_weekly: bool):
+    """The same board twice, differing only in whether `dst_weekly` exists.
+
+    Two defenses that ESPN ranks identically but that played very differently,
+    so anything that moves has to have come from the new table.
+    """
+    conn = _seed(tmp_path)
+    adp = pd.DataFrame([
+        {"adp_name": "Amon-Ra St Brown", "position": "WR", "team": "DET", "adp": 5.1},
+        {"adp_name": "Rookie Guy", "position": "WR", "team": "GB", "adp": 90.0},
+        {"adp_name": "Detroit Defense", "position": "DST", "team": "DET", "adp": 100.0},
+        {"adp_name": "Green Bay Defense", "position": "DST", "team": "GB", "adp": 101.0}])
+    write_table(conn, "adp", adp)
+    if with_dst_weekly:
+        rows = []
+        for team, espn_id, sacks in (("DET", -16008, 5.0), ("GB", -16009, 1.0)):
+            for season in (2024, 2025):
+                for week in range(1, 18):
+                    rows.append({"season": season, "week": week, "team": team,
+                                 "espn_id": espn_id, "applied_total": sacks,
+                                 "stat_99": sacks})
+        write_table(conn, "dst_weekly", pd.DataFrame(rows))
+    return conn
+
+
+def test_a_board_with_no_dst_weekly_is_the_board_it_always_was(tmp_path):
+    """The no-op condition, stated as a test rather than as an intention:
+    every database is in this state until a refresh has run the new job."""
+    before = build_board(_seed_with_two_defenses(tmp_path / "a", False))
+    dst = before[before["position"] == "DST"]
+    assert len(dst) == 2
+    assert set(dst["production"]) == {50.0}
+    assert dst["stats"].isna().all()
+
+
+def test_dst_weekly_moves_defenses_and_nothing_else(tmp_path):
+    """The guarantee the live board rests on, checked the only way that
+    counts: build both boards and diff them, exactly.
+
+    Defenses gain a real `production` spread and a real `stats` line. Every
+    other position keeps every value it had, to the bit.
+    """
+    before = build_board(_seed_with_two_defenses(tmp_path / "a", False))
+    after = build_board(_seed_with_two_defenses(tmp_path / "b", True))
+
+    dst = after[after["position"] == "DST"].set_index("team")
+    assert set(dst["production"]) != {50.0}
+    assert dst.loc["DET", "production"] > dst.loc["GB", "production"]
+    assert dst.loc["DET", "stats"]["points"] == 85.0     # 17 weeks x 5
+    assert dst.loc["GB", "stats"]["points"] == 17.0
+    # ESPN scored these weeks identically, so nothing is converted.
+    assert set(dst["proj_scale"]) == {1.0}
+
+    skill = ["QB", "RB", "WR", "TE", "K"]
+    keep = [c for c in before.columns if c not in ("rank", "edge")]
+    a = before[before["position"].isin(skill)].sort_values("player_id").reset_index(drop=True)
+    b = after[after["position"].isin(skill)].sort_values("player_id").reset_index(drop=True)
+    pd.testing.assert_frame_equal(a[keep], b[keep], check_exact=True)
+    # `rank` and `edge` are the only two columns that CAN move, because both
+    # are positions in a single cross-position ordering: a defense that
+    # re-sorts past a skill player pushes his rank number down by one. The
+    # order among skill players themselves is untouched.
+    order_before = before[before["position"].isin(skill)].sort_values("rank")["player_id"].tolist()
+    order_after = after[after["position"].isin(skill)].sort_values("rank")["player_id"].tolist()
+    assert order_before == order_after

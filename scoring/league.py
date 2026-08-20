@@ -110,35 +110,60 @@ ESPN_STAT_COLUMNS = {
 #     (This also corrects a stale note in tests/test_league.py, which said
 #     101 is unmappable because nflverse does not carry it. It does carry
 #     it; the problem is that it cannot tell 101 from 102.)
-#   * 89-92, 121-125, 187-195 (points-allowed tiers) and 120/187 (points
+#
+# EVERY DEFENSIVE ID BELOW HAS SINCE MOVED, and this map is no longer where
+# they live. They are not mapped HERE because there is no nflverse column to
+# map them to -- that part was and is correct. They ARE scored, through
+# `LeagueSettings.dst_scoring` and `scoring.ppr.compute_dst_points`, keyed by
+# ESPN's stat id against the D/ST stat line ESPN itself serves. The three
+# bullets are kept because each one records a real measurement, and each one
+# also records where the reasoning stopped a step early.
+#
+#   * 89-92, 121-125, 187-196 (points-allowed tiers) and 120/187 (points
 #     allowed): the tier families are real -- for all 32 defenses the nine
 #     ids in each family sum to exactly 17, the games played -- but this
 #     database CANNOT compute points allowed. `schedules` holds only the
 #     upcoming season and every `home_score`/`away_score` in it is null
 #     (verified: 0 of 272 rows scored), and reconstructing each team's score
 #     from `weekly` scoring plays reproduced ESPN's season total for only 8
-#     of 32 teams, off by as much as 38 points. Which tier a game falls in
-#     therefore cannot be determined at all, let alone the boundaries.
+#     of 32 teams, off by as much as 38 points.
+#     WHAT THAT MISSED: the tier does not have to be computed. ESPN publishes
+#     it pre-bucketed, one-hot, per game -- and its own per-game points-allowed
+#     number (120) alongside, which is what pinned every band exactly. 187-196
+#     turned out to be a second copy of the same family, identical row for row.
 #   * 128-136 (yards-allowed tiers) and 127 (yards allowed): these ARE fully
 #     derivable and were verified exactly -- opponents' `passing_yards +
 #     rushing_yards + sack_yards_lost` reproduces ESPN's season yards
 #     allowed for 31 of 32 teams (the last off by 5), and bucketing that
 #     per game at <100/100-199/200-299/300-349/350-399/400-449/450-499/
-#     500-549/550+ reproduces all 288 of ESPN's per-team tier counts. They
-#     are still not mapped, because they are not what this map is: a tier is
-#     a step function over a per-GAME team aggregate, and every rule here is
-#     `column x points` summed over a player's rows. See `from_espn`.
+#     500-549/550+ reproduces all 288 of ESPN's per-team tier counts.
+#     WHAT THAT MISSED: nothing about the bands -- ESPN's own one-hot ids
+#     confirm all nine of them exactly. Only the conclusion, that a tier
+#     cannot be a `column x points` rule. A pre-bucketed tier is precisely
+#     that rule; it is the bucketing that could not be expressed.
 #   * 93 (blocked-kick-return TD), 95 (interceptions), 96 (fumble
 #     recoveries), 97 (blocked kicks), 98 (safeties), 99 (sacks), 206, 209:
 #     team-defense stats with no DST row to attach to (nflverse `weekly` has
 #     no team-defense rows at all -- only individual defenders, who are not
 #     on this board). Summing individual defenders by team gets close but
 #     not exact anyway: interceptions matched ESPN for all 32 teams, but
-#     sacks for only 25, fumble recoveries 28 and safeties 26. 209 could not
-#     be identified at all -- no player and no defense in the 2025 payload
-#     carries a non-zero value for it.
+#     sacks for only 25, fumble recoveries 28 and safeties 26.
+#     WHAT THAT MISSED: ESPN has a DST row and will hand it over. Those same
+#     per-defender sums, compared PER WEEK rather than per season, are what
+#     identified the ids by name (see scoring/ppr.DEFAULT_DST_RULES) -- and
+#     206 turned out to be the defensive 2-point return, exact on all 544
+#     defense-weeks. 209 still could not be identified: no player and no
+#     defense carries a non-zero value for it in any season checked. It is
+#     scored anyway, because scoring it needs ESPN's id and ESPN's points and
+#     neither is a guess -- see DEFAULT_DST_RULES for that distinction.
 
 _FLEX_POSITIONS = ("RB", "WR", "TE")
+
+# The D/ST lineup slot, as a STRING: ESPN keys `pointsOverrides` by the slot
+# id rendered as a JSON object key, so `16` would never match. Same 16 as
+# pipeline/espn_league.ESPN_SLOT_POSITIONS, kept here rather than imported
+# because that import is function-local in `from_espn` (circular otherwise).
+DST_SLOT = "16"
 
 
 @dataclass(frozen=True)
@@ -152,6 +177,18 @@ class LeagueSettings:
     draft_type: str
     pick_order: tuple = ()
     unmapped_scoring: tuple = ()
+    # This league's D/ST scoring: ESPN stat id (as a string, ESPN's own key
+    # type) -> points. NOT nflverse columns like `scoring` -- see `from_espn`
+    # and scoring/ppr.DEFAULT_DST_RULES for why defenses are keyed by stat id
+    # and every other position is keyed by column.
+    #
+    # `None` means "this settings row predates D/ST parsing" -- every `league`
+    # row written before this existed, read back through `from_json`. That is
+    # "not specified", and `scoring.ppr.compute_dst_points` resolves it to
+    # ESPN's default D/ST scoring, exactly as `None` resolves to full PPR for
+    # `scoring`. `{}` is different and means what it says: `from_espn` looked
+    # and found no defensive scoring in this league at all.
+    dst_scoring: dict | None = None
 
     @property
     def rounds(self) -> int:
@@ -198,27 +235,47 @@ def from_espn(settings: dict) -> LeagueSettings:
     values reproduces ESPN's published season totals exactly (184.6 and
     53.0).
 
-    WHY DEFENSES ARE NOT HERE, which is the thing to know before adding
-    them. Reading the owner's live ESPN settings turned up a second field
-    this parser has never looked at: `pointsOverrides`, a map from LINEUP
-    SLOT id to points. Every team-defense item in that league carries
-    `points: 0.0` with the real value hidden in `pointsOverrides["16"]` --
-    16 being the D/ST slot (pipeline/espn_league.ESPN_SLOT_POSITIONS). So a
-    defense's scoring is not merely unmapped here, it is invisible to a
-    parser that reads `points`: mapping those ids without also reading the
-    override would quietly price every defensive rule at zero.
+    HOW DEFENSES GET HERE, and why the old "they cannot" was half right.
+    Reading the owner's live ESPN settings turned up a second field this
+    parser used to ignore: `pointsOverrides`, a map from LINEUP SLOT id to
+    points. Every team-defense item in that league carries `points: 0.0`
+    with the real value in `pointsOverrides["16"]` -- 16 being the D/ST slot
+    (pipeline/espn_league.ESPN_SLOT_POSITIONS). Reading `points` for those
+    ids would price every defensive rule at zero, so `dst_scoring` reads the
+    override and nothing else: an item with a slot-16 override IS a
+    defensive rule, by ESPN's own declaration rather than by our inference.
 
-    Reading the override is not the missing piece either, and this is the
-    real blocker. Two of the largest DST components -- points allowed and
-    yards allowed -- are scored by TIER: nine ids, each worth points for
-    each GAME whose team total fell in a band. That is a step function over
-    a per-game team aggregate, and this map's contract is `column x points`
-    summed over a player's own rows. There is no honest way to express one
-    as the other, and no team-defense row in `weekly` to sum over in the
-    first place. See ESPN_STAT_COLUMNS above for which defensive ids are
-    identified, which are computable from this data (yards allowed: all of
-    them, verified exactly) and which are not (points allowed: none of
-    them, because this database holds no game scores).
+    THE TWO THINGS THAT USED TO BLOCK THIS, and what actually answered them.
+
+    "There is no team-defense row in `weekly` to sum over." True, and no
+    longer the question -- nobody had asked ESPN. ESPN serves the scored
+    D/ST stat line itself, per week, from the same
+    `leaguedefaults/3?view=kona_player_info` endpoint pipeline/sources.py
+    already fetches; `pipeline/sources.fetch_espn_dst` reads it into
+    `dst_weekly`. So the stat values arrive keyed by the SAME stat ids these
+    scoring items are keyed by, and no nflverse column has to be identified
+    for the arithmetic to be right.
+
+    "Points allowed and yards allowed are nine-way TIERS, a step function
+    over a per-game team aggregate, and this map's contract is `column x
+    points`." Also true, and also not the question: ESPN hands over the
+    bucket ALREADY DECIDED, as nine one-hot ids per game (measured over 544
+    defense-weeks of 2025: exactly one of each family is 1.0 in every game, 0
+    violations). A pre-bucketed indicator IS a `column x points` rule. See
+    scoring/ppr.DEFAULT_DST_RULES for the measured bands and for the
+    3744-defense-week reconciliation against ESPN's own `appliedTotal`.
+
+    WHAT STAYS IN `unmapped_scoring`. An id leaves the unmapped list only
+    when it is FULLY accounted for -- a slot-16 override AND a base `points`
+    of 0.0, meaning nothing is lost for anybody else on the roster. The ids
+    that score six points for a defensive return touchdown ALSO score six
+    for a wide receiver who returns a kick (93, 101, 102, 103, 104, 206,
+    209 all carry a non-zero base `points`), and that half is still
+    unmappable: nflverse collapses 101 with 102 and 103 with 104, so pricing
+    them for a skill player would double-count. They are scored for defenses
+    and still reported as unmapped for everyone else, which is the honest
+    answer and not a comfortable one. On the owner's league this takes
+    `unmapped_scoring` from 28 ids to 8.
     """
     from pipeline.espn_league import (ESPN_SLOT_POSITIONS, ESPN_FLEX_SLOT,
                                       ESPN_BENCH_SLOT)
@@ -227,14 +284,24 @@ def from_espn(settings: dict) -> LeagueSettings:
                 for slot_id, pos in ESPN_SLOT_POSITIONS.items()}
     starters = {pos: n for pos, n in starters.items() if n > 0}
 
-    scoring, unmapped = {}, []
+    scoring, unmapped, dst_scoring = {}, [], {}
     for item in settings.get("scoring_items") or []:
-        cols = ESPN_STAT_COLUMNS.get(item.get("statId"))
+        stat_id = item.get("statId")
+        base_points = float(item.get("points") or 0.0)
+        override = (item.get("pointsOverrides") or {}).get(DST_SLOT)
+        if override is not None:
+            dst_scoring[str(stat_id)] = float(override)
+        cols = ESPN_STAT_COLUMNS.get(stat_id)
         if not cols:
-            unmapped.append(str(item.get("statId")))
+            # Fully accounted for by the D/ST rule above: this item scores
+            # nothing for anyone outside the defense slot, so there is
+            # nothing left over to report as dropped.
+            if override is not None and base_points == 0.0:
+                continue
+            unmapped.append(str(stat_id))
             continue
         for col in cols:
-            scoring[col] = float(item.get("points") or 0.0)
+            scoring[col] = base_points
 
     return LeagueSettings(
         season=settings["season"],
@@ -246,6 +313,7 @@ def from_espn(settings: dict) -> LeagueSettings:
         draft_type=settings.get("draft_type") or "SNAKE",
         pick_order=tuple(settings.get("pick_order") or ()),
         unmapped_scoring=tuple(unmapped),
+        dst_scoring=dst_scoring,
     )
 
 
@@ -296,9 +364,20 @@ def to_json(settings: LeagueSettings) -> str:
 
 
 def from_json(blob: str) -> LeagueSettings:
+    """LeagueSettings from a stored `league.settings_json` blob.
+
+    `dst_scoring` is read with `.get`, not defaulted to `{}`: every row
+    written before D/ST parsing existed -- including the six on this
+    deployment's own database right now -- has no such key, and the
+    difference between "absent" (None: fall back to ESPN's default D/ST
+    scoring) and "empty" ({}: this league scores no defense) is the whole
+    point of the field. A `{}` default would silently zero every defense on
+    every league imported before today.
+    """
     d = json.loads(blob)
     d["pick_order"] = tuple(d.get("pick_order") or ())
     d["unmapped_scoring"] = tuple(d.get("unmapped_scoring") or ())
+    d["dst_scoring"] = d.get("dst_scoring")
     return LeagueSettings(**d)
 
 
