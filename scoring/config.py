@@ -62,4 +62,30 @@ STREAMED_REPLACEMENT_RANK = {"K": 3, "DST": 3}
 # Multiplies the value a pick gains over waiting (see scoring/gain.py), so a
 # position at its roster cap contributes nothing however good the player is.
 # Starting values, to calibrate against replayed drafts -- not derived.
-NEED_WEIGHTS = {"starter": 1.0, "flex": 0.75, "bench": 0.35, "capped": 0.0}
+#
+# "deferred" is an open STARTER slot that is not yet worth filling: a
+# position the roster rules let you hold exactly one of (so a second is
+# never a bench asset -- `draft_sim._roster_cap` caps K and DST at 1, and
+# they are the only positions where the cap equals the starter count) while
+# the roster still has more picks left than unfilled starter slots. A
+# CALIBRATION, like the four above it, and re-argued rather than re-derived
+# if it ever looks wrong:
+#
+#   * BELOW "bench" (0.35), because bench depth is a player you might
+#     actually start after an injury, and a second kicker is a player you
+#     can never start at all -- the pick buys the slot and nothing else, and
+#     the slot can be bought with any later pick just as well.
+#   * ABOVE "capped" (0.0), because the slot IS one you have to fill, so the
+#     row keeps a real if small number instead of collapsing into the tie
+#     that put a defense and a kicker in the top fifteen in the first place.
+#
+# What it is worth on the real board (data/nfl.duckdb, 8 teams, 15 rounds,
+# slot 2): the best kicker's gain in round 9 is +3.32 at a full starter
+# weight and +0.50 at this one, against a whole-board top-15 spread of +4.6
+# to -0.5 that round. The weight alone therefore CANNOT keep him off the
+# list -- at those magnitudes any positive number is a top-15 number -- and
+# that is exactly why scoring/gain.py orders the deferred block last as
+# well as scaling it. The weight makes the number honest; the ordering is
+# what answers the owner's "no kicker in the top fifteen in round 3".
+NEED_WEIGHTS = {"starter": 1.0, "flex": 0.75, "deferred": 0.15,
+                "bench": 0.35, "capped": 0.0}

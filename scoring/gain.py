@@ -8,7 +8,9 @@ replacement costs you 9 points to pass on, not 91 -- which is why ranking on
 raw VOR reaches for quarterbacks and tight ends.
 
 `gain_now` is that difference, weighted by whether the roster can actually
-start the player. It is deterministic: the only stochastic input is
+start the player and by whether this is the round to be filling that slot
+at all (see `need_kind`: an open kicker slot in round 3 is not the same
+need as an open WR1). It is deterministic: the only stochastic input is
 `survive`, the per-player probability of lasting to the next pick, which
 draft_sim.survival() estimates. That is a far lower-variance quantity than
 expected end-of-draft roster value -- it counts one event per rollout instead
@@ -19,7 +21,7 @@ import numpy as np
 import pandas as pd
 
 from scoring.config import NEED_WEIGHTS
-from scoring.draft_sim import FLEX_POSITIONS, _roster_cap
+from scoring.draft_sim import FLEX_POSITIONS, _roster_cap, must_fill_positions
 
 _NO_SLOT = "—"
 
@@ -30,8 +32,9 @@ def _flex_used(settings, counts: dict) -> int:
                for pos in FLEX_POSITIONS)
 
 
-def need_kind(settings, counts: dict, position: str) -> str:
-    """Which of NEED_WEIGHTS' four cases this position is in for this roster.
+def need_kind(settings, counts: dict, position: str,
+              turns_left: int | None = None) -> str:
+    """Which of NEED_WEIGHTS' cases this position is in for this roster.
 
     `counts` is position -> how many the roster already holds, the shape
     draft_sim._seed_rosters produces.
@@ -43,12 +46,46 @@ def need_kind(settings, counts: dict, position: str) -> str:
     "capped" even if the roster overall still has bench room -- there is no
     slot, starter or bench, left for the position to occupy. Only a roster
     still under its own position cap can fall through to "bench".
+
+    "deferred" is an open starter slot that it is not yet time to fill, and
+    it exists because "is the slot open" was the whole of this model and it
+    is only half of roster need. The owner's complaint: a kicker and a
+    defense in the top fifteen in round 3, both on an open starter slot
+    weighted 1.0 -- the same weight as an empty WR1 -- in a draft where
+    nobody fills either before the last couple of rounds.
+
+    TWO CONDITIONS, and both matter:
+
+    - The position has no depth value at all: its roster cap equals its
+      starter count, so a second one can never be rostered even on the
+      bench. `_roster_cap` puts K and DST at 1 and nothing else at its
+      starter count, so those are the two today -- but this is read off the
+      league's own roster shape, not a list of position names, and a league
+      that let you carry two kickers would not qualify.
+    - The roster can still fill it later: `turns_left` picks remain and
+      fewer starter slots than that are open. This is
+      `draft_sim.must_fill_positions`, the same line the simulator uses to
+      decide when an opponent's remaining picks have run down to their
+      unfilled slots, so the ranking starts recommending a defense in the
+      same round the simulator starts expecting one.
+
+    `turns_left` is my remaining picks INCLUDING the one on the clock. None
+    means the caller cannot say (every offline caller, and the tests that
+    predate this), and then nothing is deferred -- the historical behaviour,
+    since a deferral rule with no idea how many picks are left would be
+    guessing at the half of the question it exists to answer.
     """
     caps = _roster_cap(settings)
     held = counts.get(position, 0)
+    starters = settings.starters.get(position, 0)
     if held >= caps.get(position, held + 1):
         return "capped"
-    if held < settings.starters.get(position, 0):
+    if held < starters:
+        if (turns_left is not None
+                and caps.get(position, starters + 1) <= starters
+                and position not in must_fill_positions(settings, counts,
+                                                        turns_left)):
+            return "deferred"
         return "starter"
     if position in FLEX_POSITIONS and _flex_used(settings, counts) < settings.flex_slots:
         return "flex"
@@ -58,14 +95,22 @@ def need_kind(settings, counts: dict, position: str) -> str:
     return "capped"
 
 
-def need_weight(settings, counts: dict, position: str) -> float:
-    return float(NEED_WEIGHTS[need_kind(settings, counts, position)])
+def need_weight(settings, counts: dict, position: str,
+                turns_left: int | None = None) -> float:
+    return float(NEED_WEIGHTS[need_kind(settings, counts, position,
+                                        turns_left)])
 
 
-def fills_slot(settings, counts: dict, position: str) -> str:
-    """The roster slot this player would occupy, as the UI labels it."""
-    kind = need_kind(settings, counts, position)
-    if kind == "starter":
+def fills_slot(settings, counts: dict, position: str,
+               turns_left: int | None = None) -> str:
+    """The roster slot this player would occupy, as the UI labels it.
+
+    A deferred slot is labelled like the starter slot it is -- "K", "DST" --
+    because that IS the slot he would fill. The label answers where he goes,
+    not whether now is the time; the ranking answers the second question.
+    """
+    kind = need_kind(settings, counts, position, turns_left)
+    if kind in ("starter", "deferred"):
         n = settings.starters.get(position, 0)
         held = counts.get(position, 0)
         return position if n <= 1 else f"{position}{held + 1}"
@@ -147,12 +192,15 @@ def available_by_vor(pool, taken) -> pd.DataFrame:
     return out
 
 
-def rank_available(pool, settings, taken, counts: dict, survive) -> pd.DataFrame:
+def rank_available(pool, settings, taken, counts: dict, survive,
+                   turns_left: int | None = None) -> pd.DataFrame:
     """The available pool, ranked by gain_now descending.
 
     `taken` is the pool-aligned boolean mask of players already drafted,
     `counts` my own roster's position counts, `survive` the pool-aligned
-    probability each player is still there at my next pick.
+    probability each player is still there at my next pick, `turns_left` my
+    remaining picks including the one on the clock (None = unknown, which
+    turns the deferral rule off -- see `need_kind`).
     """
     available = np.flatnonzero(~np.asarray(taken))
     if available.size == 0:
@@ -169,10 +217,15 @@ def rank_available(pool, settings, taken, counts: dict, survive) -> pd.DataFrame
         at_pos = available[pool.position[available] == pos]
         next_best[pos] = expected_best_next(pool.vor[at_pos], survive[at_pos])
 
+    # One need_kind per POSITION, not per player: it reads `counts` and the
+    # league, neither of which varies down the loop.
+    kinds = {str(pos): need_kind(settings, counts, str(pos), turns_left)
+             for pos in next_best}
+
     rows = []
     for idx in available:
         pos = str(pool.position[idx])
-        weight = need_weight(settings, counts, pos)
+        weight = float(NEED_WEIGHTS[kinds[pos]])
         rows.append({
             "player_id": pool.player_id[idx],
             "position": pos,
@@ -180,9 +233,10 @@ def rank_available(pool, settings, taken, counts: dict, survive) -> pd.DataFrame
             "vor_points": float(pool.vor[idx]),
             "gain_now": weight * (float(pool.vor[idx]) - next_best[pos]),
             "survive_pct": float(survive[idx]) * 100.0,
-            "fills": fills_slot(settings, counts, pos),
+            "fills": fills_slot(settings, counts, pos, turns_left),
             # Not part of the result -- dropped after the sort below.
             "capped": weight == 0.0,
+            "deferred": kinds[pos] == "deferred",
         })
     # Capped players sort LAST, not by gain_now alone. NEED_WEIGHTS["capped"]
     # is 0.0, so `weight * (...)` is identically 0.0 for every one of them --
@@ -197,8 +251,31 @@ def rank_available(pool, settings, taken, counts: dict, survive) -> pd.DataFrame
     # is zero for a position at its roster cap", §7), and that zero is the
     # honest number -- taking a player you cannot roster gains nothing, it
     # does not cost you points.
+    #
+    # DEFERRED positions (see need_kind) sort after everything else for the
+    # same structural reason, and it has to be a sort key rather than a
+    # smaller weight because a weight CANNOT move the number that put them
+    # there. Live at pick 19, round 3, an 8-team draft: no opponent takes a
+    # kicker or a defense inside the horizon, so every one of them survives
+    # at 100%, `expected_best_next` for the position equals its own best
+    # available, and `gain_now` is EXACTLY 0.0 -- times any weight, still
+    # exactly 0.0, and 0.0 outranks the -1 and -2 of real players who are
+    # genuinely worth slightly less than what will survive. Houston Defense
+    # 12th and Brandon Aubrey 13th, above Malik Nabers and Chris Olave.
+    # Multiplying by NEED_WEIGHTS["deferred"] leaves that ordering to the
+    # digit; only ordering the block last changes it. The weight is still
+    # applied, and does the other half of the job -- see its comment in
+    # scoring/config.py for the round-9 measurement where the gain is a real
+    # +3.32 rather than an artifact.
+    #
+    # Not a filter: the rows are all still there, in gain order within the
+    # block, and the moment `must_fill_positions` says the slots can no
+    # longer be deferred they stop being deferred and rank on merit -- which
+    # on the real board is a kicker at rank 1 in round 14 and a defense at
+    # rank 1 in round 15.
     out = pd.DataFrame(rows).sort_values(
-        ["capped", "gain_now"], ascending=[True, False]).drop(
-            columns="capped").reset_index(drop=True)
+        ["capped", "deferred", "gain_now"],
+        ascending=[True, True, False]).drop(
+            columns=["capped", "deferred"]).reset_index(drop=True)
     out["rank"] = out.index + 1
     return out

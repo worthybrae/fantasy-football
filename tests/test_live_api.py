@@ -407,12 +407,13 @@ def test_state_candidates_carry_gain_now(tmp_path):
 def test_state_names_the_pick_the_ranking_was_actually_measured_against(tmp_path):
     """`gain_now` is measured to the HORIZON, and the room has to say so.
 
-    8 teams, my_slot 2, nothing drafted: my immediately-next pick is 2, one
-    opponent pick away -- the gap that made every survival ~100% and put a
-    defense and a kicker in the top six of a round-1 board. The ranking is
-    measured to pick 15 instead (scoring/draft_sim.horizon_picks: one full
-    round of opponent picks), so 15 is the number that must reach the
-    payload. Serving 2 would caption the list with a pick nobody measured.
+    8 teams, my_slot 2, nothing drafted: the pick on the clock is 1 and it
+    is not mine, so the list is a preview of my pick 2. My immediately-next
+    turn after that is 15, twelve opponent picks out -- past the ceiling
+    (`horizon_ceiling`: a round and a half, 10 here), so the measurement
+    stops at pick 13 instead, and 13 is the number that must reach the
+    payload. Serving 2 would caption the list with a pick nobody measured;
+    serving 15 would caption it with a pick nothing was measured to either.
 
     Real engine end to end (real pool, real settings, real survival() and
     rank_available() through a real GET), the same discipline
@@ -420,7 +421,7 @@ def test_state_names_the_pick_the_ranking_was_actually_measured_against(tmp_path
     """
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
-    from scoring.draft_sim import _horizon_pick_for, _next_pick_for, horizon_picks
+    from scoring.draft_sim import _next_pick_for, horizon_picks, horizon_target
 
     path = str(tmp_path / "live.duckdb")
     _seed_minimal_live_db(path, extra_players=[
@@ -438,13 +439,15 @@ def test_state_names_the_pick_the_ranking_was_actually_measured_against(tmp_path
 
     body = client.get("/api/live/state").json()
     settings = session.settings
-    expected = _horizon_pick_for(settings, 2, 0, horizon_picks(settings))
-    assert expected == 15
+    expected = horizon_target(settings, 2, 0, False, horizon_picks(settings))
+    assert expected == 13
     assert body["horizon_pick"] == expected
     assert body["horizon_is_end_of_draft"] is False
-    # ... and it is genuinely NOT the pick the room used to name.
+    # ... and it is genuinely NOT the pick the room used to name, at either
+    # end: not my next pick (2), and not my next turn after it (15) either.
     assert _next_pick_for(settings, 2, 0) == 2
     assert body["horizon_pick"] != _next_pick_for(settings, 2, 0)
+    assert body["horizon_pick"] != _next_pick_for(settings, 2, 2)
 
 
 def test_state_says_end_of_draft_rather_than_a_pick_that_does_not_exist(tmp_path):
@@ -758,6 +761,40 @@ def test_recompute_discards_a_result_the_pick_count_has_moved_past(tmp_path, mon
 
     assert state["as_of_pick"] == 5
     assert state["candidates"] == [{"player_id": "fresh"}]
+
+
+def test_recompute_tells_the_ranking_how_many_picks_i_have_left(tmp_path, monkeypatch):
+    """`gain.need_kind` cannot tell an open kicker slot in round 3 from the
+    same slot in round 14 without it, and that is the whole of the deferral
+    rule -- so the number has to reach it, and it has to be MY remaining
+    picks counted the way `must_fill_positions` expects: including the pick
+    on the clock when that pick is mine.
+
+    Slot 4 of an 8-team, 15-round snake picks at 4, 13, 20, ... . With 3
+    picks made the next one is mine at pick 4, so all 15 remain; with 4 made
+    it has been used and 14 do.
+    """
+    state, _recompute = _live_routes_with_conn(tmp_path)
+    session = _live_session()
+    seen = {}
+    monkeypatch.setattr("api.live._drafted_state",
+                        lambda cur, pool: (set(), list(range(state["_made"]))))
+    monkeypatch.setattr("api.live._seed_rosters",
+                        lambda *a, **k: ({4: {"counts": {}}}, []))
+    monkeypatch.setattr("api.live.survival", _fake_survival_frame)
+
+    def capture(pool, settings, taken, counts, survive, turns_left=None):
+        seen["turns_left"] = turns_left
+        return _fake_candidates_frame("x")
+
+    monkeypatch.setattr("api.live.rank_available", capture)
+
+    state["_made"] = 3          # pick 4 is on the clock and it is mine
+    _recompute(session, picks_made=3)
+    assert seen["turns_left"] == 15
+    state["_made"] = 4          # my pick 4 has been made
+    _recompute(session, picks_made=4)
+    assert seen["turns_left"] == 14
 
 
 def test_recompute_stores_its_result_when_nothing_superseded_it(tmp_path, monkeypatch):

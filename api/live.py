@@ -267,9 +267,8 @@ from pipeline.espn_teams import http_fetch as _team_view_fetch
 from pipeline import leagues as leagues_mod
 from pipeline.leagues import DEFAULT_LEAGUE, provision_league
 from scoring.config import CURRENT_SEASON
-from scoring.draft_sim import (_drafted_state, _horizon_pick_for,
-                               _seed_rosters, horizon_picks, snake_slots,
-                               survival)
+from scoring.draft_sim import (_drafted_state, _seed_rosters, horizon_picks,
+                               horizon_target, snake_slots, survival)
 from scoring.gain import available_by_vor, rank_available
 
 
@@ -1333,15 +1332,24 @@ def register_live_routes(app, conn, db_path):
             snake = snake_slots(session.settings.teams, session.settings.rounds)
             on_the_clock = (len(taken_order) < len(snake)
                             and snake[len(taken_order)] == session.my_slot)
-            # WHICH turn of mine this ranking is measured against. Not my
-            # immediately-next one: at a 1-3 opponent-pick gap that step is
+            # WHICH pick this ranking is measured against. Not my
+            # immediately-next turn: at a 1-3 opponent-pick gap that step is
             # ~zero for everybody and the ranking has no signal left (a
             # defense 5th and a kicker 6th at pick 1 of the owner's mock --
-            # see horizon_picks for the measurements). `horizon_picks`
-            # derives the threshold from this league's own team count, and
-            # `_horizon_pick_for` walks my turns to the first one that far
-            # away, so this number is a pick that exists and is mine --
-            # except at my last pick of the draft, where it is the
+            # see horizon_picks for the measurements). Not an arbitrarily
+            # distant one either: past about a round and a half the survival
+            # column the room prints reads 0% for every row it shows, which
+            # is the same loss of signal from the other side (see
+            # horizon_ceiling for that sweep). `horizon_target` is the whole
+            # rule -- floor, ceiling and the anchor they are measured from
+            # -- and it is the SAME call survival() makes below, so the
+            # number served and the number measured cannot differ.
+            #
+            # The result is a pick that exists, and usually one of mine; at
+            # the wheel, where my own turns offer only 2 opponent picks or
+            # 14, it is the pick a round and a half out instead, which is
+            # somebody else's turn and is still exactly the pick survival
+            # was counted to. At my last pick of the draft it is the
             # off-the-end sentinel and `horizon_is_end_of_draft` below is
             # what the room renders instead.
             #
@@ -1349,10 +1357,17 @@ def register_live_routes(app, conn, db_path):
             # survival() is called with, in the same critical section, so
             # the number served can never describe a different pick than
             # the one the ranking actually used.
-            start = len(taken_order) + 1 if on_the_clock else len(taken_order)
             h = horizon_picks(session.settings)
-            horizon = _horizon_pick_for(session.settings, session.my_slot,
-                                        start, h)
+            horizon = horizon_target(session.settings, session.my_slot,
+                                     len(taken_order), on_the_clock, h)
+            # How many picks I have left, INCLUDING the one on the clock if
+            # it is mine -- `snake[len(taken_order):]` starts at the pick
+            # about to be made, which is exactly that reading. It is what
+            # lets need_kind tell an open kicker slot in round 3 (thirteen
+            # picks left, fill it whenever) from the same slot in round 14
+            # (two picks left, two empty slots, fill it now).
+            my_turns_left = sum(1 for s in snake[len(taken_order):]
+                                if s == session.my_slot)
             # survival()'s avail_pct is already a 0-1 probability (see its
             # docstring and the "counts / max(n_rollouts, 1)" line it
             # returns) -- rank_available wants exactly that, no rescaling.
@@ -1363,7 +1378,7 @@ def register_live_routes(app, conn, db_path):
                 taken_order=taken_order, on_the_clock=on_the_clock,
                 horizon=h)["avail_pct"].to_numpy()
             frame = rank_available(session.pool, session.settings, taken,
-                                   counts, avail)
+                                   counts, avail, my_turns_left)
         finally:
             cur.close()
         with lock:

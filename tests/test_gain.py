@@ -47,6 +47,72 @@ def test_need_weight_is_zero_when_capped():
     assert need_weight(settings(), {"K": 1}, "K") == 0.0
 
 
+# --- Roster need is "is the slot open" AND "is now the time to fill it".
+# Reported live: a kicker and a defense in the top fifteen at pick 19 (round
+# 3), both on an open starter slot weighted 1.0 -- the same weight as an
+# empty WR1 -- in a 16-round draft where neither slot gets filled before the
+# last couple of rounds.
+
+
+def test_need_kind_defers_a_slot_you_can_only_ever_hold_one_of():
+    """K and DST in round 3: the slot is open, and it is not the round.
+
+    `_roster_cap` puts both at 1, equal to their starter count, so a second
+    one can never be rostered even on the bench -- the pick buys the slot
+    and nothing else, and any later pick buys it just as well. With 13 of my
+    15 picks still to come and two open starter slots, it can wait.
+    """
+    assert need_kind(settings(), {}, "K", turns_left=13) == "deferred"
+    assert need_kind(settings(), {}, "DST", turns_left=13) == "deferred"
+    assert need_weight(settings(), {}, "K", turns_left=13) < \
+        need_weight(settings(), {}, "K", turns_left=2)
+
+
+def test_need_kind_never_defers_a_position_with_depth_value():
+    """Read off the roster shape, not a list of position names.
+
+    Every other position's cap is above its starter count (RB 2+2, WR 2+2,
+    TE 1+2, QB capped at 3), so a second one is a real bench asset and the
+    slot is a full starter need from the first pick of the draft.
+    """
+    for pos in ("QB", "RB", "WR", "TE"):
+        assert need_kind(settings(), {}, pos, turns_left=15) == "starter"
+
+
+def test_need_kind_stops_deferring_when_the_slots_must_be_filled():
+    """The lift, on the simulator's own line.
+
+    `draft_sim.must_fill_positions` says a roster whose open starter slots
+    have caught up with its remaining picks has to spend every one of them
+    on those slots. Here that is two picks and two empty slots (K and DST),
+    so both are starter needs again -- which is what puts a kicker back at
+    the top of the list in the last rounds instead of the bottom.
+    """
+    counts = {"QB": 1, "RB": 4, "WR": 4, "TE": 2, }
+    assert need_kind(settings(), counts, "K", turns_left=3) == "deferred"
+    assert need_kind(settings(), counts, "K", turns_left=2) == "starter"
+    assert need_kind(settings(), counts, "DST", turns_left=2) == "starter"
+
+
+def test_need_kind_without_turns_left_is_exactly_what_it_always_was():
+    """None is "the caller cannot say how many picks are left", which is
+    every offline caller. A deferral rule with no idea how many picks remain
+    would be guessing at the half of the question it exists to answer, so it
+    does not fire at all."""
+    assert need_kind(settings(), {}, "K") == "starter"
+    assert need_kind(settings(), {}, "K", turns_left=None) == "starter"
+    assert need_weight(settings(), {}, "K") == 1.0
+
+
+def test_fills_slot_still_names_the_slot_a_deferred_pick_would_fill():
+    """The label answers WHERE he goes, not whether now is the time -- that
+    is the ranking's job. A deferred kicker still fills K, and only a
+    capped one gets the "no slot" dash."""
+    assert fills_slot(settings(), {}, "K", turns_left=13) == "K"
+    assert fills_slot(settings(), {}, "DST", turns_left=13) == "DST"
+    assert fills_slot(settings(), {"K": 1}, "K", turns_left=13) == "—"
+
+
 def test_fills_slot_names_the_open_starter():
     assert fills_slot(settings(), {"RB": 1}, "RB") == "RB2"
     assert fills_slot(settings(), {}, "QB") == "QB"
@@ -133,6 +199,60 @@ def test_rank_available_sorts_capped_players_last():
     assert by_id["rb2"] < 0.0
     # And `capped` is a sort key, not a served column.
     assert "capped" not in out.columns
+
+
+def test_rank_available_sorts_a_deferred_kicker_below_a_negative_gain():
+    """The owner's second report, reproduced: pick 19, round 3.
+
+    No opponent takes a kicker or a defense inside the horizon, so both
+    survive at 100%, `expected_best_next` for the position equals its own
+    best available, and `gain_now` is EXACTLY 0.0 -- which outranks the -1
+    and -2 of real players who are genuinely worth slightly less than what
+    will survive. Houston Defense 12th and Brandon Aubrey 13th, above Malik
+    Nabers and Chris Olave.
+
+    A smaller need weight cannot fix that: any weight times exactly zero is
+    exactly zero. Ordering the deferred block last is what does it, and the
+    number it carries stays honest rather than being forced negative.
+    """
+    pool = _pool(player_id=["k1", "dst1", "wr0", "wr1", "wr2"],
+                 position=["K", "DST", "WR", "WR", "WR"],
+                 points=[130.0, 120.0, 250.0, 240.0, 230.0],
+                 vor=[12.0, 5.0, 25.0, 19.0, 17.0])
+    taken = np.zeros(5, dtype=bool)
+    survive = np.array([1.0, 1.0, 0.90, 0.78, 0.30])
+    out = rank_available(pool, settings(), taken, {}, survive, turns_left=13)
+    assert list(out["player_id"]) == ["wr0", "wr1", "wr2", "k1", "dst1"]
+    by_id = dict(zip(out["player_id"], out["gain_now"]))
+    # The premise, unchanged by the fix: the two zeros really are the larger
+    # numbers, and the two receivers really are worth less than what will
+    # survive at their own position.
+    assert by_id["k1"] == 0.0 and by_id["dst1"] == 0.0
+    assert by_id["wr1"] < 0.0 and by_id["wr2"] < 0.0
+    assert "deferred" not in out.columns
+    # Without the deferral rule -- an offline caller that cannot say how
+    # many picks are left -- this is exactly the reported ordering.
+    old = rank_available(pool, settings(), taken, {}, survive)
+    assert list(old["player_id"]) == ["wr0", "k1", "dst1", "wr1", "wr2"]
+
+
+def test_rank_available_puts_the_kicker_back_on_top_when_it_must_be_filled():
+    """The other end of the same rule: nothing is being hidden.
+
+    Two picks left and two empty starter slots (K and DST), so
+    `must_fill_positions` says both are now needs -- the kicker ranks on
+    merit, above a receiver the roster can no longer start.
+    """
+    pool = _pool(player_id=["k1", "wr1"], position=["K", "WR"],
+                 points=[130.0, 240.0], vor=[12.0, 19.0])
+    counts = {"QB": 1, "RB": 4, "WR": 4, "TE": 2}
+    taken = np.zeros(2, dtype=bool)
+    survive = np.array([0.4, 0.9])
+    out = rank_available(pool, settings(), taken, counts, survive,
+                         turns_left=2)
+    assert list(out["player_id"]) == ["k1", "wr1"]
+    assert out.iloc[0]["fills"] == "K"
+    assert out.iloc[0]["gain_now"] > 0
 
 
 def test_available_by_vor_ranks_by_vor_points_descending():

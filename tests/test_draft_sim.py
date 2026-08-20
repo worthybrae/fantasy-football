@@ -1478,8 +1478,22 @@ def test_survival_on_the_clock_makes_gain_now_non_degenerate():
 # `horizon_picks(settings)` opponent picks away instead. In the owner's own
 # words, a tight end being available in round 9 is not a reason to take one
 # in round 3, and only the SHAPE of the curve can tell those apart.
+#
+# The horizon has TWO ends and both were live bugs. The floor above is one.
+# The other, reported from the owner's draft: at pick 11, with their own
+# pick 15 still to come, the horizon was 31 -- the walk counted from NOW
+# rather than from the pick being advised, so pick 15 read four opponent
+# picks away and pick 18 six, both under the floor, and it landed two of
+# their own turns later. Thirteen picks out, nothing the room displayed
+# survived at all, and the survival column read 0% down the page. So the
+# rule below is anchored on the pick being advised AND capped at
+# `horizon_ceiling` opponent picks; the tests here pin both ends and the
+# fact that the same board answers the same way whether it is being
+# previewed or played.
 
-from scoring.draft_sim import _horizon_pick_for, horizon_picks
+from scoring import draft_sim
+from scoring.draft_sim import (_horizon_pick_for, horizon_ceiling,
+                               horizon_picks, horizon_target)
 
 
 def test_horizon_picks_is_one_round_of_opponent_picks_derived_from_teams():
@@ -1525,22 +1539,78 @@ def test_horizon_pick_for_at_zero_is_exactly_next_pick_for():
                     == _next_pick_for(S, my_slot, already))
 
 
+def test_horizon_ceiling_is_a_round_and_a_half_derived_from_teams():
+    """`3 * (teams - 1) // 2`: one and a half rounds of opponent picks.
+
+    Derived from the league like the floor is -- 10 here, 16 in a 12-team
+    league -- and strictly between the floor (7) and the distance the walk
+    produces when it has to skip a turn (2 * (teams - 1) = 14), which is the
+    only case it exists to catch.
+    """
+    assert horizon_ceiling(S) == 3 * (S.teams - 1) // 2 == 10
+    assert horizon_ceiling(type("S12", (), {"teams": 12})()) == 16
+    assert horizon_picks(S) < horizon_ceiling(S) < 2 * (S.teams - 1)
+
+
 def test_horizon_pick_for_skips_turns_too_close_to_measure_anything():
     """8 teams, 15 rounds. Slot 2's turns are 2, 15, 18, 31, ... .
 
-    From nothing drafted, my next turn (pick 2) is one opponent pick away
-    and is skipped; pick 15 is 13 opponent picks away and is taken. From my
-    own pick 15 (start=15, the on_the_clock reading), pick 18 is the wheel
-    partner two opponent picks away and is skipped for pick 31 -- 12
-    opponent picks, since my own pick 18 does not count against the
-    threshold.
+    Anchored on my own pick 15 (the on_the_clock reading), pick 18 is the
+    wheel partner two opponent picks away and is skipped. The turn after it
+    is pick 31 -- but that is 14 opponent picks out, past the ceiling, so
+    the answer is the pick a round and a half from 15 instead: picks 16 and
+    17, then my own 18 (not counted), then 19-26 is ten opponent picks, so
+    27.
     """
     h = horizon_picks(S)
-    assert _horizon_pick_for(S, 2, 0, h) == 15
-    assert _horizon_pick_for(S, 2, 15, h) == 31
-    # Slot 8 at the wheel: on the clock at pick 8 (start=8), its own pick 9
-    # follows with NO opponent in between, so the horizon has to reach 24.
-    assert _horizon_pick_for(S, 8, 8, h) == 24
+    assert _horizon_pick_for(S, 2, 15, h, advised=15) == 27
+    # Slot 8 at the wheel: on the clock at pick 8, its own pick 9 follows
+    # with NO opponent in between, and the turn after that (24) is 14
+    # opponent picks away -- the same skip, the same ceiling, and 20 is the
+    # pick ten opponent picks after 8 (9 is mine and does not count).
+    assert _horizon_pick_for(S, 8, 8, h, advised=8) == 20
+    # A turn that lands INSIDE the window is taken as it is, and is a pick I
+    # actually hold: slot 5 on the clock at 12 has pick 21 eight opponent
+    # picks away, between the floor and the ceiling.
+    assert _horizon_pick_for(S, 5, 12, h, advised=12) == 21
+
+
+def test_horizon_is_measured_from_the_pick_being_advised_not_from_now():
+    """The reported bug: at pick 11, slot 2, the horizon was 31.
+
+    The owner's turns are 2, 15, 18, 31. At pick 11 they are not on the
+    clock, so the list is a preview of pick 15 -- and counted from 11, pick
+    15 is 4 opponent picks away and pick 18 is 6, both under the floor, so
+    the walk skipped BOTH of their own turns and answered 31: thirteen picks
+    out, past two turns they had not taken yet.
+
+    Anchored on the pick being advised, the preview of 15 and the live list
+    at 15 are the same measurement -- which is the property that makes the
+    preview worth anything.
+    """
+    h = horizon_picks(S)
+    # The old, unanchored walk, kept here as the thing that must not come
+    # back: distances counted from pick 11 rather than from pick 15.
+    assert _horizon_pick_for(S, 2, 10, h, ceiling=10 ** 6) == 31
+    preview = horizon_target(S, my_slot=2, already=10, on_the_clock=False,
+                             horizon=h)
+    on_the_clock = horizon_target(S, my_slot=2, already=14, on_the_clock=True,
+                                  horizon=h)
+    assert preview == on_the_clock == 27
+
+
+def test_horizon_target_never_measures_a_pick_against_itself():
+    """A preview's horizon is a turn AFTER the pick being advised.
+
+    At pick 19 slot 2's next turn is 31, a full round away, so the old walk
+    answered 31 -- the very pick the list was previewing. `gain_now` then
+    compared today's board against the board at that same pick, which
+    prices the wait between now and my turn rather than the wait the pick
+    itself is choosing over. The horizon is a turn past it, capped: 43.
+    """
+    h = horizon_picks(S)
+    assert _next_pick_for(S, 2, 18) == 31
+    assert horizon_target(S, 2, already=18, on_the_clock=False, horizon=h) == 43
 
 
 def test_horizon_pick_for_falls_back_to_my_last_turn_then_off_the_end():
@@ -1549,20 +1619,63 @@ def test_horizon_pick_for_falls_back_to_my_last_turn_then_off_the_end():
     Late in the draft no turn of mine is a full round away any more. That
     is not a reason to answer "the end of the draft" -- my last turn is a
     real pick, and it is the most informative horizon that actually exists
-    for me. Only when I hold NO turn after this one does the answer become
-    `len(slots) + 1`, the off-the-end sentinel `_next_pick_for` has always
-    returned, which the caller must render as "the end of the draft"
-    rather than as a pick number (api/live.py's horizon_is_end_of_draft).
+    for me. Only when I hold NO turn after the pick being advised does the
+    answer become `len(slots) + 1`, the off-the-end sentinel
+    `_next_pick_for` has always returned, which the caller must render as
+    "the end of the draft" rather than as a pick number (api/live.py's
+    horizon_is_end_of_draft).
     """
     h = horizon_picks(S)
     slots = snake_slots(S.teams, S.rounds)
     mine = [i + 1 for i, s in enumerate(slots) if s == 2]
     assert mine[-1] == 114 and len(slots) == 120
-    # On the clock at 111 (start=111): only pick 114 remains, 2 opponent
-    # picks away -- under the threshold, so the fallback returns it anyway.
-    assert _horizon_pick_for(S, 2, 111, h) == 114
+    # On the clock at 111: only pick 114 remains, 2 opponent picks away --
+    # under the floor, so the fallback returns it anyway. The ceiling cannot
+    # bind on a turn that is nearer than the floor.
+    assert horizon_target(S, 2, already=110, on_the_clock=True, horizon=h) == 114
     # On the clock at my last pick: no turn remains at all.
-    assert _horizon_pick_for(S, 2, 114, h) == len(slots) + 1
+    assert horizon_target(S, 2, already=113, on_the_clock=True,
+                          horizon=h) == len(slots) + 1
+    # PREVIEWING my last pick is the same answer, and for the same reason:
+    # the advice is for 114 and I hold nothing after it. Measuring to 114
+    # would be measuring that pick against itself. (111 picks made, so pick
+    # 112 is on the clock and it is slot 1's, not mine.)
+    assert slots[111] != 2 and _next_pick_for(S, 2, 111) == 114
+    assert horizon_target(S, 2, already=111, on_the_clock=False,
+                          horizon=h) == len(slots) + 1
+
+
+def test_horizon_ceiling_only_ever_pulls_the_horizon_nearer():
+    """Whatever the ceiling does, it never reaches past what the walk found,
+    never lands on or before the pick being advised, and never runs off the
+    end of the draft into the sentinel's meaning.
+
+    Swept over every slot and every pick of a real 8-team, 15-round snake,
+    on the clock and previewing alike.
+    """
+    h = horizon_picks(S)
+    slots = snake_slots(S.teams, S.rounds)
+    for my_slot in range(1, S.teams + 1):
+        mine = [i + 1 for i, s in enumerate(slots) if s == my_slot]
+        for already in range(0, len(slots)):
+            on_clock = slots[already] == my_slot
+            advised = (already + 1 if on_clock
+                       else _next_pick_for(S, my_slot, already))
+            target = horizon_target(S, my_slot, already, on_clock, h)
+            if target == len(slots) + 1:          # the off-the-end sentinel
+                assert advised >= mine[-1]
+                continue
+            assert advised < target <= len(slots), (my_slot, already, target)
+            uncapped = _horizon_pick_for(S, my_slot, already + 1 if on_clock
+                                         else already, h, advised=advised,
+                                         ceiling=10 ** 6)
+            assert target <= uncapped, (my_slot, already, target, uncapped)
+            opponents = sum(1 for p in range(advised + 1, target)
+                            if slots[p - 1] != my_slot)
+            assert opponents <= horizon_ceiling(S), (my_slot, already)
+            # ... and never nearer than the floor, unless my own turns ran
+            # out first (the fallback above).
+            assert (opponents >= h or target == mine[-1]), (my_slot, already)
 
 
 def test_survival_with_a_horizon_is_not_degenerate_at_a_one_pick_gap():
@@ -1633,6 +1746,111 @@ def test_survival_at_the_wheel_is_no_longer_a_uniform_one():
                    seed=0, taken_order=taken_order, on_the_clock=True,
                    horizon=horizon_picks(S))
     assert (new.loc[~taken, "avail_pct"] < 1.0).any()
+
+
+def test_a_one_pick_gap_still_cannot_tie_every_leader_at_zero():
+    """FAILURE MODE ONE, pinned. Slot 8 on the clock at pick 8: its own pick
+    9 follows with no opponent in between, the tightest gap a snake has.
+
+    Measured to that next turn (horizon 0) nothing at all happens in
+    between, so every available player survives at exactly 1.0,
+    `gain.expected_best_next` equals each position's own leader, and
+    `gain_now` is EXACTLY 0.0 for all six leaders -- six rows tied at the
+    top of the list, ordered by pandas' sort rather than by any number, with
+    a kicker and a defense among them. That is the bug the horizon was
+    introduced for, and no later change to the far end may bring it back.
+
+    `turns_left` is deliberately not passed: this is the horizon on its own,
+    with gain.py's deferral rule (which would move K and DST for an
+    unrelated reason) switched off.
+    """
+    pool = _pool()
+    slot_managers = {i: f"m{i}" for i in range(1, 9)}
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    taken[:7] = True                      # picks 1-7 gone; slot 8 on the clock
+    taken_order = list(range(7))
+    betas = _adp_betas(slot_managers.values())
+
+    def ranked(horizon):
+        avail = survival(pool, S, slot_managers, 8, taken, betas,
+                         n_rollouts=100, seed=0, taken_order=taken_order,
+                         on_the_clock=True, horizon=horizon)["avail_pct"]
+        return rank_available(pool, S, taken, {}, avail.to_numpy())
+
+    def leaders(frame):
+        return frame.sort_values("vor_points", ascending=False) \
+            .drop_duplicates("position")
+
+    before = ranked(0)
+    assert (leaders(before)["gain_now"] == 0.0).all(), \
+        "fixture drifted off the documented zero-gap collapse"
+    assert int((before["gain_now"] > 0).sum()) == 0
+    assert set(before["position"][:6]) == {"RB", "WR", "TE", "QB", "K", "DST"}
+
+    after = ranked(horizon_picks(S))
+    assert not (leaders(after)["gain_now"] == 0.0).any()
+    assert int((after["gain_now"] > 0).sum()) > 5
+    # Every leader now carries its own number, so the order of the top of
+    # the list is the model's and not the sort's. (WHICH positions lead is
+    # this fixture's business, not the horizon's -- its `vor` is one linear
+    # ramp dealt round-robin across the six positions, so a defense here is
+    # worth what a receiver is. On the real board, where a kicker is +12 and
+    # the leading receiver +57, the same fixed horizon puts the first K and
+    # DST outside the top ten; see scoring/gain.py for the ordering rule
+    # that keeps them there.)
+    assert len(set(leaders(after)["gain_now"])) == 6
+
+
+def test_the_ceiling_keeps_the_top_of_the_board_from_being_all_zeroes():
+    """FAILURE MODE TWO, pinned: the mirror image of the one above.
+
+    Slot 2 on the clock at pick 15, at the wheel. Its own turns offer 18 (2
+    opponent picks: nothing moves) or 31 (14: too much moves), and with no
+    ceiling the walk takes 31. Every row the room shows is then a row that
+    will be gone -- the survival column reads 0% down the page -- and the
+    number the owner is being asked to read carries nothing.
+
+    The opponents here follow the market hard (a large negative `reach`),
+    which is what makes the fixture show the effect at all: with a soft
+    market every player has some chance of lasting and the top of the board
+    never empties. The real board's own numbers, where the fitted opponents
+    concentrate on the same twenty players, are in `horizon_ceiling`.
+    """
+    pool = _pool(240)
+    slot_managers = {i: f"m{i}" for i in range(1, 9)}
+    beta = np.zeros(len(FEATURE_NAMES))
+    beta[FEATURE_NAMES.index("reach")] = -30.0
+    betas = {m: beta for m in slot_managers.values()}
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    taken[:14] = True
+    taken_order = list(range(14))
+    h = horizon_picks(S)
+
+    def shown(target):
+        real = draft_sim._horizon_pick_for
+        draft_sim._horizon_pick_for = lambda *a, **k: target
+        try:
+            avail = survival(pool, S, slot_managers, 2, taken, betas,
+                             n_rollouts=60, seed=0, taken_order=taken_order,
+                             on_the_clock=True, horizon=h)["avail_pct"]
+        finally:
+            draft_sim._horizon_pick_for = real
+        frame = rank_available(pool, S, taken, {}, avail.to_numpy())
+        return frame["survive_pct"].to_numpy()[:15] / 100.0
+
+    uncapped = _horizon_pick_for(S, 2, 15, h, advised=15, ceiling=10 ** 6)
+    capped = horizon_target(S, 2, already=14, on_the_clock=True, horizon=h)
+    assert (uncapped, capped) == (31, 27)
+
+    far, near = shown(uncapped), shown(capped)
+    # Half the list is a certainty at the far horizon and the median row is
+    # a rounding error away from gone.
+    assert int((far == 0.0).sum()) >= 6 and float(np.median(far)) < 0.05
+    # The ceiling does not make everything survive -- that would be the
+    # other failure mode -- it keeps the column readable.
+    assert int((near == 0.0).sum()) <= 2
+    assert float(np.median(near)) > float(np.median(far))
+    assert not (near == 1.0).any()
 
 
 def test_survival_default_leaves_the_offline_callers_where_they_were():

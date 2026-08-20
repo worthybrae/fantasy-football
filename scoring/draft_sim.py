@@ -506,6 +506,33 @@ def _turns_left(slots, rounds: int) -> list:
     return out
 
 
+def must_fill_positions(settings, counts, turns_left: int) -> tuple:
+    """The starter slots a roster with `turns_left` picks left can no longer
+    defer -- empty whenever it still has slack.
+
+    One definition of "now is the time to fill it", used from two places
+    that must not disagree about it: `_must_fill_mask`, which forces a
+    simulated opponent's pick onto those slots, and `gain.need_kind`, which
+    stops calling a deferrable slot a full starter need. If they drifted,
+    the ranking would recommend a kicker on a different round from the one
+    the simulator expects kickers to go in.
+
+    The line is `open starter slots >= remaining picks`: at that point every
+    pick left has to become one of them. `turns_left` counts the pick on the
+    clock (see `_turns_left`). Measured over 8 seeds of the real board, the
+    earliest pick at which it binds for anybody is 106 -- round 14 of 15 --
+    so it is inert for the whole draft up to there.
+    """
+    needed = tuple(pos for pos, n in settings.starters.items()
+                   if counts.get(pos, 0) < n)
+    if not needed:
+        return ()
+    open_slots = sum(n - counts.get(pos, 0)
+                     for pos, n in settings.starters.items()
+                     if counts.get(pos, 0) < n)
+    return needed if open_slots >= turns_left else ()
+
+
 def _must_fill_mask(pool, indices, counts, settings, turns_left: int):
     """Which of `indices` fill a starter slot this roster can no longer defer,
     or None when the constraint does not bind (which is nearly always).
@@ -604,14 +631,8 @@ def _must_fill_mask(pool, indices, counts, settings, turns_left: int):
     board, and an intervening pick of my own removes a player exactly like
     anybody else's.
     """
-    needed = [pos for pos, n in settings.starters.items()
-              if counts.get(pos, 0) < n]
+    needed = must_fill_positions(settings, counts, turns_left)
     if not needed:
-        return None
-    open_slots = sum(n - counts.get(pos, 0)
-                     for pos, n in settings.starters.items()
-                     if counts.get(pos, 0) < n)
-    if open_slots < turns_left:
         return None
     # Same fixed-vocabulary OR as `_legal_mask`, and for the same reason:
     # np.unique's sort and a per-player Python comprehension both showed up
@@ -1030,53 +1051,212 @@ def horizon_picks(settings) -> int:
       Allen climbs 9th -> 4th. At H=30 the top of the board is raw VOR
       order. So the rule takes the FIRST turn that is a real wait, not the
       furthest one available.
+
+    This is only the FLOOR. "First turn that is a real wait" does not bound
+    the far end at all, and the snake guarantees a case where the first such
+    turn is a full round TRIP away -- see `horizon_ceiling`, which is the
+    other half of the same rule and carries the measurements for that end.
     """
     return settings.teams - 1
 
 
-def _horizon_pick_for(settings, my_slot, already, horizon: int = 0) -> int:
+def horizon_ceiling(settings) -> int:
+    """How far away a turn may be and still be worth measuring against.
+
+    A round and a half of opponent picks, `3 * (teams - 1) // 2` -- 10 in
+    this league, 16 in a 12-team one. The COMPANION of `horizon_picks`, and
+    the two exist to steer between the two ways this measurement dies. Both
+    were measured; neither is a preference:
+
+    - TOO NEAR (what `horizon_picks` is the floor against): at a 0-2
+      opponent-pick step every available player survives at ~100%,
+      `gain.expected_best_next` collapses to the position's own leader and
+      `gain_now` is 0.0 for the best player at every position -- six rows
+      tied at zero, ordered by pandas' sort, which is how a defense placed
+      5th and a kicker 6th in round 1.
+    - TOO FAR (what this is the ceiling against): the survival column the
+      room prints goes to zero for every row it shows, so the number the
+      owner reads carries nothing, and the ranking slides toward raw
+      `vor_points`. Measured on the real 249-player board (8 teams, 15
+      rounds, slot 2 on the clock at pick 15, 400 rollouts), holding the
+      state fixed and moving ONLY the horizon -- `med` is the median
+      survival of the fifteen rows the room actually shows, `rho` is the
+      rank correlation of `gain_now` with `vor_points` over the top 50 of
+      the board:
+
+          opponent picks   0     4     7    10    12    14    18    21
+          shown-row med  1.00  0.90  0.73  0.31  0.10  0.07  0.01  0.00
+          rho(gain,vor)  .685  .646  .677  .735  .762  .758  .851  .892
+
+      Two other states (slot 5 at pick 12, slot 4 at pick 13) put the same
+      cliff in the same place: the median shown row is still 0.87-0.91 at 8
+      opponent picks, 0.19-0.48 at 10, and 0.09-0.12 by 11.
+
+    So the usable window is roughly 7-10 opponent picks for this league, and
+    10 is where it is cut: past that the survival distribution is ~0.0 for
+    everything the room displays, which is the mirror image of the ~1.0-for-
+    everything failure the floor exists to prevent. Do NOT collapse this
+    back toward either end without re-running that sweep.
+
+    WHY A CEILING IS NEEDED AT ALL, given the floor. A snake's two gaps for
+    a slot are `2 * (slot - 1)` and `2 * (teams - slot)` opponent picks and
+    they sum to `2 * teams - 2`, so the walk in `_horizon_pick_for` produces
+    exactly two distances: my next turn's own gap when it clears the floor,
+    or -- when it does not, which happens at every slot on every second turn
+    and at slots 1 and 8 on EVERY turn -- the turn after it, which is always
+    exactly `2 * (teams - 1)` away. That second case is 14 opponent picks
+    here, four past the cliff above, and no floor can bound it: a rule that
+    only asks "is this far enough" will always take it.
+    """
+    return 3 * (settings.teams - 1) // 2
+
+
+def _pick_after_opponent_picks(slots, my_slot, anchor, n):
+    """The nearest pick after `anchor` with exactly `n` opponent picks
+    between it and `anchor`, or None if the draft ends first.
+
+    Used only by the ceiling: when no turn of mine sits inside the usable
+    window, this is the pick the ranking is measured to instead. It is a
+    real pick of this draft and it is what `horizon_pick` then names -- just
+    not one of mine, which is the honest answer, since the alternative is a
+    number that names my turn and measures a distribution with nothing in
+    it. `len(slots)` is the last pick of the draft; a ceiling that would
+    land past it returns None so the caller keeps the turn it found rather
+    than colliding with `_horizon_pick_for`'s off-the-end sentinel.
+    """
+    seen = 0
+    for pick in range(anchor + 1, len(slots) + 1):
+        if slots[pick - 1] != my_slot:
+            seen += 1
+            if seen == n:
+                return pick + 1 if pick + 1 <= len(slots) else None
+    return None
+
+
+def _horizon_pick_for(settings, my_slot, already, horizon: int = 0, *,
+                      advised: int | None = None,
+                      ceiling: int | None = None) -> int:
     """The overall pick number (1-based) of my next turn at least `horizon`
-    opponent picks from now.
+    opponent picks after the pick this advice is FOR, capped at `ceiling`.
 
     `already` is the pick count the walk starts from; the scan is INCLUSIVE
     of the pick at that offset, which is what lets `on_the_clock` (see
     `survival`) choose between "my pick is now" and "my pick is next" by
     shifting `already` rather than by a second code path.
 
-    Walks my remaining turns in order and counts, for each, how many picks
-    between here and there are somebody else's: a turn `k` places later in
-    my own sequence has `k` of my own picks in front of it, so the opponent
-    count to my `k`-th remaining turn at pick P is `(P - 1 - already) - k`.
-    The first turn that clears `horizon` wins.
+    `advised` is the pick the ranking is FOR, and it is the anchor every
+    distance below is measured from -- NOT "now". They are the same thing
+    while I am on the clock and they are not while I am not: at pick 11 of
+    an 8-team draft with my turns at 2, 15, 18, 31, the list being built is
+    a preview of pick 15, so the wait it prices starts at 15. Measuring from
+    11 instead was the live bug this parameter closes: 15 came back 4
+    opponent picks away and 18 six, both under a `teams - 1` threshold, so
+    the walk landed on 31 -- thirteen picks out and two of my own turns
+    later, a horizon the owner could not have waited for even in principle,
+    and one at which nothing the room showed survived at all. Anchored on
+    15, the same state answers exactly what pick 15 answers when it arrives,
+    so the preview and the live list agree. Defaults to `already`, which is
+    the on-the-clock reading and the one `_next_pick_for` wants.
 
-    `horizon <= 0` returns my very next turn, unconditionally: the first
-    candidate always has an opponent count >= 0. That is not a special case
-    bolted on -- it is the general rule evaluated at zero, which is why
-    `_next_pick_for` is now this function rather than a second copy of the
-    same arithmetic, and why `run_sim`/`search_pick` (which call it only
-    through that name) cannot drift from it.
+    Walks my remaining turns AFTER the anchor and counts, for each, how many
+    picks between the anchor and there are somebody else's: a turn `k`
+    places later in my own sequence has `k` of my own picks in front of it,
+    so the opponent count to my `k`-th candidate at pick P is
+    `(P - 1 - anchor) - k`. The first turn that clears `horizon` wins.
 
-    Two fallbacks, and they are different things:
+    `ceiling` (opponent picks; `horizon_ceiling` for the rule and the
+    measurements) is the other end. When the turn the walk finds is further
+    away than that, the answer is the pick exactly `ceiling` opponent picks
+    after the anchor instead -- a real pick of this draft, but not
+    necessarily one of mine. That is deliberate and it is the point: at the
+    wheel my own turns offer a choice between 2 opponent picks away and 14,
+    and neither measures anything (see `horizon_ceiling` for both
+    distributions).
+
+    `horizon <= 0` returns my very next turn and nothing else applies -- no
+    anchor, no ceiling. That is the historical meaning `_next_pick_for` and
+    every offline caller (run_sim, search_pick) depend on, and it is why
+    they are still this one function rather than a second copy of the same
+    arithmetic.
+
+    Three fallbacks, and they are different things:
 
     - No turn is far enough away (late in the draft, where my remaining
       turns simply run out before `horizon` picks do): the LAST turn I have.
       It is the most informative horizon that actually exists for me, and it
-      is a real pick number the room can name.
-    - No turn remains at all (I am on my final pick): `len(slots) + 1`, the
-      same off-the-end answer `_next_pick_for` has always given, which
-      `survival` reads as "simulate to the end of the draft". That number is
-      not a pick that exists, so the caller must not print it -- see
-      api/live.py's `horizon_is_end_of_draft`.
+      is a real pick number the room can name. The ceiling cannot bind here
+      -- that turn is nearer than `horizon`, which is nearer than `ceiling`.
+    - No turn remains AFTER the anchor (the anchor is my final pick, whether
+      I am on the clock for it or previewing it): `len(slots) + 1`, the same
+      off-the-end answer `_next_pick_for` has always given, which `survival`
+      reads as "simulate to the end of the draft". That number is not a pick
+      that exists, so the caller must not print it -- see api/live.py's
+      `horizon_is_end_of_draft`.
+    - No turn remains at all: the same sentinel, for the same reason.
     """
     slots = snake_slots(settings.teams, settings.rounds)
     mine = [offset + 1 for offset in range(already, len(slots))
             if slots[offset] == my_slot]
     if not mine:
         return len(slots) + 1
-    for k, pick in enumerate(mine):
-        if (pick - 1 - already) - k >= horizon:
+    if horizon <= 0:
+        # No horizon means no anchor and no ceiling either: the answer is my
+        # very next turn, which is what `_next_pick_for` and every offline
+        # caller (run_sim, search_pick) have always meant by this call. It
+        # has to be said outright rather than falling out of the walk,
+        # because the walk now measures FROM the advised pick and never
+        # returns the anchor itself -- so a zero horizon would otherwise
+        # answer with the turn AFTER my next one, which is not "my next
+        # pick" by any reading. The arithmetic below is still the only copy
+        # of it; this is the one case that needs no arithmetic at all.
+        return mine[0]
+    anchor = already if advised is None else advised
+    if ceiling is None:
+        ceiling = horizon_ceiling(settings)
+    # Strictly after the anchor: when the anchor IS my next turn (the
+    # preview reading) that turn is the pick being advised, not a horizon to
+    # measure it against -- measuring a pick against itself is the
+    # everything-survives degeneracy in its purest form.
+    candidates = [pick for pick in mine if pick > anchor]
+    if not candidates:
+        return len(slots) + 1
+    for k, pick in enumerate(candidates):
+        gap = (pick - 1 - anchor) - k
+        if gap >= horizon:
+            if gap > ceiling:
+                capped = _pick_after_opponent_picks(slots, my_slot, anchor,
+                                                    ceiling)
+                if capped is not None:
+                    return capped
             return pick
-    return mine[-1]
+    return candidates[-1]
+
+
+def horizon_target(settings, my_slot, already, on_the_clock: bool,
+                   horizon: int) -> int:
+    """The pick a live ranking is measured against: ONE expression of the
+    rule, called by `survival` (which measures it) and by api/live.py (which
+    serves the number as `horizon_pick`).
+
+    Both used to derive `start` and call `_horizon_pick_for` themselves, in
+    two places, from the same two inputs. That is exactly the shape a
+    drifting caption comes from -- a list ranked against one pick and
+    captioned with another -- and now neither of them can say a different
+    number than the other, whatever the rule becomes.
+
+    `already` is the pick count (len(taken_order)), NOT the shifted start;
+    `on_the_clock` is whether the pick about to be made is mine. Those are
+    the two facts a caller has, and every derived quantity is worked out
+    here: the scan start (inclusive, so it has to skip my own pick when that
+    pick is the one on the clock) and the anchor the horizon is measured
+    from (that same pick when it is mine, my next turn when it is not --
+    see `_horizon_pick_for`'s `advised`).
+    """
+    start = already + 1 if on_the_clock else already
+    advised = (start if on_the_clock
+               else _next_pick_for(settings, my_slot, already))
+    return _horizon_pick_for(settings, my_slot, start, horizon,
+                             advised=advised)
 
 
 def _next_pick_for(settings, my_slot, already) -> int:
@@ -1242,9 +1422,13 @@ def survival(pool, settings, slot_managers, my_slot, taken, betas,
     and a guess would be wrong far more often than one player in a
     position's tail matters.
 
-    `horizon` (opponent picks; see `horizon_picks` for the rule and
-    `_horizon_pick_for` for the walk) is what makes the measurement mean
-    anything when my next turn is close. `gain_now` is one step of a
+    `horizon` (opponent picks; `horizon_picks` for the floor,
+    `horizon_ceiling` for the far end, `horizon_target` for the walk that
+    puts them together) is what makes the measurement mean anything when my
+    next turn is close. It is measured from the pick the ranking is FOR --
+    the one on the clock when that is mine, my next turn when it is not --
+    and it is bounded at BOTH ends, because both ends destroy the
+    measurement in mirror-image ways. `gain_now` is one step of a
     position's supply curve -- now versus the turn measured here -- and a
     step taken over one or two opponent picks is near zero for everybody,
     at which point the ranking has no signal left in it and the order of
@@ -1273,7 +1457,10 @@ def survival(pool, settings, slot_managers, my_slot, taken, betas,
             "and roster caps are wrong", RuntimeWarning, stacklevel=2)
     already = len(taken_order) if taken_order is not None else int(taken.sum())
     start = already + 1 if on_the_clock else already
-    target = _horizon_pick_for(settings, my_slot, start, horizon)
+    # Both the pick measured to and the number api/live.py serves for it come
+    # from this one function, so the caption can never name a different pick
+    # than the one these rollouts stopped at.
+    target = horizon_target(settings, my_slot, already, on_the_clock, horizon)
     slots = snake_slots(settings.teams, settings.rounds)
     turns_left = _turns_left(slots, settings.rounds)
     caps = _roster_cap(settings)
