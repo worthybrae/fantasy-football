@@ -2,14 +2,14 @@ import { memo, useMemo, useState, type ReactNode } from 'react'
 import type { LiveCandidate, Player } from '../../api'
 import { riskTone } from './tone'
 
-// duplicated from RosterPanel.tsx/DraftBoardGrid.tsx (unexported in both) --
-// same precedent as PlayerCard.tsx's depthSlotLabel/sosLabel: a four-line
-// pure function isn't worth a shared module between four views now.
+// duplicated from RosterPanel.tsx/DraftBoardGrid.tsx (unexported in both):
+// a four-line pure function isn't worth a shared module between four views
+// now.
 function posBadge(position: string): ReactNode {
   return <span className={`pos-badge pos-badge-${position.toLowerCase()}`}>{position}</span>
 }
 
-// Same shape as RankingsPanel.tsx's fmtRank -- one decimal only when the
+// Same shape as profile/payload.ts's fmtRank -- one decimal only when the
 // aggregate ADP isn't a whole number, dash when the player has no market
 // coverage at all. Used for both market ranks in this table: `market_rank`
 // (the five-source median, scoring/market.py) and `espn_ppr_rank` (a single

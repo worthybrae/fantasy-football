@@ -1,9 +1,8 @@
 import type { MarketSources } from '../../api'
 import { fmtRank } from './payload'
 
-// Same five sources, same labels, same order as RankingsPanel's rows -- two
-// views of one consensus that disagreed about which sites were in it would
-// be worse than either.
+// The five sources, labels and order of `scoring/market.py`'s consensus --
+// this list exists to agree with that one, not to choose its own membership.
 const SOURCES: { key: keyof Omit<MarketSources, 'fp_tier'>; label: string }[] = [
   { key: 'ffc', label: 'FFC' },
   { key: 'espn', label: 'ESPN' },

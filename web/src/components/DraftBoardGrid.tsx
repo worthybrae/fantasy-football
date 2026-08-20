@@ -2,9 +2,10 @@ import { Fragment, useEffect, useState, type CSSProperties, type FocusEvent, typ
 import { Link } from 'react-router-dom'
 import { playerSlug, type BoardCell, type BoardPlayer, type LiveBoard } from '../api'
 
-// duplicated from LiveDraft.tsx (unexported there) -- same precedent as
-// PlayerCard.tsx's depthSlotLabel/sosLabel: a four-line pure function isn't
-// worth a shared module between the board's two views.
+// duplicated from LiveDraft.tsx (unexported there): a four-line pure
+// function isn't worth a shared module between the board's two views. The
+// same call is made in RosterPanel/AvailableList/TopThree, which carry their
+// own copies for the same reason.
 function posBadge(position: string | undefined): ReactNode {
   if (!position) return null
   return <span className={`pos-badge pos-badge-${position.toLowerCase()}`}>{position}</span>

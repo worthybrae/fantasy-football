@@ -4,8 +4,8 @@
 
 // The alt bar's fill color: a continuous red -> amber -> green ramp keyed to
 // `survive_pct` (the chance a candidate is still there at your next pick),
-// same color-mix technique as PlayerCard's sosTone (two-stop interpolation
-// between the design system's fixed --ok/--fail tokens) but extended to
+// same color-mix technique as the deleted PlayerCard.tsx's sosTone (two-stop
+// interpolation between the fixed --ok/--fail tokens) but extended to
 // three stops through --accent -- this app's amber -- at the midpoint,
 // since the brief calls for amber as its own readable tier, not just a
 // blend implied by two endpoints. Low pct (gone before your next pick)

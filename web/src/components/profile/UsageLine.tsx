@@ -1,13 +1,16 @@
 import type { ProfileSummary } from '../../api'
 
-// Same keys, same order, same labels as StatTiles' STAT_ROWS -- duplicated
-// rather than shared for the same reason posBadge and fmtRank are duplicated
-// across four views in this codebase: a six-entry table is not worth a module,
-// and both copies name `scoring/profile.py::_SUMMARY_STATS` as the thing they
-// have to agree with. What changed is the shape, not the numbers: the tiles
-// were a grid of nine boxes above the fold, and the card now leads with the
-// verdict instead, so the usage they carried is one dim line under the
-// seasons they came from.
+// The keys and their order are `scoring/profile.py::_SUMMARY_STATS`, which is
+// the thing this table has to agree with -- not a list invented here. What
+// changed is the shape, not the numbers: this used to be a grid of nine tiles
+// above the fold, and the card now leads with the verdict instead, so the
+// usage they carried is one dim line under the seasons they came from.
+//
+// THERE IS NO `K` ROW AND THAT IS DELIBERATE. `_SUMMARY_STATS` carries the
+// eleven skill columns only, so `w_stats` has no kicking key to read even in a
+// league that prices kicking -- a K entry here would render six zeros. The
+// lookup falls through to `[]` and the line degrades to the points alone,
+// which is the whole of what the payload can say about a kicker's usage.
 const STATS: Record<string, [string, string][]> = {
   QB: [['cmp', 'completions'], ['att', 'attempts'], ['pass yds', 'pass_yards'],
     ['pass TD', 'pass_tds'], ['int', 'interceptions'], ['rush yds', 'rush_yards']],

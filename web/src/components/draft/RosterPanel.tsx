@@ -1,9 +1,8 @@
 import type { ReactNode } from 'react'
 import type { RosterPlayer } from '../../api'
 
-// duplicated from LiveDraft.tsx / DraftBoardGrid.tsx (unexported in both) --
-// same precedent as PlayerCard.tsx's depthSlotLabel/sosLabel: a four-line
-// pure function isn't worth a shared module between three views.
+// duplicated from LiveDraft.tsx / DraftBoardGrid.tsx (unexported in both):
+// a four-line pure function isn't worth a shared module between three views.
 function posBadge(position: string | undefined): ReactNode {
   if (!position) return null
   return <span className={`pos-badge pos-badge-${position.toLowerCase()}`}>{position}</span>

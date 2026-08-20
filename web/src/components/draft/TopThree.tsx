@@ -3,8 +3,8 @@ import type { LiveCandidate, Player } from '../../api'
 import { riskTone } from './tone'
 
 // duplicated from AvailableList.tsx (which duplicated it from
-// RosterPanel.tsx/DraftBoardGrid.tsx in turn) -- same precedent as
-// PlayerCard.tsx's depthSlotLabel/sosLabel.
+// RosterPanel.tsx/DraftBoardGrid.tsx in turn) -- see either for why a
+// four-line pure function is copied rather than shared.
 function posBadge(position: string): ReactNode {
   return <span className={`pos-badge pos-badge-${position.toLowerCase()}`}>{position}</span>
 }
