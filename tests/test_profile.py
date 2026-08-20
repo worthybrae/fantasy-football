@@ -1765,3 +1765,347 @@ def test_the_rank_frame_is_priced_by_the_leagues_scoring_not_always_ppr(tmp_path
     assert _season(p["ppr"], 2025)["cv"] == round(2.108185106778921 / 20.0, 3)
     assert _season(p["half"], 2025)["cv"] == round(1.0540925533894598 / 17.0, 3)
     assert _season(p["std"], 2025)["cv"] == 0.0
+
+
+# -- news + injury status (pipeline/news.py -> the profile payload) ----------
+#
+# `player_news` and `player_status` were written by pipeline/news.py and read
+# by nobody. These pin the three things that could quietly go wrong on the
+# way to the card: the attribution marker being flattened away, the feed
+# arriving in an order nobody chose, and a player with no news or no injury
+# being given one.
+
+def _news_rows(player_id="p1", name="Amon-Ra St. Brown"):
+    """One player's feed, mixing both attributions, deliberately out of order.
+
+    Two of these share a `published_at` to the second -- which is not a
+    contrived case: Google sends batches with identical pubDates, and 114 of
+    the 2,192 (player, published_at) groups in the real table hold more than
+    one row.
+    """
+    from pipeline.news import ATTR_EXACT, ATTR_NAME
+    ts = pd.Timestamp("2026-08-19 12:00:00")
+    return pd.DataFrame([
+        {"player_id": player_id, "name": name, "headline": "oldest name item",
+         "url": "https://news.google.com/a", "published_at": ts - pd.Timedelta(days=3),
+         "source": "Yahoo Sports", "attribution": ATTR_NAME, "fetched_at": ts},
+        {"player_id": player_id, "name": name, "headline": "newest of all",
+         "url": "https://espn.com/newest", "published_at": ts,
+         "source": "ESPN", "attribution": ATTR_EXACT, "fetched_at": ts},
+        {"player_id": player_id, "name": name, "headline": "tied, name-matched",
+         "url": "https://news.google.com/tied-b", "published_at": ts - pd.Timedelta(days=1),
+         "source": "CBS Sports", "attribution": ATTR_NAME, "fetched_at": ts},
+        {"player_id": player_id, "name": name, "headline": "tied, id-tagged",
+         "url": "https://espn.com/tied-a", "published_at": ts - pd.Timedelta(days=1),
+         "source": "ESPN", "attribution": ATTR_EXACT, "fetched_at": ts},
+    ])
+
+
+def _status_row(player_id="p1", name="Amon-Ra St. Brown", position="WR",
+                team="DET", **over):
+    row = {"player_id": player_id, "name": name, "position": position,
+           "team": team, "sleeper_id": "4035",
+           "injury_status": None, "injury_body_part": None,
+           "injury_notes": None, "practice_participation": None,
+           "depth_chart_position": "LWR", "depth_chart_order": 1,
+           "news_updated": pd.Timestamp("2026-08-18 09:30:00"),
+           "fetched_at": pd.Timestamp("2026-08-19 12:00:00")}
+    row.update(over)
+    return pd.DataFrame([row])
+
+
+def test_player_news_is_newest_first_and_breaks_a_tie_toward_the_exact_item(tmp_path):
+    """Recency is the primary key and attribution only the tiebreak, on
+    purpose: the marker says how sure we are that an item is about this
+    player, not how much it matters. On the real table not one of the 114
+    ties mixes the two attributions, so this fixture manufactures the case
+    the rule exists for."""
+    from scoring.profile import player_news
+    conn = get_conn(str(tmp_path / "news.duckdb"))
+    write_table(conn, "player_news", _news_rows())
+
+    items = player_news(conn, "p1")
+    assert [i["headline"] for i in items] == [
+        "newest of all",            # 08-19
+        "tied, id-tagged",          # 08-18, exact wins the tie
+        "tied, name-matched",       # 08-18
+        "oldest name item"]         # 08-16
+    # Sorted, not merely stable: reading them back in a different physical
+    # order must not change the answer.
+    write_table(conn, "player_news", _news_rows().iloc[::-1].reset_index(drop=True))
+    assert [i["headline"] for i in player_news(conn, "p1")] == [
+        "newest of all", "tied, id-tagged", "tied, name-matched",
+        "oldest name item"]
+
+
+def test_player_news_keeps_the_two_attributions_apart(tmp_path):
+    """THE ONE THING THAT MUST NOT BE FLATTENED. An ESPN athlete-id match is
+    a fact; a name+team search hit is a ~93-96% guess. The card presents them
+    differently, so the marker travels verbatim -- not as a boolean, not
+    dropped, and not translated into some third vocabulary of this file's
+    own invention."""
+    from pipeline.news import ATTR_EXACT, ATTR_NAME
+    from scoring.profile import player_news
+    conn = get_conn(str(tmp_path / "news.duckdb"))
+    write_table(conn, "player_news", _news_rows())
+
+    items = player_news(conn, "p1")
+    assert {i["attribution"] for i in items} == {ATTR_EXACT, ATTR_NAME}
+    exact = [i for i in items if i["attribution"] == ATTR_EXACT]
+    assert {i["headline"] for i in exact} == {"newest of all", "tied, id-tagged"}
+    # And the rest of the item is there to be rendered, not just the marker.
+    assert exact[0]["source"] == "ESPN"
+    assert exact[0]["url"] == "https://espn.com/newest"
+    assert exact[0]["published_at"] == "2026-08-19T12:00:00"
+
+
+def test_player_news_caps_the_feed(tmp_path):
+    """The cap is a real trim, not decoration: the stored feed runs to 14
+    items for some players and the median is 10. See NEWS_ITEMS for the
+    bytes it is protecting."""
+    from scoring.profile import NEWS_ITEMS, player_news
+    from pipeline.news import ATTR_NAME
+    conn = get_conn(str(tmp_path / "news.duckdb"))
+    many = pd.DataFrame([
+        {"player_id": "p1", "name": "Amon-Ra St. Brown",
+         "headline": f"item {i}", "url": f"https://news.google.com/{i}",
+         "published_at": pd.Timestamp("2026-08-19 12:00:00") - pd.Timedelta(hours=i),
+         "source": "Yahoo Sports", "attribution": ATTR_NAME,
+         "fetched_at": pd.Timestamp("2026-08-19 12:00:00")}
+        for i in range(30)])
+    write_table(conn, "player_news", many)
+
+    items = player_news(conn, "p1")
+    assert len(items) == NEWS_ITEMS
+    # ...and it keeps the NEWEST NEWS_ITEMS, not the first NEWS_ITEMS rows.
+    assert [i["headline"] for i in items] == [f"item {i}" for i in range(NEWS_ITEMS)]
+    assert len(player_news(conn, "p1", limit=3)) == 3
+
+
+def test_player_news_is_empty_rather_than_invented(tmp_path):
+    """Three ways to have no news, all of them an empty list. The first is
+    not hypothetical: data/nfl.duckdb had no `player_news` table at all when
+    this was wired, because the table only exists after a `make refresh`."""
+    from scoring.profile import player_news
+    conn = get_conn(str(tmp_path / "news.duckdb"))
+    assert player_news(conn, "p1") == []              # no table
+
+    write_table(conn, "player_news", _news_rows())
+    assert player_news(conn, "nobody") == []          # no rows for him
+
+    write_table(conn, "player_news", _news_rows().drop(columns=["attribution"]))
+    assert player_news(conn, "p1") == []              # no attribution column
+
+
+def test_player_status_carries_the_injury_and_the_depth_chart(tmp_path):
+    from scoring.profile import player_status
+    conn = get_conn(str(tmp_path / "st.duckdb"))
+    write_table(conn, "player_status", _status_row(
+        injury_status="Questionable", injury_body_part="Knee - ACL",
+        injury_notes="Surgery"))
+
+    s = player_status(conn, "p1")
+    assert s["injury_status"] == "Questionable"
+    assert s["injury_body_part"] == "Knee - ACL"
+    assert s["injury_notes"] == "Surgery"
+    assert s["depth_chart_position"] == "LWR" and s["depth_chart_order"] == 1
+    assert s["news_updated"] == "2026-08-18T09:30:00"
+    assert s["source"] == "sleeper"
+    # Measured null for all 3,186 active rostered players in the live
+    # payload, so it is deliberately not served. See `player_status`.
+    assert "practice_participation" not in s
+
+
+def test_player_status_never_says_healthy(tmp_path):
+    """Sleeper publishes Questionable / IR / PUP / Sus / Out / Doubtful /
+    NA / DNR / COV, and null. There is no "Healthy" in the vocabulary
+    (measured across all 12,221 players), so a player with nothing wrong
+    with him gets a null and the card decides what to draw. Inventing the
+    word here would be this payload claiming something Sleeper did not."""
+    from scoring.profile import player_status
+    conn = get_conn(str(tmp_path / "st.duckdb"))
+    write_table(conn, "player_status", _status_row())
+
+    s = player_status(conn, "p1")
+    assert s is not None                    # we DID look him up
+    assert s["injury_status"] is None       # and Sleeper said nothing
+    assert s["injury_body_part"] is None and s["injury_notes"] is None
+
+
+def test_player_status_is_none_when_sleeper_does_not_carry_him(tmp_path):
+    """parse_sleeper_status reindexes onto the whole board, so every board
+    player HAS a row -- a null `sleeper_id` is what "we looked and Sleeper
+    has never heard of him" looks like. That is all 26 defenses and 1 of 24
+    kickers. None, rather than a dict of nulls the client has to inspect
+    field by field."""
+    from scoring.profile import player_status
+    conn = get_conn(str(tmp_path / "st.duckdb"))
+    assert player_status(conn, "p1") is None          # no table at all
+
+    write_table(conn, "player_status", pd.concat([
+        _status_row(),
+        _status_row("d1", "Cowboys", "DST", "DAL", sleeper_id=None,
+                    depth_chart_position=None, depth_chart_order=None,
+                    news_updated=None)], ignore_index=True))
+    assert player_status(conn, "d1") is None
+    assert player_status(conn, "p1") is not None
+    assert player_status(conn, "nobody") is None      # no row
+
+
+def _seed_with_news(tmp_path):
+    from scoring import board_cache, profile_cache
+    conn = _seed(tmp_path)
+    write_table(conn, "player_news", _news_rows())
+    write_table(conn, "player_status", _status_row(injury_status="Questionable",
+                                                   injury_body_part="Hamstring"))
+    # The tables were written straight through write_table without touching
+    # `meta`, which is the one staleness gap scoring/profile_cache.py
+    # documents -- and it bites harder for these two than for the rest,
+    # because CREATING the table is the change that matters.
+    board_cache.clear(); profile_cache.clear()
+    return conn
+
+
+def test_build_profile_serves_the_feed_and_the_status_beside_the_header(tmp_path):
+    """The wiring, end to end. `status` is a sibling of `header` rather than
+    something nested in the feed: a manager wants to see Questionable before
+    he spends the pick, in one lookup from the component that draws the
+    name."""
+    p = build_profile(_seed_with_news(tmp_path), "p1")
+    assert list(p)[:2] == ["header", "status"]
+    assert p["status"]["injury_status"] == "Questionable"
+    assert p["status"]["injury_body_part"] == "Hamstring"
+    assert [i["headline"] for i in p["news"]][0] == "newest of all"
+    assert len(p["news"]) == 4
+
+
+def test_news_and_status_are_additive_to_a_payload_that_does_not_move(tmp_path):
+    """Every pre-existing key, value for value, against the same fixture
+    without the two tables. (Checked the same way against data/nfl.duckdb
+    for all 249 board players: `news` and `status` added, nothing else
+    changed -- see .superpowers/sdd/payload-wiring-report.md.)"""
+    from scoring import board_cache, profile_cache
+    board_cache.clear(); profile_cache.clear()
+    without = build_profile(_seed(tmp_path / "a"), "p1")
+    with_news = build_profile(_seed_with_news(tmp_path / "b"), "p1")
+
+    # The two keys are always PRESENT -- an empty feed is `news: []`, not a
+    # missing key, so a client never has to branch on whether the pipeline
+    # has run. What changes is only their contents.
+    assert set(with_news) == set(without)
+    assert without["news"] == [] and without["status"] is None
+    assert with_news["news"] and with_news["status"] is not None
+    for key in without:
+        if key in ("news", "status"):
+            continue
+        assert with_news[key] == without[key], key
+
+
+def test_the_new_keys_survive_json_with_no_nan_and_no_datetimes(tmp_path):
+    """`_scrub` passes a datetime straight through -- it is a scalar and it
+    is not NaN -- so `json.dumps(..., allow_nan=False)` would raise
+    TypeError on one. Every timestamp is stringified on the way out
+    (`_ts`), which is also how `player_bio` has always handled a birth
+    date."""
+    import json
+    p = build_profile(_seed_with_news(tmp_path), "p1")
+    json.dumps(p, allow_nan=False)
+    assert all(isinstance(i["published_at"], str) for i in p["news"])
+    assert isinstance(p["status"]["news_updated"], str)
+
+
+def test_a_kicker_gets_a_feed_and_a_defense_gets_an_empty_one(tmp_path):
+    """Neither may raise, and neither may be given something it has not got.
+
+    A kicker is a person somebody writes about: on the real table all 24 of
+    them have a feed and 23 of 24 match Sleeper. A defense has neither --
+    pipeline/news.py runs no query for a DST at all, because "Denver
+    Defense" as a search phrase returns whatever the newspaper wrote about
+    the Broncos, and Sleeper has no such player to match.
+    """
+    import json
+    from scoring import board_cache, profile_cache
+    from scoring.board import build_board
+    conn = _seed_kicker_fixture(tmp_path)
+    write_table(conn, "adp", pd.DataFrame([
+        {"adp_name": "Kick Guy", "position": "PK", "team": "DAL", "adp": 140.0},
+        {"adp_name": "Amon-Ra St Brown", "position": "WR", "team": "DET", "adp": 5.1},
+        {"adp_name": "Cowboys", "position": "DST", "team": "DAL", "adp": 150.0}]))
+    write_table(conn, "player_news", _news_rows("k1", "Kick Guy"))
+    write_table(conn, "player_status", _status_row(
+        "k1", "Kick Guy", "K", "DAL", depth_chart_position="K"))
+    board_cache.clear(); profile_cache.clear()
+    settings = _kicker_settings(_kicker_rules())
+    dst_id = build_board(conn, settings=settings).pipe(
+        lambda b: b[b["position"] == "DST"].iloc[0]["player_id"])
+
+    kicker = build_profile(conn, "k1", None, settings)
+    assert len(kicker["news"]) == 4 and kicker["status"]["depth_chart_position"] == "K"
+
+    defense = build_profile(conn, dst_id, None, settings)
+    json.dumps(defense, allow_nan=False)
+    assert defense["news"] == []            # no feed exists for a team defense
+    assert defense["status"] is None        # and Sleeper has no such player
+
+
+def test_the_column_lists_for_the_two_news_tables_are_cached_not_re_queried(tmp_path):
+    """Both reads have to know the table is there before they can query it,
+    and that information_schema round trip measured 0.53 + 0.53 ms against
+    0.62 + 0.11 ms for the queries themselves -- the schema lookup cost more
+    than the reads did. They ride in ProfileFrames beside `snap_columns`,
+    which is there for the identical reason, and carrying them is what takes
+    the whole addition from ~2.6 ms a click to 1.6 ms."""
+    from scoring import profile_cache
+    conn = _seed_with_news(tmp_path)
+    build_profile(conn, "p1")
+
+    frames = next(iter(profile_cache._cache.values()))
+    assert "attribution" in frames.news_columns
+    assert "injury_status" in frames.status_columns
+    # A database with neither table carries the empty sets, which is what
+    # makes `news: []` / `status: None` the answer without a query.
+    profile_cache.clear()
+    plain = _seed(tmp_path / "plain")
+    build_profile(plain, "p1")
+    frames = next(iter(profile_cache._cache.values()))
+    assert frames.news_columns == frozenset()
+    assert frames.status_columns == frozenset()
+
+
+def test_an_all_null_status_table_is_none_rather_than_a_dict_of_nans(tmp_path):
+    """The shape a DST-only board, or a failed Sleeper fetch, actually
+    produces: pandas gives an all-null column no dtype to work with, DuckDB
+    stores it as DOUBLE, and it comes back as float nan -- not None. An
+    `is None` guard would sail past that and put nans in the payload, where
+    `json.dumps(allow_nan=False)` raises rather than showing anything."""
+    import json
+    from scoring.profile import player_status
+    conn = get_conn(str(tmp_path / "st.duckdb"))
+    write_table(conn, "player_status", pd.DataFrame([
+        {"player_id": "d1", "name": "Cowboys", "position": "DST", "team": "DAL",
+         "sleeper_id": None, "injury_status": None, "injury_body_part": None,
+         "injury_notes": None, "practice_participation": None,
+         "depth_chart_position": None, "depth_chart_order": None,
+         "news_updated": None, "fetched_at": None}]))
+    assert conn.execute("SELECT typeof(sleeper_id) FROM player_status").fetchone()[0] != "VARCHAR"
+    assert player_status(conn, "d1") is None
+
+
+def test_a_feed_with_no_publication_names_serves_nulls_not_nans(tmp_path):
+    """Same failure one table over: `source` is optional in the RSS -- Google
+    sends it, a hand-written row need not -- and an all-null column arrives
+    as float nan. The item must carry `source: null` and stay serialisable."""
+    import json
+    from pipeline.news import ATTR_NAME
+    from scoring.profile import player_news
+    conn = get_conn(str(tmp_path / "news.duckdb"))
+    write_table(conn, "player_news", pd.DataFrame([
+        {"player_id": "p1", "name": "A Star", "headline": "no publication",
+         "url": "https://news.google.com/z",
+         "published_at": pd.Timestamp("2026-08-19 12:00:00"), "source": None,
+         "attribution": ATTR_NAME,
+         "fetched_at": pd.Timestamp("2026-08-19 12:00:00")}]))
+
+    items = player_news(conn, "p1")
+    assert items[0]["source"] is None
+    json.dumps(items, allow_nan=False)

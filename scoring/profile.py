@@ -3,6 +3,18 @@ import math
 import numpy as np
 import pandas as pd
 from pipeline.db import read_table
+# IMPORTED from the writer, never re-spelled here. The attribution marker is
+# the whole contract between pipeline/news.py and this payload: an id-tagged
+# item and a name-matched one are different kinds of fact and the card
+# presents them differently. A literal "espn_athlete_id" typed a second time
+# in this file would silently stop matching the day somebody renames the
+# constant, and the failure mode is not an exception -- it is every exact
+# item quietly losing its tiebreak and sorting as if it were inferred.
+# (ATTR_NAME is deliberately not imported: nothing here needs to NAME the
+# inferred case. Every row's marker is passed through verbatim, so a third
+# value pipeline/news.py might add one day reaches the client untouched
+# rather than being collapsed into one of the two this file knows.)
+from pipeline.news import ATTR_EXACT
 from scoring import factors, league
 from scoring.board import _norm_name, _adapt_depth_charts
 from scoring.board_cache import cached_build_board
@@ -41,6 +53,36 @@ _KDST_POSITIONS = {"K", "DST"}
 # than read.
 COMP_PPG_BAND = 3.0
 COMP_EXP_BAND = 1
+
+# How many headlines travel with one profile. The second calibration on this
+# page, and like COMP_PPG_BAND above it is a judgement stated rather than a
+# number that fell out of the data -- but the trade it balances was measured,
+# on the 2,346 rows pipeline/news.py wrote for the 249-player board:
+#
+#   * ONE ITEM IS EXPENSIVE FOR WHAT IT SAYS. Median 494 bytes, of which the
+#     Google News redirect URL alone is 256 -- Google stopped putting a
+#     decodable target in that token, so the redirect IS the link and it
+#     cannot be shortened. A headline is ~60 characters of actual content
+#     inside a 494-byte row.
+#   * THE PAYLOAD IT JOINS IS NOT BIG. A skill player's profile is 33 KB
+#     today (23 KB of it game_log); a kicker's is 3.3 KB and a defense's
+#     3.0 KB. Eight items add 4.1 KB median / 5.0 KB worst case -- +12% on a
+#     running back, but +150% on a kicker, which is the case that decided
+#     this. The whole thing is fetched on a click while a draft clock runs.
+#   * THE STORED FEED HOLDS AT MOST 14 (pipeline's GOOGLE_ITEMS_PER_PLAYER
+#     is 10 name-matched, plus 1-4 id-tagged; median 10). So 8 is a real
+#     trim rather than a decorative cap -- which is the point of having one
+#     here at all. A serving cap set AT the storage cap does nothing today
+#     and silently grows the payload the day somebody raises the pipeline's.
+#   * IT ALMOST NEVER COSTS AN ID-TAGGED ITEM. Ordering by recency and
+#     cutting at 8 drops an exact item for 4 of the 87 players who have one;
+#     at 6 it is 5 players, at 10 it is 3. Below ~6 the losses start and the
+#     bytes saved (3.0 KB vs 4.1 KB) do not pay for them.
+#
+# What this is NOT sized for is completeness. The feed is a "what has been
+# said about him lately" panel next to a pick clock, not an archive: the
+# median stored item is already 5 days old and the oldest is 9 months.
+NEWS_ITEMS = 8
 
 # Distinguishable from an explicit `snap_share=None`, which means "there is
 # no snap data" -- a real, different answer from "work it out yourself".
@@ -913,6 +955,205 @@ def _depth_slice(conn, team, player_id: str) -> pd.DataFrame:
         [team, player_id]).df()
 
 
+def _ts(v):
+    """A timestamp as an ISO-8601 string, or None.
+
+    Every other date on this page is stringified before it leaves
+    (`player_bio` does `str(pd.Timestamp(birth).date())`), and it has to be:
+    `_scrub` passes a `datetime`/`pd.Timestamp` straight through -- it is a
+    scalar and it is not NaN -- and `tests/test_profile.py::test_no_nan_
+    anywhere` calls `json.dumps(payload, allow_nan=False)`, which raises
+    TypeError on one. A date rendered by whatever the web framework happens
+    to do with a datetime is also a payload key whose format nobody chose.
+    """
+    if v is None or pd.isna(v):
+        return None
+    return pd.Timestamp(v).isoformat()
+
+
+# Written by pipeline/news.py's NEWS_COLUMNS / STATUS_COLUMNS. Named here as
+# the minimum this reader needs rather than as the full column list, so a
+# later column ADDED by the pipeline does not make these reads fall back to
+# empty.
+_NEWS_NEEDS = {"player_id", "headline", "url", "published_at", "source",
+               "attribution", "fetched_at"}
+_STATUS_NEEDS = {"player_id", "sleeper_id", "injury_status",
+                 "injury_body_part", "injury_notes", "depth_chart_position",
+                 "depth_chart_order", "news_updated", "fetched_at"}
+
+
+def player_news(conn, player_id: str, columns=None,
+                limit: int = NEWS_ITEMS) -> list[dict]:
+    """This player's recent headlines, newest first. `[]` when there are none.
+
+    ATTRIBUTION SURVIVES INTACT, which is the reason this returns a list of
+    dicts rather than a list of (headline, url) pairs. `pipeline/news.py`
+    mixes two feeds into one table and stamps every row with which one it
+    came from: ATTR_EXACT rows were tagged with the player's ESPN athlete id
+    by ESPN itself, ATTR_NAME rows came back from a name+team search that
+    measured ~93-96% relevant. Those are not the same claim, the card shows
+    them differently, and flattening them into one undifferentiated feed
+    would present a good guess as a fact. The marker is passed through
+    verbatim -- not translated to a boolean, not dropped.
+
+    ORDER: most recent first; an exact item wins a tie on `published_at`;
+    `url` breaks what is left, only so the order is deterministic. The
+    middle term is a rule about what SHOULD happen rather than one that
+    changes today's output -- measured on the 2,346 stored rows, 114 of
+    2,192 (player, published_at) groups hold more than one item, and not one
+    of those ties mixes the two attributions (Google sends batches of items
+    sharing a pubDate to the second). Without the last term those 114 groups
+    would come back in whatever order the scan produced, which is stable in
+    practice and guaranteed by nothing.
+
+    Recency is the PRIMARY key and exactness only the tiebreak, deliberately:
+    attribution measures how sure we are that an item is about this player,
+    not how much it matters. A three-week-old ESPN article is not more use
+    to a manager on the clock than eight things written this week, so it is
+    not pinned above them. See NEWS_ITEMS for what the cap costs.
+
+    NOT BEHIND `cached_profile_frames`, unlike every other cross-player
+    frame the card needed: this is a per-player read of ~8 rows out of a
+    2,346-row table, the same shape as `_player_weekly` and `_depth_slice`
+    above it. Caching the table instead would put ~1.2 MB into a 46 MB
+    cache entry and `.copy()` it on every click to hand back eight rows.
+
+    WHAT THE WHOLE ADDITION COSTS, this function plus `player_status`: 1.58
+    ms on a warm click that was 82.2 ms without it, +1.9% -- measured as a
+    single-process A/B (40 alternating pairs, the two calls stubbed out and
+    restored in the same interpreter) so that process-to-process variance
+    could not be read as a cost. Both are per-player SQL, so nothing here
+    touches the 1.89s cold build.
+
+    `.fetchall()` rather than `.df()`: eight rows do not need a DataFrame,
+    and going through pandas would cost a conversion and hand back NaT for
+    a null timestamp where DuckDB hands back None.
+
+    `columns` is the table's column names, off `ProfileFrames.news_columns`,
+    on the same argument `snap_share_by_game` takes `snap_columns`: the
+    information_schema round trip this replaces measured 0.53 ms against
+    0.62 ms for the query itself -- the schema lookup cost almost as much as
+    the read. None (the default) means "look it up", so a caller holding no
+    frames -- every test of this function -- still works; an empty frozenset
+    means the table is not there.
+    """
+    if columns is None:
+        columns = _table_columns(conn, "player_news")
+    if not _NEWS_NEEDS.issubset(columns):
+        # Missing table (no `make refresh` has written one yet -- true of
+        # data/nfl.duckdb as this was wired) or a schema this reader cannot
+        # honour. An empty feed is the honest answer, and it is the same one
+        # a player with no news gets; there is no half-served version of an
+        # item whose attribution is unknown.
+        return []
+    rows = conn.execute(
+        "SELECT headline, url, published_at, source, attribution, fetched_at "
+        "FROM player_news WHERE player_id = ? "
+        "ORDER BY published_at DESC NULLS LAST, (attribution = ?) DESC, url "
+        "LIMIT ?", [player_id, ATTR_EXACT, int(limit)]).fetchall()
+    # `_scrub`ed here rather than only by `build_profile`: an all-null
+    # `source` column (a feed that sent no publication names) comes out of
+    # pandas as float nan, and these two are reachable without going through
+    # the payload assembly at all. It is idempotent, so the outer scrub still
+    # sees exactly what it saw before.
+    return [
+        _scrub({
+            "headline": h,
+            "url": u,
+            "published_at": _ts(p),
+            "source": s,
+            "attribution": a,
+            # Per item, not per feed, because it genuinely varies within one
+            # player's rows: fetch_player_news re-reads ESPN every run but
+            # carries a player's name-matched rows forward when his query
+            # fails or is inside the TTL, so the two halves can be hours or
+            # days apart. It is the only thing that lets the card say how old
+            # the FEED is, as opposed to how old the news in it is.
+            "fetched_at": _ts(f),
+        })
+        for h, u, p, s, a, f in rows
+    ]
+
+
+def player_status(conn, player_id: str, columns=None) -> dict | None:
+    """Sleeper's injury and depth-chart signals for one player, or None.
+
+    SERVED AS A SIBLING OF `header`, NOT INSIDE `news`. This is the one field
+    on the card that changes a pick: a manager wants to see "Questionable"
+    before he spends the pick, not after scrolling a feed. Nested under the
+    news it would be `payload.news.status.injury_status` and would read as
+    another headline; at the top level the header component reaches it with
+    one lookup and can render it beside the name.
+
+    NULL IS NOT "HEALTHY", and this never invents the word. Measured on the
+    live Sleeper payload (12,221 players, 2026-08-19), `injury_status` takes
+    the values Questionable / IR / PUP / Sus / Out / Doubtful / NA / DNR /
+    COV, and null -- there is no "Healthy" and no "Active" in it. A player
+    with nothing wrong with him is published with the field empty, so the
+    honest payload is `injury_status: None` and the card decides whether a
+    blank badge is worth drawing. `source` names Sleeper for the same
+    reason `attribution` exists on a headline: a status is a claim by
+    somebody, and the client should be able to say who.
+
+    RETURNS None -- not a dict of nulls -- WHEN SLEEPER HAS NO ROW FOR HIM.
+    `pipeline.news.parse_sleeper_status` reindexes onto the whole board, so
+    every board player HAS a `player_status` row; a `sleeper_id` of null is
+    what "we looked and Sleeper does not carry this player" looks like. All
+    26 defenses are in that state (a team defense is not a Sleeper player)
+    and 1 of 24 kickers. A dict whose every value is null says the same
+    thing in a shape the client has to inspect field by field.
+
+    DELIBERATELY ABSENT: `practice_participation`. It is a real column on
+    the table and reads like exactly what an injury panel wants, but it is
+    null for all 3,186 active rostered players in the live payload (1 of
+    12,221 overall, and he is not on any roster) -- so serving it would put
+    an always-blank line on the card. pipeline/news.py's own comment about
+    `injury_start_date` records the same shape of finding. If Sleeper ever
+    starts populating it, re-measure and add it back.
+
+    `columns` behaves exactly as it does in `player_news` above: the cached
+    column list, or None to look it up.
+    """
+    if columns is None:
+        columns = _table_columns(conn, "player_status")
+    if not _STATUS_NEEDS.issubset(columns):
+        return None
+    row = conn.execute(
+        "SELECT sleeper_id, injury_status, injury_body_part, injury_notes, "
+        "depth_chart_position, depth_chart_order, news_updated, fetched_at "
+        "FROM player_status WHERE player_id = ? LIMIT 1", [player_id]).fetchone()
+    # `pd.isna`, not `is None`. A `player_status` whose `sleeper_id` is null
+    # for EVERY row -- a DST-only fixture, or a database whose Sleeper fetch
+    # failed outright -- gives pandas an all-null column, which DuckDB stores
+    # as DOUBLE and hands back as float nan rather than None. `is None` would
+    # miss that and return a dict of nans; the same reasoning applies to
+    # `depth_chart_order` below, where `int(nan)` is a ValueError.
+    if row is None or pd.isna(row[0]):
+        return None
+    _, status, part, notes, slot, order, updated, fetched = row
+    # Scrubbed for the same reason `player_news` scrubs: `injury_status` and
+    # friends are all-null often enough that pandas hands DuckDB a float
+    # column, and a nan in the payload is a TypeError out of
+    # `json.dumps(allow_nan=False)`, not a visible bug.
+    return _scrub({
+        "injury_status": status,
+        "injury_body_part": part,
+        "injury_notes": notes,
+        # Sleeper's own depth chart, which is a different source from the
+        # nflverse `depth_charts` table behind `outlook.depth_slot` -- kept
+        # separate rather than merged, because two sources disagreeing is
+        # information and a silently-preferred one is not.
+        "depth_chart_position": slot,
+        "depth_chart_order": _int_or_none(order),
+        # Sleeper's "when did this player last make news" stamp. The cheapest
+        # freshness signal on the panel: it says whether the injury line is
+        # current without the client having to read the headlines.
+        "news_updated": _ts(updated),
+        "fetched_at": _ts(fetched),
+        "source": "sleeper",
+    })
+
+
 def build_profile(conn, player_id: str, weights: dict | None = None,
                   settings: "league.LeagueSettings | None" = None) -> dict | None:
     # `settings` (the league's roster shape AND its scoring rules) is loaded
@@ -1070,6 +1311,12 @@ def build_profile(conn, player_id: str, weights: dict | None = None,
 
     payload = {
         "header": header,
+        # Second, next to the header rather than at the bottom with the feed,
+        # because that is where it is used: "Questionable" changes a pick and
+        # has to be reachable in one lookup from the component that draws the
+        # name. See `player_status` for why it is None rather than a dict of
+        # nulls for a defense, and why nothing here ever says "Healthy".
+        "status": player_status(conn, player_id, frames.status_columns),
         "factors": factors_out,
         "summary": summary,
         "seasons": seasons,
@@ -1089,5 +1336,10 @@ def build_profile(conn, player_id: str, weights: dict | None = None,
                                      player_id, bio["rookie_season"])),
         "oline": team_line_quality(frames.line_quality, frames.draft_season,
                                    header["team"], header["position"]),
+        # Last, and a list -- empty for a player nobody wrote about, and for
+        # every defense (pipeline/news.py runs no query for a DST: "Denver
+        # Defense" as a search phrase returns whatever the newspaper wrote
+        # about the Broncos). Never a placeholder item.
+        "news": player_news(conn, player_id, frames.news_columns),
     }
     return _scrub(payload)

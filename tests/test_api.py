@@ -218,6 +218,57 @@ def test_profile_endpoint(tmp_path):
     assert body["header"]["player_id"] == pid
     assert {"factors", "seasons", "game_log", "outlook", "similar"} <= set(body)
 
+def test_profile_endpoint_carries_the_news_feed_and_the_injury_status(tmp_path):
+    """The two tables pipeline/news.py writes reach the client, over HTTP,
+    with the attribution marker intact and the injury status one lookup from
+    the header rather than buried in the feed.
+
+    `player_news`/`player_status` are written straight through write_table
+    here without touching `meta`, which is the staleness gap
+    scoring/profile_cache.py documents -- so the caches are cleared before
+    the app is built, exactly as that module's docstring instructs.
+    """
+    from scoring import board_cache, profile_cache
+    from pipeline.news import ATTR_EXACT, ATTR_NAME
+    path = str(tmp_path / "t.duckdb")
+    _seed(path)
+    conn = get_conn(path)
+    now = pd.Timestamp("2026-08-19 12:00:00")
+    write_table(conn, "player_news", pd.DataFrame([
+        {"player_id": "p1", "name": "A Star", "headline": "id-tagged, older",
+         "url": "https://espn.com/x", "published_at": now - pd.Timedelta(days=1),
+         "source": "ESPN", "attribution": ATTR_EXACT, "fetched_at": now},
+        {"player_id": "p1", "name": "A Star", "headline": "name-matched, newer",
+         "url": "https://news.google.com/y", "published_at": now,
+         "source": "Yahoo Sports", "attribution": ATTR_NAME, "fetched_at": now}]))
+    write_table(conn, "player_status", pd.DataFrame([
+        {"player_id": "p1", "name": "A Star", "position": "WR", "team": "DET",
+         "sleeper_id": "4035", "injury_status": "Questionable",
+         "injury_body_part": "Hamstring", "injury_notes": None,
+         "practice_participation": None, "depth_chart_position": "LWR",
+         "depth_chart_order": 1, "news_updated": now, "fetched_at": now}]))
+    conn.close()
+    board_cache.clear(); profile_cache.clear()
+
+    body = TestClient(create_app(path)).get("/api/players/p1/profile").json()
+    assert body["status"]["injury_status"] == "Questionable"
+    assert body["status"]["source"] == "sleeper"
+    # Newest first, and the marker survives serialization rather than being
+    # flattened into one undifferentiated feed.
+    assert [i["headline"] for i in body["news"]] == [
+        "name-matched, newer", "id-tagged, older"]
+    assert [i["attribution"] for i in body["news"]] == [ATTR_NAME, ATTR_EXACT]
+
+
+def test_profile_endpoint_without_a_refresh_serves_an_empty_feed(tmp_path):
+    """A database that has never run `make refresh` has no `player_news` and
+    no `player_status` table at all -- which is what data/nfl.duckdb looked
+    like when this was wired. Empty list and null, HTTP 200, no error."""
+    c = _client(tmp_path)
+    body = c.get("/api/players/p1/profile").json()
+    assert body["news"] == [] and body["status"] is None
+
+
 def test_profile_404(tmp_path):
     assert _client(tmp_path).get("/api/players/nope/profile").status_code == 404
 

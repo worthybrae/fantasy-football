@@ -119,7 +119,8 @@ frames (snap_share, prior_weekly, season_len, schedules, players,
 pfr_to_gsis, line_quality) are rebuilt with them rather than split into a
 second cache: the whole set is one dataclass, a second format is one extra
 46 MB entry, and no league changes its scoring mid-draft. Every table read here (`weekly`, `snap_counts`, `depth_charts`,
-`schedules`, `players`) is a UNIVERSAL_TABLES source (pipeline/db.py) that
+`schedules`, `players`, and -- for their column lists only -- `player_news`
+and `player_status`) is a UNIVERSAL_TABLES source (pipeline/db.py) that
 `pipeline.refresh.main()` rewrites and then stamps into `meta` via
 `record_freshness`, unconditionally, success or failure -- verified by
 reading pipeline/refresh.py's job list against this exact set of table
@@ -131,10 +132,15 @@ correctly-cached aggregates.
 
 WHAT IS DELIBERATELY NOT DEFENDED, same gap board_cache accepts and for the
 same reason: a `write_table` onto `weekly`/`snap_counts`/`depth_charts`/
-`schedules`/`players` that does not also touch `meta` -- a test or a script
-writing directly -- will not invalidate this cache, because `meta` is the
-only cheap change signal DuckDB exposes through this driver. Call
-`profile_cache.clear()` after any such write.
+`schedules`/`players`/`player_news`/`player_status` that does not also touch
+`meta` -- a test or a script writing directly -- will not invalidate this
+cache, because `meta` is the only cheap change signal DuckDB exposes through
+this driver. Call `profile_cache.clear()` after any such write. The two news
+tables make that sharper than it was: CREATING one is the change that
+matters (a database with no `player_news` serves an empty feed and caches
+the fact), so a test that seeds a profile database, calls `build_profile`,
+and only then writes `player_news` will keep serving `news: []` until it
+clears.
 """
 import threading
 from collections import OrderedDict
@@ -230,6 +236,28 @@ class ProfileFrames:
     # put it in a WHERE clause, and an information_schema round trip for that
     # measured 1.1 ms -- on a request whose whole warm budget is 150.
     snap_columns: frozenset
+    # `player_news` / `player_status` (pipeline/news.py), carried for exactly
+    # the same reason and measured the same way: both reads have to know the
+    # table is there and carries the columns they name before they can query
+    # it, and asking information_schema twice cost MORE THAN THE QUERIES DID
+    # -- 0.53 + 0.53 ms of schema lookup against 0.62 + 0.11 ms for the two
+    # SELECTs (medians of 300, one session, data/nfl.duckdb + a real news
+    # table). Carrying the two column lists here is what takes the whole
+    # addition from ~2.6 ms a click to 1.6 ms.
+    #
+    # The tables are UNIVERSAL_TABLES that `pipeline.refresh.main()` writes
+    # and then stamps into `meta` unconditionally (verified against its job
+    # list, which runs player_status then player_news last of all), so
+    # `_meta_key` invalidates this the moment a refresh creates them --
+    # which is the case that matters, because data/nfl.duckdb has no such
+    # tables until one runs.
+    #
+    # NOT cached: the rows. A profile serves ~8 headlines out of 2,346 and
+    # one status row out of 249, both filtered in SQL. Caching the news table
+    # would add ~1.2 MB to a 46 MB entry and `.copy()` it per click to hand
+    # back eight rows.
+    news_columns: frozenset
+    status_columns: frozenset
 
     def copy(self) -> "ProfileFrames":
         """A private copy of every frame, for one request to do as it likes with.
@@ -268,6 +296,8 @@ class ProfileFrames:
             line_quality=self.line_quality.copy(),
             draft_season=self.draft_season,
             snap_columns=self.snap_columns,
+            news_columns=self.news_columns,
+            status_columns=self.status_columns,
         )
 
 
@@ -549,6 +579,8 @@ def _build(conn, rules: dict | None) -> ProfileFrames:
         line_quality=_line_quality(conn, CURRENT_SEASON, snaps),
         draft_season=CURRENT_SEASON,
         snap_columns=frozenset(snaps.columns),
+        news_columns=frozenset(_table_columns(conn, "player_news")),
+        status_columns=frozenset(_table_columns(conn, "player_status")),
     )
 
 
@@ -597,8 +629,9 @@ def cached_profile_frames(conn, rules: dict | None = None) -> ProfileFrames:
 def clear() -> None:
     """Drop every cached frame set. Test hook, and the escape valve for the
     gap in the module docstring: after a test or a script rewrites
-    `weekly`/`snap_counts`/`depth_charts`/`schedules`/`players` via
-    `write_table` without also updating `meta`, call this so the next
-    profile can't be assembled from the old contents."""
+    `weekly`/`snap_counts`/`depth_charts`/`schedules`/`players`/
+    `player_news`/`player_status` via `write_table` without also updating
+    `meta`, call this so the next profile can't be assembled from the old
+    contents."""
     with _lock:
         _cache.clear()

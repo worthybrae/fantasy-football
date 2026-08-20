@@ -71,6 +71,24 @@ offensive player gets his team's offensive-line rating out of 32, with the
 four parts behind it. Kickers get all of it when the league scores kicking;
 defenses have no weekly rows, so most of it is null for them.
 
+It also carries the player's recent news and his injury status, both filled
+by `make refresh` (`pipeline/news.py`) so no profile click ever waits on a
+network call. `status` sits beside `header` rather than down with the feed,
+because "Questionable" is the one field on the page that changes a pick and
+it should be one lookup from the name: Sleeper's injury status, body part,
+notes and depth-chart slot, or `null` for a player Sleeper does not carry
+(every defense). It is never the word "Healthy" — Sleeper does not publish
+that, so a player with nothing wrong with him has a null status.
+
+`news` is up to 8 headlines, newest first, each with its link, publication
+and published date. Every item also carries an `attribution` marker, and the
+card is meant to show the two apart: `espn_athlete_id` means ESPN tagged the
+article with this player's athlete id, and `name_team_query` means it came
+back from a search for his name and team, which measured about 93-96%
+relevant. A guess and a fact are not the same claim. A player nobody wrote
+about gets an empty list; so does every defense, because a search for
+"Denver Defense" returns whatever the newspaper wrote about the Broncos.
+
 ## Project structure
 
 - `pipeline/` — data ingestion and refresh workflow (`sources.py`, `db.py`,
