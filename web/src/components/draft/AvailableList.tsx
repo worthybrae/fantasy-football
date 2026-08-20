@@ -9,42 +9,111 @@ function posBadge(position: string): ReactNode {
   return <span className={`pos-badge pos-badge-${position.toLowerCase()}`}>{position}</span>
 }
 
-// Signed for display: `gain_now`/`vor_points` can be negative (waiting
-// genuinely beats taking him -- e.g. the next-best survivor at his
-// position already outvalues him), and a bare template literal would print
-// "+-4" for that case. Positive gets an explicit "+" (nothing else on this
-// screen implies sign the way a raw number does); zero and negative print
-// as-is. `null` (no roster to rank this pick for yet -- my_slot not
-// resolved, see LiveCandidate's own comment in api.ts) renders as a dash,
-// never as "0" or "+0" -- either would read as a real, computed zero gain.
-function fmtSigned(n: number | null): string {
-  if (n === null) return '—'
-  const r = Math.round(n)
-  return r > 0 ? `+${r}` : `${r}`
-}
-
 // Same shape as RankingsPanel.tsx's fmtRank -- one decimal only when the
 // aggregate ADP isn't a whole number, dash when the player has no market
-// coverage at all.
+// coverage at all. Used for both market ranks in this table: `market_rank`
+// (the five-source median, scoring/market.py) and `espn_ppr_rank` (a single
+// source, integral in practice, but formatted the same way so the two
+// columns line up digit for digit).
 function fmtRank(n: number | null): string {
   if (n === null) return '—'
   return Number.isInteger(n) ? String(n) : n.toFixed(1)
 }
 
-// Whether `fills` names a slot in the actual starting lineup -- FLEX
-// counts, since a flex slot still starts. `BENCH`, gain.py's `—` ("no slot
-// left at all, even the bench is full"), and `null` (no roster to fill a
-// slot on yet -- my_slot not resolved) all read muted: the server already
-// decided which is which (need_kind/fills_slot in scoring/gain.py) for the
-// first two, and null is simply not an answer at all. TopThree.tsx applies
-// the identical rule to its own three-figure row for the same reason
-// RosterPanel colors an open starter slot and not an open bench one -- one
-// meaning, drawn the same way everywhere it appears.
-function fillsIsOpenSlot(fills: string | null): boolean {
-  return fills !== null && fills !== 'BENCH' && fills !== '—'
+const POSITIONS = ['ALL', 'QB', 'RB', 'WR', 'TE', 'K', 'DST']
+
+// -- sorting ---------------------------------------------------------------
+//
+// WHY THIS TABLE NO LONGER SHOWS `gain_now`, `vor_points` OR `fills`:
+// the model is unchanged. `gain_now` still ranks this list server-side (see
+// scoring/gain.py and api/live.py's _recompute), it is still what `c.rank`
+// -- the `#` column and the default sort here -- counts down, and it still
+// picks and orders the three recommendation cards above this table, which
+// explain the pick in a sentence. What changed is that the table stopped
+// showing the working: "Gain now", "Over repl" and "Fills" were three
+// columns nobody could read without a paragraph of explanation, so they
+// were deliberately deleted at the owner's request. They were NOT lost in a
+// refactor -- do not "restore" them. If a number here ever needs defending
+// again, the place for it is TopThree's sentence, not a fourth column of
+// jargon. (Removing `fills` also removed the accent treatment that marked
+// an open starter slot; that signal lives on in RosterPanel, which is where
+// a reader looks for "what do I still need" anyway. It is deliberately not
+// re-drawn here.)
+
+type SortKey = 'rank' | 'pos' | 'player' | 'proj' | 'lasts' | 'adp' | 'espn'
+type SortDir = 'asc' | 'desc'
+
+// The direction a column gets on its FIRST click -- "best first" for that
+// particular column, which is not the same arrow everywhere: rank/ADP/ESPN
+// are ranks (1 is best, so ascending), proj/lasts are quantities (bigger is
+// better, so descending). Clicking an already-sorted header flips it, so
+// both directions stay reachable on every column; this only decides which
+// one you land on without having to click twice.
+const NATURAL_DIR: Record<SortKey, SortDir> = {
+  rank: 'asc', pos: 'asc', player: 'asc', proj: 'desc', lasts: 'desc', adp: 'asc', espn: 'asc',
 }
 
-const POSITIONS = ['ALL', 'QB', 'RB', 'WR', 'TE', 'K', 'DST']
+// Position sorts in the pill row's order (QB, RB, WR, TE, K, DST), not
+// alphabetically -- alphabetical would open with DST and K, which is the
+// order nobody thinks about a draft in, and it would disagree with the
+// filter pills sitting directly above the header. Anything the server sends
+// that isn't in the pill list lands after everything that is.
+const POS_ORDER = POSITIONS.slice(1)
+function posIndex(position: string): number {
+  const i = POS_ORDER.indexOf(position)
+  return i === -1 ? POS_ORDER.length : i
+}
+
+// The one value a column sorts on. `null` means "this player has no such
+// number" and is handled by the comparator, never coerced to 0 -- a player
+// no market source covers is not ADP 0, i.e. the best pick on the board.
+// Every key reads from exactly the same place the cell renders from, so
+// what you see sorted is what you see printed.
+function sortValue(
+  key: SortKey, c: LiveCandidate, player: Player | undefined,
+): number | string | null {
+  switch (key) {
+    case 'rank': return c.rank
+    case 'pos': return posIndex(c.position)
+    case 'player': return (player?.name ?? c.player_id).toLowerCase()
+    case 'proj': return c.proj_points
+    case 'lasts': return c.survive_pct
+    case 'adp': return player?.market_rank ?? null
+    case 'espn': return player?.espn_ppr_rank ?? null
+  }
+}
+
+// NULLS ALWAYS LAST, in both directions -- deliberately not "smallest" or
+// "largest". A missing ESPN rank is an absence, not a value: treating it as
+// -Infinity would put every uncovered rookie above Ja'Marr Chase on one
+// click and below him on the next, and either way the dashes would be
+// interleaved through the rows you were actually trying to compare.
+// Sinking them keeps the comparable rows contiguous at the top and makes
+// the flip button do one predictable thing.
+//
+// Ties (and null-vs-null) fall back to the server's own `rank`, ascending,
+// which is never null and is unique per row -- so the sort is total and
+// stable-looking regardless of the engine, and sorting by POS, say, leaves
+// each position group in board order rather than in arrival order. The
+// tie-break is NOT flipped with `dir`: within one position, or one ADP
+// value, board order is the right order either way.
+function compareRows(
+  a: LiveCandidate, b: LiveCandidate,
+  key: SortKey, dir: SortDir, players: Record<string, Player>,
+): number {
+  const av = sortValue(key, a, players[a.player_id])
+  const bv = sortValue(key, b, players[b.player_id])
+  if (av === null || bv === null) {
+    if (av !== null) return -1
+    if (bv !== null) return 1
+    return a.rank - b.rank
+  }
+  const d = typeof av === 'string' && typeof bv === 'string'
+    ? av.localeCompare(bv)
+    : (av as number) - (bv as number)
+  if (d !== 0) return dir === 'asc' ? d : -d
+  return a.rank - b.rank
+}
 
 interface AvailableListProps {
   candidates: LiveCandidate[]
@@ -61,7 +130,7 @@ interface AvailableListProps {
   isMyTurn: boolean
   // The pick the server measured this list against ("pick 18", "the end of
   // the draft"), or null when there is no gain-ranked list yet. Same value
-  // TopThree's hint names -- it is here because the "He lasts" column is a
+  // TopThree's hint names -- it is here because the "Lasts" column is a
   // probability of surviving to THAT pick, not to your immediately-next
   // one (scoring/draft_sim.horizon_picks skips turns too close to measure),
   // and an unlabelled 0% reads as the wrong claim.
@@ -74,16 +143,29 @@ interface AvailableListProps {
   onOpenPlayer: (c: LiveCandidate) => void
 }
 
-// The ranked available pool: search + position filter above a table sorted
-// by `gain_now` (the server's own order -- never re-sorted client-side).
+// The ranked available pool: search + position filter above a table that
+// opens in the server's own `gain_now` order (`#`) and can be re-sorted by
+// any column from its header.
+//
+// Client-side sorting is confined to THIS component's own copy of the list
+// on purpose. `candidates` is DraftRoom's `state.candidates`, handed to
+// TopThree as well; the three recommendation cards must always be the
+// server's top three in the server's order no matter what this table is
+// sorted by, so nothing here may reorder the prop itself. `.filter()`
+// already returns a fresh array and `.sort()` below only ever touches that
+// -- the shared array is never mutated.
+//
 // Both filters are client-side per the task brief ("the server sends the
 // whole ranked list") -- the pool tops out in the low hundreds, cheap
-// enough to filter on every keystroke without debouncing.
+// enough to filter AND sort on every keystroke without debouncing or memos.
 export default function AvailableList({
   candidates, players, onDraft, isMyTurn, horizonLabel, onOpenPlayer,
 }: AvailableListProps) {
   const [search, setSearch] = useState('')
   const [pos, setPos] = useState('ALL')
+  // Opens on the server's ranking, which is the whole point of the list --
+  // any other default would hide the model's answer behind a click.
+  const [sort, setSort] = useState<{ key: SortKey; dir: SortDir }>({ key: 'rank', dir: 'asc' })
 
   const q = search.trim().toLowerCase()
   const visible = candidates.filter((c) => {
@@ -93,6 +175,48 @@ export default function AvailableList({
     const haystack = `${player?.name ?? c.player_id} ${player?.team ?? ''}`.toLowerCase()
     return haystack.includes(q)
   })
+  // `visible` is already a fresh array from `.filter()`; sorting it in place
+  // cannot reach `candidates`. Written as a copy anyway so that stays true
+  // if the filter is ever short-circuited away for the unfiltered case.
+  const rows = visible.slice().sort((a, b) => compareRows(a, b, sort.key, sort.dir, players))
+
+  function toggleSort(key: SortKey): void {
+    setSort((prev) => (prev.key === key
+      ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
+      : { key, dir: NATURAL_DIR[key] }))
+  }
+
+  // A sortable header. The clickable thing is a real <button> inside the
+  // <th>, not a click handler on the cell: this table is driven under a
+  // pick clock and has to stay tabbable, and `aria-sort` on the header is
+  // how a screen reader gets the same "sorted by, this way" the caret gives
+  // everyone else.
+  function sortableTh(key: SortKey, label: ReactNode, className?: string): ReactNode {
+    const active = sort.key === key
+    return (
+      <th
+        className={`${className ?? ''}${active ? ' is-sorted' : ''}`.trim() || undefined}
+        aria-sort={active ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}
+      >
+        <button type="button" className="avail-th-btn" onClick={() => toggleSort(key)}>
+          <span>{label}</span>
+          {/* The caret is ALWAYS in the markup, transparent until the column
+              is the sorted one (or hovered) -- rendering it only when active
+              made every header jump sideways by its own width on each sort
+              click, which under a pick clock reads as the table twitching.
+              Idle, it points the way that column's first click will sort
+              (NATURAL_DIR), so hovering PROJ shows ▼ and hovering ADP ▲ --
+              the affordance and the promise in one glyph. */}
+          <span
+            className={`avail-sort${active ? '' : ' is-idle'}`}
+            aria-hidden="true"
+          >
+            {(active ? sort.dir : NATURAL_DIR[key]) === 'asc' ? '▲' : '▼'}
+          </span>
+        </button>
+      </th>
+    )
+  }
 
   return (
     <div className="avail">
@@ -122,31 +246,35 @@ export default function AvailableList({
       <table className="avail-table">
         <thead>
           <tr>
-            <th className="avail-col-rank">#</th>
-            <th className="avail-col-pos">Pos</th>
-            <th>Player</th>
-            <th className="avail-col-num">Proj</th>
-            <th className="avail-col-num">Over repl</th>
-            <th className="avail-col-num">Gain now</th>
+            {sortableTh('rank', '#', 'avail-col-rank')}
+            {sortableTh('pos', 'Pos', 'avail-col-pos')}
+            {sortableTh('player', 'Player')}
+            {sortableTh('proj', 'Proj', 'avail-col-num')}
             {/* Header names the horizon when there is one; the column is
                 "chance he is still on the board at that pick". Without the
                 label a reader takes it for "lasts to my next pick", which
                 at a wheel or a short gap is a different pick entirely. */}
-            <th className="avail-col-num">
-              {horizonLabel !== null ? `Lasts to ${horizonLabel}` : 'He lasts'}
-            </th>
-            <th className="avail-col-num">ADP</th>
-            <th className="avail-col-fills">Fills</th>
+            {sortableTh(
+              'lasts',
+              horizonLabel !== null ? `Lasts to ${horizonLabel}` : 'Lasts',
+              'avail-col-num',
+            )}
+            {sortableTh('adp', 'ADP', 'avail-col-num')}
+            {/* ESPN's own PPR rank, always on screen next to this board's
+                `#` and the market's ADP -- the owner asked to be able to see
+                where ESPN has a player against where this board has him,
+                without going into the profile for it. */}
+            {sortableTh('espn', 'ESPN', 'avail-col-num')}
             <th className="avail-col-btn" />
           </tr>
         </thead>
         <tbody>
-          {visible.map((c) => {
+          {rows.map((c) => {
             const player = players[c.player_id]
             return (
               <tr key={c.player_id}>
                 <td className="avail-col-rank mono">{c.rank}</td>
-                <td>{posBadge(c.position)}</td>
+                <td className="avail-col-pos">{posBadge(c.position)}</td>
                 <td>
                   {/* A button, not a link: this opens an overlay over the
                       room, and an <a href> here would offer a navigation
@@ -168,14 +296,6 @@ export default function AvailableList({
                   )}
                 </td>
                 <td className="avail-col-num mono avail-proj">{Math.round(c.proj_points)}</td>
-                <td className="avail-col-num mono avail-vor">{fmtSigned(c.vor_points)}</td>
-                {/* The one column that decides the pick -- see the module
-                    comment and the task brief's own framing: vor_points can
-                    be the biggest number on the board and still be the
-                    wrong reason to draft someone, if the next player at his
-                    position is nearly as good. Full emphasis here, muted
-                    two columns to its left, is the argument made visually. */}
-                <td className="avail-col-num mono avail-gain">{fmtSigned(c.gain_now)}</td>
                 {/* null survive_pct (no roster to survive FOR yet) gets no
                     riskTone color at all -- riskTone's red/amber/green ramp
                     is a claim about a real probability, and coloring a dash
@@ -187,11 +307,7 @@ export default function AvailableList({
                   {c.survive_pct === null ? '—' : `${Math.round(c.survive_pct)}%`}
                 </td>
                 <td className="avail-col-num mono avail-adp">{fmtRank(player?.market_rank ?? null)}</td>
-                <td className="avail-col-fills">
-                  <span className={`avail-fills${fillsIsOpenSlot(c.fills) ? ' is-open' : ''}`}>
-                    {c.fills ?? '—'}
-                  </span>
-                </td>
+                <td className="avail-col-num mono avail-adp">{fmtRank(player?.espn_ppr_rank ?? null)}</td>
                 <td className="avail-col-btn">
                   <button
                     type="button"
@@ -206,9 +322,10 @@ export default function AvailableList({
               </tr>
             )
           })}
-          {visible.length === 0 && (
+          {rows.length === 0 && (
             <tr>
-              <td colSpan={10} className="avail-empty">
+              {/* 8 = the seven columns above plus the draft button's. */}
+              <td colSpan={8} className="avail-empty">
                 {candidates.length === 0 ? 'No candidates yet.' : 'No players match this filter.'}
               </td>
             </tr>

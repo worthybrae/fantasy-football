@@ -215,9 +215,10 @@ td:first-child {
   margin-top: 2px;
 }
 
-/* Same rule as `.avail-fills.is-open` / `.top3-figure.is-open` /
-   `.confirm-figure.is-open`: an open starter or flex slot reads in accent
-   wherever it appears. */
+/* Same rule as `.top3-figure.is-open` / `.confirm-figure.is-open`: an open
+   starter or flex slot reads in accent wherever it appears. (It used to
+   name `.avail-fills.is-open` too -- that column left the available table
+   when Fills did.) */
 .pp-seed-figure.is-open {
   color: var(--accent);
 }
@@ -1449,8 +1450,73 @@ td:first-child {
 }
 .avail-col-pos { width: 52px; }
 .avail-col-num { width: 78px; text-align: right; }
-.avail-col-fills { width: 96px; }
 .avail-col-btn { width: 78px; }
+
+/* Every header except the draft button's is a sortable control
+   (AvailableList.tsx's sortableTh). The button is stripped back to look
+   exactly like the header text it replaced -- `font: inherit` picks up the
+   global `th` rule's uppercase/letter-spacing/size, so adding sorting did
+   not change the header's rhythm by a pixel. `width: 100%` + inherited
+   text-align is what keeps `#`/PROJ/LASTS/ADP/ESPN flush right and
+   POS/PLAYER flush left without a second set of alignment rules; the caret
+   rides inside the button so it lands on the aligned edge of the label
+   rather than at the far side of the cell. */
+.avail-th-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  text-align: inherit;
+  cursor: pointer;
+}
+
+.avail-table th.avail-col-rank .avail-th-btn,
+.avail-table th.avail-col-num .avail-th-btn {
+  justify-content: flex-end;
+}
+
+.avail-th-btn:hover {
+  color: var(--text-1);
+}
+
+.avail-th-btn:focus-visible {
+  outline: 1px solid var(--accent-border);
+  outline-offset: 2px;
+}
+
+/* The sorted column reads at full strength against the other headers'
+   --text-2, so "what is this sorted by" is answerable from the column's
+   own weight as well as from the caret -- the caret alone is a 9px glyph
+   and easy to miss under a pick clock. */
+.avail-table th.is-sorted {
+  color: var(--text-1);
+}
+
+.avail-sort {
+  font-size: 9px;
+  line-height: 1;
+}
+
+/* Present but invisible on every unsorted column, so the header row never
+   reflows when the sort moves (see AvailableList.tsx's own note). Hover or
+   keyboard focus fades it in at half strength -- enough to say "this is a
+   control and this is which way it will go", not enough to compete with the
+   real one. */
+.avail-sort.is-idle {
+  opacity: 0;
+}
+
+.avail-th-btn:hover .avail-sort.is-idle,
+.avail-th-btn:focus-visible .avail-sort.is-idle {
+  opacity: 0.45;
+}
 
 /* Rows aren't clickable in this table (the draft button is the only
    action) -- overrides the global `tbody tr { cursor: pointer }`, which
@@ -1498,45 +1564,26 @@ td:first-child {
   color: var(--text-3);
 }
 
-/* Proj/over-repl read as background context; gain_now is the number this
-   room actually acts on -- the hierarchy IS the argument the task brief
-   calls for. A player's vor_points can be the single biggest number on the
-   board and still be the wrong reason to draft him if gain_now (what
-   taking him now costs you over waiting for the next one at his position)
-   is small -- see scoring/gain.py's module docstring, the Josh Allen case
-   this whole ranking exists to fix. */
-.avail-proj,
-.avail-vor {
+/* This table is descriptive, not argumentative: there is no longer an
+   emphasised "this is the pick" column here, because the column that used
+   to carry that weight (`.avail-gain`, gain_now) was deliberately removed
+   along with `.avail-vor` (over-replacement) and `.avail-fills` -- see the
+   long comment at the top of AvailableList.tsx. The model still ranks on
+   gain_now and the recommendation cards above still make the argument; the
+   remaining split is only "what this player is projected to do"
+   (--text-2) against "where the market has him" (--text-3), which is
+   context, not a claim. Do not reintroduce a loud column here. */
+.avail-proj {
   font-size: var(--text-sm);
   color: var(--text-2);
 }
 
-.avail-gain {
-  font-size: var(--text-base);
-  font-weight: 700;
-  color: var(--text-1);
-}
-
+/* Both market ranks -- the five-source ADP consensus and ESPN's own PPR
+   rank -- share one muted treatment so the eye reads them as a pair to
+   compare against the `#` column on the left. */
 .avail-adp {
+  font-size: var(--text-sm);
   color: var(--text-3);
-}
-
-.avail-fills {
-  display: inline-block;
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  font-weight: 700;
-  padding: 1px 6px;
-  border-radius: var(--radius);
-  color: var(--text-3);
-}
-
-/* Names an open slot in the actual starting lineup (FLEX included) -- muted
-   otherwise (`BENCH`, or gain.py's `—` when even the bench is full). The
-   server already decided which is which; this only draws that split. */
-.avail-fills.is-open {
-  background: var(--accent-bg);
-  color: var(--accent);
 }
 
 .avail-empty {
@@ -1827,9 +1874,10 @@ td:first-child {
   margin-top: 2px;
 }
 
-/* Same rule as `.avail-fills.is-open`/`.top3-figure.is-open` -- an open
-   starter/flex slot reads in accent here too (folded-in review finding:
-   this dialog's own Fills figure was the one place still left plain). */
+/* Same rule as `.top3-figure.is-open` -- an open starter/flex slot reads in
+   accent here too (folded-in review finding: this dialog's own Fills figure
+   was the one place still left plain). `.avail-fills.is-open` was the third
+   member of this set until the available table dropped its Fills column. */
 .confirm-figure.is-open {
   color: var(--accent);
 }
