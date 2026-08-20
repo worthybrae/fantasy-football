@@ -933,7 +933,25 @@ def build_board(conn, weights: dict | None = None,
             RuntimeWarning)
     uni = apply_vor(uni, settings.replacement_ranks, column="proj_points")
     uni = assign_tiers(uni)
-    uni = uni.sort_values("vor", ascending=False).reset_index(drop=True)
+    # Tie-broken on ADP, and the tie is structural rather than incidental:
+    # `vor` is points minus the REPLACEMENT player's points at that position,
+    # so the replacement player himself is exactly 0.0 -- one per position,
+    # six rows on today's board (DST/QB/WR/RB/K/TE), plus a second small tie
+    # elsewhere. Left to pandas' default quicksort their order is arbitrary.
+    #
+    # ADP and not `composite`: composite is a blend of WITHIN-POSITION
+    # percentiles (factors.normalize_within_position), so ordering across
+    # positions by it is the exact dimensional error that once put a TE at
+    # ADP 149 thirteenth overall. ADP is cross-position comparable, and for
+    # players who are all replacement-level by construction the market's own
+    # ordering is the only real signal left.
+    #
+    # `adp` is FFC's single-source figure, merged by _merge_adp above; the
+    # five-source `market_rank` does not exist yet -- add_market runs after
+    # this sort, because its `edge` column is market_rank minus the rank this
+    # line assigns. Missing ADP sorts last rather than winning the tie.
+    uni = uni.sort_values(["vor", "adp"], ascending=[False, True],
+                          na_position="last").reset_index(drop=True)
     uni["rank"] = uni.index + 1
     uni = add_market(uni, espn, fp, sleeper, mfl=mfl, cbs=cbs, fmt=fmt)
     # A player ESPN does not rank is not draftable, and the board is the
