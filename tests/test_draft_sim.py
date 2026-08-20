@@ -1172,16 +1172,16 @@ def test_run_draft_attributes_already_taken_players_to_the_slot_that_took_them()
 
 
 def test_run_draft_counts_already_taken_players_against_the_roster_cap():
-    """A manager who already holds three QBs must not be able to take more.
+    """A manager already at the QB cap must not be able to take more.
 
     Slot 1 is on the clock at offsets 0, 15 and 16; this hands it a QB at
-    each of them, so it starts the resume at the QB cap. Unattributed, its
-    count restarted at zero and it drafted up to three more.
+    the first two, so it starts the resume at the QB cap of 2. Unattributed,
+    its count restarted at zero and it drafted up to the cap again.
     """
     pool = _pool(300)
     qbs = [i for i in range(300) if pool.position[i] == "QB"]
     others = [i for i in range(300) if pool.position[i] != "QB"]
-    slot_one_offsets = {0, 15, 16}
+    slot_one_offsets = {0, 15}          # two QBs == the cap (see _roster_cap)
     order = [qbs.pop(0) if offset in slot_one_offsets else others.pop(0)
              for offset in range(24)]
     taken = np.zeros(len(pool.player_id), dtype=bool)
@@ -1191,7 +1191,7 @@ def test_run_draft_counts_already_taken_players_against_the_roster_cap():
     rosters = _run_draft(pool, S, slots, 4, taken, _flat_betas(slots.values()),
                          rng=np.random.default_rng(0), taken_order=order)
 
-    assert rosters[1]["counts"]["QB"] == _roster_cap(S)["QB"] == 3
+    assert rosters[1]["counts"]["QB"] == _roster_cap(S)["QB"] == 2
 
 
 def test_run_draft_keeps_the_snake_aligned_when_a_taken_player_left_the_board():
@@ -2755,3 +2755,100 @@ def test_drafted_state_refuses_a_pick_number_below_one(tmp_path):
     conn.execute("INSERT INTO drafted VALUES (?, ?)", ["p1", 0])
     with pytest.raises(ValueError, match="pick number"):
         _drafted_state(conn, _pool(12))
+
+
+def test_roster_caps_never_allow_a_third_quarterback_or_tight_end():
+    """A flex slot never meaningfully absorbs a QB or a TE, so anything past
+    the starter and one backup can never reach the lineup. The old rule was
+    `starters + 2` everywhere with a separate min(QB, 3) clamp, which allowed
+    three of each -- and the plan spent rounds 9, 10 and 11 on quarterbacks
+    and 3, 13 and 15 on tight ends, three of fifteen picks on players who
+    could not start."""
+    from scoring.draft_sim import _roster_cap
+    caps = _roster_cap(S)
+    assert caps["QB"] == 2 and caps["TE"] == 2
+    assert caps["K"] == 1 and caps["DST"] == 1
+    # RB and WR are what FLEX gets filled with and what a bench is made of,
+    # so they keep real depth.
+    assert caps["RB"] > 2 and caps["WR"] > 2
+
+
+def test_roster_caps_scale_with_a_league_that_starts_two_quarterbacks():
+    """Written relative to `starters`, not as flat numbers: a superflex or
+    2-QB league starts two and must be allowed three."""
+    import dataclasses
+    from scoring.draft_sim import _roster_cap
+    sf = dataclasses.replace(S, starters={"QB": 2, "RB": 2, "WR": 2,
+                                          "TE": 1, "K": 1, "DST": 1})
+    assert _roster_cap(sf)["QB"] == 3
+    assert _roster_cap(S)["QB"] == 2
+
+
+def test_roster_caps_always_leave_more_room_than_there_are_rounds():
+    """The invariant that keeps the caps meaning anything. `_run_draft` and
+    `_greedy_choice` both fall back to `available[0]` when no cap-legal
+    player remains, and that fallback ignores caps entirely -- so a cap table
+    summing to less than `rounds` does not produce a short roster, it
+    produces silent cap violations on every pick past the total. Tightening
+    QB/TE to starters+1 while RB/WR sat at starters+2 summed to 14 against 15
+    rounds and produced 480 violations across 60 simulated drafts."""
+    import dataclasses
+    import pytest as _pytest
+    from scoring.draft_sim import _assert_capacity, _roster_cap
+    assert sum(_roster_cap(S).values()) >= S.rounds
+    with _pytest.raises(ValueError, match="bypass the caps"):
+        _assert_capacity({"QB": 1, "RB": 1, "WR": 1, "TE": 1,
+                          "K": 1, "DST": 1}, S)
+
+
+def _realistic_pool():
+    """A draft pool shaped like a real board: deep at RB/WR, thin at the
+    positions nobody rosters many of. Sized so eight teams can all reach
+    their caps without the pool running dry at any position."""
+    mix = (["RB"] * 60 + ["WR"] * 60 + ["QB"] * 25
+           + ["TE"] * 25 + ["K"] * 15 + ["DST"] * 15)
+    n = len(mix)
+    return SimPool(
+        player_id=np.array([f"p{i}" for i in range(n)]),
+        norm=np.array([f"player {i}" for i in range(n)]),
+        position=np.array(mix),
+        adp_rank=np.arange(1, n + 1, dtype=float),
+        points=np.linspace(300.0, 60.0, n),
+        availability=np.full(n, 90.0),
+        vor=np.linspace(300.0, 60.0, n),
+        market_rank=np.arange(1, n + 1, dtype=float),
+        age=np.full(n, np.nan),
+        no_track_record=np.full(n, True), hype=np.full(n, np.nan),
+        trend=np.zeros(n))
+
+
+def test_my_own_picks_respect_the_roster_floor_like_opponents_do():
+    """`_must_fill_mask` calls itself "the floor that _roster_cap is the
+    ceiling of", and it was applied only to simulated OPPONENTS. My own
+    policy got away without it because the caps were tight enough to force
+    diversification as a side effect; at their honest depth the empty slot
+    reappeared, and my roster finished with no defense in 60 of 60 drafts."""
+    from collections import Counter
+    from scoring.draft_sim import _roster_cap
+    # NOT `_pool()`: its even six-way position split gives 30 of each, while
+    # eight teams at the RB and WR caps demand 48 apiece. The pool exhausts
+    # at those positions, `_legal_mask` empties, and the no-legal-player
+    # fallback -- which ignores caps by design -- fires. That is a fixture
+    # artifact, not the behaviour under test: the real 252-player board has
+    # a realistic mix and produces zero violations. This pool mirrors that
+    # shape instead.
+    pool = _realistic_pool()
+    managers = {i: f"m{i}" for i in range(1, S.teams + 1)}
+    taken = np.zeros(len(pool.player_id), dtype=bool)
+    caps = _roster_cap(S)
+    for my_slot in (1, 4, 8):
+        for seed in range(4):
+            rosters = _run_draft(pool, S, managers, my_slot, taken,
+                                 _flat_betas(managers.values()),
+                                 np.random.default_rng(seed), taken_order=[])
+            counts = Counter(pool.position[i]
+                             for i in rosters[my_slot]["indices"])
+            for pos, n in counts.items():
+                assert n <= caps.get(pos, 99), (my_slot, seed, pos, n)
+            for pos in ("K", "DST"):
+                assert counts.get(pos, 0) >= 1, (my_slot, seed, pos, dict(counts))

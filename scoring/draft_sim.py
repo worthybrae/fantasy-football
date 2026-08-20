@@ -480,14 +480,68 @@ def _live_features(pool, available, overall_pick, roster, recent, settings):
     return X
 
 
+# Positions a FLEX slot never meaningfully absorbs, so a second backup can
+# never enter the starting lineup and is pure dead weight. QB is literally
+# flex-ineligible; TE is eligible on paper and essentially never started
+# there in practice once the dedicated slot is filled.
+_SHALLOW_POSITIONS = ("QB", "TE")
+
+
 def _roster_cap(settings) -> dict:
     """Most of each position anyone will carry. Learned coefficients cannot
-    express a hard ceiling, so it is imposed as a mask instead."""
-    caps = {pos: n + 2 for pos, n in settings.starters.items()}
-    caps["QB"] = min(caps.get("QB", 3), 3)
-    caps["K"] = 1
-    caps["DST"] = 1
+    express a hard ceiling, so it is imposed as a mask instead.
+
+    Two depths. QB and TE carry `starters + 1` -- the starter and one backup
+    -- because nothing past that can ever reach the lineup (see
+    _SHALLOW_POSITIONS). RB and WR carry `starters + flex_slots + 2`: they
+    are what the FLEX slots actually get filled with AND what a bench is
+    made of, and they churn hardest on byes and injuries.
+
+    Written relative to `starters`/`flex_slots` rather than as flat numbers
+    so it still holds where the league changes shape: a superflex or 2-QB
+    league starts two quarterbacks and correctly allows three.
+
+    TOTAL CAPACITY MUST EXCEED THE NUMBER OF ROUNDS, and that is not a
+    stylistic preference -- it is the invariant that keeps the caps meaning
+    anything at all. `_run_draft` and `_greedy_choice` both fall back to
+    `available[0]` when no cap-legal player remains, and that fallback
+    ignores caps completely. So a cap table summing to less than `rounds`
+    does not produce a short roster, it produces a silent cap violation on
+    the picks past the total, with nothing reporting it. That is exactly
+    what happened when QB and TE were first tightened to `starters + 1`
+    while RB and WR were left at `starters + 2`: the six caps summed to 14
+    against 15 rounds, and 480 violations appeared across 60 simulated
+    drafts -- WR reaching 5 against a cap of 4, QB reaching 3 against 2.
+    `_assert_capacity` below makes the invariant explicit rather than
+    trusting the arithmetic to stay true as the rule is edited.
+    """
+    caps = {}
+    for pos, n in settings.starters.items():
+        if pos in ("K", "DST"):
+            caps[pos] = 1
+        elif pos in _SHALLOW_POSITIONS:
+            caps[pos] = n + 1
+        else:
+            caps[pos] = n + settings.flex_slots + 2
+    _assert_capacity(caps, settings)
     return caps
+
+
+def _assert_capacity(caps, settings) -> None:
+    """Guard the one invariant `_roster_cap` cannot express in its own
+    arithmetic: there must be more cap-legal roster room than there are
+    picks to make. Raising here is right because every alternative is worse
+    -- the caller's fallback would quietly draft past the ceiling, and a
+    warning would be swallowed by the same daemon threads that swallow
+    everything else in a live draft."""
+    total = sum(caps.values())
+    if total < settings.rounds:
+        raise ValueError(
+            f"roster caps allow only {total} players across "
+            f"{len(caps)} positions but the draft runs {settings.rounds} "
+            f"rounds: the last {settings.rounds - total} picks would bypass "
+            f"the caps entirely via the no-legal-player fallback. Caps: "
+            f"{caps}")
 
 
 def _turns_left(slots, rounds: int) -> list:
@@ -781,7 +835,8 @@ def _next_turn_survivors(pool, available, gap):
     return order[gap:]
 
 
-def _greedy_choice(pool, available, roster, settings, caps, gap=None):
+def _greedy_choice(pool, available, roster, settings, caps, gap=None,
+                   turns_left=None):
     """My in-rollout policy: the available, cap-legal player whose roster
     value most exceeds what I could get at his position when I pick again.
 
@@ -832,6 +887,20 @@ def _greedy_choice(pool, available, roster, settings, caps, gap=None):
         # No cap-legal player remains anywhere in the pool -- genuinely
         # unavoidable, not a shortlist artifact -- so caps no longer apply.
         return available[0] if len(available) else None
+    # The same roster floor every simulated OPPONENT gets (see
+    # `_must_fill_mask`, whose docstring calls itself "the floor that
+    # _roster_cap is the ceiling of"). It was applied only to opponents, and
+    # my own policy got away without it purely because the caps used to be
+    # tight enough to force diversification as a side effect: at RB/WR caps
+    # of 4 the late rounds had nowhere else to go. Loosening those caps to
+    # their honest depth exposed the gap -- my roster finished with an empty
+    # defense slot in 60 of 60 drafts at slots 2, 5 and 8, costing 90-130
+    # points of roster value. A ceiling was doing a floor's job.
+    if turns_left is not None:
+        must_fill = _must_fill_mask(pool, legal, roster["counts"], settings,
+                                    turns_left)
+        if must_fill is not None and len(legal[must_fill]):
+            legal = legal[must_fill]
     shortlist = legal[np.argsort(-pool.points[legal])][:GREEDY_CANDIDATES]
 
     def delta(i):
@@ -959,7 +1028,8 @@ def _run_draft(pool, settings, slot_managers, my_slot, taken, betas, rng,
             else:
                 choice = _greedy_choice(
                     pool, available, roster, settings, caps,
-                    gap=_opportunity_gap(slots, offset, my_slot))
+                    gap=_opportunity_gap(slots, offset, my_slot),
+                    turns_left=turns_left[offset])
         else:
             beta = betas.get(slot_managers.get(slot))
             if beta is None:

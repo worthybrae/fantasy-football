@@ -38,9 +38,18 @@ def test_need_kind_capped_at_the_roster_cap():
 
 
 def test_need_kind_capped_when_position_hits_its_own_roster_cap():
-    # _roster_cap gives RB a cap of starters(2)+2 = 4: a fifth RB is capped
-    # even though the overall roster (4 players) is nowhere near `rounds`.
-    assert need_kind(settings(), {"RB": 4}, "RB") == "capped"
+    """A position at its own ceiling is capped even when the overall roster
+    is nowhere near `rounds`.
+
+    Read from `_roster_cap` rather than hardcoded: the caps are written
+    relative to the league's starters and flex slots so they track a league
+    that changes shape, and a literal here silently pins one league's
+    arithmetic (it pinned RB at 4, and broke the day RB's honest depth
+    became starters + flex + 2)."""
+    from scoring.draft_sim import _roster_cap
+    cap = _roster_cap(settings())["RB"]
+    assert need_kind(settings(), {"RB": cap}, "RB") == "capped"
+    assert need_kind(settings(), {"RB": cap - 1}, "RB") != "capped"
 
 
 def test_need_weight_is_zero_when_capped():
