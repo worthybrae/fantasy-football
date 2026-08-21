@@ -53,18 +53,6 @@ export function bestEv(players: Player[]): number | null {
   return values.length ? Math.max(...values) : null
 }
 
-// URL slug for a player page: accent-folded kebab-case name
-// ("Amon-Ra St. Brown" -> "amon-ra-st-brown"). Resolved back to a player by
-// scanning the board list, so it must be a pure function of the name.
-export function playerSlug(name: string): string {
-  return name
-    .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-}
-
 async function detailText(res: Response): Promise<string> {
   try {
     const body = await res.json()

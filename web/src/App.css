@@ -119,8 +119,13 @@ td:first-child {
 
 /* -- player profile drawer -- */
 
-/* Full-width standalone player page (route /players/:slug). Replaces the
-   old slide-in drawer; the drawer-section styles below are shared. */
+/* Full-width player profile layout. Used to back a standalone /players/:slug
+   route; that route is gone -- a player now only ever opens as the popup
+   overlay (PlayerOverlay.tsx), which always renders PlayerProfile
+   `embedded`, so this un-embedded layout is dead in practice today, kept as
+   PlayerProfile's own fallback rather than deleted along with the route.
+   Replaces the old slide-in drawer; the drawer-section styles below are
+   shared. */
 .player-page {
   width: 100%;
   min-height: 100svh;
@@ -221,10 +226,12 @@ td:first-child {
 /* The verdict strip (see VerdictStrip.tsx): the handful of numbers the pick
    is actually made on, across the top of the card before any argument for
    or against them. In the draft room these are the seed's -- painted before
-   the profile request is even issued -- and on /players/:slug they are the
-   board row's. One geometry either way, so the two never read as two
-   different components. `flex-wrap` because a live candidate seeds seven
-   cells and the overlay is narrower than the standalone page. */
+   the profile request is even issued -- and with no seed at all (the
+   un-embedded fallback above, see its own comment) they are the loaded
+   profile's own board row instead. One geometry either way, so the two never
+   read as two different components. `flex-wrap` because a live candidate
+   seeds seven cells and the overlay is narrower than the full-width fallback
+   layout would be. */
 .pp-verdict {
   display: flex;
   flex-wrap: wrap;
@@ -2059,6 +2066,11 @@ button.pick-ticker-pick:hover {
   gap: 1px;
 }
 
+/* `.roster-row` is the shared layout for one roster line, drawn on whichever
+   element the row actually is: a plain <div> for an empty slot (never
+   clickable -- see RosterPanel.tsx) or a real <button> for a filled one with
+   a room to open it in. Same box either way, so a row never shifts a pixel
+   when it gains or loses its click handler. */
 .roster-row {
   display: flex;
   align-items: center;
@@ -2068,6 +2080,41 @@ button.pick-ticker-pick:hover {
   border-radius: var(--radius);
 }
 
+/* The <button> variant only -- undoes the browser's default button chrome
+   (no UA border/appearance, host font instead of the system button font,
+   left-aligned instead of centered) and stretches it to the <li>'s full
+   width, which a button does not do on its own the way a block-level <div>
+   already does. `padding` is not reset: `.roster-row` above already
+   declares it as an author style, which beats the UA stylesheet's own
+   button default regardless of order, so there's nothing left to undo. */
+button.roster-row {
+  width: 100%;
+  appearance: none;
+  -webkit-appearance: none;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* The hover/focus affordance, same bargain `.board-cell-filled`'s own
+   comment describes: quiet until the pointer or keyboard is actually on the
+   row, so a scannable rail doesn't read as a wall of buttons. */
+button.roster-row:hover {
+  background: var(--bg-2);
+}
+
+button.roster-row:focus-visible {
+  outline: 1px solid var(--accent-border);
+  outline-offset: -1px;
+}
+
+/* `.roster-row-urgent` (an empty starter slot) and `button.roster-row`
+   (a filled, clickable one) never coincide -- assignRoster only marks a slot
+   urgent when it has NO player (DraftRoom.tsx) -- so there is no button/
+   urgent combination to style here. */
 .roster-row-urgent {
   background: var(--accent-bg);
 }
@@ -3213,7 +3260,29 @@ button.pick-ticker-pick:hover {
   background: color-mix(in srgb, var(--accent) 18%, var(--bg-2));
 }
 
+/* `.board-cell-filled` is a real <button> now (it used to be an <a
+   href="/players/:slug">, which is gone -- see DraftBoardGrid.tsx). This
+   undoes the browser's default button chrome that would otherwise show
+   through: no UA appearance, host font instead of the system button font,
+   left-aligned instead of centered, stretched to the grid cell's full width
+   instead of shrink-to-fit. `border-top`/`border-left` only, NOT the
+   `border` shorthand -- `.board-cell` (declared above) sets border-bottom/
+   border-right for the divider between cells, and since this rule has the
+   same specificity and comes after it, a `border: 0` shorthand here would
+   reset those two sides right back to none. `padding`/`background`/`color`
+   are deliberately not reset at all -- `.board-cell` (padding, color) and
+   `background` right below already declare them as author styles, which
+   beat the user-agent stylesheet's own button defaults regardless of
+   selector specificity or source order, so there is nothing left for the UA
+   sheet to win. */
 .board-cell-filled {
+  appearance: none;
+  -webkit-appearance: none;
+  border-top: 0;
+  border-left: 0;
+  font: inherit;
+  text-align: left;
+  width: 100%;
   background: var(--bg-1);
   cursor: pointer;
 }

@@ -234,9 +234,9 @@ export default function DraftRoom() {
   // in the URL on purpose: a route swap unmounts this whole component --
   // the board, the tab, the scroll position, the 2.5s poll -- and clicking
   // a name mid-draft must cost none of those. Nothing below this line
-  // navigates; the /players/:slug page stays for direct links (see
-  // PlayerOverlay's own comment, and DraftBoardGrid, which keeps the href
-  // so cmd-click still opens it).
+  // navigates at all -- the standalone /players/:slug page this used to
+  // defer to for a direct link is gone (see PlayerOverlay's own comment);
+  // a player only ever opens as this popup now.
   const [openPlayer, setOpenPlayer] = useState<OverlayTarget | null>(null)
 
   // Player identity (name/position/team) is a one-time join table -- it does
@@ -480,7 +480,7 @@ export default function DraftRoom() {
     ? { filled: state.my_roster.length + 1, total: slots.length }
     : null
 
-  // Three ways in, one overlay. Each seeds from the row that was actually
+  // Four ways in, one overlay. Each seeds from the row that was actually
   // clicked (see playerSeed.ts) so the profile paints on this frame rather
   // than after the 3.5s /profile request -- the request is still issued by
   // PlayerProfile itself and fills the rest in when it lands.
@@ -493,15 +493,38 @@ export default function DraftRoom() {
   }
 
   // A comp clicked inside the profile. Only swaps for a player this room can
-  // actually name -- the same rule PlayerPage's own onSelectPlayer follows
-  // (it navigates only when the id resolves against the board list), and it
-  // matters more here: SimilarPlayers legitimately lists players who are not
+  // actually name -- SimilarPlayers legitimately lists players who are not
   // in this season's pool at all, and there is no seed to paint for one. No
   // seed, no instant open, so the click does nothing rather than opening an
-  // empty box with a spinner in it.
+  // empty box with a spinner in it. (RosterPanel's own handler below is
+  // different: a roster player must always open, since the user definitely
+  // owns him -- see handleOpenRosterPlayer's own comment.)
   function handleSelectPlayer(id: string) {
     const p = players[id]
     if (p) setOpenPlayer({ playerId: id, seed: seedFromPlayer(p) })
+  }
+
+  // RosterPanel's own click handler. RosterPlayer (api/live.py's my_roster
+  // shape) carries only player_id/name/position/proj_points, not a full
+  // board row, so this reuses handleSelectPlayer above for the common case
+  // where the id already resolves against the one-time /api/players join
+  // table -- same seed, same path, nothing duplicated. The one place it
+  // diverges: handleSelectPlayer's own "no seed in the join table, no open"
+  // rule is right for a SimilarPlayers comp that may not be in this season's
+  // pool at all, but wrong here -- a roster player is never a stranger to
+  // this room, ESPN's own feed says the user owns him, so a join-table miss
+  // (not yet loaded, or a synthetic id it never covers) still opens, seeded
+  // from just the fields RosterPlayer carries rather than dropping the
+  // click.
+  function handleOpenRosterPlayer(rp: RosterPlayer) {
+    if (players[rp.player_id]) {
+      handleSelectPlayer(rp.player_id)
+      return
+    }
+    setOpenPlayer({
+      playerId: rp.player_id,
+      seed: { name: rp.name, position: rp.position, team: null, bye: null, rookie: false, figures: [] },
+    })
   }
 
   function handleDraftClick(c: LiveCandidate) {
@@ -823,7 +846,7 @@ export default function DraftRoom() {
                 onSetAutodraft={handleSetAutodraft}
               />
               {state.active ? (
-                <RosterPanel slots={slots} />
+                <RosterPanel slots={slots} onOpenPlayer={handleOpenRosterPlayer} />
               ) : (
                 <p className="rail-empty draft-rail-loading">No roster to show.</p>
               )}

@@ -27,12 +27,12 @@ interface PlayerOverlayProps {
 // 1. It never leaves the room. Clicking a player used to navigate to
 //    /players/:slug, which unmounts the whole draft room -- board, tab,
 //    scroll position, the 2.5s poll -- and then waits on a 3.5s request
-//    while the clock runs. That route still exists and still works for a
-//    direct link (App.tsx, PlayerPage.tsx); this is the in-draft path, not
-//    a replacement for it. Because the room stays mounted, closing this
-//    restores nothing: the board behind was never taken down, so it comes
-//    back on the same tab, the same scroll offset, the same filter and the
-//    same selection by construction rather than by re-derivation.
+//    while the clock runs. That route is gone now (App.tsx); this popup is
+//    the only way a player profile opens, in or out of a draft. Because the
+//    room stays mounted, closing this restores nothing: the board behind was
+//    never taken down, so it comes back on the same tab, the same scroll
+//    offset, the same filter and the same selection by construction rather
+//    than by re-derivation.
 //
 // 2. It never moves the room. `position: fixed` over the page, no scroll
 //    lock (locking body overflow would remove a scrollbar and reflow the

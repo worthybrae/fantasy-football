@@ -25,8 +25,8 @@ import { fmtRank, fmtSigned, hasHistory, ordinal, type ProfileHeader, type Profi
 // against the live server, twice, at 3.50s and 3.51s -- and the draft room
 // opens this over a running 30-second pick clock. Waiting three and a half
 // seconds to learn a name the room was already displaying is not a load, it
-// is a stall. The route at /players/:slug passes no seed and still gets the
-// skeleton it always did.
+// is a stall. The un-embedded fallback path (see `embedded` below) passes no
+// seed and still gets the skeleton it always did.
 //
 // `figures` is pre-formatted, in display order, by whoever opened the
 // profile. Deliberately not raw numbers: the live room's figures (gain vs
@@ -57,9 +57,10 @@ interface PlayerProfileProps {
   // Instant paint (see ProfileSeed). Null/absent restores the original
   // behaviour exactly: skeleton until the request lands.
   seed?: ProfileSeed | null
-  // Rendered inside PlayerOverlay rather than as the /players/:slug page:
-  // drop the chrome the overlay supplies itself (its own close control, its
-  // own Escape handler) and stop claiming the full viewport height.
+  // Rendered inside PlayerOverlay's popup (the only caller left -- the
+  // standalone /players/:slug page this used to also back is gone): drop the
+  // chrome the overlay supplies itself (its own close control, its own
+  // Escape handler) and stop claiming the full viewport height.
   embedded?: boolean
 }
 
@@ -68,10 +69,10 @@ function depthSlotLabel(position: string, depthSlot: number | null): string | nu
   return `${position}${depthSlot}`
 }
 
-// The verdict, read off the board row -- the /players/:slug route's version
-// of the figure strip, where there is no seed because nothing opened this
-// from a list it had already ranked. Same five facts the sparse artboard
-// leads with, in the same order.
+// The verdict, read off the board row -- the un-embedded fallback's version
+// of the figure strip (see `embedded` above), where there is no seed because
+// nothing opened this from a list it had already ranked. Same five facts the
+// sparse artboard leads with, in the same order.
 function headerFigures(h: ProfileHeader): VerdictFigure[] {
   return [
     { label: 'Board rank', value: `#${h.rank}`, accent: true },

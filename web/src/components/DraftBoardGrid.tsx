@@ -1,6 +1,5 @@
 import { Fragment, useEffect, useState, type CSSProperties, type FocusEvent, type MouseEvent, type ReactNode } from 'react'
-import { Link } from 'react-router-dom'
-import { playerSlug, type BoardCell, type BoardPlayer, type LiveBoard } from '../api'
+import type { BoardCell, BoardPlayer, LiveBoard } from '../api'
 
 // duplicated from LiveDraft.tsx (unexported there): a four-line pure
 // function isn't worth a shared module between the board's two views. The
@@ -85,9 +84,10 @@ function BoardPopover({ player, style }: { player: BoardPlayer; style: CSSProper
 
 interface DraftBoardGridProps {
   board: LiveBoard
-  // Opens the pick's profile over the room instead of navigating to
-  // /players/:slug. Optional so the grid still stands on its own (and still
-  // navigates) without a room around it; DraftRoom always passes it.
+  // Opens the pick's profile as a popup overlay over the room. Optional so
+  // the grid still stands on its own without a room around it -- a cell
+  // simply does nothing on click without a handler -- though DraftRoom
+  // always passes it.
   onOpenPlayer?: (player: BoardPlayer) => void
 }
 
@@ -125,25 +125,17 @@ export default function DraftBoardGrid({ board, onOpenPlayer }: DraftBoardGridPr
   // (round, slot), not something derived by walking the snake ourselves.
   const clockRound = on_the_clock !== null ? Math.ceil((picks_made + 1) / teams) : null
 
-  function showPopover(cell: BoardCell, e: MouseEvent<HTMLAnchorElement> | FocusEvent<HTMLAnchorElement>) {
+  function showPopover(cell: BoardCell, e: MouseEvent<HTMLButtonElement> | FocusEvent<HTMLButtonElement>) {
     setHover({ cell, rect: e.currentTarget.getBoundingClientRect() })
   }
 
-  // A cell stays a real <a href="/players/:slug"> and this intercepts the
-  // plain left click: the overlay is what the room wants (it keeps the
-  // board, the tab and the clock on screen), but cmd/ctrl-click, middle
-  // click, shift-click and "open in new tab" all still reach the standalone
-  // page, and the browser still shows the target in the status bar. A
-  // <button> here would have thrown all of that away to gain nothing.
-  //
-  // Modifier check before preventDefault, never after: swallowing a
-  // cmd-click would silently break new-tab, which is the one thing the href
-  // is still here for. `e.button !== 0` covers the middle-click that arrives
-  // as a click event in some browsers.
-  function handleCellClick(cell: BoardCell, e: MouseEvent<HTMLAnchorElement>) {
+  // A plain <button>, not a link -- there is nowhere left for a cell to
+  // navigate to (the standalone /players/:slug page is gone), so there is no
+  // href to protect from a swallowed modifier-click and no reason for this
+  // to be an anchor any more. Opening the popup is the only thing a click
+  // does.
+  function handleCellClick(cell: BoardCell) {
     if (!onOpenPlayer) return
-    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return
-    e.preventDefault()
     // The hover popover is z-index 50 -- above the overlay's own backdrop --
     // so it would otherwise hang over the dimmed board with no way to
     // dismiss it (the pointer is about to leave without a mouseleave the
@@ -190,14 +182,14 @@ export default function DraftBoardGrid({ board, onOpenPlayer }: DraftBoardGridPr
               }
               const pickInRound = cell.overall - (cell.round - 1) * teams
               return (
-                <Link
+                <button
                   key={col.slot}
-                  to={`/players/${playerSlug(cell.player.name)}`}
+                  type="button"
                   className={['board-cell board-cell-filled',
                     col.is_me ? 'board-cell-mine' : '', rowClass.trim()]
                     .filter(Boolean).join(' ')}
                   aria-label={`${cell.player.name}, ${cell.player.position}, pick ${cell.round}.${pickInRound}`}
-                  onClick={(e) => handleCellClick(cell, e)}
+                  onClick={() => handleCellClick(cell)}
                   onMouseEnter={(e) => showPopover(cell, e)}
                   onMouseLeave={() => setHover(null)}
                   onFocus={(e) => showPopover(cell, e)}
@@ -213,7 +205,7 @@ export default function DraftBoardGrid({ board, onOpenPlayer }: DraftBoardGridPr
                   <div className="board-cell-namewrap">
                     <span className="board-cell-name">{cell.player.name}</span>
                   </div>
-                </Link>
+                </button>
               )
             })}
           </Fragment>

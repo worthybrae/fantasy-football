@@ -14,10 +14,12 @@ export interface VerdictFigure {
 // room the figures come from the seed the room already held (gain vs
 // waiting, survival, which roster slot he fills -- numbers the profile
 // endpoint does not have and could not compute, since they are undefined
-// outside a draft), painted on the frame the overlay opens. On the
-// /players/:slug route there is no seed and they are read off the board row
-// in the response instead. Pre-formatted strings either way: the caller owns
-// rounding and sign rules, this owns the geometry.
+// outside a draft), painted on the frame the overlay opens. With no seed at
+// all (PlayerProfile's un-embedded fallback, which nothing currently opens
+// -- the /players/:slug route it used to back is gone) there is no seed and
+// they are read off the board row in the response instead. Pre-formatted
+// strings either way: the caller owns rounding and sign rules, this owns the
+// geometry.
 export default function VerdictStrip({ figures }: { figures: VerdictFigure[] }) {
   if (figures.length === 0) return null
   return (
