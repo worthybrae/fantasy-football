@@ -108,19 +108,17 @@ function GamesBody({ data }: { data: PlayerProfileData }): ReactNode {
   const scored = [...played.values()].map((g) => g.ppr_points)
   const avg = scored.length
     ? scored.reduce((a, b) => a + b, 0) / scored.length : 0
-  const best = scored.length ? Math.max(...scored) : 0
   const position = data.header.position
 
   return (
     <>
       <div className="ctip-head">
         <span>{latest} by week</span>
-        {/* The two numbers the chart itself cannot state: its own average,
-            and the value of any week tall enough to be clipped by the shared
-            30-point ceiling. */}
-        <span className="ctip-head-note">
-          avg {avg.toFixed(1)} · best {best.toFixed(1)}
-        </span>
+        {/* The one number the chart cannot state about itself. The best week
+            used to sit here too, to recover any value the shared 30-point
+            ceiling clipped -- redundant since the points row landed, which
+            prints every week's actual value including the clipped ones. */}
+        <span className="ctip-head-note">avg {avg.toFixed(1)}</span>
       </div>
       <div className="ctip-weeks">
         {Array.from({ length: SEASON_WEEKS }, (_, i) => {
