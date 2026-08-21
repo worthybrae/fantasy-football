@@ -2990,6 +2990,73 @@ button.roster-row:focus-visible {
   outline-offset: 2px;
 }
 
+/* -- on the clock, while a profile is open (PlayerOverlay.tsx) --
+   The one thing that must reach someone who has stopped watching the rail.
+   `position: fixed` against `.player-overlay` -- whose `backdrop-filter`
+   makes it the containing block for fixed descendants, and which is
+   `inset: 0`, so the box is the viewport whether the browser honours that or
+   falls back to the viewport directly. Either way it is pinned to the top
+   centre of the screen and neither scrolls with the panel it lives inside
+   nor gets clipped by it.
+
+   Opaque, not `--accent-bg`: the surface underneath is a blurred board seen
+   through a translucent scrim, and a 12%-alpha tint over that is a smear
+   rather than a warning. z-index 2 clears `.player-overlay-close`'s 1 -- the
+   two only ever meet on a narrow window, and when they do the alert wins. */
+.player-overlay-clock {
+  position: fixed;
+  top: var(--space-4);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  /* Percentages resolve against the overlay, i.e. the viewport. The 96px is
+     clearance for the close control at the top right, doubled so the banner
+     stays centred rather than drifting off it. */
+  max-width: min(560px, calc(100% - 96px));
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg-1));
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+  color: var(--text-1);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+
+/* Same accent the rail turns when the pick is yours (`.clock-panel-up`), so
+   "you are up" reads in one colour everywhere in the room. */
+.player-overlay-clock strong {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+/* Solid accent on a dark label, the `.plan-round-now` pill's treatment: the
+   only filled control in the overlay, because it is the only one with
+   somewhere to be. */
+.player-overlay-clock-back {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: var(--bg-0);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.player-overlay-clock-back:hover {
+  background: color-mix(in srgb, var(--accent) 85%, #ffffff);
+}
+
+.player-overlay-clock-back:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 2px;
+}
+
 /* -- draft board grid (main zone of /draft) -- */
 
 /* The only horizontally-scrolling element on the page -- teams x ~130px

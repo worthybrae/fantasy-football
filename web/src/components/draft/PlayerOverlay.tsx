@@ -17,6 +17,15 @@ interface PlayerOverlayProps {
   // join table and swaps this overlay's own target, rather than routing.
   // Nothing here navigates.
   onSelectPlayer: (id: string) => void
+  // Whose pick it is, decided by the room (DraftRoom's `youAreUp`) off the
+  // 2.5s /api/live/state poll it already runs. A prop rather than a fetch of
+  // this overlay's own: a second poller for one boolean is a second thing
+  // that can disagree with the clock panel three inches to the left, and the
+  // profile is opened over a running pick clock -- the last place to spend a
+  // request. Defaulted so a caller that has no live session to speak of (or
+  // has not been updated) still type-checks, the same defaulting precedent
+  // ClockPanel's `board` and `onSetAutodraft` set.
+  onTheClock?: boolean
 }
 
 // The in-draft player profile: over the board, never instead of it.
@@ -45,7 +54,9 @@ interface PlayerOverlayProps {
 // this room, not two. Like ConfirmPick this does not trap focus -- see the
 // task report; matching the established pattern beat inventing a second one
 // here.
-export default function PlayerOverlay({ target, onClose, onSelectPlayer }: PlayerOverlayProps) {
+export default function PlayerOverlay({
+  target, onClose, onSelectPlayer, onTheClock = false,
+}: PlayerOverlayProps) {
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === 'Escape') onClose()
@@ -80,6 +91,41 @@ export default function PlayerOverlay({ target, onClose, onSelectPlayer }: Playe
         >
           ✕
         </button>
+        {onTheClock && (
+          // Your pick, and you are reading a dossier with the board behind
+          // it. Nothing in this overlay can draft -- `onToggleDrafted` is
+          // deliberately not passed (see PlayerProfile's own comment on it),
+          // so the profile is a dead end for the next thirty seconds unless
+          // something says so.
+          //
+          // Inside the panel rather than beside it: the panel is the
+          // `aria-modal` dialog, and assistive tech ignores everything
+          // outside an open modal -- an alert about a clock running out is
+          // exactly the one a person who is not looking at the screen has to
+          // hear. It is still pinned to the top centre of the viewport, not
+          // to the panel: `position: fixed` resolves against `.player-overlay`
+          // (its `backdrop-filter` makes it the containing block), which is
+          // `inset: 0` -- the same rectangle the viewport is either way, so
+          // it neither scrolls with the profile nor gets clipped by it.
+          //
+          // Not dismissible, on purpose. It clears itself the moment either
+          // half of its own condition stops being true -- the pick lands, or
+          // you close the profile -- and a dismiss control on a thirty-second
+          // warning is a way to turn it off and then forget.
+          <div className="player-overlay-clock" role="alert">
+            <span>
+              <strong>You are on the clock.</strong> Picks are made on the
+              board, not here.
+            </span>
+            <button
+              type="button"
+              className="player-overlay-clock-back"
+              onClick={onClose}
+            >
+              Back to the board
+            </button>
+          </div>
+        )}
         {/* Keyed on the player: a comp click swaps the target, and the key
             forces a fresh mount so the new seed paints instantly instead of
             the previous player's header sitting there while

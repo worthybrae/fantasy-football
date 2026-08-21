@@ -463,6 +463,17 @@ export default function DraftRoom() {
   const isMyTurn = !!state?.active && state.on_the_clock !== null
     && state.on_the_clock === state.my_slot && state.socket_alive
 
+  // Whose turn it is, and nothing else -- the same test ClockPanel calls
+  // `youAreUp`, deliberately NOT `isMyTurn` above. A dropped socket disables
+  // the draft buttons because they would 503; it does not hand the pick to
+  // anyone else, and someone reading a player profile through their own pick
+  // needs telling either way (arguably more so, since the recovery is in
+  // ESPN). Free of any new fetch: this is the same 2.5s poll the clock panel
+  // is already drawn from, so the overlay's warning and the rail's heading
+  // can never disagree about whose pick it is.
+  const youAreUp = !!state?.active && state.on_the_clock !== null
+    && state.on_the_clock === state.my_slot
+
   // The list on screen was computed for an older pick than the one on the
   // clock: a pick has landed and its recompute has not finished (0.1-0.8s of
   // ranking plus up to 2.5s of poll lag). Presenting it as current would
@@ -930,6 +941,7 @@ export default function DraftRoom() {
           target={openPlayer}
           onClose={() => setOpenPlayer(null)}
           onSelectPlayer={handleSelectPlayer}
+          onTheClock={youAreUp}
         />
       )}
 
