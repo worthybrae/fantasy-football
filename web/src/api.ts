@@ -26,6 +26,11 @@ export interface Player {
   // uses so the two views cannot disagree about what RB12 means. `null` for
   // a defense or anyone with no NFL season yet.
   season_finishes: [number, number][] | null;
+  // Projected points per game minus his recency-weighted actual. Per-game on
+  // both sides, so a short season is not read as decline -- see
+  // scoring/board.expected_change, including the one thing it cannot
+  // separate: a quarterback who lost his job reads as a huge per-game fall.
+  proj_change: number | null;
   // Points in each week of the last COMPLETE season -- index 0 is week 1 --
   // scored under the league's own rules, not always PPR (scoring/game_points.py).
   // The available table draws it as an inline bar chart.

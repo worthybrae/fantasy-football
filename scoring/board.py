@@ -79,6 +79,10 @@ _BOARD_COLUMNS = [
     # seasons included -- see `career_availability`. A RATE, unlike
     # `durability` two columns over, which is a within-position percentile.
     "career_games_pg",
+    # Projected points per game minus his recency-weighted actual, so a
+    # short season does not read as decline. See `expected_change` for the
+    # one thing it cannot separate: a lost starting job.
+    "proj_change",
     # Up to five [season, positional finish] pairs, oldest first -- the arc
     # the available table draws per row. See `season_finishes`.
     "season_finishes",
@@ -271,6 +275,60 @@ def season_finishes(weekly: pd.DataFrame, rules: dict | None = None,
                                    feats["finish"]):
         arcs.setdefault(pid, []).append([int(season), int(finish)])
     return pd.DataFrame({"player_id": list(arcs), "season_finishes": list(arcs.values())})
+
+
+def expected_change(weekly: pd.DataFrame, proj_points: pd.Series,
+                    rules: dict | None = None) -> pd.DataFrame:
+    """Projected points per game minus what he has actually been scoring.
+
+    PER GAME on both sides, which is the point: a season cut short drags a
+    player's TOTAL down without saying anything about how well he played,
+    and a column meant to show development would otherwise be measuring
+    availability -- which `career_games_pg` already answers, separately.
+
+    The baseline is the recency-weighted average (scoring/config's
+    RECENCY_WEIGHTS: half this year, a third last, a fifth the year before),
+    not simply last season. One season is a small sample to call a trend
+    against, and this is the same weighting `scoring/profile.py`'s
+    `career_summary` already shows on the card, so the two cannot disagree.
+
+    IT CONFLATES TWO THINGS AND CANNOT DO OTHERWISE. ESPN projects a full
+    17 games for 392 of the 400 players it prices, so a backup is not
+    projected to play less -- he is projected to play a whole season badly.
+    A quarterback who lost his job therefore reads as an enormous per-game
+    decline (Joe Flacco: 13.9 actual against 0.6 projected) when what
+    changed is his role, not his ability. That is real information for a
+    drafter, but it is not development, and the column says so rather than
+    letting the reader assume otherwise.
+    """
+    empty = pd.DataFrame(columns=["player_id", "proj_change"])
+    if weekly.empty or "season" not in weekly.columns:
+        return empty
+    wk = weekly[weekly["season"].isin(RECENCY_WEIGHTS)].copy()
+    if wk.empty:
+        return empty
+    wk["_pts"] = compute_ppr_points(wk, normalize_rules(rules))
+    per = wk.groupby(["player_id", "season"]).agg(
+        pts=("_pts", "sum"), games=("week", "nunique")).reset_index()
+    per = per[per["games"] > 0]
+    per["ppg"] = per["pts"] / per["games"]
+    per["w"] = per["season"].map(RECENCY_WEIGHTS).astype(float)
+    per["wx"] = per["ppg"] * per["w"]
+    agg = per.groupby("player_id").agg(wx=("wx", "sum"), w=("w", "sum")).reset_index()
+    agg = agg[agg["w"] > 0]
+    agg["w_ppg"] = agg["wx"] / agg["w"]
+    # `proj_points` is indexed by the board's `player_id`, which is NOT
+    # unique: `_add_adp_only_players` synthesizes an id from the normalized
+    # name alone, so one name at two positions collides. `.map()` against a
+    # duplicated index raises InvalidIndexError and takes the whole board --
+    # and with it the live session build -- down. A colliding id is ADP-only
+    # by construction and so has no weekly rows to reach `agg` with, which is
+    # why keeping the first is enough rather than a guess between the two.
+    lookup = pd.Series(proj_points)
+    lookup = lookup[~lookup.index.duplicated()]
+    agg["proj_ppg"] = agg["player_id"].map(lookup) / GAMES
+    agg["proj_change"] = (agg["proj_ppg"] - agg["w_ppg"]).round(1)
+    return agg.loc[agg["proj_ppg"].notna(), ["player_id", "proj_change"]]
 
 
 def career_availability(weekly: pd.DataFrame) -> pd.DataFrame:
@@ -1001,6 +1059,14 @@ def build_board(conn, weights: dict | None = None,
     # positionally gives every row -- including both id-colliding rows --
     # its own correct value, without ever reindexing on the id at all.
     uni["proj_points"] = proj.to_numpy(dtype=float)
+    # After proj_points exists, and against the FULL weekly rather than the
+    # RECENCY_WEIGHTS slice `weekly` was narrowed to above: `expected_change`
+    # applies that window itself, as its weighting, and handing it a
+    # pre-filtered frame would silently weight a subset of a subset.
+    uni = uni.merge(
+        expected_change(read_table(conn, "weekly"),
+                        uni.set_index("player_id")["proj_points"], rules),
+        on="player_id", how="left")
     # `proj_points` now follows this league's scoring on both rungs: the
     # fallback reads `stats.ppg`, scored under `rules` a few lines above, and
     # ESPN's own season projection is re-priced by `proj_scale`. What is left

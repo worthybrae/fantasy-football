@@ -201,7 +201,7 @@ const GameBars = memo(function GameBars({ points, season, position }: {
 // a reader looks for "what do I still need" anyway. It is deliberately not
 // re-drawn here.)
 
-type SortKey = 'rank' | 'pos' | 'player' | 'finish' | 'health' | 'proj' | 'lasts' | 'adp' | 'espn'
+type SortKey = 'rank' | 'pos' | 'player' | 'finish' | 'health' | 'change' | 'proj' | 'lasts' | 'adp' | 'espn'
 type SortDir = 'asc' | 'desc'
 
 // The direction a column gets on its FIRST click -- "best first" for that
@@ -214,7 +214,7 @@ type SortDir = 'asc' | 'desc'
 // column; this only decides which one you land on without having to click
 // twice.
 const NATURAL_DIR: Record<SortKey, SortDir> = {
-  rank: 'asc', pos: 'asc', player: 'asc', finish: 'asc', health: 'desc', proj: 'desc', lasts: 'desc', adp: 'asc',
+  rank: 'asc', pos: 'asc', player: 'asc', finish: 'asc', health: 'desc', change: 'desc', proj: 'desc', lasts: 'desc', adp: 'asc',
   espn: 'asc',
 }
 
@@ -280,6 +280,38 @@ function positionTip(
 // the rest are defenses and players with no NFL season yet): 9% land on one
 // bar, 15% on two, 35% on three, 28% on four, 14% on five. Wide middle,
 // rare extremes -- which is what makes a five-bar meter readable at all.
+// -- expected change, as a diverging bar ------------------------------------
+//
+// A SIGNED number, so it is not a fill meter like Health: bars grow up from a
+// baseline for a projected gain and down for a projected loss, and the
+// direction is readable before the size is.
+//
+// The scale clamps at +/-4 points per game, which covers the 5th to 95th
+// percentile of the real board (-5.9 to +2.7 at the extremes, -0.8 median).
+// Beyond that the bar is pinned and the number lives in the hover text: the
+// outliers are quarterbacks who lost a starting job, and letting a -14 set
+// the axis would flatten every real difference into nothing.
+const CHANGE_CLAMP = 4
+
+const ChangeBar = memo(function ChangeBar({ change }: { change: number }): ReactNode {
+  const scaled = Math.max(-1, Math.min(1, change / CHANGE_CLAMP))
+  const up = change >= 0
+  const label = `${change > 0 ? '+' : ''}${change.toFixed(1)} points per game vs his recent average`
+  return (
+    <span className="change-bar" role="img" aria-label={label} title={label}>
+      <span className="change-half is-up">
+        {up && <span className="change-fill is-up"
+                     style={{ height: `${Math.abs(scaled) * 100}%` }} />}
+      </span>
+      <span className="change-axis" />
+      <span className="change-half is-down">
+        {!up && <span className="change-fill is-down"
+                      style={{ height: `${Math.abs(scaled) * 100}%` }} />}
+      </span>
+    </span>
+  )
+})
+
 // -- positional finish, season by season -----------------------------------
 //
 // The same five bands SeasonFinish uses on the profile, on the same cut
@@ -384,6 +416,7 @@ function sortValue(
       return arc && arc.length ? arc[arc.length - 1][1] : null
     }
     case 'health': return player?.career_games_pg ?? null
+    case 'change': return player?.proj_change ?? null
     case 'proj': return c.proj_points
     case 'lasts': return c.survive_pct
     case 'adp': return player?.market_rank ?? null
@@ -493,6 +526,7 @@ const AvailableRow = memo(function AvailableRow({
 }): ReactNode {
   const level = healthLevel(player?.career_games_pg)
   const arc = player?.season_finishes ?? null
+  const change = player?.proj_change ?? null
   return (
               <tr key={c.player_id} data-pid={c.player_id}
                   className={isTaken ? 'avail-row-taken' : undefined}
@@ -546,6 +580,11 @@ const AvailableRow = memo(function AvailableRow({
                   {arc === null || arc.length === 0
                     ? <span className="gamebars-none">—</span>
                     : <FinishArc arc={arc} position={c.position} />}
+                </td>
+                <td className="avail-col-change">
+                  {change === null
+                    ? <span className="gamebars-none">—</span>
+                    : <ChangeBar change={change} />}
                 </td>
                 <td className="avail-col-health">
                   {level === null
@@ -942,6 +981,14 @@ export default function AvailableList({
     + "league's starters at the position, red was outside fantasy relevance "
     + 'entirely. Ranked on season points, so a year cut short by injury shows '
     + 'as the bad finish it was. Sorts on the most recent season.'
+  const changeTitle = 'How many more (or fewer) points per game he is '
+    + 'PROJECTED for than he has actually been averaging, weighted toward '
+    + 'his recent seasons. Per game on both sides, so a year cut short by '
+    + 'injury does not read as decline. One caveat: a large negative is '
+    + 'usually a lost starting job rather than a player getting worse -- '
+    + 'ESPN projects a full season for almost everyone, so a backup shows as '
+    + 'a huge per-game fall. This is what the projection expects, not a '
+    + 'forecast of our own.'
   const healthTitle = "How available this player has been across his whole "
     + 'career: average games played per season, counting seasons he missed '
     + 'entirely rather than skipping them. Five bars is close to a full '
@@ -986,6 +1033,7 @@ export default function AvailableList({
     games: gamesTitle,
     finish: finishTitle,
     health: healthTitle,
+    change: changeTitle,
     proj: projTitle,
     lasts: lastsTitle,
     adp: adpTitle,
@@ -1057,6 +1105,7 @@ export default function AvailableList({
                 to fit five bars without growing the 32px row. */}
             {sortableTh('finish', 'Finish', 'avail-col-finish')}
             {sortableTh('health', 'Health', 'avail-col-health')}
+            {sortableTh('change', 'Change', 'avail-col-change')}
             {sortableTh('proj', 'Proj', 'avail-col-num')}
             {/* One word. A header naming the horizon at all ("Lasts to pick
                 13") reads as a promise that pick 13 is the user's own turn,

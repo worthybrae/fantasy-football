@@ -94,6 +94,11 @@ def test_board_column_contract(tmp_path):
                 # entire point (the naive average reports a median of 7.2
                 # games against a true 3.0).
                 "career_games_pg",
+                # Projected points per game minus his recency-weighted
+                # actual. Per game on BOTH sides so a season cut short reads
+                # as availability (which `career_games_pg` answers) rather
+                # than as decline.
+                "proj_change",
                 # Up to five [season, positional finish] pairs, oldest first:
                 # the career arc the available table draws per row. Ranked on
                 # season points, matching scoring/profile.py's `pos_finish`
@@ -1215,3 +1220,85 @@ def test_season_finishes_keeps_the_most_recent_seasons_when_it_must_choose():
     assert len(arc) == FINISH_SEASONS
     assert [s for s, _ in arc] == sorted(s for s, _ in arc), "oldest first"
     assert arc[-1][0] == max(seasons), "the latest season is last"
+
+
+def test_expected_change_is_per_game_on_both_sides():
+    """The column exists to show development, so a season cut short must not
+    read as decline. Two players who score identically per game differ only
+    in how many games they played, and must get the same answer."""
+    from scoring.board import GAMES, expected_change
+    rows = []
+    for pid, games in (("full", 17), ("hurt", 8)):
+        rows += [{"player_id": pid, "player_display_name": pid, "season": 2025,
+                  "week": w, "position": "WR", "recent_team": "DET",
+                  "receptions": 10, "receiving_yards": 100, "rushing_yards": 0,
+                  "carries": 0, "targets": 12, "passing_yards": 0,
+                  "attempts": 0, "completions": 0}
+                 for w in range(1, games + 1)]
+    weekly = pd.DataFrame(rows)
+    # Both projected at the same RATE: 12 points a game across a full season.
+    proj = pd.Series({"full": 12.0 * GAMES, "hurt": 12.0 * GAMES})
+    out = expected_change(weekly, proj).set_index("player_id")["proj_change"]
+    assert out["full"] == pytest.approx(out["hurt"]), (
+        "games played must not move a per-game comparison")
+
+
+def test_expected_change_weights_recent_seasons_more_heavily():
+    """The baseline is RECENCY_WEIGHTS, not a flat average and not last season
+    alone: one season is a small sample to call a trend against.
+
+    Asserted against the exact weighted figure rather than "closer to the
+    recent one" -- the loose version of this test passed with every season
+    weighted equally, which is precisely the bug it exists to catch.
+    """
+    from scoring.board import GAMES, expected_change
+    from scoring.config import RECENCY_WEIGHTS
+    from scoring.ppr import compute_ppr_points, normalize_rules
+    newest, oldest = max(RECENCY_WEIGHTS), min(RECENCY_WEIGHTS)
+    rows = []
+    for season, rec in ((newest, 10), (oldest, 2)):
+        rows += [{"player_id": "p", "player_display_name": "p", "season": season,
+                  "week": w, "position": "WR", "recent_team": "DET",
+                  "receptions": rec, "receiving_yards": rec * 10,
+                  "rushing_yards": 0, "carries": 0, "targets": rec + 2,
+                  "passing_yards": 0, "attempts": 0, "completions": 0}
+                 for w in range(1, 18)]
+    weekly = pd.DataFrame(rows)
+    scored = weekly.assign(pts=compute_ppr_points(weekly, normalize_rules(None)))
+    ppg = scored.groupby("season")["pts"].sum() / 17
+
+    wn, wo = RECENCY_WEIGHTS[newest], RECENCY_WEIGHTS[oldest]
+    weighted = (ppg[newest] * wn + ppg[oldest] * wo) / (wn + wo)
+    flat = (ppg[newest] + ppg[oldest]) / 2
+    assert weighted != pytest.approx(flat), "fixture must separate the two"
+
+    proj = pd.Series({"p": 0.0})
+    change = expected_change(weekly, proj).set_index("player_id")["proj_change"]["p"]
+    # The projection is zero, so the change IS the negated baseline.
+    assert -change == pytest.approx(weighted, abs=0.05)
+    assert -change != pytest.approx(flat, abs=0.05)
+
+
+
+
+def test_expected_change_survives_a_duplicate_player_id_in_the_projections():
+    """The board's `player_id` is not unique -- `_add_adp_only_players`
+    synthesizes one from the normalized name alone, so a name appearing at two
+    positions collides. Mapping against that index raised InvalidIndexError and
+    took the whole board, and the live session build with it, down.
+    """
+    from scoring.board import expected_change
+    rows = [{"player_id": "real", "player_display_name": "Real", "season": 2025,
+             "week": w, "position": "WR", "recent_team": "DET",
+             "receptions": 5, "receiving_yards": 60, "rushing_yards": 0,
+             "carries": 0, "targets": 7, "passing_yards": 0, "attempts": 0,
+             "completions": 0} for w in range(1, 18)]
+    weekly = pd.DataFrame(rows)
+    # Two board rows share the synthesized id, exactly as the ADP feed produces.
+    proj = pd.Series([200.0, 150.0, 170.0], index=["dup_guy", "dup_guy", "real"])
+
+    out = expected_change(weekly, proj)
+
+    assert list(out["player_id"]) == ["real"], \
+        "an ADP-only collision has no weekly rows and must not reach the output"
+    assert out["proj_change"].notna().all()
