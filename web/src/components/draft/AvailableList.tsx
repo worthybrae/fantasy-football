@@ -899,13 +899,11 @@ export default function AvailableList({
               <span className="avail-th-hint">{season ?? 'Last'}</span>
               <span className="avail-nosort">no sort</span>
             </th>
-            {/* Placed immediately after the sparkline it is drawn from --
-                absence sits next to the per-week chart that shows it. Wider
-                than the other numeric columns on purpose -- see
-                `.avail-col-missed` in App.css -- to fit the pip strip
-                (MissedPips above) next to its number without growing the
-                32px row. */}
-            {sortableTh('health', 'Missed', 'avail-col-missed')}
+            {/* Next to the sparkline deliberately: one column is how he
+                scored week to week, the next is whether he was there to do
+                it. Wider than the numeric columns (see `.avail-col-health`)
+                to fit five bars without growing the 32px row. */}
+            {sortableTh('health', 'Health', 'avail-col-health')}
             {sortableTh('proj', 'Proj', 'avail-col-num')}
             {/* One word. A header naming the horizon at all ("Lasts to pick
                 13") reads as a promise that pick 13 is the user's own turn,
