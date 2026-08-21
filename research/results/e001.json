@@ -1,0 +1,212 @@
+{
+  "findings": {
+    "best_pass_r": 0.318,
+    "best_pass_weight": 70,
+    "best_run_r": 0.413,
+    "best_run_weight": 60,
+    "close_pass": 0.3,
+    "close_run": 0.421,
+    "composite_weight_pct": 10,
+    "curve_pass": [
+      [
+        0.0,
+        0.173
+      ],
+      [
+        0.05,
+        0.187
+      ],
+      [
+        0.1,
+        0.2
+      ],
+      [
+        0.15,
+        0.215
+      ],
+      [
+        0.2,
+        0.229
+      ],
+      [
+        0.25,
+        0.243
+      ],
+      [
+        0.3,
+        0.257
+      ],
+      [
+        0.35,
+        0.27
+      ],
+      [
+        0.4,
+        0.282
+      ],
+      [
+        0.45,
+        0.293
+      ],
+      [
+        0.5,
+        0.302
+      ],
+      [
+        0.55,
+        0.309
+      ],
+      [
+        0.6,
+        0.314
+      ],
+      [
+        0.65,
+        0.317
+      ],
+      [
+        0.7,
+        0.318
+      ],
+      [
+        0.75,
+        0.318
+      ],
+      [
+        0.8,
+        0.316
+      ],
+      [
+        0.85,
+        0.314
+      ],
+      [
+        0.9,
+        0.31
+      ],
+      [
+        0.95,
+        0.305
+      ],
+      [
+        1.0,
+        0.3
+      ]
+    ],
+    "curve_run": [
+      [
+        0.0,
+        0.3
+      ],
+      [
+        0.05,
+        0.313
+      ],
+      [
+        0.1,
+        0.326
+      ],
+      [
+        0.15,
+        0.34
+      ],
+      [
+        0.2,
+        0.352
+      ],
+      [
+        0.25,
+        0.365
+      ],
+      [
+        0.3,
+        0.376
+      ],
+      [
+        0.35,
+        0.386
+      ],
+      [
+        0.4,
+        0.395
+      ],
+      [
+        0.45,
+        0.402
+      ],
+      [
+        0.5,
+        0.408
+      ],
+      [
+        0.55,
+        0.411
+      ],
+      [
+        0.6,
+        0.413
+      ],
+      [
+        0.65,
+        0.413
+      ],
+      [
+        0.7,
+        0.411
+      ],
+      [
+        0.75,
+        0.407
+      ],
+      [
+        0.8,
+        0.402
+      ],
+      [
+        0.85,
+        0.396
+      ],
+      [
+        0.9,
+        0.39
+      ],
+      [
+        0.95,
+        0.382
+      ],
+      [
+        1.0,
+        0.374
+      ]
+    ],
+    "last_pass": 0.173,
+    "last_run": 0.3,
+    "n_player_seasons": 2025,
+    "n_team_season_groups": 576,
+    "open_pass": 0.3,
+    "open_run": 0.374,
+    "ppg_per_sd": 1.18,
+    "r2_base": 0.58,
+    "r2_gain": 0.0035,
+    "r2_sched": 0.583,
+    "sd_schedules_faced": 0.26,
+    "seasons": "2017-2025",
+    "swing_points": 10.6,
+    "weeks_priced": 6
+  },
+  "git_rev": "11c5d7d",
+  "id": "e001",
+  "notes": [
+    "Opening lines are each GAME's market open, not a season-long future posted in August. For weeks 1-6 the two are close; for later weeks they are not, which is why the window is capped at 6.",
+    "Week is derived by bucketing dates seven days from each season's opener, so the occasional midweek game is misfiled. Harmless for a six-week average, wrong for anything week-specific."
+  ],
+  "overturns": "The board gives `schedule` 10% of its composite weight. This finds that even PERFECT knowledge of every defense would be worth almost nothing to a player projection.",
+  "question": "Can we predict defensive strength better than last season's numbers do -- and if we can, does it change any draft decision?",
+  "ran_at": "2026-08-21T00:42:44+00:00",
+  "tags": [
+    "schedule",
+    "vegas",
+    "composite"
+  ],
+  "title": "Strength of schedule: better model, same answer"
+}
