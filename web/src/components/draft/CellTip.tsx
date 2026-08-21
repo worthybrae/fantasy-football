@@ -1,6 +1,11 @@
-// Rich hover panels for the three columns whose meter is a summary of
-// something a reader may want the detail of: Health, the 2025 sparkline, and
-// Finish. Each meter answers "how much"; each panel answers "out of what".
+// Hover panels for the three columns whose meter is a summary of something a
+// reader may want the detail of: Health, the 2025 sparkline, and Finish. Each
+// meter answers "how much"; each panel answers "out of what".
+//
+// Each shows ONE thing. The first version put a full stat line on every row of
+// the 2025 and Finish panels -- true, and unreadable at a glance, which is the
+// only way a panel that opens on hover is ever read. The stat lines live on
+// the player card, which is where someone who wants them has gone looking.
 //
 // All three read from ONE profile fetch per player, cached for the session.
 // The board carries 252 players and none of this detail -- embedding every
@@ -101,7 +106,7 @@ function GamesBody({ data }: { data: PlayerProfileData }): ReactNode {
     .sort((a, b) => a.week - b.week)
   return (
     <>
-      <div className="ctip-head">{latest} game by game</div>
+      <div className="ctip-head">{latest} points per game</div>
       <table className="ctip-table">
         <tbody>
           {rows.map((g) => (
@@ -109,7 +114,6 @@ function GamesBody({ data }: { data: PlayerProfileData }): ReactNode {
               <td className="ctip-yr">W{g.week}</td>
               <td className="ctip-opp">{g.opponent ?? '—'}</td>
               <td className="ctip-num">{g.dnp ? '—' : g.ppr_points.toFixed(1)}</td>
-              <td className="ctip-line">{g.stat_line}</td>
             </tr>
           ))}
         </tbody>
@@ -123,15 +127,13 @@ function FinishBody({ data }: { data: PlayerProfileData }): ReactNode {
   const pos = data.header.position
   return (
     <>
-      <div className="ctip-head">Every season, and where he finished</div>
+      <div className="ctip-head">Where he finished, season by season</div>
       <table className="ctip-table">
         <tbody>
           {data.seasons.map((s) => (
             <tr key={s.season}>
               <td className="ctip-yr">{s.season}</td>
               <td className="ctip-fin">{pos}{s.pos_finish}</td>
-              <td className="ctip-num">{s.games}g</td>
-              <td className="ctip-line">{s.stat_line}</td>
             </tr>
           ))}
         </tbody>

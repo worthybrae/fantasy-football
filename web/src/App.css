@@ -4761,7 +4761,6 @@ button.roster-row:focus-visible {
 .ctip-opp { font-family: var(--font-mono); color: var(--text-3); }
 .ctip-num { font-family: var(--font-mono); text-align: right; color: var(--text-1); }
 .ctip-fin { font-family: var(--font-mono); color: var(--accent); }
-.ctip-line { color: var(--text-2); padding-right: 0; }
 
 /* One dot per game of the season, so the row's LENGTH is the season and its
    green run is the part he was available for. A count alone ("8/17") makes a

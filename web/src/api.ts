@@ -105,10 +105,6 @@ export interface SeasonSummary {
   yards_per_opp: number | null; snap_share: number | null;
   completions: number; attempts: number; pass_yards: number;
   pass_tds: number; interceptions: number;
-  // The season's totals in the same words `GameLogRow.stat_line` uses
-  // per game, built server-side by the same formatter so a season and
-  // the weeks inside it cannot describe a player differently.
-  stat_line: string;
 }
 export interface GameStats {
   completions: number; attempts: number; pass_yards: number;

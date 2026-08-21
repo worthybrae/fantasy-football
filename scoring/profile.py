@@ -388,23 +388,6 @@ def season_summaries(weekly: pd.DataFrame, snaps: pd.DataFrame | None, player_id
             "cv_rank": _int_or_none(r["cv_rank"]),
             "cv_rank_n": _int_or_none(r["cv_rank_n"]),
             "cv_pos_median": _round_or_none(r["cv_pos_median"], 3),
-            # The season's totals in the SAME words `game_log` uses per game,
-            # built by the same `_stat_line`, so a season row and the weeks
-            # inside it cannot describe a player differently. Keyed on the
-            # weekly column names that function expects rather than on this
-            # payload's names -- the two vocabularies differ (`pass_yards`
-            # here, `passing_yards` there) and _GAME_STAT_COLS is the map.
-            "stat_line": _stat_line({
-                "completions": r["completions"], "attempts": r["attempts"],
-                "passing_yards": r["pass_yards"], "passing_tds": r["pass_tds"],
-                "passing_interceptions": r["interceptions"],
-                "carries": r["carries"], "rushing_yards": r["rush_yards"],
-                "rushing_tds": r["rush_tds"], "targets": r["targets"],
-                "receptions": r["receptions"], "receiving_yards": r["rec_yards"],
-                "receiving_tds": r["rec_tds"], "fg_made": r["fg_made"],
-                "fg_att": r["fg_att"], "fg_long": r["fg_long"],
-                "pat_made": r["pat_made"], "pat_att": r["pat_att"],
-            }, r["position"]),
         })
     return rows
 
