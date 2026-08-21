@@ -61,12 +61,22 @@ MIN_GAMES = 8
 LOOKBACK = 3
 PRIOR_WEIGHTS = (0.5, 0.3, 0.2)
 # Rounds 1-5 are where a manager is choosing between players rather than
-# filling out a bench, and where the earlier pass measured its +0.43. The
-# within-draft split runs over the WHOLE draft, because the question there is
-# whether early behaviour predicts late behaviour.
+# filling out a bench, and where the earlier pass measured its +0.43.
 EARLY_ROUNDS = 5
+# ...but truncating there throws away two thirds of the draft. Weighting every
+# pick by ROUND_DECAY**(round-1) keeps all of them while letting the early
+# ones dominate, and measures reach at +0.52 against the truncated +0.41 --
+# a lower-variance estimator of the same habit. A sweep of windows and decay
+# rates is in the post; this is the one that survived it.
+ROUND_DECAY = 0.8
+# The per-pick traits are personal habits and get the decay. A POSITION SHARE
+# does not: it is a fact about the finished roster, and how many tight ends a
+# manager ends up carrying is the whole question -- weighting rounds 12-16
+# down to nothing would erase exactly the picks that answer it.
+DECAYED_TRAITS = ("reach", "growth", "steadiness")
+POSITION_SHARES = ("QB", "RB", "WR", "TE")
 # The split point for the within-draft measure. Rounds 1-4 against 5+: an even
-# split of a 15-round draft would put the whole split inside the bench.
+# split of a 16-round draft would put the whole split inside the bench.
 SPLIT_ROUND = 5
 MIN_PICKS_PER_HALF = 3
 
@@ -155,6 +165,26 @@ def _round_of(picks: pd.DataFrame) -> pd.Series:
     return picks["round"].astype(float)
 
 
+def _decayed_mean(picks: pd.DataFrame, trait: str) -> pd.DataFrame:
+    """A manager-season's trait, with early picks weighted most.
+
+    Late picks are constrained -- by what is left on the board and by the
+    roster slots still open -- so they say less about taste than a first-round
+    choice does. Truncating to rounds 1-5 is the crude version of that idea
+    and measures reach at +0.41; decaying over the whole draft measures the
+    same habit at +0.52, because it discounts the late rounds without
+    discarding them.
+    """
+    d = picks.dropna(subset=[trait]).copy()
+    d["_w"] = ROUND_DECAY ** (_round_of(d) - 1)
+    d["_x"] = d[trait] * d["_w"]
+    g = d.groupby(["manager", "season"]).agg(
+        _x=("_x", "sum"), _w=("_w", "sum")).reset_index()
+    g = g[g["_w"] > 0]
+    g[trait] = g["_x"] / g["_w"]
+    return g[["manager", "season", trait]]
+
+
 def _p_value(r: float, n: int) -> float:
     """Two-sided p for a Pearson r, so a small sample cannot masquerade.
 
@@ -170,14 +200,69 @@ def _p_value(r: float, n: int) -> float:
     return float(2 * stats.t.sf(abs(t), n - 2))
 
 
+# Seven traits on two axes is fourteen correlations, and at that many a
+# |r| of 0.35 turns up somewhere by luck alone about half the time -- which
+# is exactly how a -0.40 for steadiness first read as a discovery. Every
+# reported p is therefore accompanied by a FAMILY-WISE one, from permuting
+# manager labels and asking how often the whole family's best cell beats this
+# one. Reporting only the per-cell p would publish the artefact.
+FAMILY_PERMUTATIONS = 2000
+FAMILY_SEED = 20260821
+
+
+def _pairs_r(mat: np.ndarray) -> float:
+    """Correlate column t against column t+1 down a manager x season matrix."""
+    if mat.shape[1] < 2:
+        return np.nan
+    a = np.concatenate([mat[:, i] for i in range(mat.shape[1] - 1)])
+    b = np.concatenate([mat[:, i] for i in range(1, mat.shape[1])])
+    ok = ~(np.isnan(a) | np.isnan(b))
+    if ok.sum() < 3 or np.std(a[ok]) == 0 or np.std(b[ok]) == 0:
+        return np.nan
+    return float(np.corrcoef(a[ok], b[ok])[0, 1])
+
+
+def _cols_r(mat: np.ndarray) -> float:
+    """Correlate two columns (early against late) of one matrix."""
+    ok = ~(np.isnan(mat[:, 0]) | np.isnan(mat[:, 1]))
+    if ok.sum() < 3 or np.std(mat[ok, 0]) == 0 or np.std(mat[ok, 1]) == 0:
+        return np.nan
+    return float(np.corrcoef(mat[ok, 0], mat[ok, 1])[0, 1])
+
+
+def _family_pvalues(cells: dict) -> dict:
+    """Family-wise p per cell, by permuting who each season's numbers belong to.
+
+    `cells` maps a name to (observed_r, matrix, statistic). The null shuffles
+    values within each column -- destroying the manager linkage while keeping
+    every season's distribution intact -- so it asks precisely "could this
+    much year-to-year agreement arise with no persistent owner at all".
+    """
+    rng = np.random.default_rng(FAMILY_SEED)
+    names = [k for k, (r, _, _) in cells.items() if r == r]
+    best = np.zeros(FAMILY_PERMUTATIONS)
+    draws = {n: np.zeros(FAMILY_PERMUTATIONS) for n in names}
+    for i in range(FAMILY_PERMUTATIONS):
+        top = 0.0
+        for n in names:
+            _, mat, stat = cells[n]
+            sh = np.column_stack([rng.permutation(mat[:, j])
+                                  for j in range(mat.shape[1])])
+            r = stat(sh)
+            draws[n][i] = r
+            if r == r and abs(r) > top:
+                top = abs(r)
+        best[i] = top
+    return {n: float(np.mean(best >= abs(cells[n][0]))) for n in names}
+
+
 def _across_season(per_season: pd.DataFrame, trait: str) -> tuple:
     """Correlate a manager's trait in season t with the same manager in t+1."""
     a = per_season.dropna(subset=[trait])[["manager", "season", trait]]
-    nxt = a.assign(season=a["season"] - 1).rename(columns={trait: "next"})
-    pairs = a.merge(nxt[["manager", "season", "next"]], on=["manager", "season"])
-    if len(pairs) < 3:
-        return np.nan, len(pairs)
-    return float(pairs[trait].corr(pairs["next"])), len(pairs)
+    mat = a.pivot(index="manager", columns="season", values=trait)
+    mat = mat[sorted(mat.columns)].to_numpy(dtype=float)
+    n = int(np.sum(~(np.isnan(mat[:, :-1]) | np.isnan(mat[:, 1:]))))
+    return _pairs_r(mat), n, mat
 
 
 def _within_draft(picks: pd.DataFrame, trait: str) -> tuple:
@@ -190,16 +275,17 @@ def _within_draft(picks: pd.DataFrame, trait: str) -> tuple:
     """
     df = picks.dropna(subset=[trait]).copy()
     if df.empty:
-        return np.nan, 0
+        return np.nan, 0, np.empty((0, 2))
     df["_r"] = _round_of(df)
     df["_dev"] = df[trait] - df.groupby(["season", "_r"])[trait].transform("mean")
     df["_half"] = np.where(df["_r"] < SPLIT_ROUND, "early", "late")
     halves = df.groupby(["manager", "season", "_half"])["_dev"].agg(["mean", "size"])
     halves = halves[halves["size"] >= MIN_PICKS_PER_HALF]["mean"].unstack("_half")
     halves = halves.dropna()
-    if len(halves) < 3:
-        return np.nan, len(halves)
-    return float(halves["early"].corr(halves["late"])), len(halves)
+    if len(halves) < 3 or not {"early", "late"} <= set(halves.columns):
+        return np.nan, len(halves), np.empty((0, 2))
+    mat = halves[["early", "late"]].to_numpy(dtype=float)
+    return _cols_r(mat), len(halves), mat
 
 
 def run(conn=None, odds=None, rules=None) -> dict:
@@ -211,32 +297,74 @@ def run(conn=None, odds=None, rules=None) -> dict:
     if picks.empty:
         raise RuntimeError("no draft history imported -- nothing to measure")
 
-    early = picks[_round_of(picks) <= EARLY_ROUNDS]
-    per_season = early.groupby(["manager", "season"]).agg(
-        reach=("reach", "mean"), growth=("growth", "mean"),
-        steadiness=("steadiness", "mean")).reset_index()
-    # Position is a SHARE of picks, not a mean of a per-pick number, so it is
-    # built separately rather than bent into the same aggregation.
-    for pos in ("RB", "WR"):
-        share = (early.assign(_hit=(early["position"] == pos).astype(float))
+    per_season = None
+    for trait in DECAYED_TRAITS:
+        col = _decayed_mean(picks, trait)
+        per_season = col if per_season is None else per_season.merge(
+            col, on=["manager", "season"], how="outer")
+    # Position is a SHARE of the FINISHED roster, not a decayed mean of a
+    # per-pick number, and it is measured over the whole draft: the first
+    # version of this experiment took its share over rounds 1-5 and reported
+    # that positional preference does not persist. That was the wrong window
+    # for the question. Which position a manager takes EARLY is dictated by
+    # the board; how many tight ends he walks away with is a choice, and it
+    # is the most persistent thing measured here.
+    for pos in POSITION_SHARES:
+        share = (picks.assign(_hit=(picks["position"] == pos).astype(float))
                  .groupby(["manager", "season"])["_hit"].mean()
                  .rename(f"pos_{pos}").reset_index())
         per_season = per_season.merge(share, on=["manager", "season"], how="left")
-    picks["pos_RB"] = (picks["position"] == "RB").astype(float)
-    picks["pos_WR"] = (picks["position"] == "WR").astype(float)
+        picks[f"pos_{pos}"] = (picks["position"] == pos).astype(float)
 
-    findings = {}
-    for trait in ("reach", "growth", "steadiness", "pos_RB", "pos_WR"):
-        r_across, n_across = _across_season(per_season, trait)
-        r_within, n_within = _within_draft(picks, trait)
+    traits = DECAYED_TRAITS + tuple(f"pos_{p}" for p in POSITION_SHARES)
+    cells, findings = {}, {}
+    for trait in traits:
+        r_across, n_across, m_across = _across_season(per_season, trait)
+        r_within, n_within, m_within = _within_draft(picks, trait)
+        cells[f"across_{trait}"] = (r_across, m_across, _pairs_r)
+        cells[f"within_{trait}"] = (r_within, m_within, _cols_r)
         for axis, r, n in (("across", r_across, n_across),
                            ("within", r_within, n_within)):
             pv = _p_value(r, n)
             findings[f"{axis}_{trait}"] = None if np.isnan(r) else round(r, 3)
             findings[f"{axis}_n_{trait}"] = n
             findings[f"{axis}_p_{trait}"] = None if np.isnan(pv) else round(pv, 3)
-            findings[f"{axis}_sig_{trait}"] = bool(pv == pv and pv < 0.05)
+    family = _family_pvalues(cells)
+    for key, pf in family.items():
+        findings[f"{key}_pfam"] = round(pf, 3)
+        # SIGNIFICANCE IS THE FAMILY-WISE CALL, not the per-cell one. The
+        # per-cell p stays published beside it so the gap between the two is
+        # visible rather than quietly resolved.
+        findings[f"{key}_sig"] = bool(pf < 0.05)
+    for key in cells:
+        findings.setdefault(f"{key}_pfam", None)
+        findings.setdefault(f"{key}_sig", False)
 
+    # The comparison that justifies the decay, measured rather than
+    # remembered: the same trait under the old rounds-1-EARLY_ROUNDS flat
+    # mean. The post argues from the gap between these two, so the post may
+    # not be the only place the old number exists.
+    flat = (picks[_round_of(picks) <= EARLY_ROUNDS]
+            .groupby(["manager", "season"])["reach"].mean().reset_index())
+    r_flat, _, _ = _across_season(flat, "reach")
+    findings["across_reach_truncated"] = None if np.isnan(r_flat) else round(r_flat, 3)
+
+    # Leave-one-manager-out on the headline result. With eight managers a
+    # single one can carry a correlation, and "it survives dropping any of
+    # them" is the claim -- so it has to be a measurement, not an assurance.
+    jack = []
+    for m in sorted(picks["manager"].dropna().unique()):
+        sub = picks[picks["manager"] != m]
+        share = (sub.assign(_hit=(sub["position"] == "TE").astype(float))
+                 .groupby(["manager", "season"])["_hit"].mean()
+                 .rename("pos_TE").reset_index())
+        r_j, _, _ = _across_season(share, "pos_TE")
+        if r_j == r_j:
+            jack.append(r_j)
+    findings["across_pos_TE_jack_lo"] = round(min(jack), 2) if jack else None
+    findings["across_pos_TE_jack_hi"] = round(max(jack), 2) if jack else None
+
+    findings["decay"] = ROUND_DECAY
     findings["n_picks"] = int(len(picks))
     findings["n_managers"] = int(picks["manager"].nunique())
     findings["n_seasons"] = int(picks["season"].nunique())
@@ -248,8 +376,16 @@ def run(conn=None, odds=None, rules=None) -> dict:
         "that season, and only actuals from before it.",
         "The within-draft correlation removes the (season, round) mean first, "
         "so shared late-round drift is not read as a personal trait.",
-        f"Rounds 1-{EARLY_ROUNDS} for the across-season measure; the whole "
-        f"draft, split at round {SPLIT_ROUND}, for the within-draft one.",
+        f"Per-pick traits are weighted {ROUND_DECAY}^(round-1) across the "
+        f"whole draft. Position is an unweighted share of the finished "
+        f"roster: an earlier version took it over rounds 1-{EARLY_ROUNDS} "
+        f"and concluded positional preference does not persist, which is the "
+        f"wrong window for a question about what a manager ends up with.",
+        f"Family-wise p is from {FAMILY_PERMUTATIONS} permutations of which "
+        f"manager each season's numbers belong to, across all fourteen cells "
+        f"at once. Significance is that number, not the per-cell p.",
+        "The within-draft split is at round "
+        f"{SPLIT_ROUND}, over drafts of 16 rounds.",
     ]
     return findings
 
@@ -262,12 +398,14 @@ EXPERIMENT = Experiment(
              "in front of us?",
     run=run,
     tags=("managers", "persistence", "draft-model"),
-    overturns="The pick model fits six per-manager position dummies. Which "
-              "positions a manager favours is measured here at -0.07 and "
-              "-0.14 season to season -- indistinguishable from zero -- so "
-              "those are six coefficients per owner chasing nothing, on ~85 "
-              "picks each. Inside a draft the same tendency is significant "
-              "and NEGATIVE: a manager who takes backs early takes fewer "
-              "late. The effect is roster balance, which `need` already "
-              "prices, and its sign is the opposite of a preference.",
+    overturns="Positional preference was measured over rounds 1-5 and "
+              "reported as not persisting. That is the wrong window: which "
+              "position a manager takes early is dictated by the board, "
+              "while how many tight ends he ends up with is a choice, and "
+              "over the whole draft it is the most persistent thing here "
+              "(+0.69). The pick model's six per-manager position dummies "
+              "were the right instinct at the wrong resolution -- what "
+              "carries is a target roster shape, and inside a draft a "
+              "manager moves AGAINST it as he fills up, which is why a "
+              "preference-shaped feature had the sign backwards."
 )
