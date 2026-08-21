@@ -114,6 +114,54 @@ def _bars(rows, series, vmax, caption):
     return "".join(out)
 
 
+def _signed(rows, series, vmax, caption):
+    """Grouped bars growing left or right from a zero line.
+
+    `_bars` draws `abs(v)`, which is right for magnitudes and wrong wherever
+    the SIGN is the finding: a correlation of -0.46 and one of +0.46 came out
+    as the same bar, and in E006 that difference is the difference between
+    "this manager likes running backs" and "he already has three".
+    """
+    h = len(rows) * ROW_H + (26 if caption else 6) + 14
+    half = BAR_W // 2
+    zero = LABEL_W + half
+    out = [f'<svg viewBox="0 0 {LABEL_W + BAR_W + 52} {h}" width="100%" '
+           f'style="max-width:520px;display:block;margin:0 0 22px">']
+    if caption:
+        out.append(f'<text x="0" y="12" fill="#565b69" font-size="11" '
+                   f'font-family="var(--font-mono)">{html.escape(caption)}</text>')
+    top = 26 if caption else 6
+    n = max(len(v) for _, v in rows)
+    out.append(f'<line x1="{zero}" y1="{top - 4}" x2="{zero}" '
+               f'y2="{top + len(rows) * ROW_H}" stroke="#3a4050"/>')
+    for i, (label, vals) in enumerate(rows):
+        y = top + i * ROW_H
+        out.append(f'<text x="0" y="{y + 12}" fill="#98a0b0" font-size="12">'
+                   f'{html.escape(label)}</text>')
+        bh = max(4, int(14 / n))
+        for j, v in enumerate(vals):
+            w = max(1, int(abs(v) / vmax * half))
+            by = y + 2 + j * (bh + 2)
+            x = zero if v >= 0 else zero - w
+            out.append(f'<rect x="{x}" y="{by}" width="{w}" height="{bh}" '
+                       f'rx="1" fill="{SERIES[j % len(SERIES)]}"/>')
+            # The number sits on the outside of the bar, so a negative one
+            # reads to the left of zero rather than colliding with the axis.
+            tx, anchor = ((x + w + 6, "start") if v >= 0 else (x - 6, "end"))
+            out.append(f'<text x="{tx}" y="{by + bh - 1}" fill="#565b69" '
+                       f'font-size="10" text-anchor="{anchor}" '
+                       f'font-family="var(--font-mono)">{v:g}</text>')
+    if n > 1 and series:
+        out.append(f'<text x="{LABEL_W}" y="{h - 1}" font-size="10" '
+                   f'font-family="var(--font-mono)">')
+        for j, name in enumerate(series):
+            out.append(f'<tspan fill="{SERIES[j % len(SERIES)]}">{html.escape(name)}'
+                       f'</tspan><tspan fill="#262932">  </tspan>')
+        out.append('</text>')
+    out.append("</svg>")
+    return "".join(out)
+
+
 def _curve(series, caption, xlabel):
     """Small multiple line chart. `series` is [(name, [[x, y], ...]), ...]."""
     W, H, PAD = 440, 150, 26
@@ -148,8 +196,12 @@ def _curve(series, caption, xlabel):
 
 
 def _chart_block(spec: str, findings: dict) -> str:
-    """`::bars` / `::curve` blocks. Rows are `label|value|value`, and any
-    value may be a {finding} -- resolved before it ever reaches a bar."""
+    """`::bars` / `::signed` / `::curve` blocks. Rows are `label|value|value`,
+    and any value may be a {finding} -- resolved before it reaches a bar.
+
+    `::signed` draws from a zero line and keeps the sign; `::bars` draws
+    magnitudes. Use signed for anything that can go negative.
+    """
     head, *lines = spec.strip().splitlines()
     kind = head[2:].split()[0]
     # Attribute text is prose too -- a caption naming a sample size must
@@ -176,9 +228,10 @@ def _chart_block(spec: str, findings: dict) -> str:
         rows.append((resolve(label, findings),
                      [float(resolve(v, findings)) for v in vals]))
     vmax = float(attrs["max"]) if "max" in attrs else max(
-        v for _, vs in rows for v in vs) * 1.08
+        abs(v) for _, vs in rows for v in vs) * 1.08
     series = [s.strip() for s in attrs.get("series", "").split(",") if s.strip()]
-    return _bars(rows, series, vmax, attrs.get("caption", ""))
+    draw = _signed if kind == "signed" else _bars
+    return draw(rows, series, vmax, attrs.get("caption", ""))
 
 
 def _blocks(text: str, findings: dict) -> str:

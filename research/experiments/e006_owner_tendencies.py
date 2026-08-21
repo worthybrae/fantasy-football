@@ -202,7 +202,8 @@ def _within_draft(picks: pd.DataFrame, trait: str) -> tuple:
     return float(halves["early"].corr(halves["late"])), len(halves)
 
 
-def run(conn=None, rules=None) -> dict:
+def run(conn=None, odds=None, rules=None) -> dict:
+    """`odds` is unused -- run.py hands every experiment the same three."""
     if conn is None:
         from pipeline.db import get_conn
         conn = get_conn()
@@ -261,4 +262,12 @@ EXPERIMENT = Experiment(
              "in front of us?",
     run=run,
     tags=("managers", "persistence", "draft-model"),
+    overturns="The pick model fits six per-manager position dummies. Which "
+              "positions a manager favours is measured here at -0.07 and "
+              "-0.14 season to season -- indistinguishable from zero -- so "
+              "those are six coefficients per owner chasing nothing, on ~85 "
+              "picks each. Inside a draft the same tendency is significant "
+              "and NEGATIVE: a manager who takes backs early takes fewer "
+              "late. The effect is roster balance, which `need` already "
+              "prices, and its sign is the opposite of a preference.",
 )
