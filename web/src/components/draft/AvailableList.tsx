@@ -1,5 +1,6 @@
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { LiveCandidate, Player } from '../../api'
+import { CellTip, loadProfile, type CellTipKind } from './CellTip'
 import { riskTone } from './tone'
 
 // duplicated from RosterPanel.tsx/DraftBoardGrid.tsx (unexported in both):
@@ -559,6 +560,7 @@ interface AvailableListProps {
 // and would defeat the comparison entirely.
 const AvailableRow = memo(function AvailableRow({
   c, player, isTaken, season, isMyTurn, onOpenPlayer, onDraft,
+  onCellEnter, onCellLeave,
 }: {
   c: LiveCandidate
   player: Player | undefined
@@ -567,6 +569,10 @@ const AvailableRow = memo(function AvailableRow({
   isMyTurn: boolean
   onOpenPlayer: (c: LiveCandidate) => void
   onDraft: (c: LiveCandidate) => void
+  // Stable identities from the parent (useCallback), because this row is
+  // memoized: a fresh closure per render would defeat that on every tick.
+  onCellEnter: (kind: CellTipKind, playerId: string, el: HTMLElement) => void
+  onCellLeave: () => void
 }): ReactNode {
   const level = healthLevel(player?.career_games_pg)
   const steady = steadyLevel(player?.consistency_pct)
@@ -598,7 +604,11 @@ const AvailableRow = memo(function AvailableRow({
                     </span>
                   )}
                 </td>
-                <td className="avail-col-games">
+                <td
+                  className="avail-col-games"
+                  onMouseEnter={(e) => onCellEnter('games', c.player_id, e.currentTarget)}
+                  onMouseLeave={onCellLeave}
+                >
                   {/* An explicit empty state, never a blank cell. 45 of the
                       252 players on the real board have no games in the last
                       complete season -- 25 defenses (nflverse carries no
@@ -621,12 +631,20 @@ const AvailableRow = memo(function AvailableRow({
                     renders the same em-dash the sparkline's own empty state
                     uses, never a 0 or an empty strip: a defense or an
                     unpriced rookie has no counted season, not a clean one. */}
-                <td className="avail-col-finish">
+                <td
+                  className="avail-col-finish"
+                  onMouseEnter={(e) => onCellEnter('finish', c.player_id, e.currentTarget)}
+                  onMouseLeave={onCellLeave}
+                >
                   {arc === null || arc.length === 0
                     ? <span className="gamebars-none">—</span>
                     : <FinishArc arc={arc} position={c.position} />}
                 </td>
-                <td className="avail-col-health">
+                <td
+                  className="avail-col-health"
+                  onMouseEnter={(e) => onCellEnter('health', c.player_id, e.currentTarget)}
+                  onMouseLeave={onCellLeave}
+                >
                   {level === null
                     ? <span className="gamebars-none">—</span>
                     : <HealthMeter level={level}
@@ -705,6 +723,56 @@ export default function AvailableList({
   // visible state (see that effect's own comment).
   const [tipPos, setTipPos] = useState<{ left: number; top: number } | null>(null)
   const tipRef = useRef<HTMLDivElement>(null)
+
+  // The cell panels (Health, the season sparkline, Finish) are a SECOND
+  // floating layer, not the header's. They share `positionTip` and the
+  // measure-then-place effect, and nothing else: a header tip is one line of
+  // static copy, a cell panel is a table fetched per player, and one panel
+  // serving both would have to be empty while the other's data loaded.
+  const [cellTip, setCellTip] =
+    useState<{ kind: CellTipKind; playerId: string; rect: DOMRect } | null>(null)
+  const [cellTipPos, setCellTipPos] = useState<{ left: number; top: number } | null>(null)
+  const cellTipRef = useRef<HTMLDivElement>(null)
+  const cellTimer = useRef<number | null>(null)
+
+  const hideCellTip = useCallback(() => {
+    if (cellTimer.current !== null) window.clearTimeout(cellTimer.current)
+    cellTimer.current = null
+    setCellTip(null)
+  }, [])
+
+  // Stable identity, because AvailableRow is memoized and a fresh closure per
+  // render would re-render all 252 rows on every tick of the pick clock.
+  const showCellTip = useCallback(
+    (kind: CellTipKind, playerId: string, el: HTMLElement) => {
+      if (cellTimer.current !== null) window.clearTimeout(cellTimer.current)
+      const rect = el.getBoundingClientRect()
+      // The fetch starts on the FIRST hover, before the panel is due to
+      // appear, so the request and the delay overlap rather than queue. By
+      // the time the panel opens the data is usually already cached.
+      void loadProfile(playerId).catch(() => {})
+      cellTimer.current = window.setTimeout(
+        () => setCellTip({ kind, playerId, rect }), TIP_DELAY_MS)
+    }, [])
+
+  useLayoutEffect(() => {
+    if (!cellTip || !cellTipRef.current) {
+      setCellTipPos(null)
+      return
+    }
+    const { width, height } = cellTipRef.current.getBoundingClientRect()
+    setCellTipPos(positionTip(cellTip.rect, { width, height }))
+    // `cellTip.playerId` is in the deps because the panel RESIZES when the
+    // fetch lands -- a loading panel is one line and a game log is eighteen
+    // rows, so a position measured against the small one would leave the
+    // full panel hanging off the bottom of the window.
+  }, [cellTip])
+
+  useEffect(() => {
+    if (!cellTip) return
+    window.addEventListener('scroll', hideCellTip, true)
+    return () => window.removeEventListener('scroll', hideCellTip, true)
+  }, [cellTip, hideCellTip])
   const tipTimer = useRef<number | null>(null)
 
   function clearTipTimer(): void {
@@ -1204,6 +1272,8 @@ export default function AvailableList({
               isMyTurn={isMyTurn}
               onOpenPlayer={onOpenPlayer}
               onDraft={onDraft}
+              onCellEnter={showCellTip}
+              onCellLeave={hideCellTip}
             />
           ))}
           {rows.length === 0 && (
@@ -1238,6 +1308,18 @@ export default function AvailableList({
             : { left: 0, top: 0, visibility: 'hidden' }}
         >
           {tipCopy[tip.id]}
+        </div>
+      )}
+      {cellTip && (
+        <div
+          ref={cellTipRef}
+          role="tooltip"
+          className="avail-cell-tip"
+          style={cellTipPos
+            ? { left: cellTipPos.left, top: cellTipPos.top, visibility: 'visible' }
+            : { left: 0, top: 0, visibility: 'hidden' }}
+        >
+          <CellTip kind={cellTip.kind} playerId={cellTip.playerId} />
         </div>
       )}
     </div>
