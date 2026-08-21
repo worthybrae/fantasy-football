@@ -17,6 +17,7 @@ import type { ReactNode } from 'react'
 import { fetchProfile } from '../../api'
 import type { PlayerProfileData, SeasonSummary } from '../../api'
 import { FINISH_STARTERS, finishBands, finishPosition, finishTone } from './finish'
+import { BAR_CEILING, SEASON_WEEKS, barTone } from './weeks'
 
 export type CellTipKind = 'health' | 'games' | 'finish'
 
@@ -101,24 +102,49 @@ function GamesBody({ data }: { data: PlayerProfileData }): ReactNode {
   const seasons = data.game_log.map((g) => g.season)
   if (!seasons.length) return <div className="ctip-empty">No games on record.</div>
   const latest = Math.max(...seasons)
-  const rows = data.game_log
-    .filter((g) => g.season === latest)
-    .slice()
-    .sort((a, b) => a.week - b.week)
+  const played = new Map(
+    data.game_log.filter((g) => g.season === latest && !g.dnp)
+      .map((g) => [g.week, g]))
+  const scored = [...played.values()].map((g) => g.ppr_points)
+  const avg = scored.length
+    ? scored.reduce((a, b) => a + b, 0) / scored.length : 0
+  const best = scored.length ? Math.max(...scored) : 0
+  const position = data.header.position
+
   return (
     <>
-      <div className="ctip-head">{latest} by week</div>
-      <table className="ctip-table">
-        <tbody>
-          {rows.map((g) => (
-            <tr key={g.week} className={g.dnp ? 'is-dnp' : undefined}>
-              <td className="ctip-yr">W{g.week}</td>
-              <td className="ctip-opp">{g.opponent ?? '—'}</td>
-              <td className="ctip-num">{g.dnp ? '—' : g.ppr_points.toFixed(1)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <div className="ctip-head">
+        <span>{latest} by week</span>
+        {/* The two numbers the chart itself cannot state: its own average,
+            and the value of any week tall enough to be clipped by the shared
+            30-point ceiling. */}
+        <span className="ctip-head-note">
+          avg {avg.toFixed(1)} · best {best.toFixed(1)}
+        </span>
+      </div>
+      <div className="ctip-weeks">
+        {Array.from({ length: SEASON_WEEKS }, (_, i) => {
+          const week = i + 1
+          const game = played.get(week)
+          const pts = game?.ppr_points ?? null
+          const height = pts === null
+            ? 0 : Math.max(6, Math.min(1, pts / BAR_CEILING) * 100)
+          return (
+            <span key={week} className="ctip-week">
+              <span className="ctip-week-slot">
+                {pts === null
+                  // Not a zero-height bar: a week he did not play and a week
+                  // he scored nothing are different claims, and the second
+                  // one already draws as the 6px floor above.
+                  ? <span className="ctip-week-off" />
+                  : <span className={`ctip-week-bar ${barTone(pts, position)}`}
+                          style={{ height: `${height}%` }} />}
+              </span>
+              <span className="ctip-week-no">{week}</span>
+            </span>
+          )
+        })}
+      </div>
     </>
   )
 }

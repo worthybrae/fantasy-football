@@ -4746,6 +4746,10 @@ button.roster-row:focus-visible {
 }
 
 .ctip-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 14px;
   font-size: 10px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -4753,7 +4757,49 @@ button.roster-row:focus-visible {
   margin-bottom: 5px;
 }
 
+.ctip-head-note { text-transform: none; letter-spacing: normal;
+                  font-family: var(--font-mono); color: var(--text-2); }
+
 .ctip-empty { color: var(--text-3); }
+
+/* The season read left to right, one column per week -- the shape of a year
+   rather than eighteen rows of it. Same colour thresholds and the same
+   30-point ceiling as the inline sparkline this panel opens from (weeks.ts),
+   so a week is the same colour and the same relative height in both. */
+.ctip-weeks { display: flex; align-items: flex-end; gap: 3px; }
+
+.ctip-week { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+
+/* Fixed-height slot, so every bar grows from ONE baseline: without it a short
+   week and a tall one would each be centred in their own column and the
+   season's shape would be unreadable. */
+.ctip-week-slot {
+  display: flex;
+  align-items: flex-end;
+  width: 9px;
+  height: 40px;
+}
+
+.ctip-week-bar { width: 100%; border-radius: 1px; }
+.ctip-week-bar.is-bad { background: var(--fail); }
+.ctip-week-bar.is-mid { background: var(--accent); }
+.ctip-week-bar.is-good { background: var(--ok); }
+
+/* A week he did not play: a mark on the baseline, not an absent column. The
+   gap in a season is the thing a reader is looking for. */
+.ctip-week-off {
+  width: 100%;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--border);
+}
+
+.ctip-week-no {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-3);
+  line-height: 1;
+}
 
 /* `width: max-content`, and every one of the global `th, td` defaults undone
    explicitly. That global rule (top of this file) sets `height: 32px` and a

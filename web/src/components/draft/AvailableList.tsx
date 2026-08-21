@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import type { LiveCandidate, Player } from '../../api'
 import { CellTip, loadProfile, type CellTipKind } from './CellTip'
 import { FINISH_STARTERS, finishHeight, finishTone } from './finish'
+import { BAR_CEILING, barThresholds, barTone } from './weeks'
 import { riskTone } from './tone'
 
 // duplicated from RosterPanel.tsx/DraftBoardGrid.tsx (unexported in both):
@@ -57,13 +58,6 @@ const POSITIONS = ['ALL', 'QB', 'RB', 'WR', 'TE', 'K', 'DST']
 // good defensive or kicking week is worth a fraction of a good receiver's),
 // so the split has to be smaller too; 5/10 keeps the same 1:2 ratio, sized
 // down rather than re-derived from scratch.
-const BAR_THRESHOLDS: Record<string, { amberFrom: number; greenFrom: number }> = {
-  QB: { amberFrom: 10, greenFrom: 20 },
-  K: { amberFrom: 5, greenFrom: 10 },
-  DST: { amberFrom: 5, greenFrom: 10 },
-}
-// RB, WR, TE, and anything the server ever sends that isn't one of the three
-// positions above -- the original 10/15 split.
 // How long a drafted player stays on screen on his way out. Long enough to
 // read a name under a pick clock, short enough that back-to-back picks do
 // not stack up on each other.
@@ -82,11 +76,6 @@ const SLIDE_MS = 170
 // motion describing something that did not just happen.
 const TAKEN_BURST_LIMIT = 5
 
-const BAR_THRESHOLDS_DEFAULT = { amberFrom: 10, greenFrom: 15 }
-function barThresholds(position: string): { amberFrom: number; greenFrom: number } {
-  return BAR_THRESHOLDS[position] ?? BAR_THRESHOLDS_DEFAULT
-}
-
 // The bars share ONE vertical scale across every row, so a bad player's best
 // week cannot draw as tall as a stud's. 30 points is the ceiling (anything
 // above it draws full height): on the same 252-player board it clips 3.0% of
@@ -94,7 +83,6 @@ function barThresholds(position: string): { amberFrom: number; greenFrom: number
 // every bar lands inside the scale and the ones that clip are already the
 // unmistakable ones. A per-row maximum was rejected for exactly the reason
 // the fixed colour thresholds were.
-const BAR_CEILING = 30
 // Ceiling in pixels. The row is 32px tall (`th, td { height: 32px }`) with
 // 6px of vertical padding, so 18px is the tallest chart that CANNOT make the
 // row taller -- and a taller row means fewer players on screen under a
@@ -116,13 +104,6 @@ function barHeight(points: number): number {
   // row, not a chart with an axis, and half of it cannot be spent on the 0.4%
   // of games that go below the line.
   return Math.max(BAR_MIN_PX, scaled)
-}
-
-function barTone(points: number, position: string): string {
-  const { amberFrom, greenFrom } = barThresholds(position)
-  if (points >= greenFrom) return 'is-good'
-  if (points >= amberFrom) return 'is-mid'
-  return 'is-bad'
 }
 
 // Memoized on the array identity: `players` is fetched once and never
