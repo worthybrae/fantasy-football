@@ -26,6 +26,12 @@ COLUMN_RENDERS = {
     "change": "ChangeMeter",
 }
 
+# Every column whose cell opens a hover panel. Each must be reachable, and
+# none may still carry the native `title` it had before the panels existed --
+# the OS box renders ON TOP of the panel, which is how a reader ended up with
+# a tooltip covering the thing it was there to explain.
+PANEL_KINDS = ("health", "games", "finish", "steady", "change")
+
 
 def _source() -> str:
     return SOURCE.read_text()
@@ -57,3 +63,18 @@ def test_every_visual_column_this_test_knows_about_still_exists():
     for key, token in COLUMN_RENDERS.items():
         assert f"sortableTh('{key}'" in src, f"header {key} vanished"
         assert f"<{token}" in src, f"component {token} vanished"
+
+
+def test_every_panel_kind_is_reachable_from_a_cell():
+    src = _source()
+    for kind in PANEL_KINDS:
+        assert f"onCellEnter('{kind}'" in src, f"nothing opens the {kind} panel"
+
+
+def test_no_cell_that_opens_a_panel_still_carries_a_native_title():
+    """A `title` on such a cell renders the OS tooltip over the panel."""
+    src = _source()
+    for meter in ("FinishArc", "HealthMeter", "SteadyMeter", "ChangeMeter"):
+        start = src.index(f"const {meter} = memo(")
+        body = src[start:src.index("})", start)]
+        assert "title=" not in body, f"{meter} still sets a native title"

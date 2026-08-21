@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import type { LiveCandidate, Player } from '../../api'
+import type { LiveCandidate, LiveSettings, Player } from '../../api'
 import { CellTip, loadProfile, type CellTipKind } from './CellTip'
-import { FINISH_STARTERS, finishHeight, finishTone } from './finish'
+import { finishHeight, finishTone, startersAt, weightedFinish } from './finish'
 import { BAR_CEILING, SEASON_GAMES, barThresholds, barTone } from './weeks'
 import { riskTone } from './tone'
 
@@ -305,7 +305,7 @@ const ChangeMeter = memo(function ChangeMeter({ change }: { change: number }): R
   const label = `${change > 0 ? '+' : ''}${change.toFixed(1)} points per game vs last season`
   return (
     <span className={`change-meter ${METER_CLASS[level]}`} role="img"
-          title={label} aria-label={`${label} (${level} of 5)`}>
+          aria-label={`${label} (${level} of 5)`}>
       {[1, 2, 3, 4, 5].map((i) => (
         <span key={i} className={`change-mbar${i <= level ? ' is-on' : ''}`} />
       ))}
@@ -328,9 +328,10 @@ const ChangeMeter = memo(function ChangeMeter({ change }: { change: number }): R
 const FINISH_MAX = 10
 
 const FinishArc = memo(function FinishArc(
-  { arc, position }: { arc: [number, number][]; position: string },
+  { arc, position, starters }: {
+    arc: [number, number][]; position: string; starters: number
+  },
 ): ReactNode {
-  const starters = FINISH_STARTERS[position] ?? 24
   const shown = arc.slice(-FINISH_MAX)
   // No `title`: the hover panel for this cell (CellTip) lists every season as
   // a row, and the native box rendered ON TOP of it -- two answers to one
@@ -399,7 +400,7 @@ const SteadyMeter = memo(function SteadyMeter(
       + `than ${(level - 1) * 20}-${level * 20}% of his position on this board`
   return (
     <span className={`steady-meter ${METER_CLASS[level]}`} role="img"
-          title={label} aria-label={`${label} (${level} of 5)`}>
+          aria-label={`${label} (${level} of 5)`}>
       {[1, 2, 3, 4, 5].map((i) => (
         <span key={i} className={`steady-bar${i <= level ? ' is-on' : ''}`} />
       ))}
@@ -419,13 +420,12 @@ function sortValue(
     case 'rank': return c.rank
     case 'pos': return posIndex(c.position)
     case 'player': return (player?.name ?? c.player_id).toLowerCase()
-    // The most recent finish, because an arc has no single value and the
-    // last season is the one being reasoned from. Ascending is natural:
-    // RB1 is the best thing a row can say.
-    case 'finish': {
-      const arc = player?.season_finishes
-      return arc && arc.length ? arc[arc.length - 1][1] : null
-    }
+    // A recency-weighted average finish, not the latest season alone. On the
+    // latest alone one bad year read as a collapse and one good year as an
+    // arrival: a back who went RB4, RB8, RB4 sorted below one who went RB30,
+    // RB30, RB6. Ascending is natural either way -- RB1 is the best thing a
+    // row can say.
+    case 'finish': return weightedFinish(player?.season_finishes)
     case 'health': return player?.career_games_pg ?? null
     case 'steady': return player?.consistency_pct ?? null
     case 'change': return player?.proj_change ?? null
@@ -472,6 +472,10 @@ interface AvailableListProps {
   candidates: LiveCandidate[]
   players: Record<string, Player>
   onDraft: (c: LiveCandidate) => void
+  // The session's own league shape. Finish tiers depend on how many of a
+  // position actually start -- the last startable back is a different rank in
+  // an 8-team league than a 12-team one -- and this was hardcoded to twelve.
+  settings?: LiveSettings | null
   // Not in the task brief's own signature for this component -- added
   // because "the draft button is disabled unless it is your turn" (the
   // brief's own rule) has nowhere else to come from: this component has no
@@ -527,7 +531,7 @@ interface AvailableListProps {
 // and would defeat the comparison entirely.
 const AvailableRow = memo(function AvailableRow({
   c, player, isTaken, season, isMyTurn, onOpenPlayer, onDraft,
-  onCellEnter, onCellLeave,
+  onCellEnter, onCellLeave, starters,
 }: {
   c: LiveCandidate
   player: Player | undefined
@@ -540,6 +544,7 @@ const AvailableRow = memo(function AvailableRow({
   // memoized: a fresh closure per render would defeat that on every tick.
   onCellEnter: (kind: CellTipKind, playerId: string, el: HTMLElement) => void
   onCellLeave: () => void
+  starters: number
 }): ReactNode {
   const level = healthLevel(player?.career_games_pg)
   const steady = steadyLevel(player?.consistency_pct)
@@ -605,7 +610,8 @@ const AvailableRow = memo(function AvailableRow({
                 >
                   {arc === null || arc.length === 0
                     ? <span className="gamebars-none">—</span>
-                    : <FinishArc arc={arc} position={c.position} />}
+                    : <FinishArc arc={arc} position={c.position}
+                                 starters={starters} />}
                 </td>
                 <td
                   className="avail-col-health"
@@ -621,13 +627,21 @@ const AvailableRow = memo(function AvailableRow({
                     -- was he on the field, and was he worth starting when he
                     was -- and sharing the five-bar shape makes that pairing
                     the point rather than a coincidence. */}
-                <td className="avail-col-health">
+                <td
+                  className="avail-col-health"
+                  onMouseEnter={(e) => onCellEnter('steady', c.player_id, e.currentTarget)}
+                  onMouseLeave={onCellLeave}
+                >
                   {steady === null
                     ? <span className="gamebars-none">—</span>
                     : <SteadyMeter level={steady}
                                    cv={player?.consistency_cv ?? null} />}
                 </td>
-                <td className="avail-col-change">
+                <td
+                  className="avail-col-change"
+                  onMouseEnter={(e) => onCellEnter('change', c.player_id, e.currentTarget)}
+                  onMouseLeave={onCellLeave}
+                >
                   {change === null
                     ? <span className="gamebars-none">—</span>
                     : <ChangeMeter change={change} />}
@@ -673,7 +687,7 @@ const AvailableRow = memo(function AvailableRow({
 // enough to filter AND sort on every keystroke without debouncing or memos.
 export default function AvailableList({
   candidates, players, onDraft, isMyTurn, horizonLabel, onOpenPlayer,
-  draftedIds,
+  draftedIds, settings,
 }: AvailableListProps) {
   const [search, setSearch] = useState('')
   const [pos, setPos] = useState('ALL')
@@ -1253,6 +1267,7 @@ export default function AvailableList({
               onDraft={onDraft}
               onCellEnter={showCellTip}
               onCellLeave={hideCellTip}
+              starters={startersAt(c.position, settings)}
             />
           ))}
           {rows.length === 0 && (
@@ -1298,7 +1313,8 @@ export default function AvailableList({
             ? { left: cellTipPos.left, top: cellTipPos.top, visibility: 'visible' }
             : { left: 0, top: 0, visibility: 'hidden' }}
         >
-          <CellTip kind={cellTip.kind} playerId={cellTip.playerId} />
+          <CellTip kind={cellTip.kind} playerId={cellTip.playerId}
+                   settings={settings} />
         </div>
       )}
     </div>

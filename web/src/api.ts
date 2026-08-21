@@ -105,6 +105,13 @@ export interface SeasonSummary {
   yards_per_opp: number | null; snap_share: number | null;
   completions: number; attempts: number; pass_yards: number;
   pass_tds: number; interceptions: number;
+  // Week-to-week swing: sigma over mean, and its rank within the season's
+  // positional pool. Null for a season under scoring/profile_cache.py's
+  // RANK_MIN_GAMES -- a coefficient off four appearances is not a
+  // measurement, and null says so where a zero would lie.
+  cv: number | null; cv_rank: number | null; cv_rank_n: number | null;
+  cv_pos_median: number | null;
+  pos_rank_ppg: number | null; pos_rank_ppg_n: number | null;
 }
 export interface GameStats {
   completions: number; attempts: number; pass_yards: number;

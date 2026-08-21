@@ -15,11 +15,11 @@ import { memo, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 
 import { fetchProfile } from '../../api'
-import type { PlayerProfileData, SeasonSummary } from '../../api'
-import { FINISH_STARTERS, finishPosition, finishTone } from './finish'
+import type { LiveSettings, PlayerProfileData, SeasonSummary } from '../../api'
+import { finishPosition, finishTone, startersAt, weightedFinish } from './finish'
 import { BAR_CEILING, SEASON_WEEKS, barTone } from './weeks'
 
-export type CellTipKind = 'health' | 'games' | 'finish'
+export type CellTipKind = 'health' | 'games' | 'finish' | 'steady' | 'change'
 
 // One in-flight request per player, and one cached result, shared across all
 // three columns: hovering a row's Health and then its Finish is one fetch.
@@ -56,6 +56,8 @@ function seasonLength(season: number): number {
 //
 // Taller is better in all three and the colour means the same thing in all
 // three, which leaves one thing to know per panel: what a column is.
+type BodyProps = { data: PlayerProfileData; settings?: LiveSettings | null }
+
 type Col = {
   key: string | number
   label: string                           // under the baseline: a year, a team
@@ -126,7 +128,7 @@ function availabilityRows(seasons: SeasonSummary[]): { season: number; games: nu
 // season axis runs the same way Finish's does.
 const HEALTH_TONES = ['is-out', 'is-fringe', 'is-starter', 'is-strong', 'is-elite']
 
-function HealthBody({ data }: { data: PlayerProfileData }): ReactNode {
+function HealthBody({ data }: BodyProps): ReactNode {
   const rows = availabilityRows(data.seasons)
   if (!rows.length) return <div className="ctip-empty">No NFL seasons yet.</div>
   const cols: Col[] = rows.map((r) => {
@@ -157,7 +159,7 @@ function HealthBody({ data }: { data: PlayerProfileData }): ReactNode {
   )
 }
 
-function GamesBody({ data }: { data: PlayerProfileData }): ReactNode {
+function GamesBody({ data }: BodyProps): ReactNode {
   const seasons = data.game_log.map((g) => g.season)
   if (!seasons.length) return <div className="ctip-empty">No games on record.</div>
   const latest = Math.max(...seasons)
@@ -194,10 +196,11 @@ function GamesBody({ data }: { data: PlayerProfileData }): ReactNode {
   )
 }
 
-function FinishBody({ data }: { data: PlayerProfileData }): ReactNode {
+function FinishBody({ data, settings }: BodyProps): ReactNode {
   if (!data.seasons.length) return <div className="ctip-empty">No NFL seasons yet.</div>
   const pos = data.header.position
-  const starters = FINISH_STARTERS[pos] ?? 24
+  const starters = startersAt(pos, settings)
+  const avg = weightedFinish(data.seasons.map((s) => [s.season, s.pos_finish]))
   const cols: Col[] = data.seasons.slice().reverse().map((s) => ({
     key: s.season,
     label: year(s.season),
@@ -212,17 +215,112 @@ function FinishBody({ data }: { data: PlayerProfileData }): ReactNode {
     <>
       <div className="ctip-head">
         <span>Positional finish</span>
-        <span className="ctip-head-note">startable to {pos}{starters}</span>
+        {/* Was "startable to RB24", which said neither whose league nor what
+            it had to do with this player -- and was hardcoded to a twelve-
+            team one at that. His own recency-weighted average finish is the
+            summary the column is actually sorted on. */}
+        <span className="ctip-head-note">
+          {avg === null ? '—' : `avg ${pos}${Math.round(avg)}`}
+        </span>
       </div>
       <Chart cols={cols} />
     </>
   )
 }
 
-const BODIES = { health: HealthBody, games: GamesBody, finish: FinishBody }
+// Steadiness, season by season. The column ranks a player against the board
+// on one recency-weighted number; this is where that number came from.
+//
+// The bar is 1 - cv, so taller is steadier and the panel obeys the same
+// "taller is better" rule as the three beside it. The value printed is the
+// coefficient itself, which is what the column's own tooltip quotes.
+function SteadyBody({ data }: BodyProps): ReactNode {
+  const rows = data.seasons.filter((s) => s.cv !== null && s.cv !== undefined)
+  if (!rows.length) {
+    return <div className="ctip-empty">No season long enough to measure.</div>
+  }
+  // A coefficient above 1 means a player whose week-to-week swing exceeds his
+  // own average -- real, and rare enough that letting it set the axis would
+  // flatten everyone else. Clamped, like every other scale here.
+  const CV_MAX = 1.2
+  const cols: Col[] = rows.slice().reverse().map((r) => {
+    const cv = r.cv as number
+    const share = 1 - Math.min(1, cv / CV_MAX)
+    return {
+      key: r.season,
+      label: year(r.season),
+      value: cv.toFixed(2),
+      tone: HEALTH_TONES[Math.min(4, Math.floor(share * 5))],
+      fill: share,
+    }
+  })
+  const median = rows[0].cv_pos_median
+  return (
+    <>
+      <div className="ctip-head">
+        <span>Week-to-week swing</span>
+        <span className="ctip-head-note">
+          {median ? `${data.header.position} median ${median.toFixed(2)}` : 'lower is steadier'}
+        </span>
+      </div>
+      <Chart cols={cols} />
+    </>
+  )
+}
+
+// Scoring by season with the PROJECTION as the final column, because the
+// Change column is the gap between the last of these and that one -- and a
+// gap is the one thing a single number cannot show you the size of.
+function ChangeBody({ data }: BodyProps): ReactNode {
+  const rows = data.seasons.filter((s) => s.games > 0)
+  const proj = data.summary?.proj_ppg ?? null
+  if (!rows.length && proj === null) {
+    return <div className="ctip-empty">Nothing to compare yet.</div>
+  }
+  const ceiling = Math.max(
+    ...rows.map((r) => r.ppg), proj ?? 0, 1)
+  const position = data.header.position
+  const cols: Col[] = rows.slice().reverse().map((r) => ({
+    key: r.season,
+    label: year(r.season),
+    value: r.ppg.toFixed(1),
+    tone: barTone(r.ppg, position),
+    fill: r.ppg / ceiling,
+  }))
+  if (proj !== null) {
+    cols.push({
+      key: 'proj',
+      // Not a year: this column is the only one that has not happened.
+      label: 'proj',
+      value: proj.toFixed(1),
+      tone: barTone(proj, position),
+      fill: proj / ceiling,
+    })
+  }
+  const last = rows.length ? rows[0].ppg : null
+  const delta = last !== null && proj !== null ? proj - last : null
+  return (
+    <>
+      <div className="ctip-head">
+        <span>Points per game</span>
+        <span className="ctip-head-note">
+          {delta === null
+            ? 'projection vs history'
+            : `${delta >= 0 ? '+' : ''}${delta.toFixed(1)} vs last season`}
+        </span>
+      </div>
+      <Chart cols={cols} />
+    </>
+  )
+}
+
+const BODIES = { health: HealthBody, games: GamesBody, finish: FinishBody,
+                 steady: SteadyBody, change: ChangeBody }
 
 export const CellTip = memo(function CellTip(
-  { kind, playerId }: { kind: CellTipKind; playerId: string },
+  { kind, playerId, settings }: {
+    kind: CellTipKind; playerId: string; settings?: LiveSettings | null
+  },
 ): ReactNode {
   const [data, setData] = useState<PlayerProfileData | null>(
     () => cache.get(playerId) ?? null)
@@ -245,5 +343,5 @@ export const CellTip = memo(function CellTip(
   if (failed) return <div className="ctip-empty">Could not load this player.</div>
   if (!data) return <div className="ctip-empty">Loading…</div>
   const Body = BODIES[kind]
-  return <Body data={data} />
+  return <Body data={data} settings={settings} />
 })

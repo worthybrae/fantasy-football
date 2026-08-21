@@ -840,6 +840,7 @@ export default function DraftRoom() {
                   horizonLabel={horizonLabel}
                   onOpenPlayer={handleOpenCandidate}
                   draftedIds={draftedIds}
+                  settings={state?.settings}
                 />
               </>
             )
