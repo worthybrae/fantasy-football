@@ -670,15 +670,22 @@ export default function AvailableList({
   // Departing rows are merged back in and sorted with everyone else, so a
   // taken player animates out from where he actually sat rather than jumping
   // to the end of the list on his way off it.
-  const withTaken = taken.size === 0
-    ? visible
-    : [...visible, ...[...taken.values()].filter((c) => {
-        if (pos !== 'ALL' && c.position !== pos) return false
-        if (!q) return true
-        const player = players[c.player_id]
-        return `${player?.name ?? c.player_id} ${player?.team ?? ''}`
-          .toLowerCase().includes(q)
-      })]
+  // A held row is only ADDED BACK if the candidate list has already dropped
+  // him. Since the animation fires off the board, a player is normally still
+  // in `candidates` for the second or so it takes the next ranking to land --
+  // and appending the held copy on top of the live one rendered him twice,
+  // two identical rows at the same rank, both animating out, sharing a React
+  // key. The held copy exists to outlive the recompute, not to duplicate it.
+  const present = new Set(visible.map((c) => c.player_id))
+  const held = [...taken.values()].filter((c) => {
+    if (present.has(c.player_id)) return false
+    if (pos !== 'ALL' && c.position !== pos) return false
+    if (!q) return true
+    const player = players[c.player_id]
+    return `${player?.name ?? c.player_id} ${player?.team ?? ''}`
+      .toLowerCase().includes(q)
+  })
+  const withTaken = held.length === 0 ? visible : [...visible, ...held]
   const rows = withTaken.slice().sort((a, b) => compareRows(a, b, sort.key, sort.dir, players))
 
 
