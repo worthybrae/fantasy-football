@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { LiveCandidate, Player } from '../../api'
 import { CellTip, loadProfile, type CellTipKind } from './CellTip'
+import { FINISH_STARTERS, finishHeight, finishTone } from './finish'
 import { riskTone } from './tone'
 
 // duplicated from RosterPanel.tsx/DraftBoardGrid.tsx (unexported in both):
@@ -339,26 +340,6 @@ const ChangeMeter = memo(function ChangeMeter({ change }: { change: number }): R
 // cannot disagree about whether a season was good. Fractions of the number
 // of players a 12-team league starts at the position, which is why one rule
 // reads a quarterback and a running back correctly.
-const FINISH_STARTERS: Record<string, number> = {
-  QB: 12, TE: 12, RB: 24, WR: 24, K: 12, DST: 12,
-}
-
-function finishTone(finish: number, starters: number): string {
-  if (finish <= starters / 4) return 'is-elite'
-  if (finish <= starters / 2) return 'is-strong'
-  if (finish <= starters) return 'is-starter'
-  if (finish <= starters * 2) return 'is-fringe'
-  return 'is-out'
-}
-
-// Taller is better, because rank runs the other way. Capped at three tiers
-// of starters: stretching the axis to reach a TE40 would squash every
-// meaningful season into the top of a 16px strip.
-function finishHeight(finish: number, starters: number): number {
-  const floor = starters * 3
-  return 12 + (1 - Math.min(finish, floor) / floor) * 88
-}
-
 // Careers run from one season to ten, so the arc is RIGHT-ALIGNED: the most
 // recent season sits in the same place on every row. Left-aligned, a rookie's
 // only bar and a ten-year veteran's latest one landed nine slots apart, and

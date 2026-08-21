@@ -16,6 +16,7 @@ import type { ReactNode } from 'react'
 
 import { fetchProfile } from '../../api'
 import type { PlayerProfileData, SeasonSummary } from '../../api'
+import { FINISH_STARTERS, finishBands, finishPosition, finishTone } from './finish'
 
 export type CellTipKind = 'health' | 'games' | 'finish'
 
@@ -122,9 +123,34 @@ function GamesBody({ data }: { data: PlayerProfileData }): ReactNode {
   )
 }
 
+function FinishTrack(
+  { finish, starters }: { finish: number; starters: number },
+): ReactNode {
+  const bands = finishBands(starters)
+  const at = finishPosition(finish, starters)
+  const tone = finishTone(finish, starters)
+  let left = 0
+  return (
+    <span className="ctip-track">
+      {bands.map((b) => {
+        const width = b.end - left
+        left = b.end
+        return <span key={b.tone} className={`ctip-band ${b.tone}`}
+                     style={{ width: `${width * 100}%` }} />
+      })}
+      {/* Positioned, not sized: the marker's job is to say WHERE on the
+          ladder he came down, and the tiers behind it say what that place is
+          called. `translateX(-50%)` so the dot is centred on its rank rather
+          than starting at it -- at RB1 that keeps it on the track. */}
+      <span className={`ctip-mark ${tone}`} style={{ left: `${at * 100}%` }} />
+    </span>
+  )
+}
+
 function FinishBody({ data }: { data: PlayerProfileData }): ReactNode {
   if (!data.seasons.length) return <div className="ctip-empty">No NFL seasons yet.</div>
   const pos = data.header.position
+  const starters = FINISH_STARTERS[pos] ?? 24
   return (
     <>
       <div className="ctip-head">Where he finished, season by season</div>
@@ -133,11 +159,22 @@ function FinishBody({ data }: { data: PlayerProfileData }): ReactNode {
           {data.seasons.map((s) => (
             <tr key={s.season}>
               <td className="ctip-yr">{s.season}</td>
-              <td className="ctip-fin">{pos}{s.pos_finish}</td>
+              <td className="ctip-trackcell">
+                <FinishTrack finish={s.pos_finish} starters={starters} />
+              </td>
+              <td className={`ctip-fin ${finishTone(s.pos_finish, starters)}`}>
+                {pos}{s.pos_finish}
+              </td>
             </tr>
           ))}
         </tbody>
       </table>
+      {/* The axis, stated once at the bottom rather than repeated per row. */}
+      <div className="ctip-legend">
+        <span>{pos}1</span>
+        <span className="ctip-legend-mid">startable to {pos}{starters}</span>
+        <span>{pos}{starters * 3}+</span>
+      </div>
     </>
   )
 }

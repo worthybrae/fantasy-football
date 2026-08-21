@@ -4760,7 +4760,65 @@ button.roster-row:focus-visible {
 .ctip-yr { font-family: var(--font-mono); color: var(--text-3); }
 .ctip-opp { font-family: var(--font-mono); color: var(--text-3); }
 .ctip-num { font-family: var(--font-mono); text-align: right; color: var(--text-1); }
-.ctip-fin { font-family: var(--font-mono); color: var(--accent); }
+.ctip-fin { font-family: var(--font-mono); text-align: right; }
+
+/* A finish is a PLACE on the position's ladder, so the panel draws the ladder:
+   the tiers as bands, and a marker where he came down. A fill meter would have
+   answered "how much", which is not the question RB8 raises. Same five cut
+   points and the same five names the board's finish bars use (finish.ts), so a
+   season is the same colour in the table and in the panel explaining it. */
+.ctip-trackcell { width: 150px; padding-right: 10px; }
+
+.ctip-track {
+  position: relative;
+  display: flex;
+  width: 150px;
+  height: 9px;
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+/* Quiet enough to read as ground rather than as data -- the marker is the
+   thing being read, and five saturated bands would drown it. */
+.ctip-band { height: 100%; opacity: 0.22; }
+.ctip-band.is-elite   { background: var(--ok); }
+.ctip-band.is-strong  { background: #7cb342; }
+.ctip-band.is-starter { background: #b3c132; }
+.ctip-band.is-fringe  { background: var(--accent); }
+.ctip-band.is-out     { background: var(--fail); }
+
+.ctip-mark {
+  position: absolute;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  /* A ring against the band behind it, so the marker stays findable even
+     where its own tier colour is what it is sitting on. */
+  box-shadow: 0 0 0 1.5px var(--bg-2);
+}
+.ctip-mark.is-elite   { background: var(--ok); }
+.ctip-mark.is-strong  { background: #7cb342; }
+.ctip-mark.is-starter { background: #b3c132; }
+.ctip-mark.is-fringe  { background: var(--accent); }
+.ctip-mark.is-out     { background: var(--fail); }
+
+.ctip-legend {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-3);
+}
+.ctip-legend-mid { color: var(--text-3); }
+.ctip-fin.is-elite   { color: var(--ok); }
+.ctip-fin.is-strong  { color: #7cb342; }
+.ctip-fin.is-starter { color: #b3c132; }
+.ctip-fin.is-fringe  { color: var(--accent); }
+.ctip-fin.is-out     { color: var(--fail); }
 
 /* One dot per game of the season, so the row's LENGTH is the season and its
    green run is the part he was available for. A count alone ("8/17") makes a
