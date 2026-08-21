@@ -2499,7 +2499,7 @@ def register_live_routes(app, conn, db_path):
                 # still open -- never nowhere.
                 progress.fail("socket", str(exc),
                               hint="Go back to your ESPN draft tab and click "
-                                   "the Draft Helper bookmark again -- it "
+                                   "the Draft Assistant bookmark again -- it "
                                    "mints a fresh token.")
 
         # The plan's own coalescing slot and worker. Same latest-wins
@@ -3544,7 +3544,7 @@ def register_live_routes(app, conn, db_path):
         if not (body.leagueId and body.teamId and body.swid and body.token):
             progress.fail(
                 "token", "the bookmarklet sent an incomplete token",
-                hint="Open your ESPN draft room and click the Draft Helper "
+                hint="Open your ESPN draft room and click the Draft Assistant "
                      "bookmark from inside it, not from another tab.")
             raise HTTPException(
                 status_code=422,
@@ -3558,7 +3558,7 @@ def register_live_routes(app, conn, db_path):
         except (TypeError, ValueError):
             progress.fail(
                 "token", f"team id {body.teamId!r} is not a number",
-                hint="Open your ESPN draft room and click the Draft Helper "
+                hint="Open your ESPN draft room and click the Draft Assistant "
                      "bookmark from inside it, not from another tab.")
             raise HTTPException(status_code=422, detail="teamId must be numeric")
         progress.ok("token", f"team {team_id} · season {body.season or '?'}")
@@ -3650,7 +3650,7 @@ def register_live_routes(app, conn, db_path):
         cancelled. It is bounded and loud already:
         run_socket_listener gives up after MAX_EMPTY_RECONNECTS (5)
         frameless attempts at RECONNECT_BACKOFF_SECONDS (2s) apart and
-        raises "the draft token may have expired; click the Draft Helper
+        raises "the draft token may have expired; click the Draft Assistant
         bookmark again to mint a fresh one", which pump() records as
         listener_error and fails the `socket` progress stage with the same
         hint a live connect would give. So the failure surfaces on

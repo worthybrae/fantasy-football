@@ -14,6 +14,7 @@ import PickTicker from '../components/draft/PickTicker'
 import PlayerOverlay, { type OverlayTarget } from '../components/draft/PlayerOverlay'
 import { seedFromBoardPlayer, seedFromCandidate, seedFromPlayer } from '../components/draft/playerSeed'
 import DraftBoardGrid from '../components/DraftBoardGrid'
+import { Logo } from '../components/Logo'
 
 const POLL_MS = 2500
 // Only used while the event stream is up: it is a safety net for a
@@ -669,7 +670,7 @@ export default function DraftRoom() {
             a pick clock. The title carries it rather than adding a control:
             same layout, same words, now clickable. ClockPanel's listener-down
             panel links here too, with the instruction. */}
-        <Link to="/" className="draft-topbar-title">Draft Helper</Link>
+        <Link to="/" className="draft-topbar-title"><Logo /> Draft Assistant</Link>
         <span className="draft-topbar-sep" aria-hidden="true" />
         {/* The two views, in the top bar rather than on a strip of their own
             below it. They were a 38px `.draft-tabs` row spanning the main

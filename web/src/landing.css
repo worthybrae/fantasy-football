@@ -81,20 +81,12 @@
 .lp-mark {
   display: inline-flex;
   align-items: center;
-  gap: 11px;
+  gap: 9px;
   font-weight: 700;
   font-size: var(--text-base);
   letter-spacing: 0.09em;
   text-transform: uppercase;
   color: var(--text-1);
-}
-
-.lp-pip {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-bg);
 }
 
 .lp-bar-price {
@@ -490,20 +482,38 @@
   margin: 4px 0 2px;
 }
 
+/* Styled as the bookmarks-bar item it is about to become, not as a button:
+   the user has to recognise this thing again later, on a strip of small
+   labels, so what they drag and what lands up there should look like the same
+   object. The football is carried in the link's TEXT (an emoji, not the SVG
+   mark) on purpose -- a bookmark's title is the anchor's textContent, so an
+   inline <svg> here would be dropped on the way to the bar and the label would
+   arrive naked. */
 .lp-bookmark {
   display: inline-flex;
   align-items: center;
-  padding: 9px 18px;
+  gap: 2px;
+  padding: 8px 15px 8px 12px;
   border: 1px solid var(--accent-border);
   border-radius: var(--radius);
-  background: var(--accent-bg);
-  color: var(--accent);
+  background: linear-gradient(var(--bg-2), var(--bg-1));
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 2px 8px rgba(0, 0, 0, 0.35);
+  color: var(--text-1);
+  font-size: var(--text-base);
   font-weight: 600;
   text-decoration: none;
+  white-space: nowrap;
   cursor: grab;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.lp-bookmark:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.06) inset, 0 5px 14px rgba(0, 0, 0, 0.45);
 }
 
 .lp-bookmark:active {
+  transform: translateY(0);
   cursor: grabbing;
 }
 

@@ -152,7 +152,7 @@ export default function ClockPanel({
         </p>
         {/* Spec section 6 wants the recovery instruction shown whenever the
             room is down, not only when it happens to be embedded in the
-            error text. It only ever was: the words "click the Draft Helper
+            error text. It only ever was: the words "click the Draft Assistant
             bookmark again" live inside two RuntimeError strings in
             pipeline/draft_socket.py (the two give-up-after-N-empty-
             reconnects paths), so every other way this thread dies -- and
@@ -162,7 +162,7 @@ export default function ClockPanel({
             the page that actually hands the bookmarklet over, since App.tsx
             routes one way and nothing else here leaves the room. */}
         <p className="clock-down-message">
-          Click the Draft Helper bookmarklet again in your ESPN draft tab to
+          Click the Draft Assistant bookmarklet again in your ESPN draft tab to
           reconnect, or <Link to="/">go back to setup</Link>.
         </p>
       </div>

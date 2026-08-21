@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { connectWithToken, fetchConnectProgress, fetchLiveState,
          type ConnectProgress, type LiveState, type TokenConnectParams } from '../api'
 import { BOOKMARKLET } from '../lib/bookmarklet'
+import { Logo } from '../components/Logo'
 import ConnectScreen from '../components/ConnectScreen'
 import ReadinessStrip from '../components/ReadinessStrip'
 // This page's own stylesheet, not App.css: see the header comment in it for
@@ -341,8 +342,8 @@ export default function Landing() {
     <main className="lp">
       <header className="lp-bar">
         <span className="lp-mark">
-          <span className="lp-pip" aria-hidden="true" />
-          Draft Helper
+          <Logo size={17} />
+          Draft Assistant
         </span>
         <span className="lp-bar-price">
           Mock drafts free · <span className="mono">$4.99</span> a real draft
@@ -387,7 +388,7 @@ export default function Landing() {
           </h1>
           <p className="lp-lede">
             Every draft board ranks players. None of them price what it costs to
-            wait. Draft Helper replaces your ESPN draft room with one that
+            wait. Draft Assistant replaces your ESPN draft room with one that
             measures both — and simulates the picks between now and your next
             turn to work out the difference.
           </p>
@@ -480,7 +481,7 @@ export default function Landing() {
                 __html:
                   "<a class='lp-bookmark' title='Drag me to your bookmarks bar' "
                   + "onclick='return false' href='" + BOOKMARKLET + "'>"
-                  + "<span aria-hidden='true'>⚓</span>&nbsp;Draft&nbsp;Helper</a>",
+                  + "<span aria-hidden='true'>🏈</span>&nbsp;Draft&nbsp;Assistant</a>",
               }}
             />
             <span className="lp-bookmark-hint">← drag this to your bookmarks bar</span>
@@ -500,7 +501,7 @@ export default function Landing() {
               <span className="lp-step-n mono">2</span>
               <span>
                 Open your ESPN draft room — a mock counts — and click{' '}
-                <strong>⚓ Draft&nbsp;Helper</strong> there. Your board is built,
+                <strong>🏈 Draft&nbsp;Assistant</strong> there. Your board is built,
                 priced and ranked before the first pick lands.
               </span>
             </li>

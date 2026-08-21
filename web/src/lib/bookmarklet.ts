@@ -1,4 +1,4 @@
-// The Draft Helper bookmarklet, as the exact `javascript:` string the connect
+// The Draft Assistant bookmarklet, as the exact `javascript:` string the connect
 // screen renders for the user to drag to their bookmarks bar.
 //
 // Readable source of truth: /bookmarklet/bookmarklet.js. This is the shipped,
@@ -23,7 +23,7 @@ export const BOOKMARKLET =
   's=(u.match(/memberId=(\\{[^}]+\\})/)||[])[1],' +
   'y=(u.match(/seasonId=(\\d+)/)||[])[1]||String(new Date().getFullYear());' +
   'if(!s){var m=document.cookie.match(/SWID=([^;]+)/);s=m?decodeURIComponent(m[1]):null}' +
-  'if(!l||!t){alert("Open your ESPN draft room first, then click Draft Helper.");return}' +
+  'if(!l||!t){alert("Open your ESPN draft room first, then click Draft Assistant.");return}' +
   'if(!s){alert("Cannot find your ESPN id. Make sure you are signed in to ESPN.");return}' +
   'var k;try{' +
   'var r=await fetch(E+"/seasons/"+y+"/segments/0/leagues/"+l+"/teams/"+t+"/draftSecurity",' +
@@ -34,5 +34,5 @@ export const BOOKMARKLET =
   'k=(await r.text()).trim()' +
   '}catch(e){alert("Cannot reach ESPN: "+e.message);return}' +
   'var q=new URLSearchParams({leagueId:l,teamId:t,swid:s,token:k,season:y});' +
-  'window.open(A+"/#"+q.toString(),"DraftHelper","width=1280,height=900")' +
+  'window.open(A+"/#"+q.toString(),"DraftAssistant","width=1280,height=900")' +
   '})()'

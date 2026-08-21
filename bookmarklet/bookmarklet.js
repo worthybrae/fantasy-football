@@ -1,5 +1,5 @@
 /*
- * Draft Helper bookmarklet -- readable source of truth.
+ * Draft Assistant bookmarklet -- readable source of truth.
  *
  * The compact, draggable version lives in web/src/lib/bookmarklet.ts (the
  * install screen renders it as a `javascript:` link). Keep the two in sync:
@@ -16,7 +16,7 @@
  *   session cookie (espn_s2) automatically. espn_s2 is HttpOnly: the bookmarklet
  *   never SEES it, it just rides along on the fetch and stays on ESPN.
  *
- *   Then it opens Draft Helper in a new window with only the throwaway token and
+ *   Then it opens Draft Assistant in a new window with only the throwaway token and
  *   the public ids in the URL hash. Nothing is pasted, nothing is stored, and
  *   the account session never leaves the ESPN tab.
  *
@@ -41,7 +41,7 @@
   }
 
   if (!league || !team) {
-    alert('Open your ESPN draft room first, then click Draft Helper.\n'
+    alert('Open your ESPN draft room first, then click Draft Assistant.\n'
       + '(This page has no leagueId/teamId in its address.)')
     return
   }
@@ -78,5 +78,5 @@
   const q = new URLSearchParams({
     leagueId: league, teamId: team, swid, token, season,
   })
-  window.open(`${APP}/#${q.toString()}`, 'DraftHelper', 'width=1280,height=900')
+  window.open(`${APP}/#${q.toString()}`, 'DraftAssistant', 'width=1280,height=900')
 })()

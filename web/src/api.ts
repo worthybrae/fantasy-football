@@ -335,7 +335,7 @@ export interface LiveState {
   // no session at all.
   autodraft: boolean | null
   // The bookmarklet has delivered a draft token. The onboarding gate flips
-  // from "open your draft and click Draft Helper" to the live board on this.
+  // from "open your draft and click Draft Assistant" to the live board on this.
   token_received?: boolean
   // The live pick clock, straight off DraftListener.ms_remaining
   // (pipeline/draft_listener.py) -- null until the first CLOCK or SELECTING

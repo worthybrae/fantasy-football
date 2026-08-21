@@ -3162,7 +3162,7 @@ def test_an_expired_token_fails_the_socket_stage_after_the_connect_returned(
     body = client.get("/api/live/connect-progress").json()
     assert body["error"]["stage"] == "socket"
     assert "token may have expired" in body["error"]["detail"]
-    assert "click the Draft Helper bookmark again" in body["error"]["hint"]
+    assert "click the Draft Assistant bookmark again" in body["error"]["hint"]
     # Everything it did manage is still on screen, with its values.
     stages = {s["key"]: s for s in body["stages"]}
     assert stages["board"]["status"] == "ok"
@@ -4098,7 +4098,7 @@ def test_a_restore_against_an_expired_token_says_to_click_the_bookmark_again(
         assert len(attempts) == MAX_EMPTY_RECONNECTS
         # ...and says the one thing the owner can act on.
         assert "token may have expired" in body["listener_error"]
-        assert "click the Draft Helper bookmark" in body["listener_error"]
+        assert "click the Draft Assistant bookmark" in body["listener_error"]
         assert body["socket_alive"] is False
         assert _wait_until(
             lambda: client.get("/api/live/state").json()["listener_alive"] is False)

@@ -22,8 +22,8 @@ The pipeline stages are:
 
 `/` is the front door. It opens with what the tool does, then proves it: the
 top of your own board, drawn from your own DuckDB, under a demo pick clock.
-Below that is the bookmarklet — drag it to your bookmarks bar once and every
-draft after that is one click — and the three steps for using it.
+Below that is the bookmarklet, **🏈 Draft Assistant** — drag it to your
+bookmarks bar once and every draft after that is one click — and the three steps for using it.
 
 The last band is a readiness strip: when the data last refreshed, whether a
 league and its draft history are imported, whether manager models are fitted,
@@ -130,7 +130,8 @@ make up
 ```
 
 Open the printed Vite URL. The landing page tells you what's ready and hands
-you the bookmarklet; drag it to your bookmarks bar once. On draft night, open
+you the bookmarklet — a button labelled **🏈 Draft Assistant** — drag it to
+your bookmarks bar once. On draft night, open
 your ESPN draft room and click it — your board opens in a new window and
 follows the draft from there. A mock draft works the same way, which is the
 cheapest way to check the whole path before it matters.

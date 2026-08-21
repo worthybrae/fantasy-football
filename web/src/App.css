@@ -1393,6 +1393,9 @@ td:first-child {
    -- styled to read as the title it already was, not as a link, since
    nothing about the room's layout should change to accommodate it. */
 .draft-topbar-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   font-weight: 700;
   font-size: var(--text-base);
   letter-spacing: 0.08em;
