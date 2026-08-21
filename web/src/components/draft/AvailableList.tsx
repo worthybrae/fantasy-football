@@ -474,6 +474,120 @@ interface AvailableListProps {
 // already returns a fresh array and `.sort()` below only ever touches that
 // -- the shared array is never mutated.
 //
+// One row, memoized. The table is ~250 rows of SVG sparklines and pip
+// strips, and every recompute hands down a brand-new `candidates` array --
+// so without this, a ranking landing re-rendered the entire table and the
+// main-thread work stalled the take-out animation mid-flight. That is what
+// "the recalculating blocks the animations" was.
+//
+// The props are deliberately primitives and stable references: `player` and
+// `isTaken` are resolved by the parent rather than passed as the `players`
+// map and the `taken` map, both of which get a new identity on every poll
+// and would defeat the comparison entirely.
+const AvailableRow = memo(function AvailableRow({
+  c, player, isTaken, season, isMyTurn, onOpenPlayer, onDraft,
+}: {
+  c: LiveCandidate
+  player: Player | undefined
+  isTaken: boolean
+  season: number | null
+  isMyTurn: boolean
+  onOpenPlayer: (c: LiveCandidate) => void
+  onDraft: (c: LiveCandidate) => void
+}): ReactNode {
+  const missed = missedGames(player?.game_points)
+  return (
+              <tr key={c.player_id} className={isTaken ? 'avail-row-taken' : undefined}
+                  aria-hidden={isTaken || undefined}>
+                <td className="avail-col-rank mono">{c.rank}</td>
+                <td className="avail-col-pos">{posBadge(c.position)}</td>
+                <td className="avail-col-name">
+                  {/* A button, not a link: this opens an overlay over the
+                      room, and an <a href> here would offer a navigation
+                      that no longer happens on click. The board grid keeps
+                      its real href for exactly the opposite reason -- see
+                      DraftBoardGrid.tsx. */}
+                  <button
+                    type="button"
+                    className="avail-name-btn"
+                    onClick={() => onOpenPlayer(c)}
+                    title="Open profile"
+                  >
+                    <span className="avail-name">{player?.name ?? c.player_id}</span>
+                  </button>
+                  {player && (
+                    <span className="avail-meta mono">
+                      {player.team} · BYE {player.bye ?? '—'}
+                    </span>
+                  )}
+                </td>
+                <td className="avail-col-games">
+                  {/* An explicit empty state, never a blank cell. 45 of the
+                      252 players on the real board have no games in the last
+                      complete season -- 25 defenses (nflverse carries no
+                      team-defense weekly rows at all), 17 rookies, and the
+                      kickers of a league that prices no kicking. A blank cell
+                      reads as "did not score"; a dash reads as "nothing to
+                      show", which is the true one. */}
+                  {player?.game_points
+                    ? <GameBars points={player.game_points} season={season} position={c.position} />
+                    : (
+                      <span
+                        className="gamebars-none"
+                        title={`No games in ${season ?? 'the last complete season'}`}
+                      >
+                        —
+                      </span>
+                    )}
+                </td>
+                {/* Unknown (no `game_points` at all -- see missedGames above)
+                    renders the same em-dash the sparkline's own empty state
+                    uses, never a 0 or an empty strip: a defense or an
+                    unpriced rookie has no counted season, not a clean one. */}
+                <td className="avail-col-missed">
+                  {player?.game_points
+                    ? (
+                      <span className="avail-missed-wrap">
+                        <MissedPips missed={missed ?? 0} />
+                        <span
+                          className={`avail-missed-num mono${
+                            missed !== null && missed >= MISSED_LOUD_FROM ? ' is-loud' : ''}`}
+                          style={missed === null ? undefined : { color: missedTone(missed) }}
+                        >
+                          {missed}
+                        </span>
+                      </span>
+                    )
+                    : <span className="gamebars-none">—</span>}
+                </td>
+                <td className="avail-col-num mono avail-proj">{Math.round(c.proj_points)}</td>
+                {/* null survive_pct (no roster to survive FOR yet) gets no
+                    riskTone color at all -- riskTone's red/amber/green ramp
+                    is a claim about a real probability, and coloring a dash
+                    would imply one exists. */}
+                <td
+                  className="avail-col-num mono"
+                  style={c.survive_pct === null ? undefined : { color: riskTone(c.survive_pct) }}
+                >
+                  {c.survive_pct === null ? '—' : `${Math.round(c.survive_pct)}%`}
+                </td>
+                <td className="avail-col-num mono avail-adp">{fmtRank(player?.market_rank ?? null)}</td>
+                <td className="avail-col-num mono avail-adp">{fmtRank(player?.espn_ppr_rank ?? null)}</td>
+                <td className="avail-col-btn">
+                  <button
+                    type="button"
+                    className="avail-draft-btn"
+                    disabled={!isMyTurn}
+                    title={isMyTurn ? undefined : 'Not your turn yet'}
+                    onClick={() => onDraft(c)}
+                  >
+                    Draft
+                  </button>
+                </td>
+              </tr>
+  )
+})
+
 // Both filters are client-side per the task brief ("the server sends the
 // whole ranked list") -- the pool tops out in the low hundreds, cheap
 // enough to filter AND sort on every keystroke without debouncing or memos.
@@ -898,101 +1012,18 @@ export default function AvailableList({
           </tr>
         </thead>
         <tbody>
-          {rows.map((c) => {
-            const player = players[c.player_id]
-            const missed = missedGames(player?.game_points)
-            const isTaken = taken.has(c.player_id)
-            return (
-              <tr key={c.player_id} className={isTaken ? 'avail-row-taken' : undefined}
-                  aria-hidden={isTaken || undefined}>
-                <td className="avail-col-rank mono">{c.rank}</td>
-                <td className="avail-col-pos">{posBadge(c.position)}</td>
-                <td className="avail-col-name">
-                  {/* A button, not a link: this opens an overlay over the
-                      room, and an <a href> here would offer a navigation
-                      that no longer happens on click. The board grid keeps
-                      its real href for exactly the opposite reason -- see
-                      DraftBoardGrid.tsx. */}
-                  <button
-                    type="button"
-                    className="avail-name-btn"
-                    onClick={() => onOpenPlayer(c)}
-                    title="Open profile"
-                  >
-                    <span className="avail-name">{player?.name ?? c.player_id}</span>
-                  </button>
-                  {player && (
-                    <span className="avail-meta mono">
-                      {player.team} · BYE {player.bye ?? '—'}
-                    </span>
-                  )}
-                </td>
-                <td className="avail-col-games">
-                  {/* An explicit empty state, never a blank cell. 45 of the
-                      252 players on the real board have no games in the last
-                      complete season -- 25 defenses (nflverse carries no
-                      team-defense weekly rows at all), 17 rookies, and the
-                      kickers of a league that prices no kicking. A blank cell
-                      reads as "did not score"; a dash reads as "nothing to
-                      show", which is the true one. */}
-                  {player?.game_points
-                    ? <GameBars points={player.game_points} season={season} position={c.position} />
-                    : (
-                      <span
-                        className="gamebars-none"
-                        title={`No games in ${season ?? 'the last complete season'}`}
-                      >
-                        —
-                      </span>
-                    )}
-                </td>
-                {/* Unknown (no `game_points` at all -- see missedGames above)
-                    renders the same em-dash the sparkline's own empty state
-                    uses, never a 0 or an empty strip: a defense or an
-                    unpriced rookie has no counted season, not a clean one. */}
-                <td className="avail-col-missed">
-                  {player?.game_points
-                    ? (
-                      <span className="avail-missed-wrap">
-                        <MissedPips missed={missed ?? 0} />
-                        <span
-                          className={`avail-missed-num mono${
-                            missed !== null && missed >= MISSED_LOUD_FROM ? ' is-loud' : ''}`}
-                          style={missed === null ? undefined : { color: missedTone(missed) }}
-                        >
-                          {missed}
-                        </span>
-                      </span>
-                    )
-                    : <span className="gamebars-none">—</span>}
-                </td>
-                <td className="avail-col-num mono avail-proj">{Math.round(c.proj_points)}</td>
-                {/* null survive_pct (no roster to survive FOR yet) gets no
-                    riskTone color at all -- riskTone's red/amber/green ramp
-                    is a claim about a real probability, and coloring a dash
-                    would imply one exists. */}
-                <td
-                  className="avail-col-num mono"
-                  style={c.survive_pct === null ? undefined : { color: riskTone(c.survive_pct) }}
-                >
-                  {c.survive_pct === null ? '—' : `${Math.round(c.survive_pct)}%`}
-                </td>
-                <td className="avail-col-num mono avail-adp">{fmtRank(player?.market_rank ?? null)}</td>
-                <td className="avail-col-num mono avail-adp">{fmtRank(player?.espn_ppr_rank ?? null)}</td>
-                <td className="avail-col-btn">
-                  <button
-                    type="button"
-                    className="avail-draft-btn"
-                    disabled={!isMyTurn}
-                    title={isMyTurn ? undefined : 'Not your turn yet'}
-                    onClick={() => onDraft(c)}
-                  >
-                    Draft
-                  </button>
-                </td>
-              </tr>
-            )
-          })}
+          {rows.map((c) => (
+            <AvailableRow
+              key={c.player_id}
+              c={c}
+              player={players[c.player_id]}
+              isTaken={taken.has(c.player_id)}
+              season={season}
+              isMyTurn={isMyTurn}
+              onOpenPlayer={onOpenPlayer}
+              onDraft={onDraft}
+            />
+          ))}
           {rows.length === 0 && (
             <tr>
               {/* 10 = the nine columns above (rank, pos, player, games,

@@ -4543,19 +4543,27 @@ button.roster-row:focus-visible {
 /* -- a player leaving the board -------------------------------------------
    The most informative event in a draft used to be the least visible: the
    row was simply absent on the next render. This holds it for TAKEN_MS
-   (AvailableList.tsx) so the name is readable, then it unmounts and the
-   rows below close up.
+   (AvailableList.tsx) so the name is readable, then it unmounts and the rows
+   below close up.
 
-   IT DOES NOT COLLAPSE, and that is deliberate rather than a shortcut. A
-   table row is as tall as its tallest cell, so animating a `td` to height 0
-   does not shrink the row while its sparkline SVG still has intrinsic
-   height -- the row stays full height with nothing drawn in it, which reads
-   as a hole punched in the table. Fading to fully transparent has the same
-   effect for the last stretch of the animation. So the row dims to a floor
-   it never crosses, stays legible as "this player is gone" for its whole
-   life, and disappears in one step when it unmounts. */
+   ONLY OPACITY IS ANIMATED, and that is the point. Opacity is composited,
+   so the animation keeps running on its own thread while the main thread is
+   busy; `background` is a paint property, and animating it meant a ranking
+   landing mid-flight stalled the animation visibly. The colour change still
+   happens -- it is just applied once, on the class, rather than tweened.
+
+   IT ALSO DOES NOT COLLAPSE. A table row is as tall as its tallest cell, so
+   animating a `td` to height 0 does not shrink the row while its sparkline
+   SVG still has intrinsic height: the row stands at full height with nothing
+   drawn in it, which is a hole punched in the table. Fading to fully
+   transparent does the same for the last stretch. So it dims to a floor it
+   never crosses, stays legible as "gone" for its whole life, and disappears
+   in one step when it unmounts. */
 .avail-row-taken > td {
-  animation: avail-taken var(--taken-ms, 1.25s) cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  /* Applied instantly, not tweened: one paint, no per-frame main-thread work. */
+  background: color-mix(in srgb, var(--fail) 9%, transparent);
+  animation: avail-taken 1.25s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  will-change: opacity;
 }
 
 /* Struck through as it goes, so a glance at a dimmed row reads as "taken"
@@ -4567,24 +4575,17 @@ button.roster-row:focus-visible {
 }
 
 @keyframes avail-taken {
-  /* A flash first -- SOMETHING HAPPENED HERE -- held long enough to find
-     with the eye before anything starts changing. */
-  0%, 22% {
-    background: var(--accent-bg);
-    opacity: 1;
-  }
-  /* Then a settle into "gone": red-tinted, dimmed, but never invisible. */
-  100% {
-    background: color-mix(in srgb, var(--fail) 9%, transparent);
-    opacity: 0.34;
-  }
+  /* Held at full strength long enough to find with the eye before it starts
+     receding -- the flash is the instant background change above. */
+  0%, 24% { opacity: 1; }
+  100% { opacity: 0.34; }
 }
 
-/* Motion is the whole mechanism, so with it suppressed the row simply holds
-   the flash and then the dim -- the information (someone was taken, and it
+/* Motion is the whole mechanism, so with it suppressed the row holds the
+   tint and then steps down once. The information (someone was taken, and it
    was him) survives; only the easing goes. */
 @media (prefers-reduced-motion: reduce) {
   .avail-row-taken > td {
-    animation: avail-taken var(--taken-ms, 1.25s) steps(2, end) forwards;
+    animation: avail-taken 1.25s steps(2, end) forwards;
   }
 }

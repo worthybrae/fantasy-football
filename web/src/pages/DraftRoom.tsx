@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { fetchBoard, fetchLiveState, fetchPlan, fetchPlayers, selectPlayer, setAutodraft,
          type BoardPlayer, type LiveBoard,
@@ -18,7 +18,11 @@ import DraftBoardGrid from '../components/DraftBoardGrid'
 const POLL_MS = 2500
 // Only used while the event stream is up: it is a safety net for a
 // silently dropped connection, not the way picks arrive.
-const FALLBACK_POLL_MS = 15000
+// Only used while the event stream is up, as a safety net for a connection
+// that drops silently. Not 15s: if the stream IS dead, this is how stale the
+// clock gets, and a drafter reading a fifteen-second-old clock under a
+// thirty-second timer is worse off than one who never had the stream.
+const FALLBACK_POLL_MS = 5000
 
 type Tab = 'available' | 'board' | 'plan'
 
@@ -513,9 +517,14 @@ export default function DraftRoom() {
   // clicked (see playerSeed.ts) so the profile paints on this frame rather
   // than after the 3.5s /profile request -- the request is still issued by
   // PlayerProfile itself and fills the rest in when it lands.
-  function handleOpenCandidate(c: LiveCandidate) {
+  // useCallback, and not as a style preference: AvailableList's rows are
+  // memoized, and a handler that gets a fresh identity on every render of
+  // this component makes that memo compare unequal every time and re-render
+  // all ~250 rows anyway. `players` is the only capture, and it changes when
+  // the board reloads rather than on every poll.
+  const handleOpenCandidate = useCallback((c: LiveCandidate) => {
     setOpenPlayer({ playerId: c.player_id, seed: seedFromCandidate(c, players[c.player_id]) })
-  }
+  }, [players])
 
   function handleOpenBoardPlayer(p: BoardPlayer) {
     setOpenPlayer({ playerId: p.player_id, seed: seedFromBoardPlayer(p, players[p.player_id]) })
@@ -556,11 +565,13 @@ export default function DraftRoom() {
     })
   }
 
-  function handleDraftClick(c: LiveCandidate) {
+  // Same reason as handleOpenCandidate. Captures nothing but state setters,
+  // which React guarantees are stable, so this identity never changes.
+  const handleDraftClick = useCallback((c: LiveCandidate) => {
     setConfirming(c)
     setPickStatus('idle')
     setPickError(null)
-  }
+  }, [])
 
   function handleCancelConfirm() {
     setConfirming(null)
