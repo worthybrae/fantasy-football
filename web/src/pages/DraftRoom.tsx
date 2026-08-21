@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { fetchBoard, fetchLiveState, fetchPlan, fetchPlayers, selectPlayer, setAutodraft,
          type BoardPlayer, type LiveBoard,
@@ -526,6 +526,20 @@ export default function DraftRoom() {
     setOpenPlayer({ playerId: c.player_id, seed: seedFromCandidate(c, players[c.player_id]) })
   }, [players])
 
+  // Who is off the board, according to the BOARD -- which reads the drafted
+  // rows straight out of the database and so is current the moment a pick
+  // lands. The candidate list is not: it only changes when a ranking
+  // finishes, roughly a second later. Driving the take-out animation off
+  // `candidates` therefore made every pick appear to wait for the recompute,
+  // because it did. This is the signal that does not.
+  const draftedIds = useMemo(() => {
+    const ids = new Set<string>()
+    for (const cell of board?.cells ?? []) {
+      if (cell.player?.player_id) ids.add(cell.player.player_id)
+    }
+    return ids
+  }, [board])
+
   function handleOpenBoardPlayer(p: BoardPlayer) {
     setOpenPlayer({ playerId: p.player_id, seed: seedFromBoardPlayer(p, players[p.player_id]) })
   }
@@ -825,6 +839,7 @@ export default function DraftRoom() {
                   isMyTurn={isMyTurn}
                   horizonLabel={horizonLabel}
                   onOpenPlayer={handleOpenCandidate}
+                  draftedIds={draftedIds}
                 />
               </>
             )

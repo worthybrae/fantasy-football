@@ -460,6 +460,9 @@ interface AvailableListProps {
   // last cell is the Draft button. One deliberate target, nowhere near the
   // irreversible one.
   onOpenPlayer: (c: LiveCandidate) => void
+  // Player ids the BOARD reports as drafted. Current the moment a pick
+  // lands, unlike `candidates`, which only moves when a ranking finishes.
+  draftedIds: Set<string>
 }
 
 // The ranked available pool: search + position filter above a table that
@@ -593,6 +596,7 @@ const AvailableRow = memo(function AvailableRow({
 // enough to filter AND sort on every keystroke without debouncing or memos.
 export default function AvailableList({
   candidates, players, onDraft, isMyTurn, horizonLabel, onOpenPlayer,
+  draftedIds,
 }: AvailableListProps) {
   const [search, setSearch] = useState('')
   const [pos, setPos] = useState('ALL')
@@ -690,35 +694,37 @@ export default function AvailableList({
   // long enough to read, in the position it already occupied, then collapses
   // it out. Keyed by player so a second pick landing mid-animation queues
   // its own row rather than restarting a shared timer.
+  // A row leaving the board is triggered by the BOARD saying so, not by the
+  // player falling out of `candidates`. Those are a full ranking apart --
+  // roughly a second -- and driving the animation off the candidate list is
+  // what made every pick look like it was waiting for the recompute, because
+  // it was. The board reads the drafted rows directly, so this fires as the
+  // pick lands and the recompute happens alongside it rather than in front.
   const [taken, setTaken] = useState<Map<string, LiveCandidate>>(new Map())
-  // The PREVIOUS candidate list, held whole rather than as a set of ids. By
-  // the time a player is missing from `candidates` his row data has gone
-  // with him, and this is the only copy left to draw the departing row from.
-  // One ref, updated at the end of the same effect that reads it, so nothing
-  // depends on the order two effects happen to run in.
-  const prevRef = useRef<LiveCandidate[] | null>(null)
+  const seenDraftedRef = useRef<Set<string> | null>(null)
   const timersRef = useRef<Set<number>>(new Set())
 
   useEffect(() => {
-    const before = prevRef.current
-    prevRef.current = candidates
-    if (before === null) return          // first render: nothing has "gone"
+    const before = seenDraftedRef.current
+    seenDraftedRef.current = new Set(draftedIds)
+    if (before === null) return          // first render: nothing "just" went
 
-    const now = new Set(candidates.map((c) => c.player_id))
+    const fresh = [...draftedIds].filter((id) => !before.has(id))
+    // A burst is a resync, not picks -- restoring a session or reconnecting
+    // reveals the whole board at once, and animating that describes
+    // something that did not just happen.
+    if (fresh.length === 0 || fresh.length > TAKEN_BURST_LIMIT) return
+
+    // Held from the CANDIDATE list because that is the only place the row's
+    // rendered values live; the board's own player object carries a
+    // different, thinner shape.
     const departed = new Map<string, LiveCandidate>()
-    for (const c of before) if (!now.has(c.player_id)) departed.set(c.player_id, c)
-    // A burst is a resync, not a draft. Restoring a session or reconnecting
-    // mid-draft drops dozens of players at once, and animating that is a
-    // screenful of motion describing something that did not just happen.
-    if (departed.size === 0 || departed.size > TAKEN_BURST_LIMIT) return
+    for (const c of candidates) if (fresh.includes(c.player_id)) departed.set(c.player_id, c)
+    if (departed.size === 0) return
 
     setTaken((prev) => new Map([...prev, ...departed]))
-    // The timer is NOT cleaned up when this effect re-runs, and that is the
-    // point. Returning a clearTimeout here cancels the removal of rows that
-    // are already mid-animation the moment the NEXT pick lands -- which in a
-    // draft is constantly -- so those rows never leave `taken` and sit as a
-    // permanent blank gap in the table. Each batch owns its own timer and is
-    // allowed to finish; the ref exists only so unmount can sweep them.
+    // Deliberately NOT cleaned up when this effect re-runs: cancelling on
+    // the next pick is what previously left rows stranded on screen forever.
     const timer = window.setTimeout(() => {
       timersRef.current.delete(timer)
       setTaken((prev) => {
@@ -728,10 +734,8 @@ export default function AvailableList({
       })
     }, TAKEN_MS)
     timersRef.current.add(timer)
-  }, [candidates])
+  }, [draftedIds, candidates])
 
-  // Sweep on unmount only: leaving a draft mid-animation should not leave
-  // timers firing setState against a component that is gone.
   useEffect(() => {
     const timers = timersRef.current
     return () => { for (const t of timers) window.clearTimeout(t); timers.clear() }
@@ -1017,7 +1021,7 @@ export default function AvailableList({
               key={c.player_id}
               c={c}
               player={players[c.player_id]}
-              isTaken={taken.has(c.player_id)}
+              isTaken={taken.has(c.player_id) || draftedIds.has(c.player_id)}
               season={season}
               isMyTurn={isMyTurn}
               onOpenPlayer={onOpenPlayer}
