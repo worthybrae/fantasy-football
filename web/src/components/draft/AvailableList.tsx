@@ -153,13 +153,12 @@ const GameBars = memo(function GameBars({ points, season, position }: {
         + `${bad} under ${amberFrom}`}
     >
       {points.map((p, i) => (p === null ? (
-        <span key={i} className="gamebar is-none" title={`Week ${i + 1}: no game`} />
+        <span key={i} className="gamebar is-none" />
       ) : (
         <span
           key={i}
           className={`gamebar ${barTone(p, position)}`}
           style={{ height: `${barHeight(p)}px` }}
-          title={`Week ${i + 1}: ${p.toFixed(1)}`}
         />
       )))}
     </span>
@@ -352,9 +351,13 @@ const FinishArc = memo(function FinishArc(
 ): ReactNode {
   const starters = FINISH_STARTERS[position] ?? 24
   const shown = arc.slice(-FINISH_MAX)
+  // No `title`: the hover panel for this cell (CellTip) lists every season as
+  // a row, and the native box rendered ON TOP of it -- two answers to one
+  // hover, the worse one covering the better. `aria-label` stays, because a
+  // screen reader gets nothing from the panel.
   const label = shown.map(([yr, f]) => `'${String(yr).slice(2)} ${position}${f}`).join('  ')
   return (
-    <span className="finish-arc" role="img" aria-label={label} title={label}>
+    <span className="finish-arc" role="img" aria-label={label}>
       {shown.map(([season, finish]) => (
         <span key={season} className="finish-arc-slot">
           <span className={`finish-arc-bar ${finishTone(finish, starters)}`}
@@ -383,9 +386,11 @@ const HealthMeter = memo(function HealthMeter(
   // and "durability 3 of 5" told a screen reader even less than the picture
   // told everyone else.
   const label = `${gamesPg.toFixed(1)} games per season across his career`
+  // No `title`, for the same reason FinishArc has none: this cell opens a
+  // panel and the native box would land on top of it.
   return (
     <span className={`health-meter ${METER_CLASS[level]}`} role="img"
-          title={label} aria-label={`${label} (${level} of 5)`}>
+          aria-label={`${label} (${level} of 5)`}>
       {[1, 2, 3, 4, 5].map((i) => (
         <span key={i} className={`health-bar${i <= level ? ' is-on' : ''}`} />
       ))}
