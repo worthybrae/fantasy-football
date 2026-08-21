@@ -583,6 +583,7 @@ export default function AvailableList({
   // One ref, updated at the end of the same effect that reads it, so nothing
   // depends on the order two effects happen to run in.
   const prevRef = useRef<LiveCandidate[] | null>(null)
+  const timersRef = useRef<Set<number>>(new Set())
 
   useEffect(() => {
     const before = prevRef.current
@@ -598,15 +599,29 @@ export default function AvailableList({
     if (departed.size === 0 || departed.size > TAKEN_BURST_LIMIT) return
 
     setTaken((prev) => new Map([...prev, ...departed]))
+    // The timer is NOT cleaned up when this effect re-runs, and that is the
+    // point. Returning a clearTimeout here cancels the removal of rows that
+    // are already mid-animation the moment the NEXT pick lands -- which in a
+    // draft is constantly -- so those rows never leave `taken` and sit as a
+    // permanent blank gap in the table. Each batch owns its own timer and is
+    // allowed to finish; the ref exists only so unmount can sweep them.
     const timer = window.setTimeout(() => {
+      timersRef.current.delete(timer)
       setTaken((prev) => {
         const next = new Map(prev)
         for (const id of departed.keys()) next.delete(id)
         return next
       })
     }, TAKEN_MS)
-    return () => window.clearTimeout(timer)
+    timersRef.current.add(timer)
   }, [candidates])
+
+  // Sweep on unmount only: leaving a draft mid-animation should not leave
+  // timers firing setState against a component that is gone.
+  useEffect(() => {
+    const timers = timersRef.current
+    return () => { for (const t of timers) window.clearTimeout(t); timers.clear() }
+  }, [])
 
   const q = search.trim().toLowerCase()
   const visible = candidates.filter((c) => {

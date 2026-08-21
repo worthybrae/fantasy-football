@@ -4543,63 +4543,48 @@ button.roster-row:focus-visible {
 /* -- a player leaving the board -------------------------------------------
    The most informative event in a draft used to be the least visible: the
    row was simply absent on the next render. This holds it for TAKEN_MS
-   (AvailableList.tsx) so the name is readable, then collapses it out.
+   (AvailableList.tsx) so the name is readable, then it unmounts and the
+   rows below close up.
 
-   Two phases in one keyframe rather than two animations: a flash that says
-   SOMETHING HAPPENED HERE, then the row folding away. Splitting them meant
-   the collapse could start before the eye had found the row. */
+   IT DOES NOT COLLAPSE, and that is deliberate rather than a shortcut. A
+   table row is as tall as its tallest cell, so animating a `td` to height 0
+   does not shrink the row while its sparkline SVG still has intrinsic
+   height -- the row stays full height with nothing drawn in it, which reads
+   as a hole punched in the table. Fading to fully transparent has the same
+   effect for the last stretch of the animation. So the row dims to a floor
+   it never crosses, stays legible as "this player is gone" for its whole
+   life, and disappears in one step when it unmounts. */
 .avail-row-taken > td {
-  animation: avail-taken 1.25s cubic-bezier(0.4, 0, 0.2, 1) forwards;
-  /* Collapsing padding and height together is what makes the rows below
-     slide up smoothly instead of jumping when the row unmounts. */
-  overflow: hidden;
-  white-space: nowrap;
+  animation: avail-taken var(--taken-ms, 1.25s) cubic-bezier(0.4, 0, 0.2, 1) forwards;
 }
 
-/* The name gets struck through as it goes, so a glance at a half-faded row
-   still reads as "gone" rather than "loading". */
+/* Struck through as it goes, so a glance at a dimmed row reads as "taken"
+   rather than "still loading". */
 .avail-row-taken .avail-name {
   text-decoration: line-through;
   text-decoration-color: var(--fail);
+  text-decoration-thickness: 1px;
 }
 
 @keyframes avail-taken {
-  0% {
+  /* A flash first -- SOMETHING HAPPENED HERE -- held long enough to find
+     with the eye before anything starts changing. */
+  0%, 22% {
     background: var(--accent-bg);
     opacity: 1;
   }
-  30% {
-    background: var(--accent-bg);
-    opacity: 1;
-  }
-  /* Fade before collapse: a row that shrinks while still opaque reads as
-     the table glitching rather than as a player being taken. */
-  65% {
-    background: color-mix(in srgb, var(--fail) 10%, transparent);
-    opacity: 0.45;
-    height: 32px;
-    padding-top: 6px;
-    padding-bottom: 6px;
-  }
+  /* Then a settle into "gone": red-tinted, dimmed, but never invisible. */
   100% {
-    background: transparent;
-    opacity: 0;
-    height: 0;
-    padding-top: 0;
-    padding-bottom: 0;
-    border-bottom-width: 0;
+    background: color-mix(in srgb, var(--fail) 9%, transparent);
+    opacity: 0.34;
   }
 }
 
-/* Motion is the whole mechanism here, so with it suppressed the row simply
-   holds still and dims for the same duration -- the information (someone was
-   taken, and it was him) survives; only the movement goes. */
+/* Motion is the whole mechanism, so with it suppressed the row simply holds
+   the flash and then the dim -- the information (someone was taken, and it
+   was him) survives; only the easing goes. */
 @media (prefers-reduced-motion: reduce) {
   .avail-row-taken > td {
-    animation: avail-taken-still 1.25s steps(1, end) forwards;
-  }
-  @keyframes avail-taken-still {
-    0%, 70% { background: var(--accent-bg); opacity: 1; }
-    100% { opacity: 0; }
+    animation: avail-taken var(--taken-ms, 1.25s) steps(2, end) forwards;
   }
 }
