@@ -229,90 +229,70 @@ function FinishBody({ data, settings }: BodyProps): ReactNode {
   )
 }
 
-// Steadiness, season by season. The column ranks a player against the board
-// on one recency-weighted number; this is where that number came from.
+// Steadiness, season by season, as a PLACE among the position rather than as
+// the coefficient it is computed from.
 //
-// The bar is 1 - cv, so taller is steadier and the panel obeys the same
-// "taller is better" rule as the three beside it. The value printed is the
-// coefficient itself, which is what the column's own tooltip quotes.
+// The panel used to draw `1 - cv/1.2` with the raw coefficient printed above
+// it -- an abstract ratio on a clamped axis, inverted twice (a lower cv is
+// better, a taller bar is better), and coloured off the bar's own height
+// rather than off anything. Nothing on it answered the only question a reader
+// brings: is 0.63 good? `cv_rank` has been in the payload the whole time and
+// answers exactly that, so the panel now reads like Finish beside it: a rank,
+// against a stated pool, taller is better.
+//
+// Percentile of the REAL pool, not the `starters` yardstick Finish uses.
+// Steadiness is not scarce the way RB1 production is -- grading 28th of 95
+// against an eight-team league's sixteen startable backs would paint a
+// genuinely steady season red.
+//
+// Linear, not log-spaced like Finish: RB1 to RB6 is the difference between
+// rounds, which is why that ladder is log, but consistency has no equivalent
+// tier structure to stretch.
+function steadyTone(rank: number, pool: number): string {
+  const pct = rank / pool
+  if (pct <= 0.25) return 'is-elite'
+  if (pct <= 0.5) return 'is-strong'
+  if (pct <= 0.75) return 'is-starter'
+  if (pct <= 0.9) return 'is-fringe'
+  return 'is-out'
+}
+
 function SteadyBody({ data }: BodyProps): ReactNode {
-  const rows = data.seasons.filter((s) => s.cv !== null && s.cv !== undefined)
+  // `cv_rank_n` counts only the seasons that HAVE a coefficient: a season
+  // whose mean is zero or negative gets none, ranks nowhere, and would draw
+  // as a column with no place on the ladder it is being plotted against.
+  const rows = data.seasons.filter(
+    (s) => s.cv_rank !== null && s.cv_rank !== undefined
+      && s.cv_rank_n !== null && s.cv_rank_n !== undefined && s.cv_rank_n > 0,
+  )
   if (!rows.length) {
     return <div className="ctip-empty">No season long enough to measure.</div>
   }
-  // A coefficient above 1 means a player whose week-to-week swing exceeds his
-  // own average -- real, and rare enough that letting it set the axis would
-  // flatten everyone else. Clamped, like every other scale here.
-  const CV_MAX = 1.2
+  const pos = data.header.position
   const cols: Col[] = rows.slice().reverse().map((r) => {
-    const cv = r.cv as number
-    const share = 1 - Math.min(1, cv / CV_MAX)
+    const rank = r.cv_rank as number
+    const pool = r.cv_rank_n as number
     return {
       key: r.season,
       label: year(r.season),
-      value: cv.toFixed(2),
-      tone: HEALTH_TONES[Math.min(4, Math.floor(share * 5))],
-      fill: share,
+      value: String(rank),
+      tone: steadyTone(rank, pool),
+      // `1 -` because rank runs backwards, same as Finish: the steadiest
+      // season has to be the tallest column, or this panel and the one next
+      // to it would read in opposite directions.
+      fill: 1 - rank / pool,
     }
   })
-  const median = rows[0].cv_pos_median
+  // The most recent pool, because a denominator moves year to year and the
+  // note is there to make the latest column legible, not to average them.
+  const pool = rows[0].cv_rank_n as number
   return (
     <>
       <div className="ctip-head">
-        <span>Week-to-week swing</span>
-        <span className="ctip-head-note">
-          {median ? `${data.header.position} median ${median.toFixed(2)}` : 'lower is steadier'}
-        </span>
-      </div>
-      <Chart cols={cols} />
-    </>
-  )
-}
-
-// Scoring by season with the PROJECTION as the final column, because the
-// Change column is the gap between the last of these and that one -- and a
-// gap is the one thing a single number cannot show you the size of.
-function ChangeBody({ data }: BodyProps): ReactNode {
-  const rows = data.seasons.filter((s) => s.games > 0)
-  const proj = data.summary?.proj_ppg ?? null
-  if (!rows.length && proj === null) {
-    return <div className="ctip-empty">Nothing to compare yet.</div>
-  }
-  const ceiling = Math.max(
-    ...rows.map((r) => r.ppg), proj ?? 0, 1)
-  const position = data.header.position
-  const cols: Col[] = rows.slice().reverse().map((r) => ({
-    key: r.season,
-    label: year(r.season),
-    value: r.ppg.toFixed(1),
-    tone: barTone(r.ppg, position),
-    fill: r.ppg / ceiling,
-  }))
-  if (proj !== null) {
-    cols.push({
-      key: 'proj',
-      // Not a year: this column is the only one that has not happened.
-      label: 'proj',
-      value: proj.toFixed(1),
-      tone: barTone(proj, position),
-      fill: proj / ceiling,
-      // Drawn hollow, behind a rule: everything left of it is banked, this
-      // is the only column still owed. The tone stays, so it is still read
-      // against the same good/mid/bad cut points as the seasons beside it.
-      projected: true,
-    })
-  }
-  const last = rows.length ? rows[0].ppg : null
-  const delta = last !== null && proj !== null ? proj - last : null
-  return (
-    <>
-      <div className="ctip-head">
-        <span>Points per game</span>
-        <span className="ctip-head-note">
-          {delta === null
-            ? 'projection vs history'
-            : `${delta >= 0 ? '+' : ''}${delta.toFixed(1)} vs last season`}
-        </span>
+        <span>Steadiness rank</span>
+        {/* Which end is good is the one thing a rank cannot say for itself,
+            and it is the exact thing the old panel left a reader guessing. */}
+        <span className="ctip-head-note">{`1 = steadiest of ${pool} ${pos}s`}</span>
       </div>
       <Chart cols={cols} />
     </>
