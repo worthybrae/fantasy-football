@@ -1,0 +1,73 @@
+<title>Playoff-weeks schedule: the spread survives, the forecast does not</title>
+<style>
+  :root {
+    --bg-0:#0a0b0e; --bg-1:#121319; --bg-2:#1b1d25; --border:#262932;
+    --text-1:#e8eaef; --text-2:#98a0b0; --text-3:#565b69;
+    --accent:#ffb454; --ok:#0ca30c; --fail:#d03b3b;
+    --font-ui:'Inter',system-ui,-apple-system,'Segoe UI',sans-serif;
+    --font-mono:'JetBrains Mono',ui-monospace,'SFMono-Regular',Menlo,monospace;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg-0); color:var(--text-2);
+         font:16px/1.65 var(--font-ui); -webkit-font-smoothing:antialiased; }
+  .wrap { max-width:760px; margin:0 auto; padding:56px 24px 96px; }
+  .eyebrow { font-family:var(--font-mono); font-size:12px; letter-spacing:.1em;
+              text-transform:uppercase; color:var(--text-3); }
+  h1 { font-size:34px; line-height:1.2; letter-spacing:-.02em; color:var(--text-1);
+        margin:14px 0 10px; font-weight:700; }
+  .question { font-size:18px; line-height:1.55; color:var(--text-2);
+               border-left:2px solid var(--accent); padding-left:16px; margin:22px 0 32px; }
+  h2 { font-size:21px; color:var(--text-1); margin:44px 0 12px; font-weight:600;
+        letter-spacing:-.01em; }
+  p { margin:0 0 18px; }
+  strong { color:var(--text-1); font-weight:600; }
+  code { font-family:var(--font-mono); font-size:.92em; color:var(--accent);
+          background:var(--bg-2); padding:1px 5px; border-radius:3px; }
+  pre { background:var(--bg-1); border:1px solid var(--border); border-radius:5px;
+         padding:16px 18px; overflow-x:auto; font-family:var(--font-mono);
+         font-size:13px; line-height:1.6; color:var(--text-1); margin:0 0 22px; }
+  .callout { background:var(--bg-1); border:1px solid var(--border);
+              border-left:2px solid var(--fail); border-radius:4px;
+              padding:16px 18px; margin:0 0 22px; font-size:15px; }
+  .callout .lbl { font-family:var(--font-mono); font-size:11px; letter-spacing:.08em;
+                   text-transform:uppercase; color:var(--fail); display:block;
+                   margin-bottom:6px; }
+  .meta { margin-top:56px; padding-top:20px; border-top:1px solid var(--border);
+           font-family:var(--font-mono); font-size:12px; color:var(--text-3); }
+  .meta li { margin:5px 0; }
+  ul { padding-left:22px; } li { margin:7px 0; }
+</style>
+<div class="wrap">
+  <div class="eyebrow">Research &middot; E004</div>
+  <h1>Playoff-weeks schedule: the spread survives, the forecast does not</h1>
+  <div class="question">Season-long schedule averages out to nothing. Weeks 15 to 17 are only three games and they decide the league -- is playoff-weeks schedule strength worth acting on at draft time?</div>
+  <p>The spread survives. Three opponents instead of seventeen and schedule luck more than doubles, exactly as the arithmetic says it should. It is still not worth a draft pick, and not because of the spread.</p>
+  <h2>Three games do not average out</h2>
+  <p>E001's finding was really about averaging: one defense spans a full standard deviation by construction, a season of opponents averages down to 0.26, and that collapse was the whole story. 3 opponents cannot collapse as far.</p>
+  <svg viewBox="0 0 484 104" width="100%" style="max-width:520px;display:block;margin:0 0 22px"><text x="0" y="12" fill="#565b69" font-size="11" font-family="var(--font-mono)">spread of the schedules players faced, in standard deviations of defensive quality</text><text x="0" y="38" fill="#98a0b0" font-size="12">one defense</text><rect x="132" y="28" width="277" height="14" rx="1" fill="var(--accent)"/><text x="415" y="41" fill="#565b69" font-size="10" font-family="var(--font-mono)">1</text><text x="0" y="64" fill="#98a0b0" font-size="12">a whole season</text><rect x="132" y="54" width="72" height="14" rx="1" fill="var(--accent)"/><text x="210" y="67" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.26</text><text x="0" y="90" fill="#98a0b0" font-size="12">weeks 15-17</text><rect x="132" y="80" width="169" height="14" rx="1" fill="var(--accent)"/><text x="307" y="93" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.61</text></svg>
+  <p>2.3 times wider, and almost exactly what plain averaging predicts with no football in it: 3 draws should span 0.58, 16.5 should span 0.25. Per team rather than per player, which strips out injuries and missed starts, it is 0.56 against 0.23. Divisional games and December scheduling do not clump soft defenses together enough to beat the theory. The window is simply short.</p>
+  <h2>Worth points, fewer than that implies</h2>
+  <p>Points per game in weeks 15-17, regressed on full-season ppg plus the softness of the defenses actually drawn in those weeks: 2684 player-seasons, 8 games in the season, at least 2 of the 3, perfect hindsight on every defense.</p>
+  <svg viewBox="0 0 484 78" width="100%" style="max-width:520px;display:block;margin:0 0 22px"><text x="0" y="12" fill="#565b69" font-size="11" font-family="var(--font-mono)">predicting points per game in weeks 15-17, 2684 player-seasons</text><text x="0" y="38" fill="#98a0b0" font-size="12">full-season ppg</text><rect x="132" y="28" width="276" height="14" rx="1" fill="var(--accent)"/><text x="414" y="41" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.674</text><text x="0" y="64" fill="#98a0b0" font-size="12">+ perfect schedule</text><rect x="132" y="54" width="277" height="14" rx="1" fill="var(--accent)"/><text x="415" y="67" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.678</text></svg>
+  <p>A defense a standard deviation softer is worth 0.63 points a game, against E001's 1.18 over a full season. That drop is the short window seen from the other end: a defense's season-long quality correlates only 0.537 against the run and 0.506 against the pass with how soft it actually was in those three weeks. Most of what is knowable about a defense does not turn up in the games that decide anything.</p>
+  <p>Full-season ppg contains the playoff weeks and absorbs part of the effect. Baselining on weeks 1-14 instead gives 0.81 points per standard deviation over 2301 player-seasons, and 0.0061 of R2 against 0.0037. The pre-2021 window, weeks 14-16, gives 0.66 and 0.0039. Nothing moves.</p>
+  <div class="callout"><span class="lbl">The whole prize</span>A soft three-week draw against a hard one is 2.3 points across the run, 9.7% of what an average 7.9-point starter scores over those weeks. With hindsight, before anyone has to predict it.</div>
+  <h2>You cannot see it in August</h2>
+  <svg viewBox="0 0 484 130" width="100%" style="max-width:520px;display:block;margin:0 0 22px"><text x="0" y="12" fill="#565b69" font-size="11" font-family="var(--font-mono)">correlation with how soft a defense actually was in weeks 15-17</text><text x="0" y="38" fill="#98a0b0" font-size="12">last season</text><rect x="132" y="28" width="53" height="7" rx="1" fill="var(--accent)"/><text x="191" y="34" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.103</text><rect x="132" y="37" width="51" height="7" rx="1" fill="var(--text-2)"/><text x="189" y="43" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.1</text><text x="0" y="64" fill="#98a0b0" font-size="12">opening lines, weeks 1-6</text><rect x="132" y="54" width="50" height="7" rx="1" fill="var(--accent)"/><text x="188" y="60" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.097</text><rect x="132" y="63" width="72" height="7" rx="1" fill="var(--text-2)"/><text x="210" y="69" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.141</text><text x="0" y="90" fill="#98a0b0" font-size="12">opening lines, weeks 15-17</text><rect x="132" y="80" width="202" height="7" rx="1" fill="var(--accent)"/><text x="340" y="86" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.392</text><rect x="132" y="89" width="160" height="7" rx="1" fill="var(--text-2)"/><text x="298" y="95" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.311</text><text x="0" y="116" fill="#98a0b0" font-size="12">this season, all of it</text><rect x="132" y="106" width="277" height="7" rx="1" fill="var(--accent)"/><text x="415" y="112" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.537</text><rect x="132" y="115" width="261" height="7" rx="1" fill="var(--text-2)"/><text x="399" y="121" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.506</text><text x="132" y="129" font-size="10" font-family="var(--font-mono)"><tspan fill="var(--accent)">run defense</tspan><tspan fill="#262932">  </tspan><tspan fill="var(--text-2)">pass defense</tspan><tspan fill="#262932">  </tspan></text></svg>
+  <p>The two rows that work are the two nobody has at a draft. Opening lines for weeks 15-17 price those games at 0.392 and 0.311, about as well as E001's lines priced a whole season (0.374 and 0.3) — but they post in December. They are here as a ceiling on what a market can know, not as an input.</p>
+  <p>August holds the top two rows, and they are flat. Last season's defensive numbers land at 0.103 and 0.1, against 0.3 and 0.173 when the target was a whole season. The weeks 1-6 opening lines E001 uses as its August proxy do no better, at 0.097 and 0.141.</p>
+  <h2>The bottom line</h2>
+  <svg viewBox="0 0 484 104" width="100%" style="max-width:520px;display:block;margin:0 0 22px"><text x="0" y="12" fill="#565b69" font-size="11" font-family="var(--font-mono)">R2 added to a projection by a perfect schedule number</text><text x="0" y="38" fill="#98a0b0" font-size="12">a whole season (E001)</text><rect x="132" y="28" width="159" height="14" rx="1" fill="var(--accent)"/><text x="297" y="41" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.0035</text><text x="0" y="64" fill="#98a0b0" font-size="12">weeks 15-17</text><rect x="132" y="54" width="168" height="14" rx="1" fill="var(--accent)"/><text x="306" y="67" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.0037</text><text x="0" y="90" fill="#98a0b0" font-size="12">weeks 15-17, clean baseline</text><rect x="132" y="80" width="277" height="14" rx="1" fill="var(--accent)"/><text x="415" y="93" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.0061</text></svg>
+  <p>The spread comes back, 2.3 times over, and the effect per standard deviation shrinks by about as much, so even the hindsight version lands where the season-long one did. The schedule factor stays at 10% of the composite and stays season-long: a weeks-15-17 version would price a real effect off a signal correlated 0.103 with it, which is worse than not pricing it at all.</p>
+  <p>Weeks 15-17 are worth thinking about in November, when the lines exist. That is a waiver-wire question, not a draft one.</p>
+  <div class="meta">
+    <ul>
+      <li>experiment E004 &middot; run 2026-08-21 &middot; revision 4b34a80</li>
+      <li>Weeks 15-17 is the modern fantasy playoff window. Before the 17-game season most leagues played 14-16; that window is measured too and answers the same, so the finding is not an artefact of which three weeks are called the playoffs.</li>
+      <li>The odds workbook&#x27;s week is re-derived from nflverse game ids rather than by bucketing dates seven days from the opener, because Saturday and Christmas games in this window bucket into the wrong slot. E001&#x27;s caveat does not apply here.</li>
+      <li>data.odds() silently kept playoff games when this experiment was first run: its filter compared the Playoff Game? column against 1 while the workbook stores the string Y, so none of the 232 playoff rows were dropped. Found here and fixed in data.py; E001 was re-run afterwards and none of its findings moved, because its six-week window already excluded January.</li>
+      <li>Opening lines for weeks 15-17 are each game&#x27;s market open in December, NOT anything available in August. They are measured as an upper bound on what a market can know, and are labelled that way in the post. Only last season&#x27;s defensive numbers, and the weeks 1-6 lines E001 uses as its August proxy, are draft-time inputs.</li>
+      <li>Defensive quality is a defense&#x27;s whole-season points allowed, not its weeks 15-17 points allowed: the latter contains the very points the regression predicts.</li>
+    </ul>
+  </div>
+</div>

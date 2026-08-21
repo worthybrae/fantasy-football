@@ -9,9 +9,36 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from research import data, lab                                   # noqa: E402
-from research.experiments import e001_strength_of_schedule       # noqa: E402
 
-ALL = {e.EXPERIMENT.id: e.EXPERIMENT for e in (e001_strength_of_schedule,)}
+
+def discover() -> dict:
+    """Every experiment module that declares an EXPERIMENT, found by import.
+
+    Discovered rather than listed because a hand-kept registry is a merge
+    conflict waiting to happen -- three experiments were written in parallel
+    and every one of them would have edited the same tuple. A module that
+    forgets to declare EXPERIMENT is skipped silently on purpose: it is
+    usually a helper, not a broken experiment.
+    """
+    import importlib
+    import pkgutil
+
+    import research.experiments as pkg
+
+    found = {}
+    for mod in pkgutil.iter_modules(pkg.__path__):
+        m = importlib.import_module(f"research.experiments.{mod.name}")
+        exp = getattr(m, "EXPERIMENT", None)
+        if exp is not None:
+            if exp.id in found:
+                raise ValueError(
+                    f"two experiments claim id {exp.id!r}: "
+                    f"{found[exp.id].title!r} and {exp.title!r}")
+            found[exp.id] = exp
+    return found
+
+
+ALL = discover()
 
 
 def main() -> int:
@@ -36,6 +63,12 @@ def main() -> int:
         print(f"  -> {len(result.findings)} findings at {result.git_rev or 'unknown rev'}")
         for note in result.notes:
             print(f"  note: {note[:96]}")
+
+    # The index is built from stored results, so it is only ever as current
+    # as the last run -- rebuild it here rather than leaving it to be
+    # forgotten.
+    from research.index import build
+    print("index:", build())
     return 0
 
 

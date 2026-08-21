@@ -169,7 +169,12 @@ def _chart_block(spec: str, findings: dict) -> str:
         if not ln.strip() or ln.strip() == "::":
             continue
         label, *vals = [c.strip() for c in ln.split("|")]
-        rows.append((label, [float(resolve(v, findings)) for v in vals]))
+        # The LABEL is prose too. Only the values were resolved at first, so
+        # a row named "weeks {weeks_label}" drew the literal brace into the
+        # chart -- the one place a leaked placeholder is easy to miss,
+        # because it renders inside an SVG rather than in the body text.
+        rows.append((resolve(label, findings),
+                     [float(resolve(v, findings)) for v in vals]))
     vmax = float(attrs["max"]) if "max" in attrs else max(
         v for _, vs in rows for v in vs) * 1.08
     series = [s.strip() for s in attrs.get("series", "").split(",") if s.strip()]
@@ -192,7 +197,12 @@ def _blocks(text: str, findings: dict) -> str:
         elif p.startswith("## "):
             out.append(f"  <h2>{resolve(p[3:].strip(), findings)}</h2>")
         elif p.startswith("> "):
-            label, _, rest = p[2:].partition("\n")
+            # Every line of a callout carries the marker, so strip it from
+            # all of them -- partitioning the raw block left "> " sitting at
+            # the front of the second line and rendered it as literal text.
+            lines = [ln[2:] if ln.startswith("> ") else ln
+                     for ln in p.splitlines()]
+            label, rest = lines[0], "\n".join(lines[1:])
             out.append(f'  <div class="callout"><span class="lbl">{resolve(label, findings)}</span>'
                        f'{resolve(rest.strip(), findings)}</div>')
         elif p.startswith("- "):
@@ -209,7 +219,10 @@ def render(experiment_id: str) -> Path:
     findings = stored["findings"]
     tmpl = (POSTS / f"{experiment_id}.md").read_text()
     body = _blocks(tmpl, findings)
-    notes = "\n".join(f"      <li>{html.escape(n)}</li>" for n in stored.get("notes", []))
+    # Notes are prose too: one referencing {weeks_label} shipped the literal
+    # brace into the metadata list, because only the body was ever resolved.
+    notes = "\n".join(f"      <li>{html.escape(resolve(n, findings))}</li>"
+                      for n in stored.get("notes", []))
     page = SHELL.format(
         title=html.escape(stored["title"]),
         eyebrow=f"Research &middot; {experiment_id.upper()}",

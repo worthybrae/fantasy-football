@@ -194,7 +194,7 @@
     "swing_points": 10.6,
     "weeks_priced": 6
   },
-  "git_rev": "11c5d7d",
+  "git_rev": "4b34a80",
   "id": "e001",
   "notes": [
     "Opening lines are each GAME's market open, not a season-long future posted in August. For weeks 1-6 the two are close; for later weeks they are not, which is why the window is capped at 6.",
@@ -202,7 +202,7 @@
   ],
   "overturns": "The board gives `schedule` 10% of its composite weight. This finds that even PERFECT knowledge of every defense would be worth almost nothing to a player projection.",
   "question": "Can we predict defensive strength better than last season's numbers do -- and if we can, does it change any draft decision?",
-  "ran_at": "2026-08-21T00:42:44+00:00",
+  "ran_at": "2026-08-21T01:03:23+00:00",
   "tags": [
     "schedule",
     "vegas",

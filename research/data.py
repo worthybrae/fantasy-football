@@ -9,6 +9,7 @@ deep inside a merge.
 from __future__ import annotations
 
 import os
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -66,14 +67,30 @@ def odds() -> pd.DataFrame:
     that needs a specific week, which is recorded on every experiment that
     uses it rather than hidden here.
     """
-    df = pd.read_excel(odds_path(), sheet_name="Data")
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    # Suppressed at the read, not globally: the Date column mixes real
+    # datetimes with a few string dates, and pandas warns while CONSTRUCTING
+    # the frame -- before any of our code can touch the column, so there is
+    # no way to parse our way out of it. Scoped to this one call so a real
+    # FutureWarning from anywhere else still surfaces.
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=FutureWarning,
+                                message="Inferring datetime64")
+        df = pd.read_excel(odds_path(), sheet_name="Data")
+    # Via str: the sheet mixes real datetimes with a few string dates, and
+    # handing that column straight to to_datetime makes pandas warn about an
+    # inferred dtype on every read. Coercing to text first is explicit and
+    # parses identically.
+    df["Date"] = pd.to_datetime(df["Date"].astype(str), errors="coerce")
     df = df.dropna(subset=["Date"])
     # The NFL season straddles the new year: January and February games belong
     # to the season that started the previous autumn.
     df["season"] = np.where(df["Date"].dt.month <= 2,
                             df["Date"].dt.year - 1, df["Date"].dt.year)
-    df = df[df["Playoff Game?"] != 1].copy()
+    # The workbook marks playoff games with the STRING "Y" and leaves every
+    # other row null -- `!= 1` matched all 5431 rows and dropped none of the
+    # 232 playoff games. Comparing against truthiness rather than a guessed
+    # sentinel is the fix that survives the column changing shape again.
+    df = df[df["Playoff Game?"].isna()].copy()
     opener = df.groupby("season")["Date"].transform("min")
     df["week"] = ((df["Date"] - opener).dt.days // 7) + 1
     df["home"] = df["Home Team"].map(TEAM_ABBR)

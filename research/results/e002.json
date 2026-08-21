@@ -1,0 +1,97 @@
+{
+  "findings": {
+    "bottom_lines": "CIN, LV, ARI",
+    "coverage_curve": [
+      [
+        0.0,
+        93.1
+      ],
+      [
+        0.111,
+        94.4
+      ],
+      [
+        0.222,
+        97.5
+      ],
+      [
+        0.333,
+        94.4
+      ],
+      [
+        0.444,
+        95.0
+      ],
+      [
+        0.556,
+        96.9
+      ],
+      [
+        0.667,
+        96.9
+      ],
+      [
+        0.778,
+        99.4
+      ],
+      [
+        0.889,
+        97.5
+      ],
+      [
+        1.0,
+        96.9
+      ]
+    ],
+    "coverage_max": 99.4,
+    "coverage_min": 93.1,
+    "first_season": 2016,
+    "last_season": 2025,
+    "line_autocorr": 0.52,
+    "min_carries": 50,
+    "n_moves": 88,
+    "n_moves_strict": 48,
+    "n_rb_seasons": 561,
+    "n_team_seasons": 320,
+    "n_team_ypc": 285,
+    "ppg_per_sd": 0.06,
+    "r2_ppg_base": 0.52,
+    "r2_ppg_gain": 0.0001,
+    "r2_ppg_line": 0.52,
+    "r2_ypc_base": 0.066,
+    "r2_ypc_gain": 0.0232,
+    "r2_ypc_line": 0.09,
+    "r_move": 0.253,
+    "r_move_strict": 0.351,
+    "recent_season": 2025,
+    "season_points_per_sd": 1.0,
+    "season_points_per_sd_move": 2.2,
+    "seasons": "2016-2025",
+    "spend_bottom": 0.82,
+    "spend_median": 2.88,
+    "spend_ratio": 6.7,
+    "spend_top": 5.5,
+    "starter_carries": 137,
+    "strict_carries": 100,
+    "top_lines": "DEN, DET, KC, PHI, TB",
+    "ypc_per_sd": 0.072,
+    "ypc_per_sd_move": 0.158
+  },
+  "git_rev": "4b34a80",
+  "id": "e002",
+  "notes": [
+    "Cap share measures what a team PAID, not how the five played. It underrates any line built on rookie contracts -- five good young starters on rookie deals price out near the bottom of the league, and that is a real error in the rating, not noise.",
+    "The five starters are read off snaps the season actually produced, which is hindsight. At a draft you have a projected line, and the projection is wrong often enough (injury, camp battle, a guard kicked out to tackle) that the live version of this rating is weaker than the one measured here.",
+    "Contracts come from Over The Cap via nfl_data_py at run time and are joined on gsis_id; linemen with no gsis_id on their contract row are simply unpriced, which is most of what the coverage number is measuring."
+  ],
+  "overturns": "The project's first pass tested the O-line rating against running back fantasy points, found nothing, and concluded the line does not matter. It measured the wrong outcome: the effect is on yards per carry, and fantasy points bury it under volume and touchdowns.",
+  "question": "Does offensive line quality affect player production -- and if it does, which measurement of production shows it?",
+  "ran_at": "2026-08-21T01:03:24+00:00",
+  "tags": [
+    "oline",
+    "contracts",
+    "efficiency",
+    "composite"
+  ],
+  "title": "The offensive line pays in yards, not points"
+}

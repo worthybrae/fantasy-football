@@ -1,0 +1,73 @@
+<title>The parts are not more predictable than the whole</title>
+<style>
+  :root {
+    --bg-0:#0a0b0e; --bg-1:#121319; --bg-2:#1b1d25; --border:#262932;
+    --text-1:#e8eaef; --text-2:#98a0b0; --text-3:#565b69;
+    --accent:#ffb454; --ok:#0ca30c; --fail:#d03b3b;
+    --font-ui:'Inter',system-ui,-apple-system,'Segoe UI',sans-serif;
+    --font-mono:'JetBrains Mono',ui-monospace,'SFMono-Regular',Menlo,monospace;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg-0); color:var(--text-2);
+         font:16px/1.65 var(--font-ui); -webkit-font-smoothing:antialiased; }
+  .wrap { max-width:760px; margin:0 auto; padding:56px 24px 96px; }
+  .eyebrow { font-family:var(--font-mono); font-size:12px; letter-spacing:.1em;
+              text-transform:uppercase; color:var(--text-3); }
+  h1 { font-size:34px; line-height:1.2; letter-spacing:-.02em; color:var(--text-1);
+        margin:14px 0 10px; font-weight:700; }
+  .question { font-size:18px; line-height:1.55; color:var(--text-2);
+               border-left:2px solid var(--accent); padding-left:16px; margin:22px 0 32px; }
+  h2 { font-size:21px; color:var(--text-1); margin:44px 0 12px; font-weight:600;
+        letter-spacing:-.01em; }
+  p { margin:0 0 18px; }
+  strong { color:var(--text-1); font-weight:600; }
+  code { font-family:var(--font-mono); font-size:.92em; color:var(--accent);
+          background:var(--bg-2); padding:1px 5px; border-radius:3px; }
+  pre { background:var(--bg-1); border:1px solid var(--border); border-radius:5px;
+         padding:16px 18px; overflow-x:auto; font-family:var(--font-mono);
+         font-size:13px; line-height:1.6; color:var(--text-1); margin:0 0 22px; }
+  .callout { background:var(--bg-1); border:1px solid var(--border);
+              border-left:2px solid var(--fail); border-radius:4px;
+              padding:16px 18px; margin:0 0 22px; font-size:15px; }
+  .callout .lbl { font-family:var(--font-mono); font-size:11px; letter-spacing:.08em;
+                   text-transform:uppercase; color:var(--fail); display:block;
+                   margin-bottom:6px; }
+  .meta { margin-top:56px; padding-top:20px; border-top:1px solid var(--border);
+           font-family:var(--font-mono); font-size:12px; color:var(--text-3); }
+  .meta li { margin:5px 0; }
+  ul { padding-left:22px; } li { margin:7px 0; }
+</style>
+<div class="wrap">
+  <div class="eyebrow">Research &middot; E003</div>
+  <h1>The parts are not more predictable than the whole</h1>
+  <div class="question">Should we project fantasy points directly, or decompose into team volume, player share and games played -- are the parts really more predictable than the points they combine into?</div>
+  <p>Every serious projection system is built bottom-up: forecast team volume, forecast the player's share of it, forecast games played, multiply. The justification is always that the parts are steadier than the whole. Over 956 receiver, 583 back and 486 tight end seasons, they are not.</p>
+  <h2>The parts lose</h2>
+  <svg viewBox="0 0 484 104" width="100%" style="max-width:520px;display:block;margin:0 0 22px"><text x="0" y="12" fill="#565b69" font-size="11" font-family="var(--font-mono)">year-over-year correlation, 8+ game seasons</text><text x="0" y="38" fill="#98a0b0" font-size="12">WR target share</text><rect x="132" y="28" width="266" height="7" rx="1" fill="var(--accent)"/><text x="404" y="34" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.735</text><rect x="132" y="37" width="277" height="7" rx="1" fill="var(--text-2)"/><text x="415" y="43" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.766</text><text x="0" y="64" fill="#98a0b0" font-size="12">RB rush share</text><rect x="132" y="54" width="253" height="7" rx="1" fill="var(--accent)"/><text x="391" y="60" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.698</text><rect x="132" y="63" width="263" height="7" rx="1" fill="var(--text-2)"/><text x="401" y="69" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.728</text><text x="0" y="90" fill="#98a0b0" font-size="12">TE target share</text><rect x="132" y="80" width="252" height="7" rx="1" fill="var(--accent)"/><text x="390" y="86" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.696</text><rect x="132" y="89" width="268" height="7" rx="1" fill="var(--text-2)"/><text x="406" y="95" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.74</text><text x="132" y="103" font-size="10" font-family="var(--font-mono)"><tspan fill="var(--accent)">usage share</tspan><tspan fill="#262932">  </tspan><tspan fill="var(--text-2)">points per game</tspan><tspan fill="#262932">  </tspan></text></svg>
+  <p>Same direction at every position: the share is less persistent than the points it is supposed to explain. The margins are small — 0.031 at receiver, 0.044 at tight end — but the gap never runs the other way, and the rationale needs it to.</p>
+  <p>The layer underneath is worse again.</p>
+  <svg viewBox="0 0 484 130" width="100%" style="max-width:520px;display:block;margin:0 0 22px"><text x="0" y="12" fill="#565b69" font-size="11" font-family="var(--font-mono)">team volume, year over year, 288 team-seasons</text><text x="0" y="38" fill="#98a0b0" font-size="12">pass attempts</text><rect x="132" y="28" width="191" height="14" rx="1" fill="var(--accent)"/><text x="329" y="41" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.341</text><text x="0" y="64" fill="#98a0b0" font-size="12">passing yards</text><rect x="132" y="54" width="236" height="14" rx="1" fill="var(--accent)"/><text x="374" y="67" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.421</text><text x="0" y="90" fill="#98a0b0" font-size="12">carries</text><rect x="132" y="80" width="266" height="14" rx="1" fill="var(--accent)"/><text x="404" y="93" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.475</text><text x="0" y="116" fill="#98a0b0" font-size="12">rushing yards</text><rect x="132" y="106" width="277" height="14" rx="1" fill="var(--accent)"/><text x="415" y="119" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.495</text></svg>
+  <p>A team's pass volume repeats at 0.341; a receiver's points per game repeat at 0.766. Bottom-up starts from the least stable number in the chain.</p>
+  <h2>Availability is the leak</h2>
+  <div class="callout"><span class="lbl">The weak link</span>Games played repeat at 0.316 across 2641 skill-position seasons at a 6-game floor. Nothing else in the decomposition is that noisy.</div>
+  <svg viewBox="0 0 484 104" width="100%" style="max-width:520px;display:block;margin:0 0 22px"><text x="0" y="12" fill="#565b69" font-size="11" font-family="var(--font-mono)">year-over-year correlation, rate vs whole season</text><text x="0" y="38" fill="#98a0b0" font-size="12">WR</text><rect x="132" y="28" width="277" height="7" rx="1" fill="var(--accent)"/><text x="415" y="34" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.766</text><rect x="132" y="37" width="260" height="7" rx="1" fill="var(--text-2)"/><text x="398" y="43" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.719</text><text x="0" y="64" fill="#98a0b0" font-size="12">RB</text><rect x="132" y="54" width="263" height="7" rx="1" fill="var(--accent)"/><text x="401" y="60" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.728</text><rect x="132" y="63" width="244" height="7" rx="1" fill="var(--text-2)"/><text x="382" y="69" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.673</text><text x="0" y="90" fill="#98a0b0" font-size="12">TE</text><rect x="132" y="80" width="268" height="7" rx="1" fill="var(--accent)"/><text x="406" y="86" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.74</text><rect x="132" y="89" width="248" height="7" rx="1" fill="var(--text-2)"/><text x="386" y="95" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.684</text><text x="132" y="103" font-size="10" font-family="var(--font-mono)"><tspan fill="var(--accent)">points per game</tspan><tspan fill="#262932">  </tspan><tspan fill="var(--text-2)">season total</tspan><tspan fill="#262932">  </tspan></text></svg>
+  <p>It surfaces where it should. Every season total is less predictable than the rate it was built from, and the difference is availability.</p>
+  <h2>Where decomposition does win</h2>
+  <p>Split each pair by whether the player stayed with his team.</p>
+  <svg viewBox="0 0 484 104" width="100%" style="max-width:520px;display:block;margin:0 0 22px"><text x="0" y="12" fill="#565b69" font-size="11" font-family="var(--font-mono)">predicting this year&#x27;s points per game from last year&#x27;s</text><text x="0" y="38" fill="#98a0b0" font-size="12">WR</text><rect x="132" y="28" width="277" height="7" rx="1" fill="var(--accent)"/><text x="415" y="34" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.785</text><rect x="132" y="37" width="247" height="7" rx="1" fill="var(--text-2)"/><text x="385" y="43" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.699</text><text x="0" y="64" fill="#98a0b0" font-size="12">RB</text><rect x="132" y="54" width="268" height="7" rx="1" fill="var(--accent)"/><text x="406" y="60" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.76</text><rect x="132" y="63" width="212" height="7" rx="1" fill="var(--text-2)"/><text x="350" y="69" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.601</text><text x="0" y="90" fill="#98a0b0" font-size="12">TE</text><rect x="132" y="80" width="267" height="7" rx="1" fill="var(--accent)"/><text x="405" y="86" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.755</text><rect x="132" y="89" width="220" height="7" rx="1" fill="var(--text-2)"/><text x="358" y="95" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.623</text><text x="132" y="103" font-size="10" font-family="var(--font-mono)"><tspan fill="var(--accent)">same team</tspan><tspan fill="#262932">  </tspan><tspan fill="var(--text-2)">changed teams</tspan><tspan fill="#262932">  </tspan></text></svg>
+  <p>Backs take the worst of it: 0.76 staying put against 0.601 after a move, 0.713 against 0.52 on season totals. A new team is a new denominator and a new share, something only a decomposed model can write down.</p>
+  <p>Pooled across all positions the same split reads 0.928 against 0.874 on points per game and 0.89 against 0.817 on totals. Those are far larger than the per-position numbers above, and nothing got easier: pooling mixes kickers with quarterbacks, which widens the spread of talent and lifts any correlation measured inside it. Read them against each other and nothing else here.</p>
+  <h2>What we take from it</h2>
+  <p>Decomposition does not earn its keep by being more predictable. It earns it by saying what a top-down model cannot: this receiver signed elsewhere, this back's line left, this rookie has no season to regress. Persistence is what you measure when nothing changed, and change is most of why anyone projects at all.</p>
+  <p>So we project rates, keep games played as its own uncertainty instead of hiding it in a total, and stop selling decomposition on a stability it does not have.</p>
+  <div class="meta">
+    <ul>
+      <li>experiment E003 &middot; run 2026-08-21 &middot; revision 4b34a80</li>
+      <li>Persistence is not usefulness, and this experiment measures only persistence. Decomposition&#x27;s real value is that it can price a KNOWN change -- a new team, a promoted role, a departed teammate&#x27;s vacated targets, a rookie with no history at all -- which a top-down &#x27;last year&#x27;s points&#x27; model structurally cannot represent. No correlation here captures that, and none of them argue against it.</li>
+      <li>The pooled same-team/changed-team correlations are INFLATED relative to every within-position number in this experiment. Pooling puts quarterbacks and kickers in one sample -- kickers score nothing under this league&#x27;s full-PPR rules -- so the spread of true talent is far wider than inside any one position, and a wider spread raises correlation on its own. They are meaningful ONLY as same-versus-moved against each other, never against the per-position figures.</li>
+      <li>Games-played persistence moves with the minimum-games filter more than anything else measured here: it is the reported figure at a six-game floor, higher with no floor at all, and lower at eight. Tightening the filter removes the healthy-then-injured seasons that the correlation is about.</li>
+      <li>A player who misses an ENTIRE season has no rows in `weekly`, so he never enters a year-over-year pair. Every durability number here is therefore optimistic -- the worst outcome is invisible to it.</li>
+      <li>A share correlating well is not the same as a decomposed projection working well. A real one multiplies three estimates and compounds three errors; this measures each input on its own, which is precisely what the standard rationale claims about them.</li>
+    </ul>
+  </div>
+</div>

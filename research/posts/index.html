@@ -1,0 +1,64 @@
+<title>Research</title>
+<style>
+  :root {
+    --bg-0:#0a0b0e; --bg-1:#121319; --bg-2:#1b1d25; --border:#262932;
+    --text-1:#e8eaef; --text-2:#98a0b0; --text-3:#565b69;
+    --accent:#ffb454; --fail:#d03b3b;
+    --font-ui:'Inter',system-ui,-apple-system,'Segoe UI',sans-serif;
+    --font-mono:'JetBrains Mono',ui-monospace,'SFMono-Regular',Menlo,monospace;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg-0); color:var(--text-2);
+         font:15px/1.6 var(--font-ui); -webkit-font-smoothing:antialiased; }
+  .wrap { max-width:780px; margin:0 auto; padding:56px 24px 90px; }
+  h1 { font-size:30px; color:var(--text-1); margin:0 0 10px; font-weight:700;
+        letter-spacing:-.02em; }
+  .sub { color:var(--text-2); margin:0 0 40px; max-width:60ch; }
+  .row { display:block; text-decoration:none; border:1px solid var(--border);
+          border-radius:6px; background:var(--bg-1); padding:18px 20px;
+          margin:0 0 12px; transition:border-color .12s; }
+  .row:hover { border-color:#3a4050; }
+  .id { font-family:var(--font-mono); font-size:11px; letter-spacing:.09em;
+         color:var(--text-3); }
+  .t { font-size:17px; color:var(--text-1); font-weight:600; margin:5px 0 6px;
+        letter-spacing:-.01em; }
+  .q { font-size:13.5px; color:var(--text-2); margin:0; }
+  .flag { display:inline-block; font-family:var(--font-mono); font-size:10px;
+           letter-spacing:.07em; text-transform:uppercase; color:var(--fail);
+           border:1px solid var(--fail); border-radius:3px; padding:1px 6px;
+           margin-left:8px; vertical-align:2px; }
+  .tags { font-family:var(--font-mono); font-size:11px; color:var(--text-3);
+           margin-top:9px; }
+  .none { color:var(--text-3); font-style:italic; }
+</style>
+<div class="wrap">
+  <h1>Research</h1>
+  <p class="sub">Experiments testing what this draft tool believes about its own
+  model. Every number in a post is read off the code that produced it &mdash; the
+  prose is a template, and a figure that was never measured raises rather than
+  renders.</p>
+  <a class="row" href="e001.html">
+    <div class="id">E001 &middot; 2026-08-21</div>
+    <div class="t">Strength of schedule: better model, same answer<span class="flag">overturns</span></div>
+    <p class="q">Can we predict defensive strength better than last season&#x27;s numbers do -- and if we can, does it change any draft decision?</p>
+    <div class="tags">schedule &middot; vegas &middot; composite</div>
+  </a>
+  <a class="row" href="e002.html">
+    <div class="id">E002 &middot; 2026-08-21</div>
+    <div class="t">The offensive line pays in yards, not points<span class="flag">overturns</span></div>
+    <p class="q">Does offensive line quality affect player production -- and if it does, which measurement of production shows it?</p>
+    <div class="tags">oline &middot; contracts &middot; efficiency &middot; composite</div>
+  </a>
+  <a class="row" href="e003.html">
+    <div class="id">E003 &middot; 2026-08-21</div>
+    <div class="t">The parts are not more predictable than the whole<span class="flag">overturns</span></div>
+    <p class="q">Should we project fantasy points directly, or decompose into team volume, player share and games played -- are the parts really more predictable than the points they combine into?</p>
+    <div class="tags">projections &middot; persistence &middot; usage</div>
+  </a>
+  <a class="row" href="e004.html">
+    <div class="id">E004 &middot; 2026-08-21</div>
+    <div class="t">Playoff-weeks schedule: the spread survives, the forecast does not</div>
+    <p class="q">Season-long schedule averages out to nothing. Weeks 15 to 17 are only three games and they decide the league -- is playoff-weeks schedule strength worth acting on at draft time?</p>
+    <div class="tags">schedule &middot; playoffs &middot; vegas &middot; composite</div>
+  </a>
+</div>

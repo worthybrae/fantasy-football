@@ -1,0 +1,72 @@
+<title>The offensive line pays in yards, not points</title>
+<style>
+  :root {
+    --bg-0:#0a0b0e; --bg-1:#121319; --bg-2:#1b1d25; --border:#262932;
+    --text-1:#e8eaef; --text-2:#98a0b0; --text-3:#565b69;
+    --accent:#ffb454; --ok:#0ca30c; --fail:#d03b3b;
+    --font-ui:'Inter',system-ui,-apple-system,'Segoe UI',sans-serif;
+    --font-mono:'JetBrains Mono',ui-monospace,'SFMono-Regular',Menlo,monospace;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg-0); color:var(--text-2);
+         font:16px/1.65 var(--font-ui); -webkit-font-smoothing:antialiased; }
+  .wrap { max-width:760px; margin:0 auto; padding:56px 24px 96px; }
+  .eyebrow { font-family:var(--font-mono); font-size:12px; letter-spacing:.1em;
+              text-transform:uppercase; color:var(--text-3); }
+  h1 { font-size:34px; line-height:1.2; letter-spacing:-.02em; color:var(--text-1);
+        margin:14px 0 10px; font-weight:700; }
+  .question { font-size:18px; line-height:1.55; color:var(--text-2);
+               border-left:2px solid var(--accent); padding-left:16px; margin:22px 0 32px; }
+  h2 { font-size:21px; color:var(--text-1); margin:44px 0 12px; font-weight:600;
+        letter-spacing:-.01em; }
+  p { margin:0 0 18px; }
+  strong { color:var(--text-1); font-weight:600; }
+  code { font-family:var(--font-mono); font-size:.92em; color:var(--accent);
+          background:var(--bg-2); padding:1px 5px; border-radius:3px; }
+  pre { background:var(--bg-1); border:1px solid var(--border); border-radius:5px;
+         padding:16px 18px; overflow-x:auto; font-family:var(--font-mono);
+         font-size:13px; line-height:1.6; color:var(--text-1); margin:0 0 22px; }
+  .callout { background:var(--bg-1); border:1px solid var(--border);
+              border-left:2px solid var(--fail); border-radius:4px;
+              padding:16px 18px; margin:0 0 22px; font-size:15px; }
+  .callout .lbl { font-family:var(--font-mono); font-size:11px; letter-spacing:.08em;
+                   text-transform:uppercase; color:var(--fail); display:block;
+                   margin-bottom:6px; }
+  .meta { margin-top:56px; padding-top:20px; border-top:1px solid var(--border);
+           font-family:var(--font-mono); font-size:12px; color:var(--text-3); }
+  .meta li { margin:5px 0; }
+  ul { padding-left:22px; } li { margin:7px 0; }
+</style>
+<div class="wrap">
+  <div class="eyebrow">Research &middot; E002</div>
+  <h1>The offensive line pays in yards, not points</h1>
+  <div class="question">Does offensive line quality affect player production -- and if it does, which measurement of production shows it?</div>
+  <p>Tested against running back fantasy points, an offensive line rating does nothing. We wrote that down as "the line doesn't matter." Tested against yards per carry, the same rating on the same teams is one of the clearer effects in this project.</p>
+  <h2>The rating is a price, not a grade</h2>
+  <p>There are no line grades in this database — no pressure rate, no run-block win rate, no PFF. There is what teams paid. Take the five linemen who took the most snaps for a team that season and average their contracts as a share of that year's cap: the market's own estimate of a line, already adjusted for the cap going up.</p>
+  <svg viewBox="0 0 440 180" width="100%" style="max-width:520px;display:block;margin:0 0 22px"><text x="0" y="11" fill="#565b69" font-size="11" font-family="var(--font-mono)">share of each season&#x27;s five starters with a contract on file</text><line x1="26" y1="150" x2="434" y2="150" stroke="#262932"/><path d="M26.0,150.0L70.8,124.0L115.7,62.0L160.5,124.0L205.4,112.0L250.6,74.0L295.5,74.0L340.3,24.0L385.2,62.0L430.0,74.0" fill="none" stroke="var(--accent)" stroke-width="2"/><circle cx="340.3" cy="24.0" r="3.5" fill="var(--accent)"/><text x="340.3" y="16.0" fill="var(--accent)" font-size="10" text-anchor="middle" font-family="var(--font-mono)">priced 99.4</text><text x="26" y="164" fill="#565b69" font-size="10" font-family="var(--font-mono)">2016 ------ 320 team-seasons ------ 2025</text></svg>
+  <p>Between 93.1% and 99.4% of starters price out, so a rating is five real contracts rather than three and a shrug. It names the right teams, too: DEN, DET, KC, PHI, TB paid the most in 2025, CIN, LV, ARI the least.</p>
+  <svg viewBox="0 0 484 104" width="100%" style="max-width:520px;display:block;margin:0 0 22px"><text x="0" y="12" fill="#565b69" font-size="11" font-family="var(--font-mono)">mean cap share per starter, 2025, percent of the cap</text><text x="0" y="38" fill="#98a0b0" font-size="12">best-paid line</text><rect x="132" y="28" width="277" height="14" rx="1" fill="var(--accent)"/><text x="415" y="41" fill="#565b69" font-size="10" font-family="var(--font-mono)">5.5</text><text x="0" y="64" fill="#98a0b0" font-size="12">league median</text><rect x="132" y="54" width="145" height="14" rx="1" fill="var(--accent)"/><text x="283" y="67" fill="#565b69" font-size="10" font-family="var(--font-mono)">2.88</text><text x="0" y="90" fill="#98a0b0" font-size="12">worst-paid line</text><rect x="132" y="80" width="41" height="14" rx="1" fill="var(--accent)"/><text x="179" y="93" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.82</text></svg>
+  <h2>Against fantasy points: nothing</h2>
+  <p>Predict a back's points per game from last year's, then add what his line costs.</p>
+  <svg viewBox="0 0 484 78" width="100%" style="max-width:520px;display:block;margin:0 0 22px"><text x="0" y="12" fill="#565b69" font-size="11" font-family="var(--font-mono)">predicting points per game, 561 player-seasons</text><text x="0" y="38" fill="#98a0b0" font-size="12">last year&#x27;s ppg</text><rect x="132" y="28" width="277" height="14" rx="1" fill="var(--accent)"/><text x="415" y="41" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.52</text><text x="0" y="64" fill="#98a0b0" font-size="12">+ line spending</text><rect x="132" y="54" width="277" height="14" rx="1" fill="var(--accent)"/><text x="415" y="67" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.52</text></svg>
+  <p>R2 moves 0.0001, and a standard deviation of spending buys 0.06 points a game. That was not a bad measurement. It was a good measurement of the wrong thing: fantasy points are carries and touchdowns, and a line does not hand out carries.</p>
+  <h2>Against yards per carry: something</h2>
+  <p>Same rating, same shape of test, one word different in the outcome.</p>
+  <svg viewBox="0 0 484 78" width="100%" style="max-width:520px;display:block;margin:0 0 22px"><text x="0" y="12" fill="#565b69" font-size="11" font-family="var(--font-mono)">predicting team yards per carry, 285 team-seasons</text><text x="0" y="38" fill="#98a0b0" font-size="12">last year&#x27;s team ypc</text><rect x="132" y="28" width="203" height="14" rx="1" fill="var(--accent)"/><text x="341" y="41" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.066</text><text x="0" y="64" fill="#98a0b0" font-size="12">+ line spending</text><rect x="132" y="54" width="277" height="14" rx="1" fill="var(--accent)"/><text x="415" y="67" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.09</text></svg>
+  <p>It turns up again where nothing is shared but the rating. 88 times a back with at least 50 carries in each of two seasons changed teams, and so changed lines wholesale. The change in what his line cost correlates 0.253 with the change in his yards per carry, and 0.351 among the 48 who carried it 100 times in both years.</p>
+  <svg viewBox="0 0 484 78" width="100%" style="max-width:520px;display:block;margin:0 0 22px"><text x="0" y="12" fill="#565b69" font-size="11" font-family="var(--font-mono)">yards per carry, per standard deviation of line spending</text><text x="0" y="38" fill="#98a0b0" font-size="12">team, mostly the same line</text><rect x="132" y="28" width="126" height="14" rx="1" fill="var(--accent)"/><text x="264" y="41" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.072</text><text x="0" y="64" fill="#98a0b0" font-size="12">back who changed lines</text><rect x="132" y="54" width="277" height="14" rx="1" fill="var(--accent)"/><text x="415" y="67" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.158</text></svg>
+  <p>The mover's number is the bigger one, as it should be. Team spending correlates 0.52 with its own spending a year earlier, so last year's yards per carry is already half a line measurement and absorbs part of the effect. A back who signs elsewhere gets the whole swing at once.</p>
+  <div class="callout"><span class="lbl">Where it lands</span>A median starter takes 137 carries. A standard deviation of line quality is worth 1 to 2.2 fantasy points to him across an entire season.</div>
+  <h2>What we changed</h2>
+  <p>Not the weight. What changed is what the input may claim: it prices efficiency, so judge it on efficiency. A projection denominated in points will read it as noise however good the rating gets.</p>
+  <p>And if the line moves yards and not points, then points are volume — a coaching decision rather than a blocking one. That is the thing worth predicting next.</p>
+  <div class="meta">
+    <ul>
+      <li>experiment E002 &middot; run 2026-08-21 &middot; revision 4b34a80</li>
+      <li>Cap share measures what a team PAID, not how the five played. It underrates any line built on rookie contracts -- five good young starters on rookie deals price out near the bottom of the league, and that is a real error in the rating, not noise.</li>
+      <li>The five starters are read off snaps the season actually produced, which is hindsight. At a draft you have a projected line, and the projection is wrong often enough (injury, camp battle, a guard kicked out to tackle) that the live version of this rating is weaker than the one measured here.</li>
+      <li>Contracts come from Over The Cap via nfl_data_py at run time and are joined on gsis_id; linemen with no gsis_id on their contract row are simply unpriced, which is most of what the coverage number is measuring.</li>
+    </ul>
+  </div>
+</div>
