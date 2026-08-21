@@ -45,6 +45,62 @@ function seasonLength(season: number): number {
   return season >= 2021 ? 17 : 16
 }
 
+
+// -- one chart, drawn three times ------------------------------------------
+//
+// Every panel is the same picture: time along the bottom, one column per
+// period, something growing from a shared baseline, the value above it and
+// the period below. Health and Finish are both about seasons and used to be
+// read in opposite directions -- one a stack of rows, the other a left-to-
+// right axis -- so a reader had to learn the panel again on each column.
+//
+// Taller is better in all three and the colour means the same thing in all
+// three, which leaves one thing to know per panel: what a column is.
+type Col = {
+  key: string | number
+  label: string                           // under the baseline: a year, a team
+  value: string                           // above the bar
+  tone: string                            // the shared five-step colour
+  fill: number                            // 0..1 of the slot
+  units?: { filled: number; of: number }  // circles instead of a solid bar
+  empty?: boolean                         // did not play: a baseline mark
+}
+
+function Chart({ cols }: { cols: Col[] }): ReactNode {
+  return (
+    <div className="ctip-chart">
+      {cols.map((c) => (
+        <span key={c.key} className="ctip-col">
+          <span className={`ctip-col-val ${c.empty ? 'is-off' : c.tone}`}>
+            {c.value}
+          </span>
+          <span className="ctip-col-slot">
+            {c.empty
+              // Not a zero-height bar: "did not play" and "played and scored
+              // nothing" are different claims, and the second already draws
+              // as the 6% floor below.
+              ? <span className="ctip-col-none" />
+              : c.units
+                ? <span className="ctip-units">
+                    {Array.from({ length: c.units.of }, (_, i) => (
+                      <span key={i} className={`ctip-unit${
+                        i < (c.units?.filled ?? 0) ? ` is-on ${c.tone}` : ''}`} />
+                    ))}
+                  </span>
+                : <span className={`ctip-col-bar ${c.tone}`}
+                        style={{ height: `${Math.max(6, c.fill * 100)}%` }} />}
+          </span>
+          <span className="ctip-col-label">{c.label}</span>
+        </span>
+      ))}
+    </div>
+  )
+}
+
+function year(season: number): string {
+  return `\u2019${String(season).slice(2)}`
+}
+
 /** Games played per season, INCLUDING seasons with none.
  *
  *  A player who missed a whole year has no row in the profile's `seasons`, and
@@ -59,41 +115,44 @@ function availabilityRows(seasons: SeasonSummary[]): { season: number; games: nu
   const first = Math.min(...played.keys())
   const last = Math.max(...played.keys())
   const rows = []
-  for (let season = last; season >= first; season -= 1) {
+  for (let season = first; season <= last; season += 1) {
     rows.push({ season, games: played.get(season) ?? 0 })
   }
   return rows
 }
 
-function Dots({ season, games }: { season: number; games: number }): ReactNode {
-  const total = seasonLength(season)
-  const played = Math.min(games, total)
-  return (
-    <span className="ctip-dots">
-      {Array.from({ length: total }, (_, i) => (
-        <span key={i} className={`ctip-dot${i < played ? ' is-on' : ''}`} />
-      ))}
-    </span>
-  )
-}
+// Health keeps its circles -- they say "16 of 17" in a way a bar cannot, and
+// it was the panel that already read well -- stacked into a column so the
+// season axis runs the same way Finish's does.
+const HEALTH_TONES = ['is-out', 'is-fringe', 'is-starter', 'is-strong', 'is-elite']
 
 function HealthBody({ data }: { data: PlayerProfileData }): ReactNode {
   const rows = availabilityRows(data.seasons)
   if (!rows.length) return <div className="ctip-empty">No NFL seasons yet.</div>
+  const cols: Col[] = rows.map((r) => {
+    const of = seasonLength(r.season)
+    const share = r.games / of
+    return {
+      key: r.season,
+      label: year(r.season),
+      value: String(r.games),
+      // The same five steps the other panels use, cut on how much of the
+      // season he was actually there for.
+      tone: HEALTH_TONES[Math.min(4, Math.floor(share * 5))],
+      fill: share,
+      units: { filled: Math.min(r.games, of), of },
+      empty: r.games === 0,
+    }
+  })
   return (
     <>
-      <div className="ctip-head">Games played</div>
-      <table className="ctip-table">
-        <tbody>
-          {rows.map((r) => (
-            <tr key={r.season}>
-              <td className="ctip-yr">{r.season}</td>
-              <td><Dots season={r.season} games={r.games} /></td>
-              <td className="ctip-num">{r.games}/{seasonLength(r.season)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <div className="ctip-head">
+        <span>Games played</span>
+        <span className="ctip-head-note">
+          of {seasonLength(rows[rows.length - 1].season)}
+        </span>
+      </div>
+      <Chart cols={cols} />
     </>
   )
 }
@@ -103,138 +162,59 @@ function GamesBody({ data }: { data: PlayerProfileData }): ReactNode {
   if (!seasons.length) return <div className="ctip-empty">No games on record.</div>
   const latest = Math.max(...seasons)
   const played = new Map(
-    data.game_log.filter((g) => g.season === latest && !g.dnp)
-      .map((g) => [g.week, g]))
+    data.game_log.filter((g) => g.season === latest && !g.dnp).map((g) => [g.week, g]))
   const scored = [...played.values()].map((g) => g.ppr_points)
-  const avg = scored.length
-    ? scored.reduce((a, b) => a + b, 0) / scored.length : 0
+  const avg = scored.length ? scored.reduce((a, b) => a + b, 0) / scored.length : 0
   const position = data.header.position
 
+  const cols: Col[] = Array.from({ length: SEASON_WEEKS }, (_, i) => {
+    const week = i + 1
+    const game = played.get(week)
+    const pts = game?.ppr_points ?? null
+    return {
+      key: week,
+      // The opponent, not the week number: a reader knows where week 9 is from
+      // its place in the row, and "DEN" is the fact that explains a bad one.
+      // The number would be the axis restating itself.
+      label: game?.opponent ?? '—',
+      value: pts === null ? '·' : String(Math.round(pts)),
+      tone: pts === null ? '' : barTone(pts, position),
+      fill: pts === null ? 0 : Math.min(1, pts / BAR_CEILING),
+      empty: pts === null,
+    }
+  })
   return (
     <>
       <div className="ctip-head">
         <span>{latest} by week</span>
-        {/* The one number the chart cannot state about itself. The best week
-            used to sit here too, to recover any value the shared 30-point
-            ceiling clipped -- redundant since the points row landed, which
-            prints every week's actual value including the clipped ones. */}
         <span className="ctip-head-note">avg {avg.toFixed(1)}</span>
       </div>
-      <div className="ctip-weeks">
-        {Array.from({ length: SEASON_WEEKS }, (_, i) => {
-          const week = i + 1
-          const game = played.get(week)
-          const pts = game?.ppr_points ?? null
-          const height = pts === null
-            ? 0 : Math.max(6, Math.min(1, pts / BAR_CEILING) * 100)
-          return (
-            <span key={week} className="ctip-week">
-              {/* Above the bar in a FIXED row rather than riding on top of
-                  it: labels that sat on variable-height bars scattered across
-                  the chart and stopped being a row of numbers you could read
-                  across. Rounded, because one decimal on eighteen columns
-                  makes each one wide enough to push the panel past its cap --
-                  the header carries the exact average and best. */}
-              <span className={`ctip-week-pts${pts === null ? ' is-off' : ''}`}>
-                {pts === null ? '·' : Math.round(pts)}
-              </span>
-              <span className="ctip-week-slot">
-                {pts === null
-                  // Not a zero-height bar: a week he did not play and a week
-                  // he scored nothing are different claims, and the second
-                  // one already draws as the 6px floor above.
-                  ? <span className="ctip-week-off" />
-                  : <span className={`ctip-week-bar ${barTone(pts, position)}`}
-                          style={{ height: `${height}%` }} />}
-              </span>
-              <span className="ctip-week-no">{week}</span>
-              <span className="ctip-week-opp">{game?.opponent ?? '—'}</span>
-            </span>
-          )
-        })}
-      </div>
+      <Chart cols={cols} />
     </>
-  )
-}
-
-// One column per season, oldest to newest, on a vertical rank axis.
-//
-// The first version painted all five tiers as bands. At the opacity that kept
-// them from drowning the dots they blended into one green-to-red gradient,
-// and a reader could not see where "startable" ended -- which is the only
-// boundary most seasons are judged against. Two labelled lines say it
-// exactly: the elite cut and the last startable rank. The dots keep the full
-// five-tier colouring, so the finer grades are still there to be read.
-const FIN_COL = 26        // per season
-const FIN_H = 58          // the rank axis
-const FIN_TOP = 11        // the finish numbers above it
-const FIN_BOTTOM = 12     // the years below it
-const FIN_RIGHT = 30      // room for the two axis labels
-
-function FinishChart(
-  { seasons, position }: { seasons: SeasonSummary[]; position: string },
-): ReactNode {
-  const starters = FINISH_STARTERS[position] ?? 24
-  // Oldest first: a career reads left to right, and the payload is newest
-  // first because a table wants the latest season at the top.
-  const rows = seasons.slice().reverse()
-  const plotW = Math.max(FIN_COL, rows.length * FIN_COL)
-  const width = plotW + FIN_RIGHT
-  const height = FIN_TOP + FIN_H + FIN_BOTTOM
-  const x = (i: number) => i * FIN_COL + FIN_COL / 2
-  const y = (finish: number) => FIN_TOP + finishPosition(finish, starters) * FIN_H
-
-  const marks = [
-    { rank: Math.round(starters / 4), label: `${position}${Math.round(starters / 4)}` },
-    { rank: starters, label: `${position}${starters}` },
-  ]
-  const line = rows.map((r, i) => `${x(i)},${y(r.pos_finish)}`).join(' ')
-
-  return (
-    <svg className="ctip-fchart" width={width} height={height}
-         viewBox={`0 0 ${width} ${height}`}>
-      {/* One tint, for "startable or better". Five of them was four too
-          many; one says where the useful half of the chart is. */}
-      <rect className="ctip-fzone" x="0" y={FIN_TOP}
-            width={plotW} height={y(starters) - FIN_TOP} />
-      {marks.map((m) => (
-        <g key={m.label}>
-          <line className="ctip-frule" x1="0" x2={plotW}
-                y1={y(m.rank)} y2={y(m.rank)} />
-          <text className="ctip-frule-label" x={plotW + 4} y={y(m.rank) + 3}>
-            {m.label}
-          </text>
-        </g>
-      ))}
-      {/* Only meaningful with two seasons to join, and drawn under the dots so
-          a marker is never half-covered by the path leaving it. */}
-      {rows.length > 1 && (
-        <polyline className="ctip-fline" points={line} fill="none" />
-      )}
-      {rows.map((r, i) => (
-        <g key={r.season}>
-          <text className={`ctip-flabel ${finishTone(r.pos_finish, starters)}`}
-                x={x(i)} y={FIN_TOP - 3} textAnchor="middle">{r.pos_finish}</text>
-          <circle className={`ctip-fdot ${finishTone(r.pos_finish, starters)}`}
-                  cx={x(i)} cy={y(r.pos_finish)} r="3.5" />
-          <text className="ctip-fyear" x={x(i)} y={height - 2}
-                textAnchor="middle">&rsquo;{String(r.season).slice(2)}</text>
-        </g>
-      ))}
-    </svg>
   )
 }
 
 function FinishBody({ data }: { data: PlayerProfileData }): ReactNode {
   if (!data.seasons.length) return <div className="ctip-empty">No NFL seasons yet.</div>
   const pos = data.header.position
+  const starters = FINISH_STARTERS[pos] ?? 24
+  const cols: Col[] = data.seasons.slice().reverse().map((s) => ({
+    key: s.season,
+    label: year(s.season),
+    value: String(s.pos_finish),
+    tone: finishTone(s.pos_finish, starters),
+    // `1 -` because rank runs backwards. A chart where the best season was
+    // the shortest column is the one thing a reader cannot be asked to hold
+    // in their head while comparing it to the two panels beside it.
+    fill: 1 - finishPosition(s.pos_finish, starters),
+  }))
   return (
     <>
-      {/* No axis note here: the two rules on the chart carry it, and this
-          heading was wider than the chart itself -- which, in a panel sized
-          to its widest child, is what left the empty strip down the side. */}
-      <div className="ctip-head"><span>Positional finish</span></div>
-      <FinishChart seasons={data.seasons} position={pos} />
+      <div className="ctip-head">
+        <span>Positional finish</span>
+        <span className="ctip-head-note">startable to {pos}{starters}</span>
+      </div>
+      <Chart cols={cols} />
     </>
   )
 }

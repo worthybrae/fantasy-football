@@ -4762,153 +4762,104 @@ button.roster-row:focus-visible {
 
 .ctip-empty { color: var(--text-3); }
 
-/* The season read left to right, one column per week -- the shape of a year
-   rather than eighteen rows of it. Same colour thresholds and the same
-   30-point ceiling as the inline sparkline this panel opens from (weeks.ts),
-   so a week is the same colour and the same relative height in both. */
-.ctip-weeks { display: flex; align-items: flex-end; gap: 3px; }
+/* ONE chart, drawn by all three panels: time along the bottom, a column per
+   period, something growing from a shared baseline, the value above and the
+   period below. Health and Finish are both about seasons and used to be read
+   in opposite directions -- a stack of rows against a left-to-right axis --
+   so a reader had to learn the panel again on each column. */
+.ctip-chart { display: flex; align-items: flex-end; gap: 3px; }
 
-/* Four fixed rows -- points, bar, week, opponent -- so each reads ACROSS as a
-   line rather than as eighteen little stacks. `min-width` is set by the
-   widest thing any row holds, a three-letter opponent. */
-.ctip-week {
+.ctip-col {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 2px;
+  /* Set by the widest thing any row holds, a three-letter opponent. */
   min-width: 17px;
 }
 
-.ctip-week-pts {
+.ctip-col-val {
   font-family: var(--font-mono);
   font-size: 9px;
   line-height: 1;
-  color: var(--text-2);
 }
-.ctip-week-pts.is-off { color: var(--text-3); }
+.ctip-col-val.is-off { color: var(--text-3); }
 
-.ctip-week-opp {
-  font-family: var(--font-mono);
-  font-size: 9px;
-  line-height: 1;
-  color: var(--text-3);
-  /* Quieter than the week number above it: the week is the axis and the
-     opponent is context, and at this size two equal greys read as one
-     four-character label rather than two facts. */
-  opacity: 0.75;
-}
-
-/* Fixed-height slot, so every bar grows from ONE baseline: without it a short
-   week and a tall one would each be centred in their own column and the
-   season's shape would be unreadable. */
-.ctip-week-slot {
+/* Fixed-height slot, so every bar grows from ONE baseline. Without it a short
+   column and a tall one would each be centred in their own cell and the shape
+   of the row -- the whole point of the picture -- would be unreadable. */
+.ctip-col-slot {
   display: flex;
   align-items: flex-end;
+  justify-content: center;
   width: 9px;
   height: 40px;
 }
 
-.ctip-week-bar { width: 100%; border-radius: 1px; }
-.ctip-week-bar.is-bad { background: var(--fail); }
-.ctip-week-bar.is-mid { background: var(--accent); }
-.ctip-week-bar.is-good { background: var(--ok); }
+.ctip-col-bar { width: 100%; border-radius: 1px; }
 
-/* A week he did not play: a mark on the baseline, not an absent column. The
-   gap in a season is the thing a reader is looking for. */
-.ctip-week-off {
+/* A period he did not play: a mark on the baseline, not an absent column.
+   The gap in a career is what someone hovering these is looking for. */
+.ctip-col-none {
   width: 100%;
   height: 2px;
   border-radius: 1px;
   background: var(--border);
 }
 
-.ctip-week-no {
+.ctip-col-label {
   font-family: var(--font-mono);
   font-size: 9px;
-  color: var(--text-3);
   line-height: 1;
+  color: var(--text-3);
 }
 
-/* `width: max-content`, and every one of the global `th, td` defaults undone
-   explicitly. That global rule (top of this file) sets `height: 32px` and a
-   `border-bottom` on every cell in the app, which is right for the draft
-   table and wrong here: it forced 32px of row on a 8px track and drew a
-   divider under each one, so a nine-season panel was three hundred pixels of
-   mostly nothing. Overriding padding alone left both in place. */
-.ctip-table { border-collapse: collapse; width: max-content; }
-.ctip-table td {
-  padding: 0 10px 0 0;
-  height: 18px;
-  border-bottom: none;
-  white-space: nowrap;
-  vertical-align: middle;
+/* Health draws its column as stacked circles rather than a solid bar: "16 of
+   17" is a count, and a bar can only say "most of it". */
+.ctip-units {
+  display: flex;
+  flex-direction: column-reverse;
+  align-items: center;
+  gap: 1px;
+  width: 100%;
+  height: 100%;
+  justify-content: flex-start;
 }
-.ctip-table td:last-child { padding-right: 0; }
-.ctip-table tr.is-dnp td { color: var(--text-3); }
-
-.ctip-yr { font-family: var(--font-mono); color: var(--text-3); }
-.ctip-num { font-family: var(--font-mono); text-align: right; color: var(--text-1); }
-
-/* A finish is a PLACE on the position's ladder, so the chart draws the ladder
-   as its vertical axis -- tiers as bands, a dot per season sitting where he
-   came down, and a line through them because a career has a direction that a
-   single season does not. Log-spaced (see finish.ts): RB1 to RB6 is the
-   difference between draft rounds, RB50 to RB70 is two players nobody takes.
-   Same five cut points and the same five names the board's own finish bars
-   use, so a season is the same colour in the table and in the panel. */
-.ctip-fchart { display: block; overflow: visible; }
-
-/* One tint for "startable or better", and two labelled rules. Five bands at
-   an opacity low enough not to drown the dots blended into a single
-   green-to-red gradient, and the boundary that actually matters -- the last
-   startable rank -- was invisible in it. */
-.ctip-fzone { fill: var(--ok); opacity: 0.09; }
-
-.ctip-frule {
-  stroke: var(--text-3);
-  stroke-width: 1;
-  stroke-dasharray: 3 3;
-  opacity: 0.5;
-}
-.ctip-frule-label {
-  font-family: var(--font-mono);
-  font-size: 9px;
-  fill: var(--text-3);
-}
-
-.ctip-fline { stroke: var(--text-3); stroke-width: 1.25; opacity: 0.65; }
-
-.ctip-fdot { stroke: var(--bg-2); stroke-width: 1.5; }
-.ctip-fdot.is-elite   { fill: var(--ok); }
-.ctip-fdot.is-strong  { fill: #7cb342; }
-.ctip-fdot.is-starter { fill: #b3c132; }
-.ctip-fdot.is-fringe  { fill: var(--accent); }
-.ctip-fdot.is-out     { fill: var(--fail); }
-
-/* The finish number carries the tier colour too, so the grades the two rules
-   do not mark -- elite against strong, fringe against out -- are still
-   readable without counting pixels against a line. */
-.ctip-flabel { font-family: var(--font-mono); font-size: 9px; }
-.ctip-flabel.is-elite   { fill: var(--ok); }
-.ctip-flabel.is-strong  { fill: #7cb342; }
-.ctip-flabel.is-starter { fill: #b3c132; }
-.ctip-flabel.is-fringe  { fill: var(--accent); }
-.ctip-flabel.is-out     { fill: var(--fail); }
-.ctip-fyear {
-  font-family: var(--font-mono);
-  font-size: 9px;
-  fill: var(--text-3);
-}
-
-/* One dot per game of the season, so the row's LENGTH is the season and its
-   green run is the part he was available for. A count alone ("8/17") makes a
-   reader do the arithmetic; the gap is the point. */
-.ctip-dots { display: inline-flex; gap: 2px; align-items: center; }
-.ctip-dot {
-  width: 5px;
-  height: 5px;
+.ctip-unit {
+  width: 4px;
+  height: 4px;
   border-radius: 50%;
-  background: var(--fail);
-  opacity: 0.55;
+  background: var(--bg-1);
+  flex: 0 0 auto;
 }
-.ctip-dot.is-on { background: var(--ok); opacity: 1; }
+
+/* The one five-step ramp every panel shares -- bars, circles and the value
+   above them. Same names and the same cut points as the board's finish bars
+   (finish.ts) and its week sparkline (weeks.ts), so a colour means one thing
+   whichever picture it appears in. */
+.ctip-col-bar.is-good, .ctip-unit.is-on.is-good, .ctip-col-val.is-good,
+.ctip-col-bar.is-elite, .ctip-unit.is-on.is-elite, .ctip-col-val.is-elite {
+  background: var(--ok);
+}
+.ctip-col-bar.is-strong, .ctip-unit.is-on.is-strong, .ctip-col-val.is-strong {
+  background: #7cb342;
+}
+.ctip-col-bar.is-mid, .ctip-unit.is-on.is-mid, .ctip-col-val.is-mid,
+.ctip-col-bar.is-starter, .ctip-unit.is-on.is-starter, .ctip-col-val.is-starter {
+  background: #b3c132;
+}
+.ctip-col-bar.is-fringe, .ctip-unit.is-on.is-fringe, .ctip-col-val.is-fringe {
+  background: var(--accent);
+}
+.ctip-col-bar.is-bad, .ctip-unit.is-on.is-bad, .ctip-col-val.is-bad,
+.ctip-col-bar.is-out, .ctip-unit.is-on.is-out, .ctip-col-val.is-out {
+  background: var(--fail);
+}
+/* The value above the bar is TEXT, so it takes the ramp as a colour rather
+   than as a fill -- these override the backgrounds set above. */
+.ctip-col-val { background: none !important; }
+.ctip-col-val.is-good, .ctip-col-val.is-elite { color: var(--ok); }
+.ctip-col-val.is-strong { color: #7cb342; }
+.ctip-col-val.is-mid, .ctip-col-val.is-starter { color: #b3c132; }
+.ctip-col-val.is-fringe { color: var(--accent); }
+.ctip-col-val.is-bad, .ctip-col-val.is-out { color: var(--fail); }
