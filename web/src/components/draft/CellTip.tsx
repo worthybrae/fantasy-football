@@ -131,6 +131,15 @@ function GamesBody({ data }: { data: PlayerProfileData }): ReactNode {
             ? 0 : Math.max(6, Math.min(1, pts / BAR_CEILING) * 100)
           return (
             <span key={week} className="ctip-week">
+              {/* Above the bar in a FIXED row rather than riding on top of
+                  it: labels that sat on variable-height bars scattered across
+                  the chart and stopped being a row of numbers you could read
+                  across. Rounded, because one decimal on eighteen columns
+                  makes each one wide enough to push the panel past its cap --
+                  the header carries the exact average and best. */}
+              <span className={`ctip-week-pts${pts === null ? ' is-off' : ''}`}>
+                {pts === null ? '·' : Math.round(pts)}
+              </span>
               <span className="ctip-week-slot">
                 {pts === null
                   // Not a zero-height bar: a week he did not play and a week
@@ -141,6 +150,7 @@ function GamesBody({ data }: { data: PlayerProfileData }): ReactNode {
                           style={{ height: `${height}%` }} />}
               </span>
               <span className="ctip-week-no">{week}</span>
+              <span className="ctip-week-opp">{game?.opponent ?? '—'}</span>
             </span>
           )
         })}

@@ -4768,7 +4768,35 @@ button.roster-row:focus-visible {
    so a week is the same colour and the same relative height in both. */
 .ctip-weeks { display: flex; align-items: flex-end; gap: 3px; }
 
-.ctip-week { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+/* Four fixed rows -- points, bar, week, opponent -- so each reads ACROSS as a
+   line rather than as eighteen little stacks. `min-width` is set by the
+   widest thing any row holds, a three-letter opponent. */
+.ctip-week {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 17px;
+}
+
+.ctip-week-pts {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  line-height: 1;
+  color: var(--text-2);
+}
+.ctip-week-pts.is-off { color: var(--text-3); }
+
+.ctip-week-opp {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  line-height: 1;
+  color: var(--text-3);
+  /* Quieter than the week number above it: the week is the axis and the
+     opponent is context, and at this size two equal greys read as one
+     four-character label rather than two facts. */
+  opacity: 0.75;
+}
 
 /* Fixed-height slot, so every bar grows from ONE baseline: without it a short
    week and a tall one would each be centred in their own column and the
