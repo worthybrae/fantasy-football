@@ -4853,21 +4853,26 @@ button.roster-row:focus-visible {
    whichever picture it appears in. */
 .ctip-col-bar.is-good, .ctip-unit.is-on.is-good, .ctip-col-val.is-good,
 .ctip-col-bar.is-elite, .ctip-unit.is-on.is-elite, .ctip-col-val.is-elite {
-  background: var(--ok);
+  --tone: var(--ok);
+  background: var(--tone);
 }
 .ctip-col-bar.is-strong, .ctip-unit.is-on.is-strong, .ctip-col-val.is-strong {
-  background: #7cb342;
+  --tone: #7cb342;
+  background: var(--tone);
 }
 .ctip-col-bar.is-mid, .ctip-unit.is-on.is-mid, .ctip-col-val.is-mid,
 .ctip-col-bar.is-starter, .ctip-unit.is-on.is-starter, .ctip-col-val.is-starter {
-  background: #b3c132;
+  --tone: #b3c132;
+  background: var(--tone);
 }
 .ctip-col-bar.is-fringe, .ctip-unit.is-on.is-fringe, .ctip-col-val.is-fringe {
-  background: var(--accent);
+  --tone: var(--accent);
+  background: var(--tone);
 }
 .ctip-col-bar.is-bad, .ctip-unit.is-on.is-bad, .ctip-col-val.is-bad,
 .ctip-col-bar.is-out, .ctip-unit.is-on.is-out, .ctip-col-val.is-out {
-  background: var(--fail);
+  --tone: var(--fail);
+  background: var(--tone);
 }
 /* The value above the bar is TEXT, so it takes the ramp as a colour rather
    than as a fill -- these override the backgrounds set above. */
@@ -4877,3 +4882,30 @@ button.roster-row:focus-visible {
 .ctip-col-val.is-mid, .ctip-col-val.is-starter { color: #b3c132; }
 .ctip-col-val.is-fringe { color: var(--accent); }
 .ctip-col-val.is-bad, .ctip-col-val.is-out { color: var(--fail); }
+
+/* The projection is the only column in any panel that has not happened yet,
+   and it was drawn exactly like the seasons beside it: same ramp, same solid
+   fill, the word "proj" in 9px type the only thing separating a forecast from
+   a fact. It keeps its tone -- it is still read against the same good/mid/bad
+   cut points -- but a fact is filled in and a forecast is an outline.
+   `--tone` is set alongside `background` on every step of the ramp above so
+   the border can reach the same colour without restating the five hexes. */
+.ctip-col-bar.is-proj {
+  /* A wash rather than nothing behind the outline. These bars are 9px wide:
+     at that size a bare 1.5px border loses its hue to antialiasing and the
+     projection came out reading near-white, which threw away the good/mid/bad
+     colour the tone exists to carry. 16% keeps the hue legible and is still
+     nowhere near a filled column. Browsers without color-mix fall back to the
+     hollow outline, which is the same idea, just paler. */
+  background: none;
+  background: color-mix(in srgb, var(--tone, var(--text-3)) 16%, transparent);
+  border: 1.5px solid var(--tone, var(--text-3));
+}
+
+/* Where the record stops. Dashed rather than solid so it reads as a boundary
+   in the axis and not as another column's edge. */
+.ctip-col.is-forecast {
+  border-left: 1px dashed var(--border);
+  padding-left: 6px;
+  margin-left: 3px;
+}

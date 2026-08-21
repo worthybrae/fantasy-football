@@ -66,13 +66,14 @@ type Col = {
   fill: number                            // 0..1 of the slot
   units?: { filled: number; of: number }  // circles instead of a solid bar
   empty?: boolean                         // did not play: a baseline mark
+  projected?: boolean                     // has not happened: drawn hollow
 }
 
 function Chart({ cols }: { cols: Col[] }): ReactNode {
   return (
     <div className="ctip-chart">
       {cols.map((c) => (
-        <span key={c.key} className="ctip-col">
+        <span key={c.key} className={`ctip-col${c.projected ? ' is-forecast' : ''}`}>
           <span className={`ctip-col-val ${c.empty ? 'is-off' : c.tone}`}>
             {c.value}
           </span>
@@ -89,7 +90,7 @@ function Chart({ cols }: { cols: Col[] }): ReactNode {
                         i < (c.units?.filled ?? 0) ? ` is-on ${c.tone}` : ''}`} />
                     ))}
                   </span>
-                : <span className={`ctip-col-bar ${c.tone}`}
+                : <span className={`ctip-col-bar ${c.tone}${c.projected ? ' is-proj' : ''}`}
                         style={{ height: `${Math.max(6, c.fill * 100)}%` }} />}
           </span>
           <span className="ctip-col-label">{c.label}</span>
@@ -295,6 +296,10 @@ function ChangeBody({ data }: BodyProps): ReactNode {
       value: proj.toFixed(1),
       tone: barTone(proj, position),
       fill: proj / ceiling,
+      // Drawn hollow, behind a rule: everything left of it is banked, this
+      // is the only column still owed. The tone stays, so it is still read
+      // against the same good/mid/bad cut points as the seasons beside it.
+      projected: true,
     })
   }
   const last = rows.length ? rows[0].ppg : null
