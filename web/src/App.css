@@ -4787,13 +4787,19 @@ button.roster-row:focus-visible {
 
 /* Fixed-height slot, so every bar grows from ONE baseline. Without it a short
    column and a tall one would each be centred in their own cell and the shape
-   of the row -- the whole point of the picture -- would be unreadable. */
+   of the row -- the whole point of the picture -- would be unreadable.
+   
+   68px is set by the tallest thing any panel puts in it: Health's stack of 17
+   circles at 3px with 1px between them, which comes to 67. At the previous
+   40px the stack was 84px tall and overflowed UPWARD past the baseline, which
+   is why Health and Finish sat higher on the page than the week chart. The
+   slot is shared, so this is the number that keeps all three level. */
 .ctip-col-slot {
   display: flex;
   align-items: flex-end;
   justify-content: center;
   width: 9px;
-  height: 40px;
+  height: 68px;
 }
 
 .ctip-col-bar { width: 100%; border-radius: 1px; }
@@ -4822,14 +4828,19 @@ button.roster-row:focus-visible {
   align-items: center;
   gap: 1px;
   width: 100%;
-  height: 100%;
-  justify-content: flex-start;
+  /* Sized by its circles, not by the slot: a 16-game season must come out
+     shorter than a 17-game one, which is the whole reason these are circles
+     rather than a bar. */
+  height: auto;
 }
 .ctip-unit {
-  width: 4px;
-  height: 4px;
+  width: 3px;
+  height: 3px;
   border-radius: 50%;
   background: var(--bg-1);
+  /* Never allowed to grow or shrink: the stack's HEIGHT is the count, so a
+     flexed unit would silently make a 16-game season as tall as a 17-game
+     one and take the meaning out of the picture. */
   flex: 0 0 auto;
 }
 
