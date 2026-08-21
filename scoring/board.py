@@ -79,6 +79,9 @@ _BOARD_COLUMNS = [
     # seasons included -- see `career_availability`. A RATE, unlike
     # `durability` two columns over, which is a within-position percentile.
     "career_games_pg",
+    # Up to five [season, positional finish] pairs, oldest first -- the arc
+    # the available table draws per row. See `season_finishes`.
+    "season_finishes",
     # How much this league's scoring rules re-price ESPN's PPR-shaped season
     # projection for this player: 1.0 in a PPR league, ~0.83 for a
     # high-reception WR in half-PPR, ~0.67 in standard. On the board rather
@@ -214,6 +217,52 @@ def _neutral_factors(position: str, rules: dict | None,
         return [f for f in _NEUTRAL_FACTORS_FOR_KDST
                 if f not in _KICKER_FACTORS_THAT_BECOME_REAL]
     return _NEUTRAL_FACTORS_FOR_KDST
+
+
+# How many seasons of positional finish the board carries per player. Five
+# is a career arc without being a career: it clears a rookie contract, and
+# five bars still read individually in a table row where the sparkline beside
+# them already spends 92px.
+FINISH_SEASONS = 5
+
+
+def season_finishes(weekly: pd.DataFrame, rules: dict | None = None,
+                    seasons: int = FINISH_SEASONS) -> pd.DataFrame:
+    """Positional finish per season, most recent first, per player.
+
+    The same "finished RB12" ranking scoring/profile.py computes for one
+    player at a time, computed once for everybody so the available table can
+    draw a career arc without a request per row.
+
+    Ranked on SEASON POINTS, matching profile.py deliberately: two views of
+    the same player that disagreed about what RB12 means would be worse than
+    either alone. `pos_rank_ppg` -- the same season ranked per game -- is a
+    different fact, and the profile is where there is room to show both.
+
+    Computed on the FULL history for the same reason `career_availability`
+    is: build_board narrows `weekly` to RECENCY_WEIGHTS, which is three
+    seasons, and an arc of three points is not an arc.
+    """
+    empty = pd.DataFrame(columns=["player_id", "season_finishes"])
+    if weekly.empty or "season" not in weekly.columns:
+        return empty
+    feats = player_season_features(weekly, normalize_rules(rules))
+    if feats.empty:
+        return empty
+    feats = feats.assign(finish=feats.groupby(["season", "position"])["points"]
+                         .rank(ascending=False, method="min"))
+    latest = int(feats["season"].max())
+    feats = feats[feats["season"] > latest - seasons]
+    # Built by walking the sorted frame rather than groupby.apply: apply pays
+    # a Python call per player (five thousand of them) to produce a list it
+    # then has to box back into a Series, and its `include_groups` argument
+    # does not exist on the pandas this project pins.
+    feats = feats.sort_values(["player_id", "season"])
+    arcs: dict[str, list] = {}
+    for pid, season, finish in zip(feats["player_id"], feats["season"],
+                                   feats["finish"]):
+        arcs.setdefault(pid, []).append([int(season), int(finish)])
+    return pd.DataFrame({"player_id": list(arcs), "season_finishes": list(arcs.values())})
 
 
 def career_availability(weekly: pd.DataFrame) -> pd.DataFrame:
@@ -807,6 +856,7 @@ def build_board(conn, weights: dict | None = None,
     # durability. See `career_availability` for why absent seasons are the
     # whole point of computing it over the full history.
     career = career_availability(weekly)
+    finishes = season_finishes(weekly, rules)
     if not weekly.empty:
         weekly = weekly[weekly["season"].isin(RECENCY_WEIGHTS)]
     depth = _adapt_depth_charts(read_table(conn, "depth_charts"))
@@ -856,6 +906,7 @@ def build_board(conn, weights: dict | None = None,
     for raw in (prod, dura, role):
         uni = uni.merge(raw, on="player_id", how="left")
     uni = uni.merge(career, on="player_id", how="left")
+    uni = uni.merge(finishes, on="player_id", how="left")
 
     env = factors.environment_factor(sched) if not sched.empty else pd.DataFrame(columns=["team", "env_raw"])
     uni = uni.merge(env, on="team", how="left")

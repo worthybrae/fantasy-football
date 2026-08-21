@@ -94,6 +94,12 @@ def test_board_column_contract(tmp_path):
                 # entire point (the naive average reports a median of 7.2
                 # games against a true 3.0).
                 "career_games_pg",
+                # Up to five [season, positional finish] pairs, oldest first:
+                # the career arc the available table draws per row. Ranked on
+                # season points, matching scoring/profile.py's `pos_finish`
+                # deliberately -- two views disagreeing about what RB12 means
+                # would be worse than either alone.
+                "season_finishes",
                 # The scoring-format work adds proj_scale: how much this
                 # league's rules re-price ESPN's PPR-only season projection
                 # for this player (1.0 in a PPR league). It is on the board,
@@ -1170,3 +1176,41 @@ def test_career_availability_is_measured_before_the_recency_filter():
     seasons = max(RECENCY_WEIGHTS) - old_season + 1
     assert out["vet"] == pytest.approx((2 + 17 * len(RECENCY_WEIGHTS)) / seasons)
     assert out["vet"] < 17.0, "the pre-window season must still drag it down"
+
+
+def test_season_finishes_ranks_within_season_and_position():
+    """"Finished RB12" is a rank against other RUNNING BACKS that year, not
+    against every player, and not against the same position across eras."""
+    from scoring.board import season_finishes
+    weekly = pd.DataFrame(
+        [{"player_id": p, "player_display_name": p, "season": s, "week": w,
+          "position": pos,
+          "recent_team": "DET", "receptions": rec, "receiving_yards": 0,
+          "rushing_yards": 0, "carries": 0, "targets": 0,
+          "passing_yards": 0, "attempts": 0, "completions": 0}
+         for p, pos, rec in (("rb1", "RB", 10), ("rb2", "RB", 5), ("wr1", "WR", 1))
+         for s in (2024, 2025) for w in range(1, 18)])
+    out = season_finishes(weekly).set_index("player_id")["season_finishes"]
+    # The better back is RB1 both years; the worse is RB2 -- and the receiver
+    # is WR1, because he is ranked against receivers rather than against them.
+    assert [f for _, f in out["rb1"]] == [1, 1]
+    assert [f for _, f in out["rb2"]] == [2, 2]
+    assert [f for _, f in out["wr1"]] == [1, 1]
+
+
+def test_season_finishes_keeps_only_the_most_recent_seasons():
+    """A table row has space for an arc, not a career. Older seasons are
+    dropped from the END that matters least -- the oldest."""
+    from scoring.board import FINISH_SEASONS, season_finishes
+    seasons = list(range(2015, 2026))
+    weekly = pd.DataFrame(
+        [{"player_id": "vet", "player_display_name": "Vet", "season": s,
+          "week": w, "position": "WR",
+          "recent_team": "DET", "receptions": 5, "receiving_yards": 60,
+          "rushing_yards": 0, "carries": 0, "targets": 7,
+          "passing_yards": 0, "attempts": 0, "completions": 0}
+         for s in seasons for w in range(1, 18)])
+    arc = season_finishes(weekly).set_index("player_id")["season_finishes"]["vet"]
+    assert len(arc) == FINISH_SEASONS
+    assert [s for s, _ in arc] == sorted(s for s, _ in arc), "oldest first"
+    assert arc[-1][0] == max(seasons), "the latest season is last"

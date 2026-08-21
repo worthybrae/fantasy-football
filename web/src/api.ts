@@ -21,6 +21,11 @@ export interface Player {
   // no NFL season behind him. The available table draws it as a five-bar
   // meter; it is a RATE, not the board's `durability` percentile.
   career_games_pg: number | null;
+  // Up to five [season, positional finish] pairs, oldest first -- "he
+  // finished RB12", ranked on season points, the same framing the profile
+  // uses so the two views cannot disagree about what RB12 means. `null` for
+  // a defense or anyone with no NFL season yet.
+  season_finishes: [number, number][] | null;
   // Points in each week of the last COMPLETE season -- index 0 is week 1 --
   // scored under the league's own rules, not always PPR (scoring/game_points.py).
   // The available table draws it as an inline bar chart.

@@ -4619,3 +4619,44 @@ button.roster-row:focus-visible {
   font-size: 10px;
   color: var(--text-3);
 }
+
+/* -- positional finish, in the table row ----------------------------------
+   The same five bands and cut points SeasonFinish uses on the profile card,
+   at a sixth the size: the table version is the glance ("this player is
+   trending up"), the card version is where you go to read it. They share
+   the bands deliberately -- two views that disagreed about whether a season
+   was good would be worse than either alone.
+
+   Five slots at 5px plus gaps, sized to sit between the player name and the
+   sparkline without pushing the row past 32px. */
+.avail-col-finish { width: 46px; }
+
+.finish-arc {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 16px;
+}
+
+/* Each bar gets a full-height slot so the arc is read against a constant
+   axis. Without it a career of three poor seasons would draw the least bad
+   of them as tall as a genuine RB1 year. */
+.finish-arc-slot {
+  display: flex;
+  align-items: flex-end;
+  width: 5px;
+  height: 100%;
+  background: var(--bg-2);
+  border-radius: 1px;
+}
+
+.finish-arc-bar {
+  width: 100%;
+  border-radius: 1px;
+}
+
+.finish-arc-bar.is-elite   { background: var(--ok); }
+.finish-arc-bar.is-strong  { background: #7cb342; }
+.finish-arc-bar.is-starter { background: #b3c132; }
+.finish-arc-bar.is-fringe  { background: var(--accent); }
+.finish-arc-bar.is-out     { background: var(--fail); }

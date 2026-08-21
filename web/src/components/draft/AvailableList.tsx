@@ -201,7 +201,7 @@ const GameBars = memo(function GameBars({ points, season, position }: {
 // a reader looks for "what do I still need" anyway. It is deliberately not
 // re-drawn here.)
 
-type SortKey = 'rank' | 'pos' | 'player' | 'health' | 'proj' | 'lasts' | 'adp' | 'espn'
+type SortKey = 'rank' | 'pos' | 'player' | 'finish' | 'health' | 'proj' | 'lasts' | 'adp' | 'espn'
 type SortDir = 'asc' | 'desc'
 
 // The direction a column gets on its FIRST click -- "best first" for that
@@ -214,7 +214,7 @@ type SortDir = 'asc' | 'desc'
 // column; this only decides which one you land on without having to click
 // twice.
 const NATURAL_DIR: Record<SortKey, SortDir> = {
-  rank: 'asc', pos: 'asc', player: 'asc', health: 'desc', proj: 'desc', lasts: 'desc', adp: 'asc',
+  rank: 'asc', pos: 'asc', player: 'asc', finish: 'asc', health: 'desc', proj: 'desc', lasts: 'desc', adp: 'asc',
   espn: 'asc',
 }
 
@@ -280,6 +280,50 @@ function positionTip(
 // the rest are defenses and players with no NFL season yet): 9% land on one
 // bar, 15% on two, 35% on three, 28% on four, 14% on five. Wide middle,
 // rare extremes -- which is what makes a five-bar meter readable at all.
+// -- positional finish, season by season -----------------------------------
+//
+// The same five bands SeasonFinish uses on the profile, on the same cut
+// points, so the small version in the table and the big one in the card
+// cannot disagree about whether a season was good. Fractions of the number
+// of players a 12-team league starts at the position, which is why one rule
+// reads a quarterback and a running back correctly.
+const FINISH_STARTERS: Record<string, number> = {
+  QB: 12, TE: 12, RB: 24, WR: 24, K: 12, DST: 12,
+}
+
+function finishTone(finish: number, starters: number): string {
+  if (finish <= starters / 4) return 'is-elite'
+  if (finish <= starters / 2) return 'is-strong'
+  if (finish <= starters) return 'is-starter'
+  if (finish <= starters * 2) return 'is-fringe'
+  return 'is-out'
+}
+
+// Taller is better, because rank runs the other way. Capped at three tiers
+// of starters: stretching the axis to reach a TE40 would squash every
+// meaningful season into the top of a 16px strip.
+function finishHeight(finish: number, starters: number): number {
+  const floor = starters * 3
+  return 12 + (1 - Math.min(finish, floor) / floor) * 88
+}
+
+const FinishArc = memo(function FinishArc(
+  { arc, position }: { arc: [number, number][]; position: string },
+): ReactNode {
+  const starters = FINISH_STARTERS[position] ?? 24
+  const label = arc.map(([yr, f]) => `'${String(yr).slice(2)} ${position}${f}`).join('  ')
+  return (
+    <span className="finish-arc" role="img" aria-label={label} title={label}>
+      {arc.map(([season, finish]) => (
+        <span key={season} className="finish-arc-slot">
+          <span className={`finish-arc-bar ${finishTone(finish, starters)}`}
+                style={{ height: `${finishHeight(finish, starters)}%` }} />
+        </span>
+      ))}
+    </span>
+  )
+})
+
 const HEALTH_CUTS = [10, 13, 15, 16.3] as const
 
 function healthLevel(gamesPg: number | null | undefined): number | null {
@@ -324,6 +368,13 @@ function sortValue(
     case 'rank': return c.rank
     case 'pos': return posIndex(c.position)
     case 'player': return (player?.name ?? c.player_id).toLowerCase()
+    // The most recent finish, because an arc has no single value and the
+    // last season is the one being reasoned from. Ascending is natural:
+    // RB1 is the best thing a row can say.
+    case 'finish': {
+      const arc = player?.season_finishes
+      return arc && arc.length ? arc[arc.length - 1][1] : null
+    }
     case 'health': return player?.career_games_pg ?? null
     case 'proj': return c.proj_points
     case 'lasts': return c.survive_pct
@@ -433,6 +484,7 @@ const AvailableRow = memo(function AvailableRow({
   onDraft: (c: LiveCandidate) => void
 }): ReactNode {
   const level = healthLevel(player?.career_games_pg)
+  const arc = player?.season_finishes ?? null
   return (
               <tr key={c.player_id} data-pid={c.player_id}
                   className={isTaken ? 'avail-row-taken' : undefined}
@@ -482,6 +534,11 @@ const AvailableRow = memo(function AvailableRow({
                     renders the same em-dash the sparkline's own empty state
                     uses, never a 0 or an empty strip: a defense or an
                     unpriced rookie has no counted season, not a clean one. */}
+                <td className="avail-col-finish">
+                  {arc === null || arc.length === 0
+                    ? <span className="gamebars-none">—</span>
+                    : <FinishArc arc={arc} position={c.position} />}
+                </td>
                 <td className="avail-col-health">
                   {level === null
                     ? <span className="gamebars-none">—</span>
@@ -668,6 +725,13 @@ export default function AvailableList({
 
   const q = search.trim().toLowerCase()
   const visible = candidates.filter((c) => {
+    // A drafted player stays only while he is ANIMATING. Once his fade is
+    // done he leaves `taken`, but the board still calls him drafted and the
+    // candidate list still carries him until the next ranking lands about a
+    // second later -- so without this he sat there at opacity 0, occupying a
+    // full row, and the hole the short fade was meant to close reappeared
+    // one step further on.
+    if (draftedIds.has(c.player_id) && !taken.has(c.player_id)) return false
     if (pos !== 'ALL' && c.position !== pos) return false
     if (!q) return true
     const player = players[c.player_id]
@@ -864,6 +928,12 @@ export default function AvailableList({
   // board, which is exactly what two different seasons' schedules colliding
   // by chance would produce. See missedGames's own comment for the count
   // math, which this strip does not change.
+  const finishTitle = 'Where he finished at his position in each of the last '
+    + 'five seasons, oldest bar on the left. Taller is better, and the colour '
+    + 'is how useful that finish was: green was the best quarter of a '
+    + "league's starters at the position, red was outside fantasy relevance "
+    + 'entirely. Ranked on season points, so a year cut short by injury shows '
+    + 'as the bad finish it was. Sorts on the most recent season.'
   const healthTitle = "How available this player has been across his whole "
     + 'career: average games played per season, counting seasons he missed '
     + 'entirely rather than skipping them. Five bars is close to a full '
@@ -906,6 +976,7 @@ export default function AvailableList({
     pos: posTitle,
     player: playerTitle,
     games: gamesTitle,
+    finish: finishTitle,
     health: healthTitle,
     proj: projTitle,
     lasts: lastsTitle,
@@ -976,6 +1047,7 @@ export default function AvailableList({
                 scored week to week, the next is whether he was there to do
                 it. Wider than the numeric columns (see `.avail-col-health`)
                 to fit five bars without growing the 32px row. */}
+            {sortableTh('finish', 'Finish', 'avail-col-finish')}
             {sortableTh('health', 'Health', 'avail-col-health')}
             {sortableTh('proj', 'Proj', 'avail-col-num')}
             {/* One word. A header naming the horizon at all ("Lasts to pick
