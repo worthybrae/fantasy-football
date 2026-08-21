@@ -46,21 +46,31 @@ const POSITIONS = ['ALL', 'QB', 'RB', 'WR', 'TE', 'K', 'DST']
 //
 // RB/WR/TE keep the original 10/15 split, and the original reasoning for it
 // (a good tight end week is rarer and worth more than the same number from a
-// running back) still holds unchanged for them. QB moves to 15/25, shifted
-// up in the same 1:2 amber:green ratio the original split used, sized so the
-// position's own measured median (16.6, cited above) lands just past the new
-// amber floor instead of deep inside the old green zone. K and DST move to
+// running back) still holds unchanged for them. QB is 10/20, set by the
+// owner: a quarterback's measured median week (16.6, cited above) lands in
+// amber rather than green, so green means a genuinely good start instead of
+// an ordinary one, and the red floor stays where a truly bad quarterback
+// week is. K and DST move to
 // 5/10 -- both score on a much smaller scale than every other position (a
 // good defensive or kicking week is worth a fraction of a good receiver's),
 // so the split has to be smaller too; 5/10 keeps the same 1:2 ratio, sized
 // down rather than re-derived from scratch.
 const BAR_THRESHOLDS: Record<string, { amberFrom: number; greenFrom: number }> = {
-  QB: { amberFrom: 15, greenFrom: 25 },
+  QB: { amberFrom: 10, greenFrom: 20 },
   K: { amberFrom: 5, greenFrom: 10 },
   DST: { amberFrom: 5, greenFrom: 10 },
 }
 // RB, WR, TE, and anything the server ever sends that isn't one of the three
 // positions above -- the original 10/15 split.
+// How long a drafted player stays on screen on his way out. Long enough to
+// read a name under a pick clock, short enough that back-to-back picks do
+// not stack up on each other.
+const TAKEN_MS = 1250
+// More than this vanishing at once is a resync -- a restored session, a
+// reconnect mid-draft -- not picks. Animating that would be a screenful of
+// motion describing something that did not just happen.
+const TAKEN_BURST_LIMIT = 5
+
 const BAR_THRESHOLDS_DEFAULT = { amberFrom: 10, greenFrom: 15 }
 function barThresholds(position: string): { amberFrom: number; greenFrom: number } {
   return BAR_THRESHOLDS[position] ?? BAR_THRESHOLDS_DEFAULT
@@ -560,6 +570,44 @@ export default function AvailableList({
     return null
   }, [players])
 
+  // A player leaving the board is the single most informative event in a
+  // draft, and until now it was also the least visible: the row simply was
+  // not there on the next render. `taken` keeps a departed row on screen
+  // long enough to read, in the position it already occupied, then collapses
+  // it out. Keyed by player so a second pick landing mid-animation queues
+  // its own row rather than restarting a shared timer.
+  const [taken, setTaken] = useState<Map<string, LiveCandidate>>(new Map())
+  // The PREVIOUS candidate list, held whole rather than as a set of ids. By
+  // the time a player is missing from `candidates` his row data has gone
+  // with him, and this is the only copy left to draw the departing row from.
+  // One ref, updated at the end of the same effect that reads it, so nothing
+  // depends on the order two effects happen to run in.
+  const prevRef = useRef<LiveCandidate[] | null>(null)
+
+  useEffect(() => {
+    const before = prevRef.current
+    prevRef.current = candidates
+    if (before === null) return          // first render: nothing has "gone"
+
+    const now = new Set(candidates.map((c) => c.player_id))
+    const departed = new Map<string, LiveCandidate>()
+    for (const c of before) if (!now.has(c.player_id)) departed.set(c.player_id, c)
+    // A burst is a resync, not a draft. Restoring a session or reconnecting
+    // mid-draft drops dozens of players at once, and animating that is a
+    // screenful of motion describing something that did not just happen.
+    if (departed.size === 0 || departed.size > TAKEN_BURST_LIMIT) return
+
+    setTaken((prev) => new Map([...prev, ...departed]))
+    const timer = window.setTimeout(() => {
+      setTaken((prev) => {
+        const next = new Map(prev)
+        for (const id of departed.keys()) next.delete(id)
+        return next
+      })
+    }, TAKEN_MS)
+    return () => window.clearTimeout(timer)
+  }, [candidates])
+
   const q = search.trim().toLowerCase()
   const visible = candidates.filter((c) => {
     if (pos !== 'ALL' && c.position !== pos) return false
@@ -571,7 +619,20 @@ export default function AvailableList({
   // `visible` is already a fresh array from `.filter()`; sorting it in place
   // cannot reach `candidates`. Written as a copy anyway so that stays true
   // if the filter is ever short-circuited away for the unfiltered case.
-  const rows = visible.slice().sort((a, b) => compareRows(a, b, sort.key, sort.dir, players))
+  // Departing rows are merged back in and sorted with everyone else, so a
+  // taken player animates out from where he actually sat rather than jumping
+  // to the end of the list on his way off it.
+  const withTaken = taken.size === 0
+    ? visible
+    : [...visible, ...[...taken.values()].filter((c) => {
+        if (pos !== 'ALL' && c.position !== pos) return false
+        if (!q) return true
+        const player = players[c.player_id]
+        return `${player?.name ?? c.player_id} ${player?.team ?? ''}`
+          .toLowerCase().includes(q)
+      })]
+  const rows = withTaken.slice().sort((a, b) => compareRows(a, b, sort.key, sort.dir, players))
+
 
   function toggleSort(key: SortKey): void {
     setSort((prev) => (prev.key === key
@@ -825,8 +886,10 @@ export default function AvailableList({
           {rows.map((c) => {
             const player = players[c.player_id]
             const missed = missedGames(player?.game_points)
+            const isTaken = taken.has(c.player_id)
             return (
-              <tr key={c.player_id}>
+              <tr key={c.player_id} className={isTaken ? 'avail-row-taken' : undefined}
+                  aria-hidden={isTaken || undefined}>
                 <td className="avail-col-rank mono">{c.rank}</td>
                 <td className="avail-col-pos">{posBadge(c.position)}</td>
                 <td className="avail-col-name">

@@ -16,6 +16,9 @@ import { seedFromBoardPlayer, seedFromCandidate, seedFromPlayer } from '../compo
 import DraftBoardGrid from '../components/DraftBoardGrid'
 
 const POLL_MS = 2500
+// Only used while the event stream is up: it is a safety net for a
+// silently dropped connection, not the way picks arrive.
+const FALLBACK_POLL_MS = 15000
 
 type Tab = 'available' | 'board' | 'plan'
 
@@ -353,10 +356,36 @@ export default function DraftRoom() {
     }
 
     poll()
-    const id = window.setInterval(poll, POLL_MS)
+
+    // The draft is PUSHED, not polled. Our server already holds ESPN's own
+    // websocket (pipeline/draft_socket.py), so a pick lands here within
+    // milliseconds -- and then used to sit unread for up to POLL_MS while
+    // the room waited for its next tick. `/api/live/events` streams a frame
+    // whenever the state the room renders from actually moves, which drops
+    // the delay between a pick being made and it appearing from up to 2.5s
+    // to about a tenth of a second.
+    //
+    // EventSource and not a websocket: everything the room SENDS already has
+    // an endpoint of its own, so a return channel would buy nothing and cost
+    // a protocol upgrade plus a reconnect loop this gets for free.
+    let events: EventSource | null = null
+    try {
+      events = new EventSource('/api/live/events')
+      events.addEventListener('state', () => { if (!cancelled) poll() })
+    } catch {
+      // No EventSource (or the stream refused): the interval below still
+      // runs, so the room degrades to exactly the behaviour it had before.
+      events = null
+    }
+
+    // Kept as a floor, not as the mechanism. It covers the stream dropping
+    // silently -- a proxy idling it out, a laptop waking from sleep -- and
+    // is slow enough to cost nothing while the stream is healthy.
+    const id = window.setInterval(poll, events ? FALLBACK_POLL_MS : POLL_MS)
     return () => {
       cancelled = true
       window.clearInterval(id)
+      events?.close()
     }
   }, [])
 
