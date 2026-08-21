@@ -161,6 +161,95 @@ def _pick_frame(conn, rules=None) -> pd.DataFrame:
     return picks
 
 
+# Six ways of asking "does he draft youth". Tested together, corrected
+# together -- the point of trying six is that the first one failing is not
+# evidence, and the point of correcting is that the best of six is not either.
+YOUTH_ADP_WINDOW = 12
+YOUNG_MAX_EXP = 2
+
+
+def _with_ages(conn, picks: pd.DataFrame) -> pd.DataFrame:
+    """Age and experience per pick, and the same relative to ADP neighbours.
+
+    The peer comparison is the one that matters. A manager's AVERAGE draftee
+    age is mostly a fact about who fell to him -- between-manager spread in it
+    is half the size of one manager's own year-to-year swing -- so it measures
+    the board rather than the drafter. Comparing each pick to the players
+    ranked within YOUTH_ADP_WINDOW of him asks the question the average
+    cannot: offered a tier, did he take the younger man?
+    """
+    pl = read_table(conn, "players")
+    if pl.empty:
+        return picks
+    pl = pl.copy()
+    pl["birth_date"] = pd.to_datetime(pl["birth_date"], errors="coerce")
+    out = picks.merge(pl[["gsis_id", "display_name", "birth_date", "rookie_season"]],
+                      left_on="player_id", right_on="gsis_id", how="left")
+    kick = pd.to_datetime(out["season"].astype(str) + "-09-01")
+    out["age"] = (kick - out["birth_date"]).dt.days / 365.25
+    out["exp"] = out["season"] - out["rookie_season"].astype(float)
+
+    adp = read_table(conn, "historic_adp")
+    if adp.empty:
+        out["age_peer"] = np.nan
+        out["exp_peer"] = np.nan
+        return out
+    adp = adp.assign(norm=adp["adp_name"].map(_norm_name),
+                     position=adp["position"].replace(_ADP_POSITION_ALIASES))
+    names = pl.assign(_n=pl["display_name"].map(_norm_name)).drop_duplicates("_n")
+    adp = adp.merge(names[["_n", "birth_date", "rookie_season"]],
+                    left_on="norm", right_on="_n", how="left")
+    akick = pd.to_datetime(adp["season"].astype(str) + "-09-01")
+    adp["age"] = (akick - adp["birth_date"]).dt.days / 365.25
+    adp["exp"] = adp["season"] - adp["rookie_season"].astype(float)
+    for col in ("age", "exp"):
+        peers = []
+        for _, row in out.iterrows():
+            rank = row.get("adp_rank")
+            if rank != rank:
+                peers.append(np.nan)
+                continue
+            pool = adp.loc[(adp["season"] == row["season"])
+                           & (adp["adp_rank"].sub(rank).abs() <= YOUTH_ADP_WINDOW),
+                           col].dropna()
+            peers.append(row[col] - pool.mean() if len(pool) >= 5 else np.nan)
+        out[f"{col}_peer"] = peers
+    return out
+
+
+def _youth_shapes(picks: pd.DataFrame) -> dict:
+    """Per manager-season value for each candidate shape of the youth trait."""
+    p = picks.copy()
+    p["_young"] = (p["exp"] <= YOUNG_MAX_EXP).astype(float)
+    p["_rookie"] = (p["exp"] <= 0).astype(float)
+    p["_capital"] = (17 - _round_of(p)).clip(lower=1)
+    g = p.groupby(["manager", "season"])
+    early = p[_round_of(p) <= 8].groupby(["manager", "season"])
+    return {
+        "young_count": g["_young"].sum(),
+        "rookie_count": g["_rookie"].sum(),
+        "young_capital": p.assign(_x=p["_young"] * p["_capital"]).groupby(
+            ["manager", "season"])["_x"].sum(),
+        "age_peer": g["age_peer"].mean(),
+        "exp_peer": g["exp_peer"].mean(),
+        "young_early": early["_young"].mean(),
+    }
+
+
+def _pairs_needed(r: float, power: float = 0.80, alpha: float = 0.05) -> int:
+    """Owner-season pairs to detect a correlation of `r`, via Fisher's z.
+
+    Published beside every null here, because "we found nothing" and "we could
+    not have found it" are different claims and only one of them is an answer.
+    """
+    from scipy import stats
+    if not np.isfinite(r) or abs(r) >= 1 or r == 0:
+        return -1
+    z = 0.5 * np.log((1 + r) / (1 - r))
+    return int(np.ceil((stats.norm.ppf(1 - alpha / 2)
+                        + stats.norm.ppf(power)) ** 2 / z ** 2 + 3))
+
+
 def _round_of(picks: pd.DataFrame) -> pd.Series:
     return picks["round"].astype(float)
 
@@ -296,6 +385,7 @@ def run(conn=None, odds=None, rules=None) -> dict:
     picks = _pick_frame(conn, rules)
     if picks.empty:
         raise RuntimeError("no draft history imported -- nothing to measure")
+    picks = _with_ages(conn, picks)
 
     per_season = None
     for trait in DECAYED_TRAITS:
@@ -329,6 +419,17 @@ def run(conn=None, odds=None, rules=None) -> dict:
             findings[f"{axis}_{trait}"] = None if np.isnan(r) else round(r, 3)
             findings[f"{axis}_n_{trait}"] = n
             findings[f"{axis}_p_{trait}"] = None if np.isnan(pv) else round(pv, 3)
+    # The six youth shapes join the SAME family. Asking the question six ways
+    # and correcting only within the six would still let the best of them be
+    # compared against a bar the other traits never had to clear.
+    youth_mats = {}
+    for name, series in _youth_shapes(picks).items():
+        m = series.rename("v").reset_index().pivot(
+            index="manager", columns="season", values="v")
+        m = m[sorted(m.columns)].to_numpy(dtype=float)
+        youth_mats[f"youth_{name}"] = m
+        cells[f"youth_{name}"] = (_pairs_r(m), m, _pairs_r)
+
     family = _family_pvalues(cells)
     for key, pf in family.items():
         findings[f"{key}_pfam"] = round(pf, 3)
@@ -363,6 +464,28 @@ def run(conn=None, odds=None, rules=None) -> dict:
             jack.append(r_j)
     findings["across_pos_TE_jack_lo"] = round(min(jack), 2) if jack else None
     findings["across_pos_TE_jack_hi"] = round(max(jack), 2) if jack else None
+
+    # The best of the six, and what it would take to confirm it. Recorded so
+    # that "we looked for this and could not see it" is a result someone can
+    # read rather than a search someone repeats.
+    youth = {k: cells[k][0] for k in cells if k.startswith("youth_")}
+    youth = {k: v for k, v in youth.items() if v == v}
+    if youth:
+        best = max(youth, key=lambda k: abs(youth[k]))
+        findings["youth_best_shape"] = best.replace("youth_", "")
+        findings["youth_best_r"] = round(youth[best], 3)
+        findings["youth_best_pfam"] = round(family.get(best, float("nan")), 3)
+        findings["youth_pairs_needed"] = _pairs_needed(youth[best])
+        findings["youth_shapes_tried"] = len(youth)
+    findings["pairs_have"] = int(max(
+        findings.get(f"across_n_{t}", 0) for t in traits))
+    # The same question for the traits that DID survive, so the contrast is a
+    # measurement rather than a claim: TE needs a fraction of the history we
+    # already have, which is the whole reason it is visible and youth is not.
+    for t in ("reach", "pos_TE", "pos_WR"):
+        r = findings.get(f"across_{t}")
+        if r is not None:
+            findings[f"pairs_needed_{t}"] = _pairs_needed(r)
 
     findings["decay"] = ROUND_DECAY
     findings["n_picks"] = int(len(picks))

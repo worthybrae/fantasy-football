@@ -49,10 +49,10 @@
   <p>It is also easy to fool yourself across fourteen correlations. At that many, an |r| of 0.35 appears somewhere by luck about half the time. So every number below carries a family-wise p as well as its own: permute which manager each season's numbers belong to, and ask how often the best cell in the whole family beats this one. Where the two disagree, the family-wise one is the verdict.</p>
   <h2>Weighting the picks that carry the signal</h2>
   <p>Late picks are constrained — by what is left, and by the slots still open — so they say less about taste than a first-round choice does. Truncating to rounds 1-5 is the crude version of that idea. Weighting every pick by 0.8^(round-1) is the better one: it discounts the late rounds without discarding them.</p>
-  <p>It moves the trait we already believed in. Reach goes from 0.408 truncated to **0.516** decayed, and that survives correction at p = 0.005.</p>
+  <p>It moves the trait we already believed in. Reach goes from 0.408 truncated to **0.516** decayed, and that survives correction at p = 0.015.</p>
   <p>It does nothing for the two habits we had never tested — whether a manager buys the projection or the track record, and whether he buys weekly reliability.</p>
   <svg viewBox="0 0 484 118" width="100%" style="max-width:520px;display:block;margin:0 0 22px"><text x="0" y="12" fill="#565b69" font-size="11" font-family="var(--font-mono)">does last season&#x27;s habit carry to the next? (40 owner-season pairs)</text><line x1="282" y1="22" x2="282" y2="104" stroke="#3a4050"/><text x="0" y="38" fill="#98a0b0" font-size="12">reaches vs waits</text><rect x="282" y="28" width="138" height="14" rx="1" fill="var(--accent)"/><text x="426" y="41" fill="#565b69" font-size="10" text-anchor="start" font-family="var(--font-mono)">0.516</text><text x="0" y="64" fill="#98a0b0" font-size="12">buys growth</text><rect x="219" y="54" width="63" height="14" rx="1" fill="var(--accent)"/><text x="213" y="67" fill="#565b69" font-size="10" text-anchor="end" font-family="var(--font-mono)">-0.235</text><text x="0" y="90" fill="#98a0b0" font-size="12">buys steady players</text><rect x="188" y="80" width="94" height="14" rx="1" fill="var(--accent)"/><text x="182" y="93" fill="#565b69" font-size="10" text-anchor="end" font-family="var(--font-mono)">-0.35</text></svg>
-  <div class="callout"><span class="lbl">The one that got away</span>Steadiness reads -0.35 at p = 0.027, which looks like a finding. Its family-wise p is 0.278. It is the best of fourteen tries, and that is all it is.</div>
+  <div class="callout"><span class="lbl">The one that got away</span>Steadiness reads -0.35 at p = 0.027, which looks like a finding. Its family-wise p is 0.402. It is the best of fourteen tries, and that is all it is.</div>
   <h2>The window was wrong for position</h2>
   <p>Positional preference was measured over rounds 1-5 and found to be nothing. But which position a manager takes early is dictated by the board. How many tight ends he walks away with is a choice — and it is measured over the whole draft, not the first third of it.</p>
   <svg viewBox="0 0 484 144" width="100%" style="max-width:520px;display:block;margin:0 0 22px"><text x="0" y="12" fill="#565b69" font-size="11" font-family="var(--font-mono)">share of the FULL draft spent at each position, season to season</text><line x1="282" y1="22" x2="282" y2="130" stroke="#3a4050"/><text x="0" y="38" fill="#98a0b0" font-size="12">QB</text><rect x="282" y="28" width="30" height="14" rx="1" fill="var(--accent)"/><text x="318" y="41" fill="#565b69" font-size="10" text-anchor="start" font-family="var(--font-mono)">0.153</text><text x="0" y="64" fill="#98a0b0" font-size="12">RB</text><rect x="282" y="54" width="75" height="14" rx="1" fill="var(--accent)"/><text x="363" y="67" fill="#565b69" font-size="10" text-anchor="start" font-family="var(--font-mono)">0.374</text><text x="0" y="90" fill="#98a0b0" font-size="12">WR</text><rect x="282" y="80" width="85" height="14" rx="1" fill="var(--accent)"/><text x="373" y="93" fill="#565b69" font-size="10" text-anchor="start" font-family="var(--font-mono)">0.428</text><text x="0" y="116" fill="#98a0b0" font-size="12">TE</text><rect x="282" y="106" width="138" height="14" rx="1" fill="var(--accent)"/><text x="426" y="119" fill="#565b69" font-size="10" text-anchor="start" font-family="var(--font-mono)">0.692</text></svg>
@@ -64,16 +64,42 @@
   <p>Every position goes NEGATIVE, and tight end hardest at -0.708. A manager who has taken his tight ends does not take more.</p>
   <p>That is not a contradiction of the section above, it is the mechanism behind it. A manager has a roster shape he is aiming at. Within a draft he balances toward it, which makes early and late run opposite. Across seasons the target itself barely moves. Both numbers are the same fact seen from two directions.</p>
   <p>It also matters that the sign is negative rather than positive: a model treating positional preference as a taste to be indulged would push its predictions the wrong way. The thing to predict is not "he likes tight ends", it is "he is going to end up with two".</p>
-  <p>Meanwhile reach, the trait with the real season-to-season prior, comes in at 0.228 within a draft — family-wise p = 0.999. What is real about reach is the prior, not the update.</p>
+  <p>Meanwhile reach, the trait with the real season-to-season prior, comes in at 0.228 within a draft — family-wise p = 1. What is real about reach is the prior, not the update.</p>
+  <h2>The one we could not measure</h2>
+  <p>Whether a manager buys upside or proven production is the habit people most
+expect to be real, so it got 6 different shapes rather than
+one: how many young players he ends up with, how many rookies, how much draft
+capital he spends on youth, the same restricted to the rounds where he is
+really choosing, and -- the one that should have worked -- each pick's age and
+experience measured against the players ranked ALONGSIDE it.</p>
+  <p>That last shape exists because a manager's average draftee age is mostly a
+fact about who fell to him. Comparing a pick to its ADP neighbours asks the
+question the average cannot: offered a tier, did he take the younger man?</p>
+  <p>None of them moved. The best of the six is exp_peer at
+0.188, family-wise p = 1.</p>
+  <div class="callout"><span class="lbl">Not measured, rather than measured as zero</span>To confirm a correlation of 0.188 takes 221 owner-season pairs. We have 40.</div>
+  <p>That number explains the whole experiment, and it is worth reading against
+the traits that did survive. Tight end at 0.692 needs
+14 pairs, and we have 40. Reach needs
+28. Receiver share, at 0.428, needs
+41 -- one more than we have, which is exactly why it sits
+on the boundary instead of landing on one side of it.</p>
+  <p>Nothing anomalous happened here. The habits that showed up showed up because
+they are large, not because they are the only real ones. A youth preference of
+the size hinted at would need roughly four leagues with this much history, or
+eleven with three seasons each.</p>
   <h2>What we changed</h2>
   <p>The model keeps two personal coefficients and pools everything else.</p>
   <ul><li>**Reach**, decayed by round rather than truncated at five.</li><li>**Roster shape**, as a target count per position, which is where the strongest signal in this experiment actually lives.</li></ul>
   <p>Growth and steadiness are dropped. They are indistinguishable from zero in all four of their numbers, and the one that briefly was not is the reason this experiment reports family-wise p at all.</p>
-  <p>The honest caveat is power. 40 owner-season pairs is small; reach and tight end clearing the bar shows that effects of THAT size are detectable, not that the others are absent. Two of these traits may be real and simply invisible at 712 picks across 8 managers.</p>
+  <p>Growth and steadiness are dropped, and so is the youth trait -- but dropped as
+UNMEASURED, not as disproven. At 712 picks across 8 managers
+and 6 seasons, an effect of the size they hint at is invisible by
+construction.</p>
   <p>Which argues for collecting more drafts rather than for modelling harder.</p>
   <div class="meta">
     <ul>
-      <li>experiment E006 &middot; run 2026-08-21 &middot; revision 0225f71</li>
+      <li>experiment E006 &middot; run 2026-08-21 &middot; revision 796f545</li>
       <li>Every trait is scored AS OF the draft: the projection published for that season, and only actuals from before it.</li>
       <li>The within-draft correlation removes the (season, round) mean first, so shared late-round drift is not read as a personal trait.</li>
       <li>Per-pick traits are weighted 0.8^(round-1) across the whole draft. Position is an unweighted share of the finished roster: an earlier version took it over rounds 1-5 and concluded positional preference does not persist, which is the wrong window for a question about what a manager ends up with.</li>
