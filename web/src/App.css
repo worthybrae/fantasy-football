@@ -4267,3 +4267,66 @@ button.roster-row:focus-visible {
     animation: avail-taken 1.25s steps(2, end) forwards;
   }
 }
+
+/* -- positional finish, season by season ----------------------------------
+   The shape of a career, which is the one thing the table below it is worst
+   at showing: "TE40 -> TE7 -> TE2 -> TE1" is a breakout, and reading that
+   out of four rows of numbers takes a beat that a glance should not need. */
+.finish-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  height: 96px;
+  margin: 0 0 var(--space-4);
+}
+
+.finish-col {
+  flex: 1;
+  min-width: 26px;
+  max-width: 64px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  cursor: default;
+}
+
+.finish-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+/* The track is the full height every season, so the bars are read against a
+   constant axis rather than against each other -- without it a career of
+   three mediocre years would draw the best of them as tall as a genuine
+   RB1 season. */
+.finish-track {
+  flex-grow: 1;
+  width: 100%;
+  display: flex;
+  align-items: flex-end;
+  background: var(--bg-2);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.finish-bar {
+  width: 100%;
+  border-radius: 2px 2px 0 0;
+}
+
+/* Five bands, matching SeasonFinish's own cut points: the best quarter of a
+   position's starters, the best half, startable, fringe, off the map. */
+.finish-bar.is-elite   { background: var(--ok); }
+.finish-bar.is-strong  { background: #7cb342; }
+.finish-bar.is-starter { background: #b3c132; }
+.finish-bar.is-fringe  { background: var(--accent); }
+.finish-bar.is-out     { background: var(--fail); }
+
+.finish-year {
+  font-size: 10px;
+  color: var(--text-3);
+}

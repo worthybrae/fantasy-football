@@ -7,6 +7,7 @@ import CohortNext from './profile/CohortNext'
 import InjuryStatus from './profile/InjuryStatus'
 import NewsPanel from './profile/NewsPanel'
 import ConsistencyTable from './profile/ConsistencyTable'
+import SeasonFinish from './profile/SeasonFinish'
 import LineQuality from './profile/LineQuality'
 import MarketRow from './profile/MarketRow'
 import MissingData from './profile/MissingData'
@@ -322,6 +323,12 @@ export default function PlayerProfile({
                   volatility is scored per point — spread divided by average, so a
                   bigger scorer isn’t punished for scoring
                 </p>
+                {/* The chart before the table: a career's shape is the one
+                    thing a column of numbers is worst at showing, and
+                    "TE40 -> TE7 -> TE2 -> TE1" is the whole story of a
+                    breakout in four bars. The table underneath is where you
+                    go once the shape has made you curious. */}
+                <SeasonFinish seasons={profile.seasons} position={header.position} />
                 <ConsistencyTable seasons={profile.seasons} position={header.position} />
                 {/* The old card led with nine stat tiles; the redesign leads
                     with the verdict instead. The usage they carried is not
