@@ -16,6 +16,7 @@ import type { ReactNode } from 'react'
 
 import { fetchProfile } from '../../api'
 import type { LiveSettings, PlayerProfileData, SeasonSummary } from '../../api'
+import { Chart, type Col } from './Chart'
 import { finishPosition, finishTone, startersAt, weightedFinish } from './finish'
 import { BAR_CEILING, SEASON_WEEKS, barTone } from './weeks'
 
@@ -46,59 +47,11 @@ function seasonLength(season: number): number {
 }
 
 
-// -- one chart, drawn three times ------------------------------------------
-//
-// Every panel is the same picture: time along the bottom, one column per
-// period, something growing from a shared baseline, the value above it and
-// the period below. Health and Finish are both about seasons and used to be
-// read in opposite directions -- one a stack of rows, the other a left-to-
-// right axis -- so a reader had to learn the panel again on each column.
-//
-// Taller is better in all three and the colour means the same thing in all
-// three, which leaves one thing to know per panel: what a column is.
+// Health, the 2025 sparkline, and Finish are all the same picture -- time
+// along the bottom, one column per period, something growing from a shared
+// baseline -- built here from each panel's own data and drawn by the shared
+// `Chart` component so a reader only has to learn the picture once.
 type BodyProps = { data: PlayerProfileData; settings?: LiveSettings | null }
-
-type Col = {
-  key: string | number
-  label: string                           // under the baseline: a year, a team
-  value: string                           // above the bar
-  tone: string                            // the shared five-step colour
-  fill: number                            // 0..1 of the slot
-  units?: { filled: number; of: number }  // circles instead of a solid bar
-  empty?: boolean                         // did not play: a baseline mark
-  projected?: boolean                     // has not happened: drawn hollow
-}
-
-function Chart({ cols }: { cols: Col[] }): ReactNode {
-  return (
-    <div className="ctip-chart">
-      {cols.map((c) => (
-        <span key={c.key} className={`ctip-col${c.projected ? ' is-forecast' : ''}`}>
-          <span className={`ctip-col-val ${c.empty ? 'is-off' : c.tone}`}>
-            {c.value}
-          </span>
-          <span className="ctip-col-slot">
-            {c.empty
-              // Not a zero-height bar: "did not play" and "played and scored
-              // nothing" are different claims, and the second already draws
-              // as the 6% floor below.
-              ? <span className="ctip-col-none" />
-              : c.units
-                ? <span className="ctip-units">
-                    {Array.from({ length: c.units.of }, (_, i) => (
-                      <span key={i} className={`ctip-unit${
-                        i < (c.units?.filled ?? 0) ? ` is-on ${c.tone}` : ''}`} />
-                    ))}
-                  </span>
-                : <span className={`ctip-col-bar ${c.tone}${c.projected ? ' is-proj' : ''}`}
-                        style={{ height: `${Math.max(6, c.fill * 100)}%` }} />}
-          </span>
-          <span className="ctip-col-label">{c.label}</span>
-        </span>
-      ))}
-    </div>
-  )
-}
 
 function year(season: number): string {
   return `\u2019${String(season).slice(2)}`
