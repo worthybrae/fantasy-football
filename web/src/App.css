@@ -4858,14 +4858,23 @@ button.roster-row:focus-visible {
    use, so a season is the same colour in the table and in the panel. */
 .ctip-fchart { display: block; overflow: visible; }
 
-/* Quiet enough to read as ground rather than as data: the dots are the
-   reading, and five saturated bands would drown them. */
-.ctip-fband { opacity: 0.2; }
-.ctip-fband.is-elite   { fill: var(--ok); }
-.ctip-fband.is-strong  { fill: #7cb342; }
-.ctip-fband.is-starter { fill: #b3c132; }
-.ctip-fband.is-fringe  { fill: var(--accent); }
-.ctip-fband.is-out     { fill: var(--fail); }
+/* One tint for "startable or better", and two labelled rules. Five bands at
+   an opacity low enough not to drown the dots blended into a single
+   green-to-red gradient, and the boundary that actually matters -- the last
+   startable rank -- was invisible in it. */
+.ctip-fzone { fill: var(--ok); opacity: 0.09; }
+
+.ctip-frule {
+  stroke: var(--text-3);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  opacity: 0.5;
+}
+.ctip-frule-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  fill: var(--text-3);
+}
 
 .ctip-fline { stroke: var(--text-3); stroke-width: 1.25; opacity: 0.65; }
 
@@ -4876,11 +4885,15 @@ button.roster-row:focus-visible {
 .ctip-fdot.is-fringe  { fill: var(--accent); }
 .ctip-fdot.is-out     { fill: var(--fail); }
 
-.ctip-flabel {
-  font-family: var(--font-mono);
-  font-size: 9px;
-  fill: var(--text-2);
-}
+/* The finish number carries the tier colour too, so the grades the two rules
+   do not mark -- elite against strong, fringe against out -- are still
+   readable without counting pixels against a line. */
+.ctip-flabel { font-family: var(--font-mono); font-size: 9px; }
+.ctip-flabel.is-elite   { fill: var(--ok); }
+.ctip-flabel.is-strong  { fill: #7cb342; }
+.ctip-flabel.is-starter { fill: #b3c132; }
+.ctip-flabel.is-fringe  { fill: var(--accent); }
+.ctip-flabel.is-out     { fill: var(--fail); }
 .ctip-fyear {
   font-family: var(--font-mono);
   font-size: 9px;

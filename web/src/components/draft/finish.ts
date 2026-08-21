@@ -49,21 +49,3 @@ export function finishPosition(finish: number, starters: number): number {
   const rank = Math.min(Math.max(finish, 1), floor)
   return Math.log(rank) / Math.log(floor)
 }
-
-/** The tier zones drawn behind the marker, left to right, as {tone, end}.
- *
- *  `end` is the right edge of each band as a fraction of the track. Built
- *  from the same cut points `finishTone` uses, so a marker inside the
- *  "startable" band is a marker `finishTone` calls `is-starter` -- two
- *  descriptions of one boundary would be a bug nobody could see.
- */
-export function finishBands(starters: number): { tone: string; end: number }[] {
-  const edges: [string, number][] = [
-    ['is-elite', starters / 4],
-    ['is-strong', starters / 2],
-    ['is-starter', starters],
-    ['is-fringe', starters * 2],
-    ['is-out', floorFor(starters)],
-  ]
-  return edges.map(([tone, rank]) => ({ tone, end: finishPosition(rank, starters) }))
-}

@@ -16,7 +16,7 @@ import type { ReactNode } from 'react'
 
 import { fetchProfile } from '../../api'
 import type { PlayerProfileData, SeasonSummary } from '../../api'
-import { FINISH_STARTERS, finishBands, finishPosition, finishTone } from './finish'
+import { FINISH_STARTERS, finishPosition, finishTone } from './finish'
 import { BAR_CEILING, SEASON_WEEKS, barTone } from './weeks'
 
 export type CellTipKind = 'health' | 'games' | 'finish'
@@ -157,17 +157,19 @@ function GamesBody({ data }: { data: PlayerProfileData }): ReactNode {
   )
 }
 
-// One column per season, oldest to newest, on a vertical rank axis with the
-// tiers as bands behind it. The vertical version -- a track per season,
-// stacked -- said the same thing and made a ten-year career ten rows tall,
-// and it never showed the one thing a career has that a season does not: a
-// direction. Drawn as SVG so the dots, the line through them and both rows of
-// labels share one coordinate system rather than being three flex rows that
-// have to be kept in step by hand.
+// One column per season, oldest to newest, on a vertical rank axis.
+//
+// The first version painted all five tiers as bands. At the opacity that kept
+// them from drowning the dots they blended into one green-to-red gradient,
+// and a reader could not see where "startable" ended -- which is the only
+// boundary most seasons are judged against. Two labelled lines say it
+// exactly: the elite cut and the last startable rank. The dots keep the full
+// five-tier colouring, so the finer grades are still there to be read.
 const FIN_COL = 26        // per season
-const FIN_H = 56          // the rank axis
+const FIN_H = 58          // the rank axis
 const FIN_TOP = 11        // the finish numbers above it
 const FIN_BOTTOM = 12     // the years below it
+const FIN_RIGHT = 30      // room for the two axis labels
 
 function FinishChart(
   { seasons, position }: { seasons: SeasonSummary[]; position: string },
@@ -176,27 +178,33 @@ function FinishChart(
   // Oldest first: a career reads left to right, and the payload is newest
   // first because a table wants the latest season at the top.
   const rows = seasons.slice().reverse()
-  const width = Math.max(FIN_COL, rows.length * FIN_COL)
+  const plotW = Math.max(FIN_COL, rows.length * FIN_COL)
+  const width = plotW + FIN_RIGHT
   const height = FIN_TOP + FIN_H + FIN_BOTTOM
   const x = (i: number) => i * FIN_COL + FIN_COL / 2
   const y = (finish: number) => FIN_TOP + finishPosition(finish, starters) * FIN_H
 
-  const bands = finishBands(starters)
-  let prev = 0
-  const zones = bands.map((b) => {
-    const top = FIN_TOP + prev * FIN_H
-    const h = (b.end - prev) * FIN_H
-    prev = b.end
-    return { tone: b.tone, top, h }
-  })
+  const marks = [
+    { rank: Math.round(starters / 4), label: `${position}${Math.round(starters / 4)}` },
+    { rank: starters, label: `${position}${starters}` },
+  ]
   const line = rows.map((r, i) => `${x(i)},${y(r.pos_finish)}`).join(' ')
 
   return (
     <svg className="ctip-fchart" width={width} height={height}
          viewBox={`0 0 ${width} ${height}`}>
-      {zones.map((z) => (
-        <rect key={z.tone} className={`ctip-fband ${z.tone}`}
-              x="0" y={z.top} width={width} height={z.h} />
+      {/* One tint, for "startable or better". Five of them was four too
+          many; one says where the useful half of the chart is. */}
+      <rect className="ctip-fzone" x="0" y={FIN_TOP}
+            width={plotW} height={y(starters) - FIN_TOP} />
+      {marks.map((m) => (
+        <g key={m.label}>
+          <line className="ctip-frule" x1="0" x2={plotW}
+                y1={y(m.rank)} y2={y(m.rank)} />
+          <text className="ctip-frule-label" x={plotW + 4} y={y(m.rank) + 3}>
+            {m.label}
+          </text>
+        </g>
       ))}
       {/* Only meaningful with two seasons to join, and drawn under the dots so
           a marker is never half-covered by the path leaving it. */}
@@ -205,8 +213,8 @@ function FinishChart(
       )}
       {rows.map((r, i) => (
         <g key={r.season}>
-          <text className="ctip-flabel" x={x(i)} y={FIN_TOP - 3}
-                textAnchor="middle">{r.pos_finish}</text>
+          <text className={`ctip-flabel ${finishTone(r.pos_finish, starters)}`}
+                x={x(i)} y={FIN_TOP - 3} textAnchor="middle">{r.pos_finish}</text>
           <circle className={`ctip-fdot ${finishTone(r.pos_finish, starters)}`}
                   cx={x(i)} cy={y(r.pos_finish)} r="3.5" />
           <text className="ctip-fyear" x={x(i)} y={height - 2}
@@ -220,17 +228,12 @@ function FinishChart(
 function FinishBody({ data }: { data: PlayerProfileData }): ReactNode {
   if (!data.seasons.length) return <div className="ctip-empty">No NFL seasons yet.</div>
   const pos = data.header.position
-  const starters = FINISH_STARTERS[pos] ?? 24
   return (
     <>
-      <div className="ctip-head">
-        <span>Positional finish</span>
-        {/* The axis, stated once. Without it the bands are five colours
-            nobody has been told the meaning of. */}
-        <span className="ctip-head-note">
-          {pos}1 top &middot; startable to {pos}{starters}
-        </span>
-      </div>
+      {/* No axis note here: the two rules on the chart carry it, and this
+          heading was wider than the chart itself -- which, in a panel sized
+          to its widest child, is what left the empty strip down the side. */}
+      <div className="ctip-head"><span>Positional finish</span></div>
       <FinishChart seasons={data.seasons} position={pos} />
     </>
   )
