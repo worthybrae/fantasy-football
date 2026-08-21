@@ -99,3 +99,21 @@ def odds() -> pd.DataFrame:
     if unmapped:
         raise ValueError(f"unmapped team names in the odds workbook: {unmapped}")
     return df.dropna(subset=["home", "away"])
+
+
+def espn_crosswalk() -> pd.DataFrame:
+    """espn_id -> gsis_id, from nflverse's own id table.
+
+    NOT `sleeper_ids`, which is the obvious candidate in this database and is
+    the wrong one: it joins 80-88% of the 2018-2020 projections but only
+    22-39% of 2024-2026, which is backwards for a current snapshot and leaves
+    the seasons the tool actually runs in worst covered. nflverse's table
+    holds 93-95% in every season, and 100% of the skill players who carry a
+    real projection.
+    """
+    import nfl_data_py as nfl
+
+    ids = nfl.import_ids()
+    ids = ids.dropna(subset=["espn_id", "gsis_id"])[["espn_id", "gsis_id"]].copy()
+    ids["espn_id"] = pd.to_numeric(ids["espn_id"], errors="coerce")
+    return ids.dropna(subset=["espn_id"]).drop_duplicates("espn_id")

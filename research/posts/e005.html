@@ -1,0 +1,69 @@
+<title>Where ESPN&#x27;s projections are weakest</title>
+<style>
+  :root {
+    --bg-0:#0a0b0e; --bg-1:#121319; --bg-2:#1b1d25; --border:#262932;
+    --text-1:#e8eaef; --text-2:#98a0b0; --text-3:#565b69;
+    --accent:#ffb454; --ok:#0ca30c; --fail:#d03b3b;
+    --font-ui:'Inter',system-ui,-apple-system,'Segoe UI',sans-serif;
+    --font-mono:'JetBrains Mono',ui-monospace,'SFMono-Regular',Menlo,monospace;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg-0); color:var(--text-2);
+         font:16px/1.65 var(--font-ui); -webkit-font-smoothing:antialiased; }
+  .wrap { max-width:760px; margin:0 auto; padding:56px 24px 96px; }
+  .eyebrow { font-family:var(--font-mono); font-size:12px; letter-spacing:.1em;
+              text-transform:uppercase; color:var(--text-3); }
+  h1 { font-size:34px; line-height:1.2; letter-spacing:-.02em; color:var(--text-1);
+        margin:14px 0 10px; font-weight:700; }
+  .question { font-size:18px; line-height:1.55; color:var(--text-2);
+               border-left:2px solid var(--accent); padding-left:16px; margin:22px 0 32px; }
+  h2 { font-size:21px; color:var(--text-1); margin:44px 0 12px; font-weight:600;
+        letter-spacing:-.01em; }
+  p { margin:0 0 18px; }
+  strong { color:var(--text-1); font-weight:600; }
+  code { font-family:var(--font-mono); font-size:.92em; color:var(--accent);
+          background:var(--bg-2); padding:1px 5px; border-radius:3px; }
+  pre { background:var(--bg-1); border:1px solid var(--border); border-radius:5px;
+         padding:16px 18px; overflow-x:auto; font-family:var(--font-mono);
+         font-size:13px; line-height:1.6; color:var(--text-1); margin:0 0 22px; }
+  .callout { background:var(--bg-1); border:1px solid var(--border);
+              border-left:2px solid var(--fail); border-radius:4px;
+              padding:16px 18px; margin:0 0 22px; font-size:15px; }
+  .callout .lbl { font-family:var(--font-mono); font-size:11px; letter-spacing:.08em;
+                   text-transform:uppercase; color:var(--fail); display:block;
+                   margin-bottom:6px; }
+  .meta { margin-top:56px; padding-top:20px; border-top:1px solid var(--border);
+           font-family:var(--font-mono); font-size:12px; color:var(--text-3); }
+  .meta li { margin:5px 0; }
+  ul { padding-left:22px; } li { margin:7px 0; }
+</style>
+<div class="wrap">
+  <div class="eyebrow">Research &middot; E005</div>
+  <h1>Where ESPN&#x27;s projections are weakest</h1>
+  <div class="question">ESPN publishes projected carries, yards, targets and receptions. How accurate is each one, and does simply repeating last season already match it anywhere?</div>
+  <p>ESPN publishes a projected stat line for every player: carries, rushing yards, targets, receptions, receiving yards. Our board consumes one number from it — the fantasy total — and ignores the five forecasts underneath.</p>
+  <p>Those five are not equally good, and the weakest is not the one you would guess.</p>
+  <svg viewBox="0 0 484 156" width="100%" style="max-width:520px;display:block;margin:0 0 22px"><text x="0" y="12" fill="#565b69" font-size="11" font-family="var(--font-mono)">ESPN preseason projection vs what happened, 2018-2025</text><text x="0" y="38" fill="#98a0b0" font-size="12">carries</text><rect x="132" y="28" width="271" height="14" rx="1" fill="var(--accent)"/><text x="409" y="41" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.813</text><text x="0" y="64" fill="#98a0b0" font-size="12">rushing yards</text><rect x="132" y="54" width="277" height="14" rx="1" fill="var(--accent)"/><text x="415" y="67" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.832</text><text x="0" y="90" fill="#98a0b0" font-size="12">receiving yards</text><rect x="132" y="80" width="267" height="14" rx="1" fill="var(--accent)"/><text x="405" y="93" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.801</text><text x="0" y="116" fill="#98a0b0" font-size="12">targets</text><rect x="132" y="106" width="249" height="14" rx="1" fill="var(--accent)"/><text x="387" y="119" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.747</text><text x="0" y="142" fill="#98a0b0" font-size="12">receptions</text><rect x="132" y="132" width="219" height="14" rx="1" fill="var(--accent)"/><text x="357" y="145" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.656</text></svg>
+  <p>Yardage is forecast well. **Receptions are ESPN's weakest stat at 0.656** — which matters more than it looks, because in a PPR league a reception is a point. The thing they predict worst is the thing our scoring rewards most.</p>
+  <h2>Is that just because projection is hard?</h2>
+  <p>The test that matters is not whether ESPN is accurate in the abstract, but whether they beat the dumbest available alternative: assume a player repeats last season. Same players, same rows, so neither side gets an easier sample.</p>
+  <svg viewBox="0 0 484 156" width="100%" style="max-width:520px;display:block;margin:0 0 22px"><text x="0" y="12" fill="#565b69" font-size="11" font-family="var(--font-mono)">ESPN against &#x27;repeat last season&#x27;, head to head</text><text x="0" y="38" fill="#98a0b0" font-size="12">carries</text><rect x="132" y="28" width="271" height="7" rx="1" fill="var(--accent)"/><text x="409" y="34" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.813</text><rect x="132" y="37" width="240" height="7" rx="1" fill="var(--text-2)"/><text x="378" y="43" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.72</text><text x="0" y="64" fill="#98a0b0" font-size="12">rushing yards</text><rect x="132" y="54" width="277" height="7" rx="1" fill="var(--accent)"/><text x="415" y="60" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.832</text><rect x="132" y="63" width="254" height="7" rx="1" fill="var(--text-2)"/><text x="392" y="69" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.762</text><text x="0" y="90" fill="#98a0b0" font-size="12">receiving yards</text><rect x="132" y="80" width="267" height="7" rx="1" fill="var(--accent)"/><text x="405" y="86" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.801</text><rect x="132" y="89" width="248" height="7" rx="1" fill="var(--text-2)"/><text x="386" y="95" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.745</text><text x="0" y="116" fill="#98a0b0" font-size="12">targets</text><rect x="132" y="106" width="249" height="7" rx="1" fill="var(--accent)"/><text x="387" y="112" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.747</text><rect x="132" y="115" width="228" height="7" rx="1" fill="var(--text-2)"/><text x="366" y="121" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.683</text><text x="0" y="142" fill="#98a0b0" font-size="12">receptions</text><rect x="132" y="132" width="219" height="7" rx="1" fill="var(--accent)"/><text x="357" y="138" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.656</text><rect x="132" y="141" width="199" height="7" rx="1" fill="var(--text-2)"/><text x="337" y="147" fill="#565b69" font-size="10" font-family="var(--font-mono)">0.599</text><text x="132" y="155" font-size="10" font-family="var(--font-mono)"><tspan fill="var(--accent)">ESPN</tspan><tspan fill="#262932">  </tspan><tspan fill="var(--text-2)">last season</tspan><tspan fill="#262932">  </tspan></text></svg>
+  <div class="callout"><span class="lbl">They win everywhere</span>On 0 of five stats does repeating last season match ESPN. The margin runs from 0.056 on receiving yards to 0.093 on carries.</div>
+  <p>So ESPN is genuinely doing work. But look at the size of it: their edge over a baseline with no model at all is between 0.056 and 0.093. They are better than doing nothing, and not by a great deal.</p>
+  <p>Where they earn it most is **carries**, which is where a projection has to know something a stat sheet cannot tell you — who the team signed, who is hurt, how a backfield will be split. And they earn it completely on rookies, where the baseline has nothing to say at all: ESPN still forecasts a rookie's receiving yards at 0.744 across 446 of them.</p>
+  <h2>What this means for building our own</h2>
+  <p>Two things, pointing in different directions.</p>
+  <p>Beating ESPN is not a formality. They are ahead of the naive baseline on every stat, they handle rookies, and any model of ours has to clear a bar we now know the height of.</p>
+  <p>But the bar is not high, and it is lowest exactly where PPR scoring is decided. 0.056 to 0.093 above "repeat last year" is a target a genuinely informed model should reach — and receptions, at 0.656, is the softest number on the board.</p>
+  <p>That is where we start.</p>
+  <div class="meta">
+    <ul>
+      <li>experiment E005 &middot; run 2026-08-21 &middot; revision ef80aca</li>
+      <li>Season 2023 is excluded: ESPN returns 89 usable projections for it against roughly 490 in a normal year, and a season that thin would speak for players it never covered.</li>
+      <li>These are ESPN&#x27;s PRESEASON projections, confirmed rather than assumed: against realised outcomes they correlate 0.66-0.70 on fantasy points at 70-117% mean absolute percentage error. A projection contaminated by in-season results would sit above 0.95.</li>
+      <li>Rows are filtered to an actual of at least 20, because a projected zero carries for a receiver is a position fact rather than a forecast, and including those inflates every correlation.</li>
+      <li>The baseline is last season&#x27;s raw total with no adjustment for games missed, age or a change of team. It is a floor to clear, not a rival model, and a real projection should beat it comfortably.</li>
+      <li>ESPN&#x27;s id joins via nflverse&#x27;s id table, not this database&#x27;s `sleeper_ids`, which covers only 22-39% of recent seasons.</li>
+    </ul>
+  </div>
+</div>
