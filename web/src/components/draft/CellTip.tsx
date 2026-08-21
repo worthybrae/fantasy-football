@@ -299,6 +299,56 @@ function SteadyBody({ data }: BodyProps): ReactNode {
   )
 }
 
+// Scoring by season with the PROJECTION as the final column, because the
+// Change column is the gap between the last of these and that one -- and a
+// gap is the one thing a single number cannot show you the size of.
+function ChangeBody({ data }: BodyProps): ReactNode {
+  const rows = data.seasons.filter((s) => s.games > 0)
+  const proj = data.summary?.proj_ppg ?? null
+  if (!rows.length && proj === null) {
+    return <div className="ctip-empty">Nothing to compare yet.</div>
+  }
+  const ceiling = Math.max(
+    ...rows.map((r) => r.ppg), proj ?? 0, 1)
+  const position = data.header.position
+  const cols: Col[] = rows.slice().reverse().map((r) => ({
+    key: r.season,
+    label: year(r.season),
+    value: r.ppg.toFixed(1),
+    tone: barTone(r.ppg, position),
+    fill: r.ppg / ceiling,
+  }))
+  if (proj !== null) {
+    cols.push({
+      key: 'proj',
+      // Not a year: this column is the only one that has not happened.
+      label: 'proj',
+      value: proj.toFixed(1),
+      tone: barTone(proj, position),
+      fill: proj / ceiling,
+      // Drawn hollow, behind a rule: everything left of it is banked, this
+      // is the only column still owed. The tone stays, so it is still read
+      // against the same good/mid/bad cut points as the seasons beside it.
+      projected: true,
+    })
+  }
+  const last = rows.length ? rows[0].ppg : null
+  const delta = last !== null && proj !== null ? proj - last : null
+  return (
+    <>
+      <div className="ctip-head">
+        <span>Points per game</span>
+        <span className="ctip-head-note">
+          {delta === null
+            ? 'projection vs history'
+            : `${delta >= 0 ? '+' : ''}${delta.toFixed(1)} vs last season`}
+        </span>
+      </div>
+      <Chart cols={cols} />
+    </>
+  )
+}
+
 const BODIES = { health: HealthBody, games: GamesBody, finish: FinishBody,
                  steady: SteadyBody, change: ChangeBody }
 
