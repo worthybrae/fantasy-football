@@ -5,6 +5,15 @@ def test_table_split_is_complete_and_disjoint():
     contradiction the code cannot honour."""
     from pipeline.db import UNIVERSAL_TABLES, LEAGUE_TABLES
     assert UNIVERSAL_TABLES.isdisjoint(LEAGUE_TABLES)
+    # The draft corpus (pipeline/draft_log.py) is in NEITHER set, on purpose:
+    # it lives in its own database. Both sets here describe the contents of a
+    # league file, and provisioning COPIES the universal ones into each new
+    # league -- right for reference data a refresh rewrites wholesale, wrong
+    # for a corpus that grows, which would fork into a private history per
+    # league and never share a draft between them.
+    from pipeline.draft_log import CORPUS_TABLES
+    assert UNIVERSAL_TABLES.isdisjoint(CORPUS_TABLES)
+    assert LEAGUE_TABLES.isdisjoint(CORPUS_TABLES)
     # The league-specific set, exact -- adding a per-league table without
     # listing it here is the bug this pins.
     assert LEAGUE_TABLES == frozenset({

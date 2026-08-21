@@ -15,6 +15,9 @@ refresh: ## pull latest stats, depth charts, schedules/odds, ADP into DuckDB
 espn-import: ## import ESPN draft history: make espn-import LEAGUE=<url-or-id>
 	.venv/bin/python -m pipeline.import_league "$(LEAGUE)"
 
+draft-corpus: ## fold draft history into the cross-league corpus: make draft-corpus LEAGUE=<id>
+	.venv/bin/python -m pipeline.draft_log "$(LEAGUE)"
+
 fit-managers: ## fit per-manager pick models from imported draft history (REDUCED=1 also measures reduced personal models -- slow)
 	# filter-out, not a bare $(if): $(if) tests emptiness, so REDUCED=0 would
 	# have switched the slow path ON.
