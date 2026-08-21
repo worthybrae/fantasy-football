@@ -2253,362 +2253,40 @@ button.roster-row:focus-visible {
    version measured 172px -- nearly double the sparkline, and the widest
    column in the table after the player's name, for a value that is 0 for
    most of the board. */
-.avail-col-missed { width: 132px; }
+/* 5 bars at ~4px plus their gaps. Narrower than the sparkline beside it on
+   purpose: this is a five-state summary, not a series, and giving it equal
+   weight would say the two carry equal information. */
+.avail-col-health { width: 74px; }
 
-/* The name column is the only one that flexes, so it is the one that pays
-   for every other column's fixed width -- and it used to pay in ROW HEIGHT.
-   Measured before the bar chart column existed: at a 1024px window the name
-   and its "DET · BYE 6" meta wrapped onto a second line for 66 of the 252
-   rows and those rows grew from 37px to 51px. Adding a column moved that
-   threshold up, to 1 row at 1150px and 156 at 1100px, which is exactly the
-   cost the chart was not allowed to have.
-
-   `max-width: 0` is what lets a cell in an auto-layout table shrink BELOW
-   its content instead of forcing the column wider (the browser hands it
-   whatever the fixed columns leave, and a definite width is also what
-   `text-overflow` needs to have anything to clip against). With nowrap, the
-   row height stops being a function of the window width at all: 37px at
-   every width measured, 1440 down to 960, with the column and without it.
-   What gets clipped first is the end of the line -- the team and bye meta --
-   never the name, which is the right order for a table you scan by name. */
-.avail-table td.avail-col-name {
-  max-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* -- last season's per-game bars --
-
-   THE ONE RULE THIS COLUMN HAS TO OBEY: it must not make the row taller. The
-   global `th, td { height: 32px; padding: 6px 10px }` leaves 20px of content
-   box, so the chart is 18px and the row measures the same 32px with it as
-   without (verified by measuring the rendered table at 1280 and 1440, not by
-   reading this arithmetic back). A taller row means fewer players visible
-   under a thirty-second pick clock, which costs more than the column is
-   worth.
-
-   Width is the bars' own: 18 weeks x (3px bar + 1px gap) = 72px, plus the
-   cell's 20px of padding. Fixed rather than fluid so every row's chart shares
-   one horizontal scale as well as one vertical one -- a nine-game season has
-   to read as half a season, not as a full one drawn wider. */
-.avail-col-games { width: 92px; }
-
-.gamebars {
-  display: flex;
+/* -- career availability, as a signal-strength meter ----------------------
+   Five discrete steps rather than a continuous ramp: the meter answers "how
+   many bars" first and the colour reinforces it, and a gradient would make
+   four and five near-identical at this size, which is exactly the pair a
+   reader most needs to tell apart. */
+.health-meter {
+  display: inline-flex;
   align-items: flex-end;
-  gap: 1px;
-  height: 18px;
-  /* Bars are inline-level boxes; without this the line box adds descender
-     space under them and the cell grows past its 20px of content. */
-  line-height: 0;
+  gap: 2px;
+  height: 14px;
 }
 
-.gamebar {
-  width: 3px;
-  flex: 0 0 3px;
-  border-radius: 1px;
-}
-
-/* The owner's thresholds, on the existing status tokens: under 10 is a bad
-   week, 10-15 is a startable one, 15+ is why you drafted him. Same three
-   colours the rest of the room already uses for bad/neutral/good, so the
-   chart needs no legend to be read at a glance. */
-.gamebar.is-bad { background: var(--fail); }
-.gamebar.is-mid { background: var(--accent); }
-.gamebar.is-good { background: var(--ok); }
-
-/* A week with no game -- a bye, an injury, a season that started late. A 1px
-   baseline mark, not an absent element: the slot has to stay in place or the
-   weeks after it would slide left and the chart would stop being a calendar.
-   Deliberately NOT a short red bar, which is what a 0-point game he actually
-   played draws (BAR_MIN_PX in AvailableList.tsx) -- the two are different
-   claims. */
-.gamebar.is-none {
-  height: 1px;
-  background: var(--border);
-}
-
-/* No games at all in that season: a rookie, a defense, or a kicker in a
-   league that prices no kicking. The same em dash the ADP/ESPN columns use
-   for "no such number", for the same reason -- an empty cell would read as a
-   season of zeroes. */
-.gamebars-none {
-  color: var(--text-3);
-  font-size: var(--text-sm);
-}
-
-/* The header that says it is not a control. `.avail-th-btn`'s siblings are
-   all buttons that reveal a caret on hover; this one is bare text, and the
-   suffix states outright what its silence implies. Sized and coloured down
-   so it reads as an annotation on the label rather than as a second label,
-   and nowrap for the same reason every other header here is: a two-line
-   header in this table is taller than three body rows. */
-.avail-table th.avail-col-games {
-  white-space: nowrap;
-  cursor: default;
-}
-
-.avail-nosort {
-  margin-left: 5px;
-  font-size: 9px;
-  font-weight: 500;
-  letter-spacing: 0.02em;
-  text-transform: none;
-  color: var(--text-3);
-}
-
-/* No header may wrap. `Lasts to pick 13` in a 78px column stacked into four
-   lines and made the header row taller than three body rows -- the horizon
-   moved to `.avail-horizon-note` and this keeps any future label from doing
-   the same thing again. */
-.avail-table th .avail-th-btn { white-space: nowrap; }
-
-/* The horizon note: pushed to the far right of the toolbar, where the
-   removed "hide players I can't start" toggle used to sit. */
-.avail-horizon-note {
-  margin-left: auto;
-  font-size: var(--text-sm);
-  color: var(--text-3);
-  white-space: nowrap;
-}
-
-.avail-horizon-key {
-  font-family: var(--font-mono);
-  font-weight: 700;
-  color: var(--text-2);
-}
-.avail-col-btn { width: 78px; }
-
-/* Every header except the draft button's is a sortable control
-   (AvailableList.tsx's sortableTh). The button is stripped back to look
-   exactly like the header text it replaced -- `font: inherit` picks up the
-   global `th` rule's uppercase/letter-spacing/size, so adding sorting did
-   not change the header's rhythm by a pixel. `width: 100%` + inherited
-   text-align is what keeps `#`/PROJ/LASTS/ADP/ESPN flush right and
-   POS/PLAYER flush left without a second set of alignment rules; the caret
-   rides inside the button so it lands on the aligned edge of the label
-   rather than at the far side of the cell. */
-.avail-th-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  width: 100%;
-  padding: 0;
-  border: 0;
-  background: none;
-  font: inherit;
-  color: inherit;
-  text-transform: inherit;
-  letter-spacing: inherit;
-  text-align: inherit;
-  cursor: pointer;
-}
-
-.avail-table th.avail-col-rank .avail-th-btn,
-.avail-table th.avail-col-num .avail-th-btn {
-  justify-content: flex-end;
-}
-
-.avail-th-btn:hover {
-  color: var(--text-1);
-}
-
-.avail-th-btn:focus-visible {
-  outline: 1px solid var(--accent-border);
-  outline-offset: 2px;
-}
-
-/* The sorted column reads at full strength against the other headers'
-   --text-2, so "what is this sorted by" is answerable from the column's
-   own weight as well as from the caret -- the caret alone is a 9px glyph
-   and easy to miss under a pick clock. */
-.avail-table th.is-sorted {
-  color: var(--text-1);
-}
-
-.avail-sort {
-  font-size: 9px;
-  line-height: 1;
-}
-
-/* Present but invisible on every unsorted column, so the header row never
-   reflows when the sort moves (see AvailableList.tsx's own note). Hover or
-   keyboard focus fades it in at half strength -- enough to say "this is a
-   control and this is which way it will go", not enough to compete with the
-   real one. */
-.avail-sort.is-idle {
-  opacity: 0;
-}
-
-.avail-th-btn:hover .avail-sort.is-idle,
-.avail-th-btn:focus-visible .avail-sort.is-idle {
-  opacity: 0.45;
-}
-
-/* -- header tooltips: replaces the native `title` every header used to
-   carry (AvailableList.tsx's sortableTh has the full story). -- */
-
-/* The visible affordance: a quiet dotted underline under the header's own
-   label, present on every header that carries an explanation, so a reader
-   can see one is there before ever hovering it -- not a second icon bolted
-   onto eight headers, which is louder than the owner asked for. */
-.avail-th-hint {
-  border-bottom: 1px dotted var(--text-3);
-}
-
-/* Fixed positioning (not absolute) is the point, same reasoning `.board-pop`
-   (DraftBoardGrid.tsx, see its own comment) already established for the
-   main board's popover: it escapes `.draft-main`'s own scroll-region
-   clipping entirely, since neither it nor any ancestor sets a transform
-   that would give `fixed` a closer containing block. Left/top arrive as
-   inline styles, computed by AvailableList's own `positionTip` off the
-   header's rect and the panel's own measured size. */
-.avail-th-tip {
-  position: fixed;
-  z-index: 60;
-  width: max-content;
-  max-width: 300px;
-  padding: 7px 10px;
-  background: var(--bg-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45);
-  color: var(--text-2);
-  font-size: var(--text-sm);
-  font-weight: 400;
-  text-transform: none;
-  letter-spacing: normal;
-  line-height: 1.5;
-  /* Never the thing under the pointer -- a tooltip a mouse could enter
-     would keep the header's own `mouseleave` from ever firing, which is how
-     a tooltip gets stuck open. */
-  pointer-events: none;
-}
-
-/* Rows aren't clickable in this table (the draft button is the only
-   action) -- overrides the global `tbody tr { cursor: pointer }`, which
-   exists for the main board's row-opens-a-drawer behavior and would
-   otherwise be a false affordance here. */
-.avail tbody tr {
-  cursor: default;
-}
-
-.avail-name {
-  font-size: var(--text-sm);
-  font-weight: 500;
-  color: var(--text-1);
-}
-
-/* The name is the profile's open control (AvailableList.tsx). Stripped back
-   to look exactly like the text it replaced -- same font, same colour, no
-   padding, no box -- so the table's rhythm is unchanged and the row is not
-   a pixel taller than it was. The affordance shows on hover/focus only,
-   which is the same bargain `.board-cell` already makes. */
-.avail-name-btn {
-  display: inline-block;
-  vertical-align: baseline;
-  padding: 0;
-  border: 0;
-  background: none;
-  text-align: left;
-  cursor: pointer;
-}
-
-.avail-name-btn:hover .avail-name,
-.avail-name-btn:focus-visible .avail-name {
-  color: var(--accent);
-  text-decoration: underline;
-}
-
-.avail-name-btn:focus-visible {
-  outline: 1px solid var(--accent-border);
-  outline-offset: 2px;
-}
-
-.avail-meta {
-  margin-left: 7px;
-  font-size: var(--text-xs);
-  color: var(--text-3);
-}
-
-/* This table is descriptive, not argumentative: there is no longer an
-   emphasised "this is the pick" column here, because the column that used
-   to carry that weight (`.avail-gain`, gain_now) was deliberately removed
-   along with `.avail-vor` (over-replacement) and `.avail-fills` -- see the
-   long comment at the top of AvailableList.tsx. The model still ranks on
-   gain_now and the recommendation cards above still make the argument; the
-   remaining split is only "what this player is projected to do"
-   (--text-2) against "where the market has him" (--text-3), which is
-   context, not a claim. Do not reintroduce a loud column here. */
-.avail-proj {
-  font-size: var(--text-sm);
-  color: var(--text-2);
-}
-
-/* Both market ranks -- the five-source ADP consensus and ESPN's own PPR
-   rank -- share one muted treatment so the eye reads them as a pair to
-   compare against the `#` column on the left. */
-.avail-adp {
-  font-size: var(--text-sm);
-  color: var(--text-3);
-}
-
-/* Weeks missed last season, as a pip strip beside its own number
-   (AvailableList.tsx's MissedPips/missedGames/missedTone). */
-.avail-missed-wrap {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.missed-pips {
-  display: inline-flex;
-  align-items: center;
-  gap: 1px;
-  /* Pips are inline-level boxes; without this the line box adds descender
-     space under them, same reason `.gamebars` sets it above. */
-  line-height: 0;
-}
-
-/* Both states share one fixed footprint, so the 17 pips occupy the same
-   total width in every row regardless of how the count splits between
-   them -- the strip's length is the season, not the damage. */
-.missed-pip {
+/* Every bar the same height. A rising staircase was tried and read as a
+   trend over time, which is the one thing this number is not. */
+.health-bar {
   width: 4px;
-  height: 4px;
-  flex: 0 0 4px;
+  height: 100%;
   border-radius: 1px;
+  background: var(--bg-2);
 }
 
-/* Played: dim and receding, the same job `--text-3` already does everywhere
-   else in this table for "unremarkable, most of the board looks like
-   this". */
-.missed-pip.is-played {
-  background: var(--text-3);
-}
+/* Unlit bars stay visible so the denominator is always legible -- "two of
+   five" rather than an ambiguous two floating marks. */
+.health-meter.is-1 .health-bar.is-on { background: var(--fail); }
+.health-meter.is-2 .health-bar.is-on { background: #e0762c; }
+.health-meter.is-3 .health-bar.is-on { background: var(--accent); }
+.health-meter.is-4 .health-bar.is-on { background: #7cb342; }
+.health-meter.is-5 .health-bar.is-on { background: var(--ok); }
 
-/* Missed: full --fail, no ramp of its own -- the ramp already lives on the
-   number beside it (below), and seventeen 4px pips is too small a canvas to
-   draw a second one. */
-.missed-pip.is-missed {
-  background: var(--fail);
-}
-
-/* The number beside the strip: same colour ramp and "big number gets
-   heavier" weight idiom the old single-cell version used (missedTone's
-   color-mix ramp, --text-3 at 0 climbing to --fail; the same
-   `.plan-cliff-value.is-loud`/`.plan-avail-value.is-drop` weight-on-large-
-   values idiom for `.is-loud`) -- moved from the whole `<td>` onto just this
-   `<span>` now that the pips carry their own fixed palette instead of
-   inheriting the cell's. */
-.avail-missed-num {
-  font-size: var(--text-sm);
-}
-
-.avail-missed-num.is-loud {
-  font-weight: 700;
-}
 
 .avail-empty {
   text-align: center;

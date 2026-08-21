@@ -86,6 +86,14 @@ def test_board_column_contract(tmp_path):
                 # now differences (cross-position comparable, unlike the
                 # within-position composite percentile it replaced).
                 "proj_points",
+                # Career availability: average games per season across a
+                # player's whole career, absent seasons counted as zero
+                # rather than skipped. A RATE, unlike `durability` above,
+                # which is a within-position percentile -- see
+                # `board.career_availability` for why the distinction is the
+                # entire point (the naive average reports a median of 7.2
+                # games against a true 3.0).
+                "career_games_pg",
                 # The scoring-format work adds proj_scale: how much this
                 # league's rules re-price ESPN's PPR-only season projection
                 # for this player (1.0 in a PPR league). It is on the board,
@@ -1111,3 +1119,54 @@ def test_dst_weekly_moves_defenses_and_nothing_else(tmp_path):
     order_before = before[before["position"].isin(skill)].sort_values("rank")["player_id"].tolist()
     order_after = after[after["position"].isin(skill)].sort_values("rank")["player_id"].tolist()
     assert order_before == order_after
+
+
+def test_career_availability_counts_seasons_a_player_missed_entirely():
+    """The whole reason this is not a one-line groupby.
+
+    A player who sits out a season has NO ROWS in `weekly` for it, so
+    averaging the seasons he appears in silently drops his worst ones. On the
+    real table that is not a rounding difference: the naive version reports a
+    median of 7.2 games a season against a true 3.0, which inverts who looks
+    durable.
+    """
+    from scoring.board import career_availability
+    weekly = pd.DataFrame(
+        [{"player_id": "iron", "season": s, "week": w}
+         for s in (2023, 2024, 2025) for w in range(1, 18)]
+        + [{"player_id": "hurt", "season": 2023, "week": w} for w in range(1, 18)]
+        # 2024 missing entirely -- the case the naive average cannot see.
+        + [{"player_id": "hurt", "season": 2025, "week": w} for w in range(1, 18)])
+    out = career_availability(weekly).set_index("player_id")["career_games_pg"]
+    assert out["iron"] == pytest.approx(17.0)
+    # 34 games across three seasons, not 17 across the two he showed up for.
+    assert out["hurt"] == pytest.approx(34 / 3)
+
+
+def test_career_availability_caps_a_traded_player_at_a_full_season():
+    """A player traded mid-season can appear in 18 game weeks, which must not
+    read as better than perfect attendance."""
+    from scoring.board import career_availability
+    weekly = pd.DataFrame([{"player_id": "moved", "season": 2025, "week": w}
+                           for w in range(1, 19)])
+    out = career_availability(weekly).set_index("player_id")["career_games_pg"]
+    assert out["moved"] == pytest.approx(17.0)
+
+
+def test_career_availability_is_measured_before_the_recency_filter():
+    """`build_board` narrows `weekly` to RECENCY_WEIGHTS for its scoring
+    factors, which is right for form and wrong for durability: three seasons
+    is a small sample for "can he be relied on to play". This column is
+    computed on the full history, so a player whose only missed year predates
+    the window still shows it."""
+    from scoring.board import career_availability
+    from scoring.config import RECENCY_WEIGHTS
+    old_season = min(RECENCY_WEIGHTS) - 2
+    weekly = pd.DataFrame(
+        [{"player_id": "vet", "season": old_season, "week": w} for w in range(1, 3)]
+        + [{"player_id": "vet", "season": s, "week": w}
+           for s in RECENCY_WEIGHTS for w in range(1, 18)])
+    out = career_availability(weekly).set_index("player_id")["career_games_pg"]
+    seasons = max(RECENCY_WEIGHTS) - old_season + 1
+    assert out["vet"] == pytest.approx((2 + 17 * len(RECENCY_WEIGHTS)) / seasons)
+    assert out["vet"] < 17.0, "the pre-window season must still drag it down"

@@ -192,20 +192,20 @@ const GameBars = memo(function GameBars({ points, season, position }: {
 // a reader looks for "what do I still need" anyway. It is deliberately not
 // re-drawn here.)
 
-type SortKey = 'rank' | 'pos' | 'player' | 'missed' | 'proj' | 'lasts' | 'adp' | 'espn'
+type SortKey = 'rank' | 'pos' | 'player' | 'health' | 'proj' | 'lasts' | 'adp' | 'espn'
 type SortDir = 'asc' | 'desc'
 
 // The direction a column gets on its FIRST click -- "best first" for that
 // particular column, which is not the same arrow everywhere: rank/ADP/ESPN
 // are ranks (1 is best, so ascending), proj/lasts are quantities (bigger is
-// better, so descending). MISSED follows the rank/ADP/ESPN logic, not
-// proj/lasts's -- 0 missed games is the best outcome a row can have, so its
+// better, so descending). HEALTH follows proj/lasts's logic, not
+// rank/ADP's -- five bars is the best outcome a row can have, so its
 // first click is ascending too, same as a rank where 1 is best. Clicking an
 // already-sorted header flips it, so both directions stay reachable on every
 // column; this only decides which one you land on without having to click
 // twice.
 const NATURAL_DIR: Record<SortKey, SortDir> = {
-  rank: 'asc', pos: 'asc', player: 'asc', missed: 'asc', proj: 'desc', lasts: 'desc', adp: 'asc',
+  rank: 'asc', pos: 'asc', player: 'asc', health: 'desc', proj: 'desc', lasts: 'desc', adp: 'asc',
   espn: 'asc',
 }
 
@@ -258,121 +258,39 @@ function positionTip(
   return { left, top }
 }
 
-// -- weeks missed -----------------------------------------------------------
+// Career availability, drawn as a five-bar meter.
 //
-// How many of last season's 18 weeks were neither the bye nor a game he
-// played -- injury, inactivity, or (for a backup) simply not being the
-// starter yet. `game_points` always carries exactly 18 entries when it
-// carries any at all (scoring/game_points.py, index 0 = week 1), and every
-// player has exactly one bye among his nulls, so missed = (null count) - 1.
-// Floored at 0 rather than allowed negative: a player traded mid-season can
-// have ZERO null entries (he played 18 game-weeks across two teams with no
-// single bye week of his own to subtract), and that is a real 0, not a sign
-// something else went wrong.
+// The number behind it is `career_games_pg` from the board: average games
+// played per season across a player's WHOLE career, counting the seasons he
+// missed entirely rather than skipping them. That distinction is the reason
+// the column is worth having -- a player who sits out a year has no rows at
+// all in the weekly data, so the obvious average silently drops his worst
+// seasons and reports the fragile as durable.
 //
-// `null` here (never 0) means UNKNOWN, not "missed nothing" -- `game_points`
-// itself is null for 45 of 252 players on the real board (every D/ST, plus
-// rookies and kickers with no priced weekly history), who have no season to
-// count absences out of at all. A pure function so the sort column and the
-// rendered cell read off the literal same number, the same discipline
-// `sortValue` below already keeps for every other column.
-function missedGames(points: (number | null)[] | null | undefined): number | null {
-  if (!points) return null
-  const nulls = points.filter((p) => p === null).length
-  return Math.max(0, nulls - 1)
+// Cut points measured on the real board (184 of 252 players carry a value;
+// the rest are defenses and players with no NFL season yet): 9% land on one
+// bar, 15% on two, 35% on three, 28% on four, 14% on five. Wide middle,
+// rare extremes -- which is what makes a five-bar meter readable at all.
+const HEALTH_CUTS = [10, 13, 15, 16.3] as const
+
+function healthLevel(gamesPg: number | null | undefined): number | null {
+  if (gamesPg === null || gamesPg === undefined || Number.isNaN(gamesPg)) return null
+  let level = 1
+  for (const cut of HEALTH_CUTS) if (gamesPg >= cut) level += 1
+  return level
 }
 
-// Colour ramp for the MISSED cell: recedes to --text-3 at 0, where most of
-// the board sits, and pops toward --fail as the count climbs -- the same
-// color-mix idiom PlanTab's cliffTone uses for its own recede-vs-pop cells
-// (that file's comment explains the technique), reused rather than
-// reinvented because it is already this app's answer to "most values here
-// are small and unremarkable, a few are large and are the entire point of
-// the column."
-//
-// A 10-game absence and a 14-game one (Najee Harris's real 2025 number) do
-// not need to read as two different shades of bad -- both clamp to full
-// --fail, because past a point the column's only job is "this player was
-// not on the field".
-//
-// Where the colour ramp saturates. MEASURED, not guessed, on the real
-// 2025 board (184 of 252 players carry weekly rows; the rest -- every
-// defense, rookies, unpriced kickers -- have no number at all and render as
-// an em-dash): the median player missed 1 game, p75 is 5, p90 is 9, p95 is
-// 12 and the worst is 16. A ceiling of 10 puts 7.6% of the board at full
-// intensity, so the top of the ramp stays the genuinely notable group. An
-// earlier ceiling of 6 saturated 21.7% of players -- over a fifth of the
-// column rendering identical maximum red, which is exactly the contrast
-// this column exists to provide.
-const MISSED_CEILING = 10
-function missedTone(n: number): string {
-  const k = Math.max(0, Math.min(1, n / MISSED_CEILING))
-  return `color-mix(in srgb, var(--fail) ${Math.round(k * 100)}%, var(--text-3))`
-}
+// One colour per level rather than a gradient: the meter answers "how many
+// bars" first and the colour reinforces it, so five discrete steps read
+// faster than a continuous ramp that makes four and five nearly identical.
+const HEALTH_CLASS = ['', 'is-1', 'is-2', 'is-3', 'is-4', 'is-5'] as const
 
-// The same "big number gets heavier" idiom `.plan-cliff-value.is-loud` and
-// `.plan-avail-value.is-drop` already use, so a real absence pops on shape
-// as well as colour -- not colour alone, which a colourblind reader or a
-// dim/greyscale screenshot loses entirely. Set below the colour ramp's own
-// ceiling on purpose: by the time a cell reads fully red it should already
-// be bold too, not still waiting on one more missed game to earn it. Six of
-// a 17-game season is a third of the year missed and covers 21.7% of the
-// board -- frequent enough to be worth flagging, rare enough that the bold
-// still means something.
-const MISSED_LOUD_FROM = 6
-
-// -- weeks missed pip strip -------------------------------------------------
-//
-// A pip per week (18, always), grouped by STATE rather than drawn in real
-// week order -- deliberately. `Player.bye` is the bye for the UPCOMING
-// season; `game_points` is LAST season's weekly rows. They only agree by
-// coincidence, and on the real board they do not agree often: 157 of 207
-// players "played through" their own `bye` index in `game_points`, which is
-// exactly what comparing two different seasons' schedules would produce.
-// There is nothing in this data that says which of a player's null weeks
-// was actually his bye, so this strip does not pretend to place one -- real
-// week order already lives one column to the left, in the per-week
-// sparkline (GameBars above).
-//
-// What IS knowable, and what this draws: how many weeks he played, that
-// exactly one of the rest is being counted as the bye (missedGames' own
-// `- 1`), and how many are left over as genuinely missed. Grouped, that is
-// three honest counts instead of one dishonest calendar. Memoized on
-// `points`'s identity for the same reason GameBars is: without it every
-// re-filter/re-sort would rebuild up to 250 x 18 = 4,500 spans.
-// The season drawn as 17 marks -- one per game a player could have played
-// -- with the ones he missed in `--fail` at the right end and the rest
-// receding. Seventeen, not eighteen, because the bye is excluded outright:
-// it is a week nobody is penalised for, and the numeral beside this strip
-// already excludes it (missedGames is nulls - 1). Excluding it here too
-// keeps the picture and the number telling the same story, and drops a
-// third pip state that was costing width without earning it.
-//
-// NOT drawn in true week order, and it cannot be. One of the gaps in
-// `game_points` is the bye and nothing available says which: `Player.bye`
-// is the UPCOMING season's bye while `game_points` is last season's, and
-// they disagree for 157 of the 207 players who have both. So the marks are
-// grouped by state rather than sequenced by week. The real week ordering is
-// already on screen -- it is the `2025` sparkline immediately to the left,
-// which draws its gaps where they actually fell.
-const MISSED_PIP_COUNT = 17
-
-const MissedPips = memo(function MissedPips({ missed }: { missed: number }): ReactNode {
-  const bad = Math.max(0, Math.min(MISSED_PIP_COUNT, missed))
-  const ok = MISSED_PIP_COUNT - bad
+const HealthMeter = memo(function HealthMeter({ level }: { level: number }): ReactNode {
   return (
-    <span
-      className="missed-pips"
-      role="img"
-      aria-label={bad === 0
-        ? 'played every game outside the bye'
-        : `${bad} of ${MISSED_PIP_COUNT} games missed`}
-    >
-      {Array.from({ length: ok }, (_, i) => (
-        <span key={`ok-${i}`} className="missed-pip is-played" />
-      ))}
-      {Array.from({ length: bad }, (_, i) => (
-        <span key={`bad-${i}`} className="missed-pip is-missed" />
+    <span className={`health-meter ${HEALTH_CLASS[level]}`} role="img"
+          aria-label={`durability ${level} of 5`}>
+      {[1, 2, 3, 4, 5].map((i) => (
+        <span key={i} className={`health-bar${i <= level ? ' is-on' : ''}`} />
       ))}
     </span>
   )
@@ -390,7 +308,7 @@ function sortValue(
     case 'rank': return c.rank
     case 'pos': return posIndex(c.position)
     case 'player': return (player?.name ?? c.player_id).toLowerCase()
-    case 'missed': return missedGames(player?.game_points)
+    case 'health': return player?.career_games_pg ?? null
     case 'proj': return c.proj_points
     case 'lasts': return c.survive_pct
     case 'adp': return player?.market_rank ?? null
@@ -498,7 +416,7 @@ const AvailableRow = memo(function AvailableRow({
   onOpenPlayer: (c: LiveCandidate) => void
   onDraft: (c: LiveCandidate) => void
 }): ReactNode {
-  const missed = missedGames(player?.game_points)
+  const level = healthLevel(player?.career_games_pg)
   return (
               <tr key={c.player_id} className={isTaken ? 'avail-row-taken' : undefined}
                   aria-hidden={isTaken || undefined}>
@@ -547,21 +465,10 @@ const AvailableRow = memo(function AvailableRow({
                     renders the same em-dash the sparkline's own empty state
                     uses, never a 0 or an empty strip: a defense or an
                     unpriced rookie has no counted season, not a clean one. */}
-                <td className="avail-col-missed">
-                  {player?.game_points
-                    ? (
-                      <span className="avail-missed-wrap">
-                        <MissedPips missed={missed ?? 0} />
-                        <span
-                          className={`avail-missed-num mono${
-                            missed !== null && missed >= MISSED_LOUD_FROM ? ' is-loud' : ''}`}
-                          style={missed === null ? undefined : { color: missedTone(missed) }}
-                        >
-                          {missed}
-                        </span>
-                      </span>
-                    )
-                    : <span className="gamebars-none">—</span>}
+                <td className="avail-col-health">
+                  {level === null
+                    ? <span className="gamebars-none">—</span>
+                    : <HealthMeter level={level} />}
                 </td>
                 <td className="avail-col-num mono avail-proj">{Math.round(c.proj_points)}</td>
                 {/* null survive_pct (no roster to survive FOR yet) gets no
@@ -848,7 +755,7 @@ export default function AvailableList({
   // Delivery is `tipCopy`/the shared `.avail-th-tip` panel below, not a
   // native `title` any more (see sortableTh's own comment) -- only that
   // mechanism changed; this is the same copy that was already reviewed and
-  // confirmed accurate, except `missedTitle` (the pip strip replaced a bare
+  // confirmed accurate, except `healthTitle` (the meter replaced a bare
   // number, so its own tooltip has to describe the strip) and `lastsTitle`
   // (see the comment above that one).
   const rankTitle = "This board's own rank of who to take now. Not ADP and "
@@ -876,14 +783,11 @@ export default function AvailableList({
   // board, which is exactly what two different seasons' schedules colliding
   // by chance would produce. See missedGames's own comment for the count
   // math, which this strip does not change.
-  const missedTitle = 'Weeks without a game last season, drawn as 18 marks: '
-    + 'games played, then one mark for the week counted as the bye, then '
-    + "the rest -- genuinely missed (injury, inactive, or a backup who "
-    + "wasn't starting yet). Grouped by state, not real week order: which "
-    + "gap was actually the bye can't be told apart from the others in this "
-    + 'data, so it is always drawn last rather than in its true spot -- real '
-    + 'week order is already the sparkline immediately to the left. The '
-    + 'number counts only the missed weeks, same as it always has.'
+  const healthTitle = "How available this player has been across his whole "
+    + 'career: average games played per season, counting seasons he missed '
+    + 'entirely rather than skipping them. Five bars is close to a full '
+    + 'season every year; one bar is a player who has missed a lot of '
+    + 'football. Blank for a defense, or anyone with no NFL season yet.'
   const projTitle = "Projected fantasy points for the full upcoming season, "
     + "under this league's own scoring."
   // NOT "chance he's still there at pick N" any more -- verified against the
@@ -921,7 +825,7 @@ export default function AvailableList({
     pos: posTitle,
     player: playerTitle,
     games: gamesTitle,
-    missed: missedTitle,
+    health: healthTitle,
     proj: projTitle,
     lasts: lastsTitle,
     adp: adpTitle,
@@ -993,7 +897,7 @@ export default function AvailableList({
                 `.avail-col-missed` in App.css -- to fit the pip strip
                 (MissedPips above) next to its number without growing the
                 32px row. */}
-            {sortableTh('missed', 'Missed', 'avail-col-missed')}
+            {sortableTh('health', 'Missed', 'avail-col-missed')}
             {sortableTh('proj', 'Proj', 'avail-col-num')}
             {/* One word. A header naming the horizon at all ("Lasts to pick
                 13") reads as a promise that pick 13 is the user's own turn,

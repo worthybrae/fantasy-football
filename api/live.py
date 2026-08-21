@@ -8,6 +8,7 @@ session builds them once and every refresh costs only `survival` plus
 """
 import dataclasses
 import hashlib
+import asyncio
 import json
 import os
 from dataclasses import dataclass
@@ -256,6 +257,7 @@ import threading
 import time
 
 from fastapi import HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from websockets.exceptions import ConnectionClosed
 
@@ -1424,6 +1426,12 @@ def register_live_routes(app, conn, db_path):
              # they will not reach for twenty minutes. Sharing the recompute
              # worker would have made every ranking wait behind a plan.
              "plan": None, "plan_as_of_pick": None, "plan_error": None,
+             # Pick count as the SOCKET has seen it, which is ahead of
+             # everything derived from it: `as_of_pick` trails by a ranking
+             # and `plan_as_of_pick` by up to a round. The event stream
+             # watches this so a pick reaches the room the moment ESPN sends
+             # it, rather than whenever the room next asks.
+             "picks_seen": 0,
              # Set the moment a ranking is requested, cleared when one is
              # stored. The plan worker yields on it: see _compute_plan and
              # build_plan's `should_abort`. Without it the two workers are
@@ -2408,6 +2416,8 @@ def register_live_routes(app, conn, db_path):
                         if _resolve_slot(c2):
                             made = c2.execute(
                                 PICKS_MADE_SQL).fetchone()[0]
+                            with lock:
+                                state["picks_seen"] = made
                             request_recompute(current["session"], made)
                             request_plan(current["session"], made)
                     finally:
@@ -2461,6 +2471,8 @@ def register_live_routes(app, conn, db_path):
                     clear_session_record(db_path)
                 # Hand off to the worker instead of searching here -- this
                 # callback runs on the socket read thread and must return fast.
+                with lock:
+                    state["picks_seen"] = made
                 request_recompute(current["session"], made)
                 request_plan(current["session"], made)
 
@@ -2644,6 +2656,8 @@ def register_live_routes(app, conn, db_path):
         # _resolve_slot path still fires the recompute the moment the socket
         # names our team -- that path is unchanged and still needed.
         if session.my_slot is not None:
+            with lock:
+                state["picks_seen"] = made_at_launch
             request_recompute(session, made_at_launch)
             request_plan(session, made_at_launch)
             progress.begin("ranking")
@@ -3006,6 +3020,86 @@ def register_live_routes(app, conn, db_path):
             return {"phase": "idle", "stages": [], "facts": {},
                     "error": None, "elapsed_ms": 0}
         return body
+
+    def _ui_revision() -> tuple:
+        """What the room is actually looking at, as one comparable value.
+
+        A fingerprint rather than an event bus, and deliberately so: state is
+        written from three background threads (the socket listener, the
+        recompute worker, the plan worker) at sites that already carry their
+        own staleness guards. Publishing an event from each of them would
+        mean touching every one of those guards and inventing a fourth way to
+        be wrong about ordering. Reading the five values the room renders
+        from cannot be out of order with itself.
+        """
+        listener = state["listener"]
+        return (
+            state["generation"], state["picks_seen"], state["as_of_pick"],
+            state["plan_as_of_pick"], listener is not None,
+            # THE CLOCK. Left out of the first version of this fingerprint,
+            # which was a straight regression: the room used to resync the
+            # clock on its 2500ms poll, and pushing everything EXCEPT the
+            # clock while slowing that poll to a fallback made the one number
+            # a drafter stares at the least current thing on screen.
+            #
+            # These come off ESPN's own socket frames (DraftListener's
+            # SELECTING and CLOCK handlers), so a tick here is a tick ESPN
+            # actually sent. `ms_remaining` is bucketed to whole seconds
+            # because the room renders seconds -- a frame per millisecond
+            # would be a frame the user cannot see.
+            getattr(listener, "on_the_clock", None) if listener else None,
+            getattr(listener, "started", None) if listener else None,
+            (None if listener is None or listener.ms_remaining is None
+             else listener.ms_remaining // 1000),
+            # Autodraft flipping is the other thing that changes what the
+            # clock panel says without any pick being made.
+            tuple(sorted((getattr(listener, "autodraft_by_team", None) or {}).items()))
+            if listener else (),
+        )
+
+    # Long enough that an idle draft is not a busy-loop, short enough to be
+    # invisible next to the 2500ms poll it replaces. A pick now reaches the
+    # room in about a tenth of a second instead of up to two and a half.
+    EVENT_TICK = 0.12
+    # Proxies and browsers drop a silent stream; a comment frame is the
+    # cheapest thing that is not a state update.
+    EVENT_HEARTBEAT = 15.0
+
+    @app.get("/api/live/events")
+    async def live_events():
+        """Server-sent events: one message whenever the room's state moves.
+
+        One-way on purpose. Everything the browser SENDS already has a
+        perfectly good endpoint (`/api/live/select` and friends), so a
+        websocket would buy a return channel nothing needs and cost a
+        protocol upgrade, a heartbeat of its own and a reconnect loop
+        EventSource gives away for nothing.
+        """
+        async def stream():
+            last, idle = None, 0.0
+            # Prime immediately so a reconnecting client is never left
+            # waiting for the next state change to learn where the draft is.
+            while True:
+                with lock:
+                    rev = _ui_revision()
+                if rev != last:
+                    last, idle = rev, 0.0
+                    payload = {"generation": rev[0], "picks_made": rev[1],
+                               "candidates_as_of_pick": rev[2],
+                               "plan_as_of_pick": rev[3], "listener": rev[4],
+                               "on_the_clock": rev[5], "draft_started": rev[6],
+                               "seconds_remaining": rev[7]}
+                    yield f"event: state\ndata: {json.dumps(payload)}\n\n"
+                else:
+                    idle += EVENT_TICK
+                    if idle >= EVENT_HEARTBEAT:
+                        idle = 0.0
+                        yield ": keepalive\n\n"
+                await asyncio.sleep(EVENT_TICK)
+
+        return StreamingResponse(stream(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache",
+                                          "X-Accel-Buffering": "no"})
 
     @app.get("/api/live/plan")
     def live_plan():

@@ -75,6 +75,10 @@ _ADP_TEAM_ALIASES = {"LAR": "LA", "WSH": "WAS", "JAC": "JAX", "SD": "LAC", "OAK"
 _BOARD_COLUMNS = [
     "player_id", "name", "position", "team", "bye", "production", "durability",
     "role", "environment", "schedule", "composite", "proj_points",
+    # Average games per season across the player's whole career, absent
+    # seasons included -- see `career_availability`. A RATE, unlike
+    # `durability` two columns over, which is a within-position percentile.
+    "career_games_pg",
     # How much this league's scoring rules re-price ESPN's PPR-shaped season
     # projection for this player: 1.0 in a PPR league, ~0.83 for a
     # high-reception WR in half-PPR, ~0.67 in standard. On the board rather
@@ -210,6 +214,41 @@ def _neutral_factors(position: str, rules: dict | None,
         return [f for f in _NEUTRAL_FACTORS_FOR_KDST
                 if f not in _KICKER_FACTORS_THAT_BECOME_REAL]
     return _NEUTRAL_FACTORS_FOR_KDST
+
+
+def career_availability(weekly: pd.DataFrame) -> pd.DataFrame:
+    """Average games played per season across a player's whole career.
+
+    Counted over every season since his first, INCLUDING the ones he does not
+    appear in at all. That is the entire reason this is not a one-line
+    groupby: a player who misses a full year has no rows in `weekly` for it,
+    so averaging the seasons he does appear in simply skips his worst ones.
+    Measured on the real table, the naive version reports a median of 7.2
+    games a season against a true 3.0 -- it does not shade the answer, it
+    inverts who looks durable.
+
+    Seventeen is the cap and the denominator: the regular season is 17 games
+    across 18 weeks, and a player traded mid-season can appear in 18 game
+    weeks, which is a real thing that should not read as better than perfect
+    attendance.
+
+    Deliberately NOT the board's `durability` column, which is a
+    within-position percentile (see factors.normalize_within_position) and
+    averages 50 by construction -- unusable as a rate. Nor its underlying
+    `durability_raw`, which build_board computes after narrowing `weekly` to
+    RECENCY_WEIGHTS and so answers a three-season question.
+    """
+    if weekly.empty or "season" not in weekly.columns:
+        return pd.DataFrame(columns=["player_id", "career_games_pg"])
+    per = (weekly.groupby(["player_id", "season"])["week"].nunique()
+                 .rename("games").reset_index())
+    latest = int(per["season"].max())
+    span = per.groupby("player_id")["season"].min().rename("first")
+    played = per.groupby("player_id")["games"].sum().rename("played")
+    out = pd.concat([span, played], axis=1).reset_index()
+    seasons = (latest - out["first"] + 1).clip(lower=1)
+    out["career_games_pg"] = (out["played"] / seasons).clip(upper=GAMES)
+    return out[["player_id", "career_games_pg"]]
 
 
 def _adapt_depth_charts(depth: pd.DataFrame) -> pd.DataFrame:
@@ -761,6 +800,13 @@ def build_board(conn, weights: dict | None = None,
     # are selected inside add_market. ESPN stays PPR (espn_adp is PPR-only).
     fmt = league.scoring_format(settings)
     weekly = read_table(conn, "weekly")
+    # Career availability is measured BEFORE the recency filter below, and it
+    # is the one factor that should be: every other column here scores how
+    # good a player has been lately, while this one answers "can he be relied
+    # on to play", and three seasons is a small sample for a question about
+    # durability. See `career_availability` for why absent seasons are the
+    # whole point of computing it over the full history.
+    career = career_availability(weekly)
     if not weekly.empty:
         weekly = weekly[weekly["season"].isin(RECENCY_WEIGHTS)]
     depth = _adapt_depth_charts(read_table(conn, "depth_charts"))
@@ -809,6 +855,7 @@ def build_board(conn, weights: dict | None = None,
         role = factors.role_factor(depth, weekly)
     for raw in (prod, dura, role):
         uni = uni.merge(raw, on="player_id", how="left")
+    uni = uni.merge(career, on="player_id", how="left")
 
     env = factors.environment_factor(sched) if not sched.empty else pd.DataFrame(columns=["team", "env_raw"])
     uni = uni.merge(env, on="team", how="left")

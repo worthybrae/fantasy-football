@@ -14,6 +14,13 @@ export interface Player {
   market_rank: number | null; market_spread: number | null; market_sources: MarketSources;
   espn_ppr_rank: number | null;
   stats: BoardStats | null;
+  // Average games played per season across this player's WHOLE career, with
+  // seasons he missed entirely counted as zero rather than skipped (see
+  // scoring/board.career_availability -- the naive version reports a median
+  // of 7.2 games against a true 3.0). `null` for a defense, or anyone with
+  // no NFL season behind him. The available table draws it as a five-bar
+  // meter; it is a RATE, not the board's `durability` percentile.
+  career_games_pg: number | null;
   // Points in each week of the last COMPLETE season -- index 0 is week 1 --
   // scored under the league's own rules, not always PPR (scoring/game_points.py).
   // The available table draws it as an inline bar chart.
