@@ -293,11 +293,15 @@ def expected_change(weekly: pd.DataFrame, proj_points: pd.Series,
     and a column meant to show development would otherwise be measuring
     availability -- which `career_games_pg` already answers, separately.
 
-    The baseline is the recency-weighted average (scoring/config's
-    RECENCY_WEIGHTS: half this year, a third last, a fifth the year before),
-    not simply last season. One season is a small sample to call a trend
-    against, and this is the same weighting `scoring/profile.py`'s
-    `career_summary` already shows on the card, so the two cannot disagree.
+    The baseline is LAST SEASON ALONE, not a recency-weighted blend of the
+    last three. Blending is the better estimate of a player's true rate --
+    one season is a small sample -- but it answers a question nobody asked
+    this column: a drafter reading "Change" wants to know what has happened
+    since the year he just watched, and against a three-year average a player
+    who broke out last season still shows a large positive, as though the
+    breakout were still ahead of him. It costs nothing in coverage: every one
+    of the 207 board players with any recent-season history played in the last
+    completed season, so the blend was reaching back for nobody.
 
     IT CONFLATES TWO THINGS AND CANNOT DO OTHERWISE. ESPN projects a full
     17 games for 392 of the 400 players it prices, so a backup is not
@@ -311,19 +315,17 @@ def expected_change(weekly: pd.DataFrame, proj_points: pd.Series,
     empty = pd.DataFrame(columns=["player_id", "proj_change"])
     if weekly.empty or "season" not in weekly.columns:
         return empty
-    wk = weekly[weekly["season"].isin(RECENCY_WEIGHTS)].copy()
+    # The last season present in the data, not a hardcoded year: this runs in
+    # the preseason, when the current year has no rows at all.
+    last = int(weekly["season"].max())
+    wk = weekly[weekly["season"] == last].copy()
     if wk.empty:
         return empty
     wk["_pts"] = compute_ppr_points(wk, normalize_rules(rules))
-    per = wk.groupby(["player_id", "season"]).agg(
+    per = wk.groupby("player_id").agg(
         pts=("_pts", "sum"), games=("week", "nunique")).reset_index()
     per = per[per["games"] > 0]
-    per["ppg"] = per["pts"] / per["games"]
-    per["w"] = per["season"].map(RECENCY_WEIGHTS).astype(float)
-    per["wx"] = per["ppg"] * per["w"]
-    agg = per.groupby("player_id").agg(wx=("wx", "sum"), w=("w", "sum")).reset_index()
-    agg = agg[agg["w"] > 0]
-    agg["w_ppg"] = agg["wx"] / agg["w"]
+    agg = per.assign(w_ppg=per["pts"] / per["games"])
     # `proj_points` is indexed by the board's `player_id`, which is NOT
     # unique: `_add_adp_only_players` synthesizes an id from the normalized
     # name alone, so one name at two positions collides. `.map()` against a

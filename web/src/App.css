@@ -4682,36 +4682,32 @@ button.roster-row:focus-visible {
    only fills upward has no way to say "down", and this column's whole job is
    that some players are projected to fall. Bars grow up from a centre axis
    for a gain and down for a loss, so direction reads before magnitude. */
-.avail-col-change { width: 52px; }
+/* Matched to .avail-col-health so the three meters line up. */
+.avail-col-change { width: 74px; }
 
-.change-bar {
+/* Five bars, the same shape and footprint as Health and Steady beside it.
+   The earlier design was a bar growing up or down from a centre axis, which
+   was correct about the data and wrong on screen: the axis ran the full width
+   of the cell while the fill was a short stub, so the axis was the only thing
+   the eye caught and the column read as a single flat line. Direction moved
+   into COLOUR, which the two neighbouring columns already use, and magnitude
+   into the bar count, so all three read the same way at a glance. */
+.change-meter {
   display: inline-flex;
-  flex-direction: column;
-  align-items: center;
-  width: 100%;
-  height: 18px;
+  align-items: flex-end;
+  gap: 2px;
+  height: 14px;
 }
 
-/* Two equal halves either side of the axis, so a +2 and a -2 are the same
-   length in opposite directions -- without them the bar would be measured
-   from whichever end it happened to start at. */
-.change-half {
-  flex: 1;
-  width: 14px;
-  display: flex;
-}
-.change-half.is-up { align-items: flex-end; }
-.change-half.is-down { align-items: flex-start; }
-
-/* The axis is always drawn, including for a player projected to stay exactly
-   flat: an empty cell would read as missing data, and "no change" is a real
-   answer this column gives often -- the median player sits at -0.8. */
-.change-axis {
-  width: 100%;
-  height: 1px;
-  background: var(--border);
+.change-mbar {
+  width: 4px;
+  height: 100%;
+  border-radius: 1px;
+  background: var(--bg-2);
 }
 
-.change-fill { width: 100%; border-radius: 1px; }
-.change-fill.is-up { background: var(--ok); border-radius: 1px 1px 0 0; }
-.change-fill.is-down { background: var(--fail); border-radius: 0 0 1px 1px; }
+/* Green for a projected gain, red for a projected loss. Unlike Health and
+   Steady the colour is NOT a ramp over the level -- level is size here, and
+   a one-bar fall and a five-bar fall are both falls. */
+.change-meter.is-up .change-mbar.is-on { background: var(--ok); }
+.change-meter.is-down .change-mbar.is-on { background: var(--fail); }

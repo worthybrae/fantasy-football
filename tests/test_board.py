@@ -1249,20 +1249,19 @@ def test_expected_change_is_per_game_on_both_sides():
         "games played must not move a per-game comparison")
 
 
-def test_expected_change_weights_recent_seasons_more_heavily():
-    """The baseline is RECENCY_WEIGHTS, not a flat average and not last season
-    alone: one season is a small sample to call a trend against.
+def test_expected_change_measures_against_last_season_only():
+    """Not a recency-weighted blend of the last three.
 
-    Asserted against the exact weighted figure rather than "closer to the
-    recent one" -- the loose version of this test passed with every season
-    weighted equally, which is precisely the bug it exists to catch.
+    Blending is the better estimate of a player's true rate, and the wrong
+    answer to what this column asks. A player who broke out last season reads
+    as a large projected GAIN against a three-year average -- as though the
+    breakout were still ahead of him -- when against the season a drafter
+    actually watched he is projected flat.
     """
     from scoring.board import GAMES, expected_change
-    from scoring.config import RECENCY_WEIGHTS
     from scoring.ppr import compute_ppr_points, normalize_rules
-    newest, oldest = max(RECENCY_WEIGHTS), min(RECENCY_WEIGHTS)
     rows = []
-    for season, rec in ((newest, 10), (oldest, 2)):
+    for season, rec in ((2023, 2), (2024, 2), (2025, 10)):   # broke out in 2025
         rows += [{"player_id": "p", "player_display_name": "p", "season": season,
                   "week": w, "position": "WR", "recent_team": "DET",
                   "receptions": rec, "receiving_yards": rec * 10,
@@ -1271,20 +1270,17 @@ def test_expected_change_weights_recent_seasons_more_heavily():
                  for w in range(1, 18)]
     weekly = pd.DataFrame(rows)
     scored = weekly.assign(pts=compute_ppr_points(weekly, normalize_rules(None)))
-    ppg = scored.groupby("season")["pts"].sum() / 17
+    last_ppg = scored[scored.season == 2025]["pts"].sum() / 17
 
-    wn, wo = RECENCY_WEIGHTS[newest], RECENCY_WEIGHTS[oldest]
-    weighted = (ppg[newest] * wn + ppg[oldest] * wo) / (wn + wo)
-    flat = (ppg[newest] + ppg[oldest]) / 2
-    assert weighted != pytest.approx(flat), "fixture must separate the two"
-
-    proj = pd.Series({"p": 0.0})
+    # Projected to repeat his breakout exactly: the honest answer is no change.
+    proj = pd.Series({"p": last_ppg * GAMES})
     change = expected_change(weekly, proj).set_index("player_id")["proj_change"]["p"]
-    # The projection is zero, so the change IS the negated baseline.
-    assert -change == pytest.approx(weighted, abs=0.05)
-    assert -change != pytest.approx(flat, abs=0.05)
 
-
+    assert change == pytest.approx(0.0, abs=0.05)
+    # Against the blended baseline this would have read as a large gain.
+    blended = (last_ppg * 0.5 + (scored[scored.season == 2024]["pts"].sum() / 17) * 0.3
+               + (scored[scored.season == 2023]["pts"].sum() / 17) * 0.2)
+    assert last_ppg - blended > 3, "fixture must separate the two baselines"
 
 
 def test_expected_change_survives_a_duplicate_player_id_in_the_projections():

@@ -280,34 +280,40 @@ function positionTip(
 // the rest are defenses and players with no NFL season yet): 9% land on one
 // bar, 15% on two, 35% on three, 28% on four, 14% on five. Wide middle,
 // rare extremes -- which is what makes a five-bar meter readable at all.
-// -- expected change, as a diverging bar ------------------------------------
+// -- expected change, as a five-bar meter ------------------------------------
 //
-// A SIGNED number, so it is not a fill meter like Health: bars grow up from a
-// baseline for a projected gain and down for a projected loss, and the
-// direction is readable before the size is.
+// A SIGNED number in a column that has to sit beside two fill meters. The
+// first version made it a bar growing up or down from a centre axis, which is
+// the honest shape for signed data and the wrong one here: the axis spanned
+// the whole cell while the fill was a short stub, so on screen the column was
+// a flat line and nothing else. Direction lives in the COLOUR instead --
+// green for a projected gain, red for a loss -- and magnitude in the number
+// of bars, so Health, Steady and Change all read the same way.
 //
 // The scale clamps at +/-4 points per game, which covers the 5th to 95th
 // percentile of the real board (-5.9 to +2.7 at the extremes, -0.8 median).
-// Beyond that the bar is pinned and the number lives in the hover text: the
+// Beyond that the meter is full and the number lives in the hover text: the
 // outliers are quarterbacks who lost a starting job, and letting a -14 set
-// the axis would flatten every real difference into nothing.
+// the scale would flatten every real difference into one bar.
 const CHANGE_CLAMP = 4
 
-const ChangeBar = memo(function ChangeBar({ change }: { change: number }): ReactNode {
-  const scaled = Math.max(-1, Math.min(1, change / CHANGE_CLAMP))
+function changeLevel(change: number): number {
+  const scaled = Math.min(1, Math.abs(change) / CHANGE_CLAMP)
+  // One bar minimum: a player projected to hold exactly steady still has an
+  // answer, and an empty meter would read as missing data.
+  return Math.min(5, Math.max(1, Math.ceil(scaled * 5)))
+}
+
+const ChangeMeter = memo(function ChangeMeter({ change }: { change: number }): ReactNode {
+  const level = changeLevel(change)
   const up = change >= 0
   const label = `${change > 0 ? '+' : ''}${change.toFixed(1)} points per game vs his recent average`
   return (
-    <span className="change-bar" role="img" aria-label={label} title={label}>
-      <span className="change-half is-up">
-        {up && <span className="change-fill is-up"
-                     style={{ height: `${Math.abs(scaled) * 100}%` }} />}
-      </span>
-      <span className="change-axis" />
-      <span className="change-half is-down">
-        {!up && <span className="change-fill is-down"
-                      style={{ height: `${Math.abs(scaled) * 100}%` }} />}
-      </span>
+    <span className={`change-meter ${up ? 'is-up' : 'is-down'}`} role="img"
+          title={label} aria-label={`${label} (${level} of 5)`}>
+      {[1, 2, 3, 4, 5].map((i) => (
+        <span key={i} className={`change-mbar${i <= level ? ' is-on' : ''}`} />
+      ))}
     </span>
   )
 })
@@ -611,11 +617,6 @@ const AvailableRow = memo(function AvailableRow({
                     ? <span className="gamebars-none">—</span>
                     : <FinishArc arc={arc} position={c.position} />}
                 </td>
-                <td className="avail-col-change">
-                  {change === null
-                    ? <span className="gamebars-none">—</span>
-                    : <ChangeBar change={change} />}
-                </td>
                 <td className="avail-col-health">
                   {level === null
                     ? <span className="gamebars-none">—</span>
@@ -631,6 +632,11 @@ const AvailableRow = memo(function AvailableRow({
                     ? <span className="gamebars-none">—</span>
                     : <SteadyMeter level={steady}
                                    cv={player?.consistency_cv ?? null} />}
+                </td>
+                <td className="avail-col-change">
+                  {change === null
+                    ? <span className="gamebars-none">—</span>
+                    : <ChangeMeter change={change} />}
                 </td>
                 <td className="avail-col-num mono avail-proj">{Math.round(c.proj_points)}</td>
                 {/* null survive_pct (no roster to survive FOR yet) gets no
@@ -1022,9 +1028,11 @@ export default function AvailableList({
     + 'entirely. Ranked on season points, so a year cut short by injury shows '
     + 'as the bad finish it was. Sorts on the most recent season.'
   const changeTitle = 'How many more (or fewer) points per game he is '
-    + 'PROJECTED for than he has actually been averaging, weighted toward '
-    + 'his recent seasons. Per game on both sides, so a year cut short by '
-    + 'injury does not read as decline. One caveat: a large negative is '
+    + 'PROJECTED for than he actually averaged LAST SEASON. Per game on both '
+    + 'sides, so a year cut short by injury does not read as decline. Green '
+    + 'bars are a projected gain and red a projected loss; the number of bars '
+    + 'is the size of it, full at four points a game or more. One caveat: a '
+    + 'large negative is '
     + 'usually a lost starting job rather than a player getting worse -- '
     + 'ESPN projects a full season for almost everyone, so a backup shows as '
     + 'a huge per-game fall. This is what the projection expects, not a '
