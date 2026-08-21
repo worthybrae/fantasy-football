@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import type { LiveCandidate, Player } from '../../api'
 import { CellTip, loadProfile, type CellTipKind } from './CellTip'
 import { FINISH_STARTERS, finishHeight, finishTone } from './finish'
-import { BAR_CEILING, barThresholds, barTone } from './weeks'
+import { BAR_CEILING, SEASON_GAMES, barThresholds, barTone } from './weeks'
 import { riskTone } from './tone'
 
 // duplicated from RosterPanel.tsx/DraftBoardGrid.tsx (unexported in both):
@@ -632,7 +632,15 @@ const AvailableRow = memo(function AvailableRow({
                     ? <span className="gamebars-none">—</span>
                     : <ChangeMeter change={change} />}
                 </td>
-                <td className="avail-col-num mono avail-proj">{Math.round(c.proj_points)}</td>
+                {/* Per game, not for the season. A season total is a number
+                    nobody has a feel for -- 313 is good and 297 is fine and
+                    only a reader who already knows the scale can tell. 18.4
+                    is a Sunday, against a weekly score anyone in the league
+                    has watched all year. Sorting is unaffected: dividing
+                    every row by the same constant cannot reorder them. */}
+                <td className="avail-col-num mono avail-proj">
+                  {(c.proj_points / SEASON_GAMES).toFixed(1)}
+                </td>
                 {/* null survive_pct (no roster to survive FOR yet) gets no
                     riskTone color at all -- riskTone's red/amber/green ramp
                     is a claim about a real probability, and coloring a dash
@@ -1093,8 +1101,12 @@ export default function AvailableList({
     + 'reliable. Steady is not the same as good: a spiky player can be worth '
     + 'more if his ceiling is why you want him. Blank for anyone without a '
     + 'full-enough recent season to measure.'
-  const projTitle = "Projected fantasy points for the full upcoming season, "
-    + "under this league's own scoring."
+  const projTitle = "Projected fantasy points PER GAME for the upcoming "
+    + "season, under this league's own scoring. Per game rather than a season "
+    + "total because a total is a number nobody has a feel for -- this one "
+    + "reads against the weekly scores you have watched all year. It assumes "
+    + "a full season, so it says nothing about whether he will be available "
+    + "for it; that is what Health answers."
   // NOT "chance he's still there at pick N" any more -- verified against the
   // real model for an 8-team draft at slot 2 (own turns 2, 15, 18, 31, 34,
   // 47): the pick this number is measured against came back 13, 27, 27, 29,
@@ -1207,7 +1219,7 @@ export default function AvailableList({
             {sortableTh('health', 'Health', 'avail-col-health')}
             {sortableTh('steady', 'Steady', 'avail-col-health')}
             {sortableTh('change', 'Change', 'avail-col-change')}
-            {sortableTh('proj', 'Proj', 'avail-col-num')}
+            {sortableTh('proj', 'Proj/G', 'avail-col-num')}
             {/* One word. A header naming the horizon at all ("Lasts to pick
                 13") reads as a promise that pick 13 is the user's own turn,
                 which it verifiably never is (see lastsTitle's own comment)

@@ -33,3 +33,12 @@ export const BAR_CEILING = 30
 // many weeks this player happened to appear in. A row of 12 bars and a row of
 // 18 sitting in the same panel would make six missed games invisible.
 export const SEASON_WEEKS = 18
+
+// GAMES a team plays, which is SEASON_WEEKS minus the bye -- deliberately a
+// separate number, because the two are used for different things and a single
+// constant serving both would be wrong for one of them.
+//
+// Must equal `GAMES` in scoring/board.py: that is the divisor behind the
+// Change column, so a projection shown per game here and a change measured
+// per game there would otherwise be per-game in two different senses.
+export const SEASON_GAMES = 17
