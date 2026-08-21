@@ -15,10 +15,10 @@ import { memo, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 
 import { fetchProfile } from '../../api'
-import type { LiveSettings, PlayerProfileData, SeasonSummary } from '../../api'
-import { Chart, type Col } from './Chart'
-import { finishPosition, finishTone, startersAt, weightedFinish } from './finish'
-import { BAR_CEILING, SEASON_WEEKS, barTone } from './weeks'
+import type { LiveSettings, PlayerProfileData } from '../../api'
+import { Chart } from './Chart'
+import { startersAt, weightedFinish } from './finish'
+import { finishCols, healthCols, perGameCols, seasonLength, steadyCols, weekCols } from './panels'
 
 export type CellTipKind = 'health' | 'games' | 'finish' | 'steady' | 'change'
 
@@ -39,73 +39,25 @@ export function loadProfile(playerId: string): Promise<PlayerProfileData> {
   return p
 }
 
-// Seasons ran 16 games before 2021 and 17 from it, so "games missed" is only
-// meaningful against the right denominator -- a 16-game 2019 is a full year,
-// and drawing it as one short would invent an injury.
-function seasonLength(season: number): number {
-  return season >= 2021 ? 17 : 16
-}
-
-
 // Health, the 2025 sparkline, and Finish are all the same picture -- time
 // along the bottom, one column per period, something growing from a shared
 // baseline -- built here from each panel's own data and drawn by the shared
 // `Chart` component so a reader only has to learn the picture once.
 type BodyProps = { data: PlayerProfileData; settings?: LiveSettings | null }
 
-function year(season: number): string {
-  return `\u2019${String(season).slice(2)}`
-}
-
-/** Games played per season, INCLUDING seasons with none.
- *
- *  A player who missed a whole year has no row in the profile's `seasons`, and
- *  leaving that year out is precisely the mistake the Health meter exists not
- *  to make: `career_availability` counts absent seasons as zeros, so a panel
- *  that skipped them would explain a number by showing different data. Spans
- *  from his first season with any games through the most recent one measured.
- */
-function availabilityRows(seasons: SeasonSummary[]): { season: number; games: number }[] {
-  if (!seasons.length) return []
-  const played = new Map(seasons.map((s) => [s.season, s.games]))
-  const first = Math.min(...played.keys())
-  const last = Math.max(...played.keys())
-  const rows = []
-  for (let season = first; season <= last; season += 1) {
-    rows.push({ season, games: played.get(season) ?? 0 })
-  }
-  return rows
-}
-
-// Health keeps its circles -- they say "16 of 17" in a way a bar cannot, and
-// it was the panel that already read well -- stacked into a column so the
-// season axis runs the same way Finish's does.
-const HEALTH_TONES = ['is-out', 'is-fringe', 'is-starter', 'is-strong', 'is-elite']
-
 function HealthBody({ data }: BodyProps): ReactNode {
-  const rows = availabilityRows(data.seasons)
-  if (!rows.length) return <div className="ctip-empty">No NFL seasons yet.</div>
-  const cols: Col[] = rows.map((r) => {
-    const of = seasonLength(r.season)
-    const share = r.games / of
-    return {
-      key: r.season,
-      label: year(r.season),
-      value: String(r.games),
-      // The same five steps the other panels use, cut on how much of the
-      // season he was actually there for.
-      tone: HEALTH_TONES[Math.min(4, Math.floor(share * 5))],
-      fill: share,
-      units: { filled: Math.min(r.games, of), of },
-      empty: r.games === 0,
-    }
-  })
+  const cols = healthCols(data.seasons)
+  if (!cols.length) return <div className="ctip-empty">No NFL seasons yet.</div>
+  // The last column's key is that season: reading it back off the built
+  // columns keeps this note from re-deriving "which season is most recent"
+  // by a second route than `healthCols` used.
+  const lastSeason = cols[cols.length - 1].key as number
   return (
     <>
       <div className="ctip-head">
         <span>Games played</span>
         <span className="ctip-head-note">
-          of {seasonLength(rows[rows.length - 1].season)}
+          of {seasonLength(lastSeason)}
         </span>
       </div>
       <Chart cols={cols} />
@@ -121,24 +73,7 @@ function GamesBody({ data }: BodyProps): ReactNode {
     data.game_log.filter((g) => g.season === latest && !g.dnp).map((g) => [g.week, g]))
   const scored = [...played.values()].map((g) => g.ppr_points)
   const avg = scored.length ? scored.reduce((a, b) => a + b, 0) / scored.length : 0
-  const position = data.header.position
-
-  const cols: Col[] = Array.from({ length: SEASON_WEEKS }, (_, i) => {
-    const week = i + 1
-    const game = played.get(week)
-    const pts = game?.ppr_points ?? null
-    return {
-      key: week,
-      // The opponent, not the week number: a reader knows where week 9 is from
-      // its place in the row, and "DEN" is the fact that explains a bad one.
-      // The number would be the axis restating itself.
-      label: game?.opponent ?? '—',
-      value: pts === null ? '·' : String(Math.round(pts)),
-      tone: pts === null ? '' : barTone(pts, position),
-      fill: pts === null ? 0 : Math.min(1, pts / BAR_CEILING),
-      empty: pts === null,
-    }
-  })
+  const cols = weekCols(data.game_log, latest, data.header.position)
   return (
     <>
       <div className="ctip-head">
@@ -155,16 +90,7 @@ function FinishBody({ data, settings }: BodyProps): ReactNode {
   const pos = data.header.position
   const starters = startersAt(pos, settings)
   const avg = weightedFinish(data.seasons.map((s) => [s.season, s.pos_finish]))
-  const cols: Col[] = data.seasons.slice().reverse().map((s) => ({
-    key: s.season,
-    label: year(s.season),
-    value: String(s.pos_finish),
-    tone: finishTone(s.pos_finish, starters),
-    // `1 -` because rank runs backwards. A chart where the best season was
-    // the shortest column is the one thing a reader cannot be asked to hold
-    // in their head while comparing it to the two panels beside it.
-    fill: 1 - finishPosition(s.pos_finish, starters),
-  }))
+  const cols = finishCols(data.seasons, starters)
   return (
     <>
       <div className="ctip-head">
@@ -200,16 +126,8 @@ function FinishBody({ data, settings }: BodyProps): ReactNode {
 //
 // Linear, not log-spaced like Finish: RB1 to RB6 is the difference between
 // rounds, which is why that ladder is log, but consistency has no equivalent
-// tier structure to stretch.
-function steadyTone(rank: number, pool: number): string {
-  const pct = rank / pool
-  if (pct <= 0.25) return 'is-elite'
-  if (pct <= 0.5) return 'is-strong'
-  if (pct <= 0.75) return 'is-starter'
-  if (pct <= 0.9) return 'is-fringe'
-  return 'is-out'
-}
-
+// tier structure to stretch. (Tone cut points live with the builder, in
+// `panels.ts`, alongside the fill they colour.)
 function SteadyBody({ data }: BodyProps): ReactNode {
   // `cv_rank_n` counts only the seasons that HAVE a coefficient: a season
   // whose mean is zero or negative gets none, ranks nowhere, and would draw
@@ -222,20 +140,7 @@ function SteadyBody({ data }: BodyProps): ReactNode {
     return <div className="ctip-empty">No season long enough to measure.</div>
   }
   const pos = data.header.position
-  const cols: Col[] = rows.slice().reverse().map((r) => {
-    const rank = r.cv_rank as number
-    const pool = r.cv_rank_n as number
-    return {
-      key: r.season,
-      label: year(r.season),
-      value: String(rank),
-      tone: steadyTone(rank, pool),
-      // `1 -` because rank runs backwards, same as Finish: the steadiest
-      // season has to be the tallest column, or this panel and the one next
-      // to it would read in opposite directions.
-      fill: 1 - rank / pool,
-    }
-  })
+  const cols = steadyCols(data.seasons)
   // The most recent pool, because a denominator moves year to year and the
   // note is there to make the latest column legible, not to average them.
   const pool = rows[0].cv_rank_n as number
@@ -261,30 +166,7 @@ function ChangeBody({ data }: BodyProps): ReactNode {
   if (!rows.length && proj === null) {
     return <div className="ctip-empty">Nothing to compare yet.</div>
   }
-  const ceiling = Math.max(
-    ...rows.map((r) => r.ppg), proj ?? 0, 1)
-  const position = data.header.position
-  const cols: Col[] = rows.slice().reverse().map((r) => ({
-    key: r.season,
-    label: year(r.season),
-    value: r.ppg.toFixed(1),
-    tone: barTone(r.ppg, position),
-    fill: r.ppg / ceiling,
-  }))
-  if (proj !== null) {
-    cols.push({
-      key: 'proj',
-      // Not a year: this column is the only one that has not happened.
-      label: 'proj',
-      value: proj.toFixed(1),
-      tone: barTone(proj, position),
-      fill: proj / ceiling,
-      // Drawn hollow, behind a rule: everything left of it is banked, this
-      // is the only column still owed. The tone stays, so it is still read
-      // against the same good/mid/bad cut points as the seasons beside it.
-      projected: true,
-    })
-  }
+  const cols = perGameCols(data.seasons, proj, data.header.position)
   const last = rows.length ? rows[0].ppg : null
   const delta = last !== null && proj !== null ? proj - last : null
   return (
