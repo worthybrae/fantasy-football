@@ -285,10 +285,17 @@ function healthLevel(gamesPg: number | null | undefined): number | null {
 // faster than a continuous ramp that makes four and five nearly identical.
 const HEALTH_CLASS = ['', 'is-1', 'is-2', 'is-3', 'is-4', 'is-5'] as const
 
-const HealthMeter = memo(function HealthMeter({ level }: { level: number }): ReactNode {
+const HealthMeter = memo(function HealthMeter(
+  { level, gamesPg }: { level: number; gamesPg: number },
+): ReactNode {
+  // The bars are the glance; this is the number behind them. Without it the
+  // meter is unfalsifiable -- three bars means nothing a reader can check,
+  // and "durability 3 of 5" told a screen reader even less than the picture
+  // told everyone else.
+  const label = `${gamesPg.toFixed(1)} games per season across his career`
   return (
     <span className={`health-meter ${HEALTH_CLASS[level]}`} role="img"
-          aria-label={`durability ${level} of 5`}>
+          title={label} aria-label={`${label} (${level} of 5)`}>
       {[1, 2, 3, 4, 5].map((i) => (
         <span key={i} className={`health-bar${i <= level ? ' is-on' : ''}`} />
       ))}
@@ -468,7 +475,8 @@ const AvailableRow = memo(function AvailableRow({
                 <td className="avail-col-health">
                   {level === null
                     ? <span className="gamebars-none">—</span>
-                    : <HealthMeter level={level} />}
+                    : <HealthMeter level={level}
+                                    gamesPg={player?.career_games_pg ?? 0} />}
                 </td>
                 <td className="avail-col-num mono avail-proj">{Math.round(c.proj_points)}</td>
                 {/* null survive_pct (no roster to survive FOR yet) gets no
