@@ -219,11 +219,19 @@ def _neutral_factors(position: str, rules: dict | None,
     return _NEUTRAL_FACTORS_FOR_KDST
 
 
-# How many seasons of positional finish the board carries per player. Five
-# is a career arc without being a career: it clears a rookie contract, and
-# five bars still read individually in a table row where the sparkline beside
-# them already spends 92px.
-FINISH_SEASONS = 5
+# How many seasons of positional finish the board carries per player.
+#
+# Ten, which is every season `weekly` holds, i.e. no cap in practice. It was
+# five, and five was measured to be wrong: the median draftable player has
+# four seasons, but 72 of 207 -- 35%, and every veteran among them -- have
+# more, so a five-season window silently truncated a third of the board and
+# cut the early years off exactly the careers whose SHAPE is most worth
+# seeing. Josh Allen showed five of his eight.
+#
+# The cost is a ragged column, and that is handled in the renderer rather
+# than here by right-aligning the arc: the most recent season sits in the
+# same place on every row, which is the bar being compared between players.
+FINISH_SEASONS = 10
 
 
 def season_finishes(weekly: pd.DataFrame, rules: dict | None = None,

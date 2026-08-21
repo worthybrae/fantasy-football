@@ -4629,13 +4629,22 @@ button.roster-row:focus-visible {
 
    Five slots at 5px plus gaps, sized to sit between the player name and the
    sparkline without pushing the row past 32px. */
-.avail-col-finish { width: 46px; }
+/* Ten slots at 3px plus 1px gaps. Sized for the longest career the weekly
+   data can hold rather than for the median one, so the column never changes
+   width as the board is filtered. */
+.avail-col-finish { width: 58px; }
 
+/* RIGHT-aligned, which is the whole reason this works with careers of
+   different lengths: `justify-content: flex-end` puts the most recent season
+   in the same place on every row, so the bar a reader compares between two
+   players is always the rightmost one. */
 .finish-arc {
   display: inline-flex;
   align-items: flex-end;
-  gap: 2px;
+  justify-content: flex-end;
+  gap: 1px;
   height: 16px;
+  width: 100%;
 }
 
 /* Each bar gets a full-height slot so the arc is read against a constant
@@ -4644,7 +4653,7 @@ button.roster-row:focus-visible {
 .finish-arc-slot {
   display: flex;
   align-items: flex-end;
-  width: 5px;
+  width: 3px;
   height: 100%;
   background: var(--bg-2);
   border-radius: 1px;

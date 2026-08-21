@@ -307,14 +307,22 @@ function finishHeight(finish: number, starters: number): number {
   return 12 + (1 - Math.min(finish, floor) / floor) * 88
 }
 
+// Careers run from one season to ten, so the arc is RIGHT-ALIGNED: the most
+// recent season sits in the same place on every row. Left-aligned, a rookie's
+// only bar and a ten-year veteran's latest one landed nine slots apart, and
+// the bar a reader actually compares between two players was never in the
+// same position twice.
+const FINISH_MAX = 10
+
 const FinishArc = memo(function FinishArc(
   { arc, position }: { arc: [number, number][]; position: string },
 ): ReactNode {
   const starters = FINISH_STARTERS[position] ?? 24
-  const label = arc.map(([yr, f]) => `'${String(yr).slice(2)} ${position}${f}`).join('  ')
+  const shown = arc.slice(-FINISH_MAX)
+  const label = shown.map(([yr, f]) => `'${String(yr).slice(2)} ${position}${f}`).join('  ')
   return (
     <span className="finish-arc" role="img" aria-label={label} title={label}>
-      {arc.map(([season, finish]) => (
+      {shown.map(([season, finish]) => (
         <span key={season} className="finish-arc-slot">
           <span className={`finish-arc-bar ${finishTone(finish, starters)}`}
                 style={{ height: `${finishHeight(finish, starters)}%` }} />

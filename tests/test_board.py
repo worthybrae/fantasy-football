@@ -1198,11 +1198,12 @@ def test_season_finishes_ranks_within_season_and_position():
     assert [f for _, f in out["wr1"]] == [1, 1]
 
 
-def test_season_finishes_keeps_only_the_most_recent_seasons():
-    """A table row has space for an arc, not a career. Older seasons are
-    dropped from the END that matters least -- the oldest."""
+def test_season_finishes_keeps_the_most_recent_seasons_when_it_must_choose():
+    """The cap is the full width of the weekly data, so in practice nothing
+    is dropped -- but when a career does exceed it, the OLDEST seasons go.
+    A 2016 finish says less about this year than a 2025 one does."""
     from scoring.board import FINISH_SEASONS, season_finishes
-    seasons = list(range(2015, 2026))
+    seasons = list(range(2010, 2026))     # longer than any cap
     weekly = pd.DataFrame(
         [{"player_id": "vet", "player_display_name": "Vet", "season": s,
           "week": w, "position": "WR",
