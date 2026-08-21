@@ -65,11 +65,16 @@ const BAR_THRESHOLDS: Record<string, { amberFrom: number; greenFrom: number }> =
 // How long a drafted player stays on screen on his way out. Long enough to
 // read a name under a pick clock, short enough that back-to-back picks do
 // not stack up on each other.
-const TAKEN_MS = 650
-// How long the rows below take to close the gap once one is removed. Shorter
-// than the fade on purpose -- the fade is information, the slide is only
-// continuity, and a slow slide reads as the table being sluggish.
-const SLIDE_MS = 260
+// How long a drafted row stays before it is removed. MUST match the fade in
+// App.css: a row that reaches full transparency before it is unmounted is
+// still occupying a full row of space, and that window IS the gap -- the
+// longer the fade, the longer the table sits with a hole in it. At 200ms the
+// invisible-but-present window is a couple of frames rather than a beat.
+const TAKEN_MS = 200
+// The rows below closing up. Deliberately shorter than the fade: by the time
+// it starts, the interesting thing has already happened, and a slow slide
+// just reads as the table being sluggish.
+const SLIDE_MS = 170
 // More than this vanishing at once is a resync -- a restored session, a
 // reconnect mid-draft -- not picks. Animating that would be a screenful of
 // motion describing something that did not just happen.

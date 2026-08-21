@@ -4490,8 +4490,10 @@ button.roster-row:focus-visible {
    `background` is a paint property and tweening it put the animation back on
    the thread it was competing with. */
 .avail-row-taken > td {
-  background: color-mix(in srgb, var(--fail) 9%, transparent);
-  animation: avail-taken 0.65s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  /* Applied instantly, not tweened: the tint IS the "he went" signal, and it
+     lands on the first frame rather than easing in while the row leaves. */
+  background: color-mix(in srgb, var(--fail) 16%, transparent);
+  animation: avail-taken 0.2s ease-out forwards;
   will-change: opacity;
 }
 
@@ -4504,9 +4506,11 @@ button.roster-row:focus-visible {
 }
 
 @keyframes avail-taken {
-  /* Held at full strength for a beat first -- long enough to see WHO went
-     before the row starts to leave. */
-  0%, 34% { opacity: 1; }
+  /* No hold. A hold was there to let the name be read, but the row is only
+     one of three places the pick is already visible (the ticker and the
+     board carry it too), and every millisecond of hold is a millisecond the
+     table sits with a hole in it. */
+  0% { opacity: 1; }
   100% { opacity: 0; }
 }
 
@@ -4515,7 +4519,7 @@ button.roster-row:focus-visible {
    preference before applying any FLIP transform. */
 @media (prefers-reduced-motion: reduce) {
   .avail-row-taken > td {
-    animation: avail-taken 0.65s steps(2, end) forwards;
+    animation: avail-taken 0.2s steps(2, end) forwards;
   }
 }
 
