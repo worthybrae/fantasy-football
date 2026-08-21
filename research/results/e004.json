@@ -54,7 +54,7 @@
     "weeks_priced": 6,
     "window_weeks": 3
   },
-  "git_rev": "4b34a80",
+  "git_rev": "4cfb457",
   "id": "e004",
   "notes": [
     "Weeks 15-17 is the modern fantasy playoff window. Before the 17-game season most leagues played 14-16; that window is measured too and answers the same, so the finding is not an artefact of which three weeks are called the playoffs.",
@@ -65,7 +65,7 @@
   ],
   "overturns": null,
   "question": "Season-long schedule averages out to nothing. Weeks 15 to 17 are only three games and they decide the league -- is playoff-weeks schedule strength worth acting on at draft time?",
-  "ran_at": "2026-08-21T01:04:19+00:00",
+  "ran_at": "2026-08-21T01:08:59+00:00",
   "tags": [
     "schedule",
     "playoffs",

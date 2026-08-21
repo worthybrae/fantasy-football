@@ -77,7 +77,7 @@
     "ypc_per_sd": 0.072,
     "ypc_per_sd_move": 0.158
   },
-  "git_rev": "4b34a80",
+  "git_rev": "4cfb457",
   "id": "e002",
   "notes": [
     "Cap share measures what a team PAID, not how the five played. It underrates any line built on rookie contracts -- five good young starters on rookie deals price out near the bottom of the league, and that is a real error in the rating, not noise.",
@@ -86,7 +86,7 @@
   ],
   "overturns": "The project's first pass tested the O-line rating against running back fantasy points, found nothing, and concluded the line does not matter. It measured the wrong outcome: the effect is on yards per carry, and fantasy points bury it under volume and touchdowns.",
   "question": "Does offensive line quality affect player production -- and if it does, which measurement of production shows it?",
-  "ran_at": "2026-08-21T01:03:24+00:00",
+  "ran_at": "2026-08-21T01:08:57+00:00",
   "tags": [
     "oline",
     "contracts",

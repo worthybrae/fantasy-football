@@ -53,14 +53,15 @@ def _true_weeks(conn, odds: pd.DataFrame) -> tuple[pd.DataFrame, float]:
     Chargers' pre-move seasons are mapped forward before the join -- left
     alone they silently drop 64 regular-season games from 2016 to 2019.
 
-    Playoff games are dropped here as well, and NOT because `data.odds()`
-    forgot to: it tries, with `df["Playoff Game?"] != 1`, but the workbook
-    writes that column as the string "Y", so the test passes every row and
-    all 232 playoff games survive. E001 never notices because it keeps only
-    weeks 1-6. This experiment would: a playoff REMATCH shares
-    (season, home, away) with its regular-season meeting, so it would merge
-    onto that game's week and double-count it. Filtering on the real flag
-    leaves exactly nflverse's regular-season game count in every season.
+    Playoff games are filtered again here, redundantly, because this is the
+    experiment that would notice one: a playoff REMATCH shares
+    (season, home, away) with its regular-season meeting, so a leaked one
+    merges onto that game's week and double-counts it. `data.odds()` did
+    leak all 232 of them until this experiment hit it -- the workbook writes
+    that column as the string "Y" and the filter compared it against 1 --
+    and it is fixed there now. This line is what keeps the merge correct
+    whatever the loader does; with it, the join matches nflverse's
+    regular-season game count in every season exactly.
     """
     ids = conn.execute(
         "select distinct game_id from weekly where season_type = 'REG'").df()

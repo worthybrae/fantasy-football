@@ -49,7 +49,7 @@
     "wr_same_ppg": 0.785,
     "wr_same_total": 0.732
   },
-  "git_rev": "4b34a80",
+  "git_rev": "4cfb457",
   "id": "e003",
   "notes": [
     "Persistence is not usefulness, and this experiment measures only persistence. Decomposition's real value is that it can price a KNOWN change -- a new team, a promoted role, a departed teammate's vacated targets, a rookie with no history at all -- which a top-down 'last year's points' model structurally cannot represent. No correlation here captures that, and none of them argue against it.",
@@ -60,7 +60,7 @@
   ],
   "overturns": "Bottom-up projection is justified by the claim that team volume, player share and games played are each more stable year to year than fantasy points. On this data they are not: shares are consistently LESS persistent than the per-game points they are meant to explain, and team volume is far less persistent than either.",
   "question": "Should we project fantasy points directly, or decompose into team volume, player share and games played -- are the parts really more predictable than the points they combine into?",
-  "ran_at": "2026-08-21T01:03:25+00:00",
+  "ran_at": "2026-08-21T01:08:58+00:00",
   "tags": [
     "projections",
     "persistence",

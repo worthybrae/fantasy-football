@@ -62,7 +62,7 @@
   <p>Weeks 15-17 are worth thinking about in November, when the lines exist. That is a waiver-wire question, not a draft one.</p>
   <div class="meta">
     <ul>
-      <li>experiment E004 &middot; run 2026-08-21 &middot; revision 4b34a80</li>
+      <li>experiment E004 &middot; run 2026-08-21 &middot; revision 4cfb457</li>
       <li>Weeks 15-17 is the modern fantasy playoff window. Before the 17-game season most leagues played 14-16; that window is measured too and answers the same, so the finding is not an artefact of which three weeks are called the playoffs.</li>
       <li>The odds workbook&#x27;s week is re-derived from nflverse game ids rather than by bucketing dates seven days from the opener, because Saturday and Christmas games in this window bucket into the wrong slot. E001&#x27;s caveat does not apply here.</li>
       <li>data.odds() silently kept playoff games when this experiment was first run: its filter compared the Playoff Game? column against 1 while the workbook stores the string Y, so none of the 232 playoff rows were dropped. Found here and fixed in data.py; E001 was re-run afterwards and none of its findings moved, because its six-week window already excluded January.</li>

@@ -202,13 +202,12 @@ def run(conn, odds: pd.DataFrame, rules) -> dict:
     line_autocorr = float(auto["z"].corr(auto["prev_z"]))
 
     # --- 4b. the same effect, from backs who changed lines ---------------
-    # An independent route to the same coefficient: hold the player fixed
-    # and change the line under him. Nothing here is shared with the team
-    # regression above except the rating -- different unit, different
-    # outcome, different sample.
-    # The carry floor applies to BOTH seasons: a back with thirty totes has a
-    # yards-per-carry that is mostly one long run either way, and differencing
-    # two of those measures nothing but noise.
+    # An independent route to the same effect: hold the player fixed and
+    # change the line under him. Nothing is shared with the team regression
+    # above except the rating -- different unit, different outcome, different
+    # sample. The carry floor applies to BOTH seasons, because a back with
+    # thirty totes has a yards-per-carry that is mostly one long run either
+    # way, and differencing two of those measures nothing but noise.
     worked = rb[rb.carries >= MIN_CARRIES]
     moves = worked.merge(
         _lag(worked, ["season", "player_id"],
