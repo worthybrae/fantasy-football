@@ -157,27 +157,63 @@ function GamesBody({ data }: { data: PlayerProfileData }): ReactNode {
   )
 }
 
-function FinishTrack(
-  { finish, starters }: { finish: number; starters: number },
+// One column per season, oldest to newest, on a vertical rank axis with the
+// tiers as bands behind it. The vertical version -- a track per season,
+// stacked -- said the same thing and made a ten-year career ten rows tall,
+// and it never showed the one thing a career has that a season does not: a
+// direction. Drawn as SVG so the dots, the line through them and both rows of
+// labels share one coordinate system rather than being three flex rows that
+// have to be kept in step by hand.
+const FIN_COL = 26        // per season
+const FIN_H = 56          // the rank axis
+const FIN_TOP = 11        // the finish numbers above it
+const FIN_BOTTOM = 12     // the years below it
+
+function FinishChart(
+  { seasons, position }: { seasons: SeasonSummary[]; position: string },
 ): ReactNode {
+  const starters = FINISH_STARTERS[position] ?? 24
+  // Oldest first: a career reads left to right, and the payload is newest
+  // first because a table wants the latest season at the top.
+  const rows = seasons.slice().reverse()
+  const width = Math.max(FIN_COL, rows.length * FIN_COL)
+  const height = FIN_TOP + FIN_H + FIN_BOTTOM
+  const x = (i: number) => i * FIN_COL + FIN_COL / 2
+  const y = (finish: number) => FIN_TOP + finishPosition(finish, starters) * FIN_H
+
   const bands = finishBands(starters)
-  const at = finishPosition(finish, starters)
-  const tone = finishTone(finish, starters)
-  let left = 0
+  let prev = 0
+  const zones = bands.map((b) => {
+    const top = FIN_TOP + prev * FIN_H
+    const h = (b.end - prev) * FIN_H
+    prev = b.end
+    return { tone: b.tone, top, h }
+  })
+  const line = rows.map((r, i) => `${x(i)},${y(r.pos_finish)}`).join(' ')
+
   return (
-    <span className="ctip-track">
-      {bands.map((b) => {
-        const width = b.end - left
-        left = b.end
-        return <span key={b.tone} className={`ctip-band ${b.tone}`}
-                     style={{ width: `${width * 100}%` }} />
-      })}
-      {/* Positioned, not sized: the marker's job is to say WHERE on the
-          ladder he came down, and the tiers behind it say what that place is
-          called. `translateX(-50%)` so the dot is centred on its rank rather
-          than starting at it -- at RB1 that keeps it on the track. */}
-      <span className={`ctip-mark ${tone}`} style={{ left: `${at * 100}%` }} />
-    </span>
+    <svg className="ctip-fchart" width={width} height={height}
+         viewBox={`0 0 ${width} ${height}`}>
+      {zones.map((z) => (
+        <rect key={z.tone} className={`ctip-fband ${z.tone}`}
+              x="0" y={z.top} width={width} height={z.h} />
+      ))}
+      {/* Only meaningful with two seasons to join, and drawn under the dots so
+          a marker is never half-covered by the path leaving it. */}
+      {rows.length > 1 && (
+        <polyline className="ctip-fline" points={line} fill="none" />
+      )}
+      {rows.map((r, i) => (
+        <g key={r.season}>
+          <text className="ctip-flabel" x={x(i)} y={FIN_TOP - 3}
+                textAnchor="middle">{r.pos_finish}</text>
+          <circle className={`ctip-fdot ${finishTone(r.pos_finish, starters)}`}
+                  cx={x(i)} cy={y(r.pos_finish)} r="3.5" />
+          <text className="ctip-fyear" x={x(i)} y={height - 2}
+                textAnchor="middle">&rsquo;{String(r.season).slice(2)}</text>
+        </g>
+      ))}
+    </svg>
   )
 }
 
@@ -187,31 +223,15 @@ function FinishBody({ data }: { data: PlayerProfileData }): ReactNode {
   const starters = FINISH_STARTERS[pos] ?? 24
   return (
     <>
-      <div className="ctip-head">Positional finish</div>
-      <table className="ctip-table">
-        <tbody>
-          {data.seasons.map((s) => (
-            <tr key={s.season}>
-              <td className="ctip-yr">{s.season}</td>
-              <td className="ctip-trackcell">
-                <FinishTrack finish={s.pos_finish} starters={starters} />
-              </td>
-              <td className={`ctip-fin ${finishTone(s.pos_finish, starters)}`}>
-                {pos}{s.pos_finish}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {/* The axis, stated once rather than repeated per row, and sized to the
-          TRACK rather than the table: spanning the finish column too made this
-          the widest row in the panel, so the axis label was setting how wide
-          the whole thing got. */}
-      <div className="ctip-legend ctip-trackcell">
-        <span>{pos}1</span>
-        <span>{pos}{starters}</span>
-        <span>{pos}{starters * 3}+</span>
+      <div className="ctip-head">
+        <span>Positional finish</span>
+        {/* The axis, stated once. Without it the bands are five colours
+            nobody has been told the meaning of. */}
+        <span className="ctip-head-note">
+          {pos}1 top &middot; startable to {pos}{starters}
+        </span>
       </div>
+      <FinishChart seasons={data.seasons} position={pos} />
     </>
   )
 }
