@@ -65,7 +65,11 @@ const BAR_THRESHOLDS: Record<string, { amberFrom: number; greenFrom: number }> =
 // How long a drafted player stays on screen on his way out. Long enough to
 // read a name under a pick clock, short enough that back-to-back picks do
 // not stack up on each other.
-const TAKEN_MS = 1250
+const TAKEN_MS = 650
+// How long the rows below take to close the gap once one is removed. Shorter
+// than the fade on purpose -- the fade is information, the slide is only
+// continuity, and a slow slide reads as the table being sluggish.
+const SLIDE_MS = 260
 // More than this vanishing at once is a resync -- a restored session, a
 // reconnect mid-draft -- not picks. Animating that would be a screenful of
 // motion describing something that did not just happen.
@@ -425,7 +429,8 @@ const AvailableRow = memo(function AvailableRow({
 }): ReactNode {
   const level = healthLevel(player?.career_games_pg)
   return (
-              <tr key={c.player_id} className={isTaken ? 'avail-row-taken' : undefined}
+              <tr key={c.player_id} data-pid={c.player_id}
+                  className={isTaken ? 'avail-row-taken' : undefined}
                   aria-hidden={isTaken || undefined}>
                 <td className="avail-col-rank mono">{c.rank}</td>
                 <td className="avail-col-pos">{posBadge(c.position)}</td>
@@ -688,6 +693,62 @@ export default function AvailableList({
   const withTaken = held.length === 0 ? visible : [...visible, ...held]
   const rows = withTaken.slice().sort((a, b) => compareRows(a, b, sort.key, sort.dir, players))
 
+  // FLIP, because a table row cannot be collapsed. Animating a `td` to height
+  // zero does not shrink the row while its sparkline still has intrinsic
+  // height, so the row either stands there empty or vanishes and everything
+  // below it jumps. Instead the leaving row fades, is removed, and the
+  // survivors are put back at their OLD offsets and released -- they slide
+  // into place under a transform, which costs no layout and cannot fight the
+  // table's own sizing.
+  const bodyRef = useRef<HTMLTableSectionElement | null>(null)
+  const offsetsRef = useRef<Map<string, number>>(new Map())
+
+  // Which rows are on screen, in order. Reading `offsetTop` forces a layout,
+  // and doing that for ~250 rows on EVERY render would hand back the cost the
+  // row memoization just saved -- on a poll where nothing moved, most of all.
+  // Row positions cannot change unless this string does.
+  const rowKey = rows.map((r) => r.player_id).join(',')
+  const rowKeyRef = useRef('')
+
+  useLayoutEffect(() => {
+    const body = bodyRef.current
+    if (!body) return
+    if (rowKey === rowKeyRef.current) return
+    rowKeyRef.current = rowKey
+    const previous = offsetsRef.current
+    const next = new Map<string, number>()
+    const moved: Array<[HTMLElement, number]> = []
+
+    for (const el of Array.from(body.children) as HTMLElement[]) {
+      const pid = el.dataset.pid
+      if (!pid) continue
+      const top = el.offsetTop
+      next.set(pid, top)
+      const was = previous.get(pid)
+      // Only rows that were already on screen AND actually moved. A row
+      // appearing for the first time has nowhere to slide from.
+      if (was !== undefined && was !== top) moved.push([el, was - top])
+    }
+    offsetsRef.current = next
+    if (moved.length === 0) return
+
+    // Respect the same preference the fade does: with reduced motion the
+    // rows simply appear in their new places rather than travelling there.
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return
+    for (const [el, delta] of moved) {
+      el.style.transition = 'none'
+      el.style.transform = `translateY(${delta}px)`
+    }
+    // One frame at the old position, then release: without the double rAF the
+    // browser coalesces both styles into a single paint and nothing animates.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      for (const [el] of moved) {
+        el.style.transition = `transform ${SLIDE_MS}ms cubic-bezier(0.4, 0, 0.2, 1)`
+        el.style.transform = ''
+      }
+    }))
+  })
+
 
   function toggleSort(key: SortKey): void {
     setSort((prev) => (prev.key === key
@@ -932,7 +993,7 @@ export default function AvailableList({
             />
           </tr>
         </thead>
-        <tbody>
+        <tbody ref={bodyRef}>
           {rows.map((c) => (
             <AvailableRow
               key={c.player_id}
