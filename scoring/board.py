@@ -86,6 +86,13 @@ _BOARD_COLUMNS = [
     # Up to five [season, positional finish] pairs, oldest first -- the arc
     # the available table draws per row. See `season_finishes`.
     "season_finishes",
+    # Week-to-week steadiness. `_cv` is the raw coefficient of variation
+    # (lower is steadier) and `_pct` its within-position percentile among the
+    # players ON THIS BOARD, steadiest highest. A coefficient, never a sigma,
+    # and ranked against the draftable pool -- see `consistency` for why both
+    # of those are load-bearing.
+    "consistency_cv",
+    "consistency_pct",
     # How much this league's scoring rules re-price ESPN's PPR-shaped season
     # projection for this player: 1.0 in a PPR league, ~0.83 for a
     # high-reception WR in half-PPR, ~0.67 in standard. On the board rather
@@ -329,6 +336,96 @@ def expected_change(weekly: pd.DataFrame, proj_points: pd.Series,
     agg["proj_ppg"] = agg["player_id"].map(lookup) / GAMES
     agg["proj_change"] = (agg["proj_ppg"] - agg["w_ppg"]).round(1)
     return agg.loc[agg["proj_ppg"].notna(), ["player_id", "proj_change"]]
+
+
+CONSISTENCY_MIN_GAMES = 8
+
+
+def consistency(weekly: pd.DataFrame, rules: dict | None = None,
+                pool: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Week-to-week steadiness, as a percentile within position.
+
+    The COEFFICIENT OF VARIATION -- sigma over mean -- not raw sigma, for the
+    reason `profile_cache.season_rank_frame` documents at length: sigma
+    correlates with points per game at r = 0.81-0.87, so a sigma rank is a
+    second scoring rank wearing a different name, and it calls the best
+    players in the league the least reliable. DO NOT "SIMPLIFY" THIS TO A
+    SIGMA RANK.
+
+    Computed PER SEASON and then averaged under RECENCY_WEIGHTS, never by
+    pooling several seasons of weeks into one sigma. A player who averaged 8
+    ppg in 2023 and 18 in 2025 was steady inside each of them, but pooled,
+    that between-season step change enters sigma and reads as wild swinging.
+    The question the column asks is how much he moves week to week, and that
+    is a within-season quantity.
+
+    Ranked WITHIN POSITION, because the coefficient is not comparable across
+    them -- a quarterback plays every snap and a tight end's week is three
+    targets or none -- so the number means "steady for his position", which
+    is the only reading a drafter can act on.
+
+    A season under CONSISTENCY_MIN_GAMES games is not ranked: a coefficient
+    off four appearances is noise. A season whose mean is zero or negative
+    gets none either -- sigma over a mean of nothing is not a volatility, and
+    a negative coefficient would sort as the steadiest player alive.
+
+    `pool` is the set of players to rank WITHIN -- a frame of `player_id` and
+    `position`, normally the board itself. It is not an optimization, it is
+    the difference between a column that means something and one that does
+    not: ranked against every player with eight games anywhere in the weekly
+    history, 630 of them, the spiky tail is all special-teamers and backup
+    quarterbacks, and 143 of the 181 draftable players come out in the top two
+    of five bars. Every name a drafter can actually take reads "steady", which
+    is no information at all. Ranked against the board, the pool is the one
+    the reader is choosing from. Passing None ranks against everyone measured.
+
+    Returns `consistency_cv`, the raw coefficient (lower is steadier, for a
+    tooltip that wants the number), and `consistency_pct` in [0, 1] with the
+    STEADIEST HIGHEST, so the meter fills the way a reader expects without the
+    frontend needing to know that low is good.
+    """
+    empty = pd.DataFrame(columns=["player_id", "consistency_cv", "consistency_pct"])
+    if weekly.empty or "season" not in weekly.columns:
+        return empty
+    wk = weekly[weekly["season"].isin(RECENCY_WEIGHTS)].copy()
+    if wk.empty:
+        return empty
+    wk["_pts"] = compute_ppr_points(wk, normalize_rules(rules))
+    per = wk.groupby(["player_id", "season"]).agg(
+        mean=("_pts", "mean"), sd=("_pts", "std"),
+        games=("week", "nunique")).reset_index()
+    per = per[(per["games"] >= CONSISTENCY_MIN_GAMES) & (per["mean"] > 0)]
+    per = per[per["sd"].notna()]
+    if per.empty:
+        return empty
+    per["cv"] = per["sd"] / per["mean"]
+    per["w"] = per["season"].map(RECENCY_WEIGHTS).astype(float)
+    per["wx"] = per["cv"] * per["w"]
+    agg = per.groupby("player_id").agg(wx=("wx", "sum"), w=("w", "sum")).reset_index()
+    agg = agg[agg["w"] > 0]
+    agg["cv"] = agg["wx"] / agg["w"]
+
+    if pool is not None:
+        # An inner join, so a measured player who is not on the board neither
+        # gets a rank nor dilutes anyone else's.
+        agg = agg.merge(pool[["player_id", "position"]].drop_duplicates("player_id"),
+                        on="player_id", how="inner")
+    else:
+        # The position a player is ranked against is his LATEST one, not his
+        # first: a back who has moved to receiver is drafted as a receiver,
+        # and the pool has to be the one he will play in.
+        pos = (wk.sort_values("season").groupby("player_id")["position"]
+                 .last().rename("position").reset_index())
+        agg = agg.merge(pos, on="player_id", how="left")
+    agg = agg[agg["position"].notna()]
+    if agg.empty:
+        return empty
+    agg["consistency_cv"] = agg["cv"].round(3)
+    # `ascending=False` so the LARGEST coefficient takes rank 1 and lands at
+    # the bottom of the percentile: the steadiest player must come out near 1.
+    agg["consistency_pct"] = (agg.groupby("position")["cv"]
+                              .rank(pct=True, ascending=False).round(3))
+    return agg[["player_id", "consistency_cv", "consistency_pct"]]
 
 
 def career_availability(weekly: pd.DataFrame) -> pd.DataFrame:
@@ -973,6 +1070,13 @@ def build_board(conn, weights: dict | None = None,
         uni = uni.merge(raw, on="player_id", how="left")
     uni = uni.merge(career, on="player_id", how="left")
     uni = uni.merge(finishes, on="player_id", how="left")
+    # Ranked against the board, not the whole weekly universe, and computed
+    # here rather than beside `career`/`finishes` above for exactly that
+    # reason: `uni` is the pool. Against the FULL weekly, since `consistency`
+    # applies the RECENCY_WEIGHTS window itself as its weighting -- handing it
+    # the narrowed frame would weight a subset of a subset.
+    uni = uni.merge(consistency(read_table(conn, "weekly"), rules, pool=uni),
+                    on="player_id", how="left")
 
     env = factors.environment_factor(sched) if not sched.empty else pd.DataFrame(columns=["team", "env_raw"])
     uni = uni.merge(env, on="team", how="left")

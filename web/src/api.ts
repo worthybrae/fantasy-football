@@ -21,6 +21,11 @@ export interface Player {
   // no NFL season behind him. The available table draws it as a five-bar
   // meter; it is a RATE, not the board's `durability` percentile.
   career_games_pg: number | null;
+  // Week-to-week steadiness. `_cv` is the raw coefficient of variation
+  // (sigma over mean, lower is steadier); `_pct` is its percentile among the
+  // players at his position ON THIS BOARD, steadiest highest.
+  consistency_cv: number | null;
+  consistency_pct: number | null;
   // Up to five [season, positional finish] pairs, oldest first -- "he
   // finished RB12", ranked on season points, the same framing the profile
   // uses so the two views cannot disagree about what RB12 means. `null` for

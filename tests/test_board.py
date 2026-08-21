@@ -105,6 +105,12 @@ def test_board_column_contract(tmp_path):
                 # deliberately -- two views disagreeing about what RB12 means
                 # would be worse than either alone.
                 "season_finishes",
+                # Week-to-week steadiness: the raw coefficient of variation
+                # and its within-position percentile among the players on THIS
+                # board, steadiest highest. Ranked against the board and not
+                # the whole weekly universe on purpose -- see `consistency`.
+                "consistency_cv",
+                "consistency_pct",
                 # The scoring-format work adds proj_scale: how much this
                 # league's rules re-price ESPN's PPR-only season projection
                 # for this player (1.0 in a PPR league). It is on the board,
@@ -1302,3 +1308,115 @@ def test_expected_change_survives_a_duplicate_player_id_in_the_projections():
     assert list(out["player_id"]) == ["real"], \
         "an ADP-only collision has no weekly rows and must not reach the output"
     assert out["proj_change"].notna().all()
+
+
+def _wk_rows(pid, season, weekly_pts, position="RB"):
+    """Weekly rows whose PPR points equal `weekly_pts`, via rushing yards."""
+    return [{"player_id": pid, "player_display_name": pid, "season": season,
+             "week": i + 1, "position": position, "recent_team": "DET",
+             "receptions": 0, "receiving_yards": 0, "rushing_yards": p * 10,
+             "carries": 1, "targets": 0, "passing_yards": 0, "attempts": 0,
+             "completions": 0} for i, p in enumerate(weekly_pts)]
+
+
+def test_consistency_is_a_coefficient_not_a_sigma():
+    """The whole reason the column exists, and the case that separates the two
+    measures rather than one where they happen to agree.
+
+    The star swings by 5 points a week around a mean of 20 (coefficient 0.26);
+    the scrub swings by 2 around a mean of 5 (coefficient 0.42). Raw sigma
+    calls the star more than twice as volatile -- 5.3 against 2.1 -- because
+    his good weeks are bigger, not because he is less reliable. Ranked on the
+    coefficient he is the steadier of the two, which is the truth a drafter
+    needs.
+    """
+    from scoring.board import consistency
+    star = [15, 25] * 5      # mean 20, sd 5.3, cv 0.26
+    scrub = [3, 7] * 5       # mean  5, sd 2.1, cv 0.42
+    weekly = pd.DataFrame(_wk_rows("star", 2025, star) + _wk_rows("scrub", 2025, scrub))
+
+    out = consistency(weekly).set_index("player_id")["consistency_pct"]
+
+    assert out["star"] > out["scrub"], \
+        "a sigma rank puts the bigger scorer last -- the coefficient is the point"
+
+
+def test_consistency_does_not_pool_seasons_into_one_sigma():
+    """Seasons are measured separately and then weighted, never concatenated.
+
+    `grew` never moved more than a point inside either season -- he is the
+    steadiest player here by a wide margin -- but he went from 5 ppg to 25.
+    Concatenate the two seasons and that step change lands in sigma: his
+    pooled coefficient is 0.66 against `swings`' 0.14, and the steadiest
+    player in the fixture comes out the spikiest. The assertion is written so
+    that pooling REVERSES it, not merely narrows it.
+    """
+    from scoring.board import consistency
+    grew = (_wk_rows("grew", 2023, [5, 6] * 5)      # cv 0.096 inside 2023
+            + _wk_rows("grew", 2025, [25, 26] * 5))  # cv 0.021 inside 2025
+    swings = _wk_rows("swings", 2025, [13, 17] * 5)  # cv 0.141, one season
+    weekly = pd.DataFrame(grew + swings)
+
+    out = consistency(weekly).set_index("player_id")["consistency_pct"]
+
+    assert out["grew"] > out["swings"], \
+        "growth was priced as volatility -- the seasons were pooled"
+
+
+def test_consistency_ranks_within_position_not_across_the_board():
+    """A quarterback's coefficient and a tight end's are not the same scale.
+    The identical player at two positions must be judged against his own pool.
+    """
+    from scoring.board import consistency
+    rows = (_wk_rows("qb_steady", 2025, [20] * 10, "QB")
+            + _wk_rows("qb_swingy", 2025, [10, 30] * 5, "QB")
+            + _wk_rows("te_swingy", 2025, [10, 30] * 5, "TE")
+            + _wk_rows("te_worse", 2025, [2, 38] * 5, "TE"))
+    out = consistency(pd.DataFrame(rows)).set_index("player_id")["consistency_pct"]
+
+    # Identical raw coefficient, different pools: the TE beats a worse TE, the
+    # QB loses to a steadier QB. A board-wide rank could not produce both.
+    assert out["te_swingy"] > out["qb_swingy"]
+
+
+def test_consistency_skips_seasons_too_short_to_rank():
+    """A coefficient off four appearances is noise, not a measurement."""
+    from scoring.board import CONSISTENCY_MIN_GAMES, consistency
+    short = _wk_rows("short", 2025, [5, 25] * (CONSISTENCY_MIN_GAMES // 2 - 1))
+    ok = _wk_rows("ok", 2025, [10] * CONSISTENCY_MIN_GAMES)
+    out = consistency(pd.DataFrame(short + ok))
+
+    assert list(out["player_id"]) == ["ok"]
+
+
+def test_consistency_ranks_against_the_supplied_pool_only():
+    """Ranked against every player with eight games anywhere in the weekly
+    history, the spiky tail is special-teamers and backup quarterbacks, and
+    almost every draftable player comes out "steady" -- measured on the real
+    board, 143 of 181 landed in the top two of five bars. The pool has to be
+    the players the reader is choosing between.
+
+    Here the two draftable backs sit at the steady end of a field padded with
+    scrubs. Pooled with the scrubs they are 1st and 2nd of six and read as
+    identical; against each other they separate.
+    """
+    from scoring.board import consistency
+    rows = (_wk_rows("startable_a", 2025, [14, 16] * 5)     # cv 0.07
+            + _wk_rows("startable_b", 2025, [10, 20] * 5)   # cv 0.35
+            + _wk_rows("scrub_1", 2025, [0, 18] * 5)
+            + _wk_rows("scrub_2", 2025, [1, 22] * 5)
+            + _wk_rows("scrub_3", 2025, [0, 25] * 5)
+            + _wk_rows("scrub_4", 2025, [2, 30] * 5))
+    weekly = pd.DataFrame(rows)
+    board = pd.DataFrame({"player_id": ["startable_a", "startable_b"],
+                          "position": ["RB", "RB"]})
+
+    everyone = consistency(weekly).set_index("player_id")["consistency_pct"]
+    drafted = consistency(weekly, pool=board).set_index("player_id")["consistency_pct"]
+
+    assert list(drafted.index) == ["startable_a", "startable_b"], \
+        "a player off the board must not be ranked, nor dilute anyone else"
+    # Against the full field both look elite and the meter cannot tell them
+    # apart; against the board the spread is the whole range.
+    assert everyone["startable_a"] - everyone["startable_b"] < 0.34
+    assert drafted["startable_a"] - drafted["startable_b"] == pytest.approx(0.5)

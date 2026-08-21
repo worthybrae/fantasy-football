@@ -4533,7 +4533,8 @@ button.roster-row:focus-visible {
    many bars" first and the colour reinforces it, and a gradient would make
    four and five near-identical at this size, which is exactly the pair a
    reader most needs to tell apart. */
-.health-meter {
+.health-meter,
+.steady-meter {
   display: inline-flex;
   align-items: flex-end;
   gap: 2px;
@@ -4542,7 +4543,8 @@ button.roster-row:focus-visible {
 
 /* Every bar the same height. A rising staircase was tried and read as a
    trend over time, which is the one thing this number is not. */
-.health-bar {
+.health-bar,
+.steady-bar {
   width: 4px;
   height: 100%;
   border-radius: 1px;
@@ -4551,11 +4553,16 @@ button.roster-row:focus-visible {
 
 /* Unlit bars stay visible so the denominator is always legible -- "two of
    five" rather than an ambiguous two floating marks. */
-.health-meter.is-1 .health-bar.is-on { background: var(--fail); }
-.health-meter.is-2 .health-bar.is-on { background: #e0762c; }
-.health-meter.is-3 .health-bar.is-on { background: var(--accent); }
-.health-meter.is-4 .health-bar.is-on { background: #7cb342; }
-.health-meter.is-5 .health-bar.is-on { background: var(--ok); }
+.health-meter.is-1 .health-bar.is-on,
+.steady-meter.is-1 .steady-bar.is-on { background: var(--fail); }
+.health-meter.is-2 .health-bar.is-on,
+.steady-meter.is-2 .steady-bar.is-on { background: #e0762c; }
+.health-meter.is-3 .health-bar.is-on,
+.steady-meter.is-3 .steady-bar.is-on { background: var(--accent); }
+.health-meter.is-4 .health-bar.is-on,
+.steady-meter.is-4 .steady-bar.is-on { background: #7cb342; }
+.health-meter.is-5 .health-bar.is-on,
+.steady-meter.is-5 .steady-bar.is-on { background: var(--ok); }
 
 /* -- positional finish, season by season ----------------------------------
    The shape of a career, which is the one thing the table below it is worst

@@ -201,7 +201,7 @@ const GameBars = memo(function GameBars({ points, season, position }: {
 // a reader looks for "what do I still need" anyway. It is deliberately not
 // re-drawn here.)
 
-type SortKey = 'rank' | 'pos' | 'player' | 'finish' | 'health' | 'change' | 'proj' | 'lasts' | 'adp' | 'espn'
+type SortKey = 'rank' | 'pos' | 'player' | 'finish' | 'health' | 'steady' | 'change' | 'proj' | 'lasts' | 'adp' | 'espn'
 type SortDir = 'asc' | 'desc'
 
 // The direction a column gets on its FIRST click -- "best first" for that
@@ -214,7 +214,7 @@ type SortDir = 'asc' | 'desc'
 // column; this only decides which one you land on without having to click
 // twice.
 const NATURAL_DIR: Record<SortKey, SortDir> = {
-  rank: 'asc', pos: 'asc', player: 'asc', finish: 'asc', health: 'desc', change: 'desc', proj: 'desc', lasts: 'desc', adp: 'asc',
+  rank: 'asc', pos: 'asc', player: 'asc', finish: 'asc', health: 'desc', steady: 'desc', change: 'desc', proj: 'desc', lasts: 'desc', adp: 'asc',
   espn: 'asc',
 }
 
@@ -396,6 +396,34 @@ const HealthMeter = memo(function HealthMeter(
   )
 })
 
+// Already a percentile, so the quintiles are the meter: an even fifth of the
+// board's players at each position lands on each bar by construction, which
+// is the whole reason the percentile is taken against the BOARD and not the
+// weekly universe (see scoring/board.py's `consistency`).
+function steadyLevel(pct: number | null | undefined): number | null {
+  if (pct === null || pct === undefined || Number.isNaN(pct)) return null
+  return Math.min(5, Math.max(1, Math.ceil(pct * 5)))
+}
+
+const SteadyMeter = memo(function SteadyMeter(
+  { level, cv }: { level: number; cv: number | null },
+): ReactNode {
+  // Same falsifiability as HealthMeter: the bars are the glance, the
+  // coefficient is the number a reader can check them against.
+  const label = cv === null
+    ? `Steadier than ${(level - 1) * 20}-${level * 20}% of his position`
+    : `Week-to-week swing of ${cv.toFixed(2)} (sigma over mean) -- steadier `
+      + `than ${(level - 1) * 20}-${level * 20}% of his position on this board`
+  return (
+    <span className={`steady-meter ${HEALTH_CLASS[level]}`} role="img"
+          title={label} aria-label={`${label} (${level} of 5)`}>
+      {[1, 2, 3, 4, 5].map((i) => (
+        <span key={i} className={`steady-bar${i <= level ? ' is-on' : ''}`} />
+      ))}
+    </span>
+  )
+})
+
 // The one value a column sorts on. `null` means "this player has no such
 // number" and is handled by the comparator, never coerced to 0 -- a player
 // no market source covers is not ADP 0, i.e. the best pick on the board.
@@ -416,6 +444,7 @@ function sortValue(
       return arc && arc.length ? arc[arc.length - 1][1] : null
     }
     case 'health': return player?.career_games_pg ?? null
+    case 'steady': return player?.consistency_pct ?? null
     case 'change': return player?.proj_change ?? null
     case 'proj': return c.proj_points
     case 'lasts': return c.survive_pct
@@ -525,6 +554,7 @@ const AvailableRow = memo(function AvailableRow({
   onDraft: (c: LiveCandidate) => void
 }): ReactNode {
   const level = healthLevel(player?.career_games_pg)
+  const steady = steadyLevel(player?.consistency_pct)
   const arc = player?.season_finishes ?? null
   const change = player?.proj_change ?? null
   return (
@@ -591,6 +621,16 @@ const AvailableRow = memo(function AvailableRow({
                     ? <span className="gamebars-none">—</span>
                     : <HealthMeter level={level}
                                     gamesPg={player?.career_games_pg ?? 0} />}
+                </td>
+                {/* Directly after Health: the two meters read as a pair
+                    -- was he on the field, and was he worth starting when he
+                    was -- and sharing the five-bar shape makes that pairing
+                    the point rather than a coincidence. */}
+                <td className="avail-col-health">
+                  {steady === null
+                    ? <span className="gamebars-none">—</span>
+                    : <SteadyMeter level={steady}
+                                   cv={player?.consistency_cv ?? null} />}
                 </td>
                 <td className="avail-col-num mono avail-proj">{Math.round(c.proj_points)}</td>
                 {/* null survive_pct (no roster to survive FOR yet) gets no
@@ -994,6 +1034,14 @@ export default function AvailableList({
     + 'entirely rather than skipping them. Five bars is close to a full '
     + 'season every year; one bar is a player who has missed a lot of '
     + 'football. Blank for a defense, or anyone with no NFL season yet.'
+  const steadyTitle = 'How steady his scoring has been week to week, ranked '
+    + 'against the other players at his position ON THIS BOARD. Five bars is '
+    + 'the steadiest fifth, one bar the spikiest. Measured as swing relative '
+    + 'to his own average, not raw swing -- a 20-point-a-week player moves in '
+    + 'bigger absolute points than an 8-point one without being less '
+    + 'reliable. Steady is not the same as good: a spiky player can be worth '
+    + 'more if his ceiling is why you want him. Blank for anyone without a '
+    + 'full-enough recent season to measure.'
   const projTitle = "Projected fantasy points for the full upcoming season, "
     + "under this league's own scoring."
   // NOT "chance he's still there at pick N" any more -- verified against the
@@ -1033,6 +1081,7 @@ export default function AvailableList({
     games: gamesTitle,
     finish: finishTitle,
     health: healthTitle,
+    steady: steadyTitle,
     change: changeTitle,
     proj: projTitle,
     lasts: lastsTitle,
@@ -1105,6 +1154,7 @@ export default function AvailableList({
                 to fit five bars without growing the 32px row. */}
             {sortableTh('finish', 'Finish', 'avail-col-finish')}
             {sortableTh('health', 'Health', 'avail-col-health')}
+            {sortableTh('steady', 'Steady', 'avail-col-health')}
             {sortableTh('change', 'Change', 'avail-col-change')}
             {sortableTh('proj', 'Proj', 'avail-col-num')}
             {/* One word. A header naming the horizon at all ("Lasts to pick
