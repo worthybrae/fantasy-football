@@ -4755,8 +4755,20 @@ button.roster-row:focus-visible {
 
 .ctip-empty { color: var(--text-3); }
 
-.ctip-table { border-collapse: collapse; width: auto; }
-.ctip-table td { padding: 1px 7px 1px 0; white-space: nowrap; vertical-align: middle; }
+/* `width: max-content`, and every one of the global `th, td` defaults undone
+   explicitly. That global rule (top of this file) sets `height: 32px` and a
+   `border-bottom` on every cell in the app, which is right for the draft
+   table and wrong here: it forced 32px of row on a 8px track and drew a
+   divider under each one, so a nine-season panel was three hundred pixels of
+   mostly nothing. Overriding padding alone left both in place. */
+.ctip-table { border-collapse: collapse; width: max-content; }
+.ctip-table td {
+  padding: 0 10px 0 0;
+  height: 18px;
+  border-bottom: none;
+  white-space: nowrap;
+  vertical-align: middle;
+}
 .ctip-table td:last-child { padding-right: 0; }
 .ctip-table tr.is-dnp td { color: var(--text-3); }
 
@@ -4810,13 +4822,11 @@ button.roster-row:focus-visible {
 .ctip-legend {
   display: flex;
   justify-content: space-between;
-  gap: 8px;
-  margin-top: 5px;
+  margin-top: 4px;
   font-family: var(--font-mono);
   font-size: 10px;
   color: var(--text-3);
 }
-.ctip-legend-mid { color: var(--text-3); }
 .ctip-fin.is-elite   { color: var(--ok); }
 .ctip-fin.is-strong  { color: #7cb342; }
 .ctip-fin.is-starter { color: #b3c132; }

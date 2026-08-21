@@ -81,7 +81,7 @@ function HealthBody({ data }: { data: PlayerProfileData }): ReactNode {
   if (!rows.length) return <div className="ctip-empty">No NFL seasons yet.</div>
   return (
     <>
-      <div className="ctip-head">Games played, season by season</div>
+      <div className="ctip-head">Games played</div>
       <table className="ctip-table">
         <tbody>
           {rows.map((r) => (
@@ -107,7 +107,7 @@ function GamesBody({ data }: { data: PlayerProfileData }): ReactNode {
     .sort((a, b) => a.week - b.week)
   return (
     <>
-      <div className="ctip-head">{latest} points per game</div>
+      <div className="ctip-head">{latest} by week</div>
       <table className="ctip-table">
         <tbody>
           {rows.map((g) => (
@@ -153,7 +153,7 @@ function FinishBody({ data }: { data: PlayerProfileData }): ReactNode {
   const starters = FINISH_STARTERS[pos] ?? 24
   return (
     <>
-      <div className="ctip-head">Where he finished, season by season</div>
+      <div className="ctip-head">Positional finish</div>
       <table className="ctip-table">
         <tbody>
           {data.seasons.map((s) => (
@@ -169,10 +169,13 @@ function FinishBody({ data }: { data: PlayerProfileData }): ReactNode {
           ))}
         </tbody>
       </table>
-      {/* The axis, stated once at the bottom rather than repeated per row. */}
-      <div className="ctip-legend">
+      {/* The axis, stated once rather than repeated per row, and sized to the
+          TRACK rather than the table: spanning the finish column too made this
+          the widest row in the panel, so the axis label was setting how wide
+          the whole thing got. */}
+      <div className="ctip-legend ctip-trackcell">
         <span>{pos}1</span>
-        <span className="ctip-legend-mid">startable to {pos}{starters}</span>
+        <span>{pos}{starters}</span>
         <span>{pos}{starters * 3}+</span>
       </div>
     </>
