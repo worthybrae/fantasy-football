@@ -4706,8 +4706,15 @@ button.roster-row:focus-visible {
   background: var(--bg-2);
 }
 
-/* Green for a projected gain, red for a projected loss. Unlike Health and
-   Steady the colour is NOT a ramp over the level -- level is size here, and
-   a one-bar fall and a five-bar fall are both falls. */
-.change-meter.is-up .change-mbar.is-on { background: var(--ok); }
-.change-meter.is-down .change-mbar.is-on { background: var(--fail); }
+/* The same red-to-green ramp Health and Steady use, on the same rule: MORE
+   BARS IS BETTER. The first version made the count the SIZE of the change and
+   the colour its direction, which put a full five-bar meter on the biggest
+   faller -- next to two columns where a full meter means good, that reads as
+   a top rating someone has coloured in red. Here one bar is the worst
+   outcome and five the best, so a glance down all three columns means the
+   same thing in each. */
+.change-meter.is-1 .change-mbar.is-on { background: var(--fail); }
+.change-meter.is-2 .change-mbar.is-on { background: #e0762c; }
+.change-meter.is-3 .change-mbar.is-on { background: var(--accent); }
+.change-meter.is-4 .change-mbar.is-on { background: #7cb342; }
+.change-meter.is-5 .change-mbar.is-on { background: var(--ok); }

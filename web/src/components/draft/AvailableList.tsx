@@ -290,26 +290,39 @@ function positionTip(
 // green for a projected gain, red for a loss -- and magnitude in the number
 // of bars, so Health, Steady and Change all read the same way.
 //
-// The scale clamps at +/-4 points per game, which covers the 5th to 95th
-// percentile of the real board (-5.9 to +2.7 at the extremes, -0.8 median).
-// Beyond that the meter is full and the number lives in the hover text: the
-// outliers are quarterbacks who lost a starting job, and letting a -14 set
-// the scale would flatten every real difference into one bar.
-const CHANGE_CLAMP = 4
+// One colour per level rather than a gradient: the meter answers "how many
+// bars" first and the colour reinforces it, so five discrete steps read
+// faster than a continuous ramp that makes four and five nearly identical.
+//
+// Shared by all three meters -- Health, Steady and Change -- which is what
+// makes a glance across them mean one thing: in every column one bar is the
+// worst outcome and five the best, on the same red-to-green ramp.
+const METER_CLASS = ['', 'is-1', 'is-2', 'is-3', 'is-4', 'is-5'] as const
 
+// Bands in points per game, chosen to spread the real board rather than to be
+// round numbers: they put 43/55/53/37/19 of the 207 measurable players in the
+// five levels. Outliers are pinned rather than allowed to set the scale --
+// the extremes are quarterbacks who lost a starting job, at -15, and letting
+// one of those define "a big fall" would flatten every real difference into
+// the middle band.
+const CHANGE_CUTS = [-2, -0.5, 0.5, 2] as const
+
+// MORE BARS IS BETTER, which is the rule Health and Steady beside it already
+// follow. An earlier version made the count the SIZE of the change and the
+// colour its direction, so the biggest faller on the board wore a full
+// five-bar meter -- and against two neighbours where full means good, that
+// reads as a top rating that happens to be red.
 function changeLevel(change: number): number {
-  const scaled = Math.min(1, Math.abs(change) / CHANGE_CLAMP)
-  // One bar minimum: a player projected to hold exactly steady still has an
-  // answer, and an empty meter would read as missing data.
-  return Math.min(5, Math.max(1, Math.ceil(scaled * 5)))
+  let level = 1
+  for (const cut of CHANGE_CUTS) if (change >= cut) level += 1
+  return level
 }
 
 const ChangeMeter = memo(function ChangeMeter({ change }: { change: number }): ReactNode {
   const level = changeLevel(change)
-  const up = change >= 0
-  const label = `${change > 0 ? '+' : ''}${change.toFixed(1)} points per game vs his recent average`
+  const label = `${change > 0 ? '+' : ''}${change.toFixed(1)} points per game vs last season`
   return (
-    <span className={`change-meter ${up ? 'is-up' : 'is-down'}`} role="img"
+    <span className={`change-meter ${METER_CLASS[level]}`} role="img"
           title={label} aria-label={`${label} (${level} of 5)`}>
       {[1, 2, 3, 4, 5].map((i) => (
         <span key={i} className={`change-mbar${i <= level ? ' is-on' : ''}`} />
@@ -379,10 +392,6 @@ function healthLevel(gamesPg: number | null | undefined): number | null {
   return level
 }
 
-// One colour per level rather than a gradient: the meter answers "how many
-// bars" first and the colour reinforces it, so five discrete steps read
-// faster than a continuous ramp that makes four and five nearly identical.
-const HEALTH_CLASS = ['', 'is-1', 'is-2', 'is-3', 'is-4', 'is-5'] as const
 
 const HealthMeter = memo(function HealthMeter(
   { level, gamesPg }: { level: number; gamesPg: number },
@@ -393,7 +402,7 @@ const HealthMeter = memo(function HealthMeter(
   // told everyone else.
   const label = `${gamesPg.toFixed(1)} games per season across his career`
   return (
-    <span className={`health-meter ${HEALTH_CLASS[level]}`} role="img"
+    <span className={`health-meter ${METER_CLASS[level]}`} role="img"
           title={label} aria-label={`${label} (${level} of 5)`}>
       {[1, 2, 3, 4, 5].map((i) => (
         <span key={i} className={`health-bar${i <= level ? ' is-on' : ''}`} />
@@ -421,7 +430,7 @@ const SteadyMeter = memo(function SteadyMeter(
     : `Week-to-week swing of ${cv.toFixed(2)} (sigma over mean) -- steadier `
       + `than ${(level - 1) * 20}-${level * 20}% of his position on this board`
   return (
-    <span className={`steady-meter ${HEALTH_CLASS[level]}`} role="img"
+    <span className={`steady-meter ${METER_CLASS[level]}`} role="img"
           title={label} aria-label={`${label} (${level} of 5)`}>
       {[1, 2, 3, 4, 5].map((i) => (
         <span key={i} className={`steady-bar${i <= level ? ' is-on' : ''}`} />
@@ -1029,10 +1038,9 @@ export default function AvailableList({
     + 'as the bad finish it was. Sorts on the most recent season.'
   const changeTitle = 'How many more (or fewer) points per game he is '
     + 'PROJECTED for than he actually averaged LAST SEASON. Per game on both '
-    + 'sides, so a year cut short by injury does not read as decline. Green '
-    + 'bars are a projected gain and red a projected loss; the number of bars '
-    + 'is the size of it, full at four points a game or more. One caveat: a '
-    + 'large negative is '
+    + 'sides, so a year cut short by injury does not read as decline. Five '
+    + 'bars is the biggest projected gain and one bar the biggest fall, the '
+    + 'same direction as Health and Steady. One caveat: a large fall is '
     + 'usually a lost starting job rather than a player getting worse -- '
     + 'ESPN projects a full season for almost everyone, so a backup shows as '
     + 'a huge per-game fall. This is what the projection expects, not a '
