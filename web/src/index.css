@@ -25,6 +25,13 @@
   --ok: #0ca30c;
   --fail: #d03b3b;
 
+  /* The two steps of the five-step ramp that are not already a token:
+     its ends are --ok and --fail and its fourth step is --accent, but
+     these two were literals repeated in eight places in App.css. A
+     sixth step, or a change to either of these, should be one edit. */
+  --ramp-strong: #7cb342;
+  --ramp-mid: #b3c132;
+
   /* -- position hues: distinct, dark-legible, CVD-checked (adjacent-pair
      ΔE >= 8 in this QB/RB/WR/TE/K/DST order — see task-5-report.md).
      Consumed by badges in the next task; defined now so both tasks draw

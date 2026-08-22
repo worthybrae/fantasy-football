@@ -186,7 +186,12 @@ RANK_MIN_GAMES = 8
 # the populated shape cannot drift apart.
 _SEASON_RANK_COLUMNS = ["player_id", "season", "position", "pos_rank_ppg",
                         "pos_rank_ppg_n", "cv", "cv_rank", "cv_rank_n",
-                        "cv_pos_median"]
+                        "cv_pos_median",
+                        # Percentiles within (season, position), for the
+                        # usage card's colour. See `season_rank_frame`.
+                        "target_share_pctl", "carries_pg_pctl",
+                        "targets_pg_pctl", "receptions_pg_pctl",
+                        "yards_pg_pctl"]
 _COMP_POOL_COLUMNS = ["player_id", "name", "season", "position", "games",
                       "ppg", "next_ppg", "change", "nfl_season"]
 
@@ -379,7 +384,9 @@ def season_rank_frame(weekly: pd.DataFrame, feats: pd.DataFrame,
           .groupby(["player_id", "season"])["_pts"].std()
           .rename("ppg_sd").reset_index())
     q = feats.loc[feats["games"] >= RANK_MIN_GAMES,
-                  ["player_id", "season", "position", "ppg"]].merge(
+                  ["player_id", "season", "position", "ppg", "games",
+                   "target_share", "targets", "carries", "receptions",
+                   "rush_yards", "rec_yards"]].merge(
         sd, on=["player_id", "season"], how="left")
     if q.empty:
         return pd.DataFrame(columns=_SEASON_RANK_COLUMNS)
@@ -397,6 +404,34 @@ def season_rank_frame(weekly: pd.DataFrame, feats: pd.DataFrame,
     # so counting them would advertise a denominator nobody occupies.
     q["cv_rank_n"] = cv_pool.transform("count")
     q["cv_pos_median"] = cv_pool.transform("median")
+
+    # -- what the usage card is coloured against ---------------------------
+    #
+    # A share or a rate is meaningless as a level: 52% of snaps is a workhorse
+    # back and a part-time receiver, and 5.9 carries a game is a committee
+    # back and a busy slot receiver. The only honest reading is a place among
+    # the same position in the same year, which is the pool every other rank
+    # on this card already uses.
+    #
+    # `pct=True` rather than a place out of N: the card paints a five-step
+    # ramp, and a percentile is what a ramp cuts. Higher is better for every
+    # one of these -- more snaps, more targets, more yards -- so none of them
+    # inverts the way `cv_rank` does.
+    #
+    # NOT SNAP SHARE, and that is not an oversight. The league-wide snap frame
+    # is keyed by (normalised name, team, season) and `feats` carries no team
+    # column, so a percentile for it would come from a SECOND join to the one
+    # `season_summaries` already does per player -- and the day those two
+    # disagree, the card paints a colour that argues with the number under it.
+    # Colouring snap share means giving that frame a player_id first.
+    q["_yards_pg"] = (q["rush_yards"] + q["rec_yards"]) / q["games"]
+    for col, source in (("target_share_pctl", q["target_share"]),
+                        ("carries_pg_pctl", q["carries"] / q["games"]),
+                        ("targets_pg_pctl", q["targets"] / q["games"]),
+                        ("receptions_pg_pctl", q["receptions"] / q["games"]),
+                        ("yards_pg_pctl", q["_yards_pg"])):
+        q[col] = (source.groupby([q["season"], q["position"]])
+                  .rank(pct=True, ascending=True))
     return q[_SEASON_RANK_COLUMNS]
 
 

@@ -3613,7 +3613,7 @@ button.roster-row:focus-visible {
 .health-meter.is-3 .health-bar.is-on,
 .steady-meter.is-3 .steady-bar.is-on { background: var(--accent); }
 .health-meter.is-4 .health-bar.is-on,
-.steady-meter.is-4 .steady-bar.is-on { background: #7cb342; }
+.steady-meter.is-4 .steady-bar.is-on { background: var(--ramp-strong); }
 .health-meter.is-5 .health-bar.is-on,
 .steady-meter.is-5 .steady-bar.is-on { background: var(--ok); }
 
@@ -3662,8 +3662,8 @@ button.roster-row:focus-visible {
 }
 
 .finish-arc-bar.is-elite   { background: var(--ok); }
-.finish-arc-bar.is-strong  { background: #7cb342; }
-.finish-arc-bar.is-starter { background: #b3c132; }
+.finish-arc-bar.is-strong  { background: var(--ramp-strong); }
+.finish-arc-bar.is-starter { background: var(--ramp-mid); }
 .finish-arc-bar.is-fringe  { background: var(--accent); }
 .finish-arc-bar.is-out     { background: var(--fail); }
 
@@ -3706,7 +3706,7 @@ button.roster-row:focus-visible {
 .change-meter.is-1 .change-mbar.is-on { background: var(--fail); }
 .change-meter.is-2 .change-mbar.is-on { background: #e0762c; }
 .change-meter.is-3 .change-mbar.is-on { background: var(--accent); }
-.change-meter.is-4 .change-mbar.is-on { background: #7cb342; }
+.change-meter.is-4 .change-mbar.is-on { background: var(--ramp-strong); }
 .change-meter.is-5 .change-mbar.is-on { background: var(--ok); }
 
 /* -- cell hover panels: Health, the season sparkline, Finish ---------------
@@ -3844,12 +3844,12 @@ button.roster-row:focus-visible {
   background: var(--tone);
 }
 .ctip-col-bar.is-strong, .ctip-unit.is-on.is-strong, .ctip-col-val.is-strong {
-  --tone: #7cb342;
+  --tone: var(--ramp-strong);
   background: var(--tone);
 }
 .ctip-col-bar.is-mid, .ctip-unit.is-on.is-mid, .ctip-col-val.is-mid,
 .ctip-col-bar.is-starter, .ctip-unit.is-on.is-starter, .ctip-col-val.is-starter {
-  --tone: #b3c132;
+  --tone: var(--ramp-mid);
   background: var(--tone);
 }
 .ctip-col-bar.is-fringe, .ctip-unit.is-on.is-fringe, .ctip-col-val.is-fringe {
@@ -3872,9 +3872,9 @@ button.roster-row:focus-visible {
 .ctip-col-val { background: none !important; }
 .ctip-col-val.is-good, .ctip-col-val.is-elite,
 .pp-pop-log-pts.is-good { color: var(--ok); }
-.ctip-col-val.is-strong { color: #7cb342; }
+.ctip-col-val.is-strong { color: var(--ramp-strong); }
 .ctip-col-val.is-mid, .ctip-col-val.is-starter,
-.pp-pop-log-pts.is-mid { color: #b3c132; }
+.pp-pop-log-pts.is-mid { color: var(--ramp-mid); }
 .ctip-col-val.is-fringe { color: var(--accent); }
 .ctip-col-val.is-bad, .ctip-col-val.is-out,
 .pp-pop-log-pts.is-bad { color: var(--fail); }
@@ -4425,6 +4425,33 @@ button.roster-row:focus-visible {
 
 .delta-tone.is-up { color: var(--ok); }
 .delta-tone.is-down { color: var(--fail); }
+
+/* A usage number, tinted by where it places among the same position that
+   season. A wash rather than a solid fill: twelve saturated boxes in one
+   small card would shout over the panels above, and the number has to stay
+   the thing being read. The ramp's own tokens, so a chip and a bar of the
+   same step cannot drift apart. */
+.pp-pop-chip {
+  display: inline-block;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--chip) 20%, transparent);
+  color: var(--text-1);
+}
+
+.pp-pop-chip.is-elite { --chip: var(--ok); }
+.pp-pop-chip.is-strong { --chip: var(--ramp-strong); }
+.pp-pop-chip.is-starter { --chip: var(--ramp-mid); }
+.pp-pop-chip.is-fringe { --chip: var(--accent); }
+.pp-pop-chip.is-out { --chip: var(--fail); }
+
+/* No pool to place it against -- snap share, today -- so no colour. A grey
+   cell here is the card saying it does not know, which is the one thing a
+   tinted one could not say. */
+.pp-pop-chip.is-unrated {
+  background: none;
+  color: var(--text-2);
+}
 
 /* A small season table: a label column that takes what it needs and one
    equal column per season. Grid rather than rows of flex, so "Snap share"

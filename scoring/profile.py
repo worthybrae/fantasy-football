@@ -303,7 +303,13 @@ def season_summaries(weekly: pd.DataFrame, snaps: pd.DataFrame | None, player_id
     ranks = (season_rank_frame(weekly, feats, rules)
              if season_ranks is _UNSET else season_ranks)
     rank_cols = ["pos_rank_ppg", "pos_rank_ppg_n", "cv", "cv_rank",
-                 "cv_rank_n", "cv_pos_median"]
+                 "cv_rank_n", "cv_pos_median",
+                 # The usage card's colour: where each share and rate places
+                 # among the same position that season. See
+                 # profile_cache.season_rank_frame for why snap share is not
+                 # among them.
+                 "target_share_pctl", "carries_pg_pctl", "targets_pg_pctl",
+                 "receptions_pg_pctl", "yards_pg_pctl"]
     if ranks is not None and not ranks.empty:
         mine = mine.merge(ranks[["player_id", "season"] + rank_cols],
                           on=["player_id", "season"], how="left")
@@ -388,6 +394,11 @@ def season_summaries(weekly: pd.DataFrame, snaps: pd.DataFrame | None, player_id
             "cv_rank": _int_or_none(r["cv_rank"]),
             "cv_rank_n": _int_or_none(r["cv_rank_n"]),
             "cv_pos_median": _round_or_none(r["cv_pos_median"], 3),
+            # One object rather than five loose keys: they are read together,
+            # by one card, and a season row is already wide.
+            "pcts": {k: _round_or_none(r[f"{k}_pctl"], 3) for k in
+                     ("target_share", "carries_pg", "targets_pg",
+                      "receptions_pg", "yards_pg")},
         })
     return rows
 

@@ -23,7 +23,19 @@ import type {
 // invented: a value the payload nulls is rendered as missing, not as zero.
 
 /** One season row: `SeasonSummary` plus the six the redesign asked for. */
+/** Where each usage number places among the same position that season, 0-1,
+ *  higher better. Null for a season the pool could not rank. Snap share is
+ *  deliberately absent -- see scoring/profile_cache.season_rank_frame. */
+export interface SeasonPercentiles {
+  target_share: number | null
+  carries_pg: number | null
+  targets_pg: number | null
+  receptions_pg: number | null
+  yards_pg: number | null
+}
+
 export interface SeasonRow extends SeasonSummary {
+  pcts?: SeasonPercentiles
   /** Age on September 1 of THAT season (not today) -- see `player_bio`. */
   age: number | null
   /** 1-based: a rookie year is his 1st NFL season. */
