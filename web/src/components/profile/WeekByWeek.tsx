@@ -1,3 +1,5 @@
+import { useState } from 'react'
+
 import { Chart } from '../draft/Chart'
 import { weekCols } from '../draft/panels'
 import { barTone } from '../draft/weeks'
@@ -23,14 +25,23 @@ export default function WeekByWeek({ games, seasons, position }: {
   seasons: SeasonRow[]
   position: string
 }) {
-  if (games.length === 0) return null
-  const season = Math.max(...games.map((g) => g.season))
+  // Every season he has a PLAYED game in, newest first. A season of nothing
+  // but DNPs is not offered: it would be a chart of baseline marks over an
+  // empty log, and an arrow that lands on one is an arrow that appears
+  // broken.
+  const played = [...new Set(games.filter((g) => !g.dnp).map((g) => g.season))]
+    .sort((a, b) => b - a)
+  // Newest by default -- form is what someone opening this mid-draft is
+  // reading for. Held as the season itself rather than an index so a payload
+  // swapping under it (a comp clicked inside the profile) cannot land on
+  // another player's third-newest year.
+  const [shown, setShown] = useState<number | null>(null)
+  if (played.length === 0) return null
+  const season = shown !== null && played.includes(shown) ? shown : played[0]
+  const at = played.indexOf(season)
   const log = games
     .filter((g) => g.season === season && !g.dnp)
     .sort((a, b) => b.week - a.week)
-  // A season of nothing but DNPs draws no card at all rather than a chart of
-  // baseline marks over an empty log.
-  if (log.length === 0) return null
 
   // The season's own row, so the head states the average the rest of the
   // popup states -- a mean recomputed here off the same games would round
@@ -56,7 +67,44 @@ export default function WeekByWeek({ games, seasons, position }: {
       )}
       className="pp-pop-panel pp-pop-weeks"
     >
-      <Chart cols={weekCols(games, season, position)} />
+      {/* An arrow on each side of the picture, pointing the way time runs:
+          left is the season before this one, right is the season after. Both
+          are real buttons -- the popup is keyboard-reachable, and a clickable
+          div here would be a hole in that. Disabled rather than hidden at
+          each end, so the chart does not shift sideways as you walk the
+          career. */}
+      <div className="pp-pop-weeks-nav">
+        <button
+          type="button"
+          className="pp-pop-weeks-arrow"
+          onClick={() => setShown(played[at + 1])}
+          disabled={at >= played.length - 1}
+          aria-label={at >= played.length - 1 ? 'No earlier season'
+            : `Show ${played[at + 1]}`}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"
+               strokeLinejoin="round" aria-hidden="true">
+            <path d="M15 5 8 12l7 7" />
+          </svg>
+        </button>
+        <div className="pp-pop-weeks-chart">
+          <Chart cols={weekCols(games, season, position)} />
+        </div>
+        <button
+          type="button"
+          className="pp-pop-weeks-arrow"
+          onClick={() => setShown(played[at - 1])}
+          disabled={at <= 0}
+          aria-label={at <= 0 ? 'No later season' : `Show ${played[at - 1]}`}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"
+               strokeLinejoin="round" aria-hidden="true">
+            <path d="m9 5 7 7-7 7" />
+          </svg>
+        </button>
+      </div>
 
       {/* Same weeks, twice: the hairline is where the picture stops and the
           words for it start. */}

@@ -891,6 +891,39 @@ def _outlook(weekly: pd.DataFrame, depth: pd.DataFrame, schedules: pd.DataFrame,
             "sos_raw": sos_raw, "sos_pct": sos_pct, "bye": bye}
 
 
+def _proj_pos_finish(board: pd.DataFrame, player_id: str) -> int | None:
+    """Where a projection places a player among his own position.
+
+    The same shape `pos_finish` gives a season that has been played -- a rank
+    within (position), best first -- so the popup's Finish panel can draw the
+    projection as one more column on the ladder the played seasons are already
+    on, rather than as a number in a different unit beside them.
+
+    Ranked over everyone the board carries a projection for, NOT over the
+    startable slice: the pool a finish is graded against is the whole position
+    (see `finishTone`, which does the grading against the league's starter
+    count afterwards). `method="min"` so two identical projections share the
+    better place instead of both landing on the average of two, which is what
+    a finish means everywhere else in this project.
+
+    None when this player has no projection -- a rookie the board could not
+    price, or a defense in a league that does not score one. A rank invented
+    for a player with nothing to rank would be the one number on the card that
+    came from nowhere.
+    """
+    if "proj_points" not in board.columns or "position" not in board.columns:
+        return None
+    priced = board[board["proj_points"].notna()]
+    if priced.empty:
+        return None
+    ranks = priced.groupby("position")["proj_points"].rank(ascending=False,
+                                                           method="min")
+    hit = ranks[priced["player_id"] == player_id]
+    if hit.empty or pd.isna(hit.iloc[0]):
+        return None
+    return int(hit.iloc[0])
+
+
 def _enrich_twins(twins: dict, board: pd.DataFrame) -> dict:
     board_idx = board.set_index("player_id")
     for p in twins["players"]:
@@ -1197,6 +1230,10 @@ def build_profile(conn, player_id: str, weights: dict | None = None,
     header = row.to_dict()
     factors_out = {k: header[k] for k in
                    ("production", "durability", "role", "environment", "schedule")}
+    # The projection as a PLACE, next to the places his played seasons took.
+    # `proj_points` alone is a number nobody has intuitions about; "RB2" is
+    # the same fact in the unit the rest of the card is already written in.
+    header["proj_pos_finish"] = _proj_pos_finish(board, player_id)
 
     # Was four full `read_table` calls -- weekly (174,373 rows), snap_counts
     # (253,106), depth_charts (416,885) and schedules -- 0.614s of reading

@@ -70,8 +70,9 @@ export function healthCols(seasons: SeasonSummary[]): Col[] {
   })
 }
 
-export function finishCols(seasons: SeasonSummary[], starters: number): Col[] {
-  return seasons.slice().reverse().map((s) => ({
+export function finishCols(seasons: SeasonSummary[], starters: number,
+                           projFinish?: number | null): Col[] {
+  const cols: Col[] = seasons.slice().reverse().map((s) => ({
     key: s.season,
     label: year(s.season),
     value: String(s.pos_finish),
@@ -81,6 +82,22 @@ export function finishCols(seasons: SeasonSummary[], starters: number): Col[] {
     // in their head while comparing it to the two panels beside it.
     fill: 1 - finishPosition(s.pos_finish, starters),
   }))
+  // The season being drafted, on the same ladder as the ones behind it. Drawn
+  // hollow behind a dashed rule for the same reason Per game's projection is:
+  // it is the only column here that has not happened. Graded by the same
+  // `finishTone`, so a projected RB2 is the green a finished RB2 was -- the
+  // colour answers "is this good", and the fill answers "is this banked".
+  if (projFinish !== null && projFinish !== undefined) {
+    cols.push({
+      key: 'proj',
+      label: 'proj',
+      value: String(projFinish),
+      tone: finishTone(projFinish, starters),
+      fill: 1 - finishPosition(projFinish, starters),
+      projected: true,
+    })
+  }
+  return cols
 }
 
 // Steadiness, season by season, as a PLACE among the position rather than as

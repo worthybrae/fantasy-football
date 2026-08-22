@@ -2,7 +2,8 @@ import dataclasses
 
 import pandas as pd
 from pipeline.db import get_conn, record_freshness, write_table
-from scoring.profile import season_summaries, game_log, build_profile, _stat_line
+from scoring.profile import (season_summaries, game_log, build_profile, _stat_line,
+                            _proj_pos_finish)
 
 def _weekly_rows():
     return pd.DataFrame(
@@ -2109,3 +2110,46 @@ def test_a_feed_with_no_publication_names_serves_nulls_not_nans(tmp_path):
     items = player_news(conn, "p1")
     assert items[0]["source"] is None
     json.dumps(items, allow_nan=False)
+
+
+def test_proj_pos_finish_ranks_within_the_position_best_first():
+    """The projection as a place, so it can sit on the same ladder as a
+    played season's finish rather than beside it in another unit."""
+    board = pd.DataFrame({
+        "player_id": ["a", "b", "c"],
+        "position": ["RB", "RB", "WR"],
+        "proj_points": [300.0, 250.0, 280.0],
+    })
+    assert _proj_pos_finish(board, "a") == 1
+    assert _proj_pos_finish(board, "b") == 2
+    # Ranked within his OWN position: the best receiver is WR1, not WR2
+    # because two backs outscore him.
+    assert _proj_pos_finish(board, "c") == 1
+
+
+def test_proj_pos_finish_is_none_without_a_projection():
+    """A player the board could not price gets no rank at all. A finish
+    invented for a player with nothing to rank would be the one number on the
+    card that came from nowhere, and it would sort him against players the
+    same column is measuring honestly."""
+    board = pd.DataFrame({
+        "player_id": ["a", "b"],
+        "position": ["RB", "RB"],
+        "proj_points": [300.0, None],
+    })
+    assert _proj_pos_finish(board, "b") is None
+    # The unpriced player is not in the pool, so he does not push anyone down.
+    assert _proj_pos_finish(board, "a") == 1
+
+
+def test_proj_pos_finish_ties_share_the_better_place():
+    """`method="min"`, which is what a finish means everywhere else here: two
+    identical projections are both RB1, not both RB1.5."""
+    board = pd.DataFrame({
+        "player_id": ["a", "b", "c"],
+        "position": ["RB", "RB", "RB"],
+        "proj_points": [300.0, 300.0, 200.0],
+    })
+    assert _proj_pos_finish(board, "a") == 1
+    assert _proj_pos_finish(board, "b") == 1
+    assert _proj_pos_finish(board, "c") == 3

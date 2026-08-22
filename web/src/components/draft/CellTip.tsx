@@ -93,7 +93,7 @@ function FinishBody({ data, settings }: BodyProps): ReactNode {
   const pos = data.header.position
   const starters = startersAt(pos, settings)
   const avg = weightedFinish(data.seasons.map((s) => [s.season, s.pos_finish]))
-  const cols = finishCols(data.seasons, starters)
+  const cols = finishCols(data.seasons, starters, data.header.proj_pos_finish)
   return (
     <>
       <div className="ctip-head">

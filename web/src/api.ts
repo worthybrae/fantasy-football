@@ -149,7 +149,11 @@ export interface ScheduleWeek {
   fpa_pg: number | null; pct: number | null;
 }
 export interface PlayerProfileData {
-  header: Player;
+  // The board row this player sits on, plus the one thing only the profile
+  // endpoint computes: where his projection places him among his position,
+  // best first. Same shape as a played season's `pos_finish`, so the Finish
+  // panel can put it on the same ladder. Null when he has no projection.
+  header: Player & { proj_pos_finish: number | null };
   factors: { production: number; durability: number; role: number;
              environment: number; schedule: number };
   summary: ProfileSummary;

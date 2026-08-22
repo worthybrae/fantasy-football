@@ -4363,11 +4363,18 @@ button.roster-row:focus-visible {
    the chart's own `.ctip-col-bar`, and take the same five-step ramp through
    the same classes: a green week here and a green season above it are the
    same claim. A bye is the chart's own baseline mark. */
+/* The strip GROWS into its card rather than sitting 26px tall at the top of
+   one. `.pp-pop-row` stretches every card in a row to the tallest of them,
+   and this card's neighbours are three and four rows of label/value -- so a
+   fixed-height strip left ~120px of empty card under it, which read as a
+   chart that had been cut off. The bars are percentage-height, so a taller
+   box is simply a bigger picture of the same season. */
 .pp-pop-strip {
   display: flex;
   align-items: flex-end;
   gap: 2px;
-  height: 26px;
+  flex: 1 1 auto;
+  min-height: 26px;
 }
 
 .pp-pop-strip > .ctip-col-bar,
@@ -4377,6 +4384,55 @@ button.roster-row:focus-visible {
   /* The floor a week draws at when its percentile rounds to nothing: the
      eighteen columns are an axis, and a missing one would read as a bye. */
   min-height: 4px;
+}
+
+/* An arrow on each side of the week chart, for walking the career a season
+   at a time. The chart takes the middle and the arrows do not shrink, so the
+   picture is the same width whichever season is showing -- an axis that
+   changed width as you paged through it would make two seasons look like
+   different-length ones. */
+.pp-pop-weeks-nav {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.pp-pop-weeks-chart {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.pp-pop-weeks-arrow {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 44px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.pp-pop-weeks-arrow:hover:not(:disabled) {
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+.pp-pop-weeks-arrow:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 2px;
+}
+
+/* Disabled, not hidden: at the ends of a career the arrow stays where it was
+   so the chart never shifts sideways under the cursor. */
+.pp-pop-weeks-arrow:disabled {
+  color: var(--text-3);
+  opacity: 0.4;
+  cursor: default;
 }
 
 /* Label on the left, number on the right (PopCard's PopRows). Market, Usage

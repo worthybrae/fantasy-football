@@ -290,7 +290,8 @@ function PopPanels({ profile, settings }: {
   // in draft/finish.ts.
   const seasons = profile.seasons.slice(0, POPUP_SEASONS)
   const health = healthCols(seasons)
-  const finish = finishCols(seasons, startersAt(header.position, settings))
+  const finish = finishCols(seasons, startersAt(header.position, settings),
+                            header.proj_pos_finish)
   const steady = steadyCols(seasons)
   // Newest first in the payload, so the first rated season carries the pool
   // the last column was ranked in. A denominator that moves year to year,

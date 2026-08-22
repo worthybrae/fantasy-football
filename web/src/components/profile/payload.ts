@@ -127,6 +127,11 @@ export interface LineQualityData {
  *  which this card reads). */
 export interface ProfileHeader extends Player {
   proj_points: number | null
+  /** Where the projection places him among his own position, best first --
+   *  the same shape `pos_finish` gives a season he has played, so the Finish
+   *  panel can draw it as one more column on the ladder the played seasons
+   *  are already on. Null when the board carries no projection for him. */
+  proj_pos_finish: number | null
   vor: number | null
 }
 
