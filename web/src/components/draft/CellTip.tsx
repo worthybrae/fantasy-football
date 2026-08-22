@@ -19,7 +19,8 @@ import type { LiveSettings, PlayerProfileData } from '../../api'
 import { Chart } from './Chart'
 import { startersAt, weightedFinish } from './finish'
 import {
-  finishCols, healthCols, perGameCols, playedSeasons, ratedSeasons, seasonLength, steadyCols,
+  finishCols, healthCols, perGameCols, perGameDelta, playedSeasons, ratedSeasons,
+  seasonLength, steadyCols,
   weekCols,
 } from './panels'
 
@@ -171,16 +172,21 @@ function ChangeBody({ data }: BodyProps): ReactNode {
     return <div className="ctip-empty">Nothing to compare yet.</div>
   }
   const cols = perGameCols(data.seasons, proj, data.header.position)
-  const last = rows.length ? rows[0].ppg : null
-  const delta = last !== null && proj !== null ? proj - last : null
+  const delta = perGameDelta(data.seasons, proj)
   return (
     <>
       <div className="ctip-head">
         <span>Points per game</span>
         <span className="ctip-head-note">
-          {delta === null
-            ? 'projection vs history'
-            : `${delta >= 0 ? '+' : ''}${delta.toFixed(1)} vs last season`}
+          {delta === null ? 'projection vs history' : (
+            <>
+              {/* Green up, red down -- the one number on this panel that is a
+                  direction rather than a level, and the direction is the
+                  point of it. */}
+              <span className={`ctip-delta ${delta.tone}`}>{delta.label}</span>
+              {' vs last season'}
+            </>
+          )}
         </span>
       </div>
       <Chart cols={cols} />

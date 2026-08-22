@@ -184,6 +184,30 @@ export function playedSeasons(seasons: SeasonSummary[]): SeasonSummary[] {
 // Scoring by season with the PROJECTION as the final column, because the
 // Change column is the gap between the last of these and that one -- and a
 // gap is the one thing a single number cannot show you the size of.
+/** The projection against the season behind it: what to print, and whether
+ *  it is a rise or a fall.
+ *
+ *  Rounded BEFORE its sign is read, so the colour cannot disagree with the
+ *  number beside it -- a delta of -0.04 prints "0.0", and painting that red
+ *  would be the card claiming a fall it is not showing.
+ *
+ *  Lives here rather than at either call site because it is derived from the
+ *  same rows `perGameCols` draws (`playedSeasons`), and the board's hover
+ *  panel and the popup were each computing it from their own copy of that
+ *  filter. Two places deciding what "vs last season" means is how they end up
+ *  meaning two things.
+ */
+export function perGameDelta(seasons: SeasonSummary[], projPpg: number | null):
+{ label: string; tone: string } | null {
+  const rows = playedSeasons(seasons)
+  if (!rows.length || projPpg === null) return null
+  const shown = Math.round((projPpg - rows[0].ppg) * 10) / 10
+  return {
+    label: `${shown > 0 ? '+' : ''}${shown.toFixed(1)}`,
+    tone: shown > 0 ? 'is-up' : shown < 0 ? 'is-down' : '',
+  }
+}
+
 export function perGameCols(
   seasons: SeasonSummary[], projPpg: number | null, position: string,
 ): Col[] {

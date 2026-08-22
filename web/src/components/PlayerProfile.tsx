@@ -4,7 +4,8 @@ import { fetchProfile, type LiveSettings, type Player } from '../api'
 import { Chart, type Col } from './draft/Chart'
 import { startersAt } from './draft/finish'
 import {
-  finishCols, healthCols, perGameCols, playedSeasons, ratedSeasons, seasonLength, steadyCols, year,
+  finishCols, healthCols, perGameCols, perGameDelta, playedSeasons, ratedSeasons,
+  seasonLength, steadyCols, year,
 } from './draft/panels'
 import DepthChartCard from './DepthChartCard'
 import PageSkeleton from './PageSkeleton'
@@ -252,7 +253,9 @@ function StatusLine({ profile }: { profile: ProfilePayload }): ReactNode {
 }
 
 function PopPanel({ title, note, cols, wide = false }: {
-  title: string; note: string; cols: Col[]; wide?: boolean
+  // ReactNode, not string: Per game's note is a signed number that is
+  // coloured by its own sign, so it arrives as an element rather than text.
+  title: string; note: ReactNode; cols: Col[]; wide?: boolean
 }): ReactNode {
   return (
     // The same card as the six below (PopCard), plus the class that says
@@ -307,7 +310,7 @@ function PopPanels({ profile, settings }: {
   const scoring = perGameCols(seasons, proj, header.position)
   const perGame = played.length
     ? scoring : [...blankSeasonCols(profile.bio.season), ...scoring]
-  const delta = played.length && proj !== null ? proj - played[0].ppg : null
+  const delta = perGameDelta(seasons, proj)
   // A defense has none of these: no games counted, no positional finish, no
   // coefficient, and no per-game projection either. An empty row would still
   // cost the gap above the section under it.
@@ -332,9 +335,11 @@ function PopPanels({ profile, settings }: {
       {scoring.length > 0 && (
         <PopPanel
           title="Per game"
-          note={delta === null
-            ? 'projection only'
-            : `${delta >= 0 ? '+' : ''}${delta.toFixed(1)}`}
+          // Green up, red down: the only number in the four panels that is a
+          // direction rather than a level, and the direction is why it is
+          // there. The panel's own columns already say the levels.
+          note={delta === null ? 'projection only'
+            : <span className={`ctip-delta ${delta.tone}`}>{delta.label}</span>}
           cols={perGame}
           wide
         />

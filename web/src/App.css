@@ -4399,6 +4399,13 @@ button.roster-row:focus-visible {
   min-height: 4px;
 }
 
+/* The projection's move against last season, in the two colours this app
+   already uses for a direction (`--ok` / `--fail`, the status pair, not the
+   five-step ramp -- a rise is not a tier). A move that rounds to zero keeps
+   the note's own colour: there is no direction to paint. */
+.ctip-delta.is-up { color: var(--ok); }
+.ctip-delta.is-down { color: var(--fail); }
+
 /* A small season table: a label column that takes what it needs and one
    equal column per season. Grid rather than rows of flex, so "Snap share"
    and "Target share" line their years up with each other -- the whole point
