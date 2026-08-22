@@ -1,5 +1,6 @@
 import type { DepthChartGroup } from '../api'
 import PopCard from './profile/PopCard'
+import { depthGroup } from './profile/payload'
 
 // The card used to print the whole offence, four position groups at once. A
 // manager holding a pick does not need to know who Detroit's third tight end
@@ -13,13 +14,8 @@ export default function DepthChartCard({ team, position, groups }: {
   position: string
   groups: DepthChartGroup[]
 }) {
-  // Whichever group actually holds him, before the one his board position
-  // names: a player charted somewhere other than where the board ranks him
-  // (a receiver taking snaps at running back) belongs in the room he is
-  // actually competing in.
-  const mine = groups.find((g) => g.players.some((p) => p.is_me))
-    ?? groups.find((g) => g.position === position)
-  if (!mine || mine.players.length === 0) return null
+  const mine = depthGroup(groups, position)
+  if (mine === null) return null
 
   const top = mine.players.slice(0, ROWS)
   // He is the reason the card is open, so he is always on it: a fourth-string
@@ -30,17 +26,19 @@ export default function DepthChartCard({ team, position, groups }: {
 
   return (
     <PopCard title="Room" note={team}>
-      <div className="pp-pop-list">
+      {/* An ordered list because a depth chart IS an order -- the whole
+          card is who stands where in the room. */}
+      <ol className="pp-pop-list">
         {rows.map((p) => (
-          <div
+          <li
             className={`pp-pop-list-row${p.is_me ? ' is-me' : ''}`}
             key={`${p.rank}-${p.name}`}
           >
             <span className="pp-pop-list-name">{p.name}</span>
             <span className="mono pp-pop-list-tail">{mine.position}{p.rank}</span>
-          </div>
+          </li>
         ))}
-      </div>
+      </ol>
     </PopCard>
   )
 }

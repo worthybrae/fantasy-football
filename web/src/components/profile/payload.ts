@@ -1,4 +1,6 @@
-import type { GameLogRow, Player, PlayerProfileData, ScheduleWeek, SeasonSummary } from '../../api'
+import type {
+  DepthChartGroup, GameLogRow, Player, PlayerProfileData, ScheduleWeek, SeasonSummary,
+} from '../../api'
 
 // The player-card payload as `scoring/profile.py::build_profile` actually
 // serves it today, which is more than `api.ts`'s `PlayerProfileData`
@@ -32,8 +34,9 @@ export interface SeasonRow extends SeasonSummary {
   pos_rank_ppg: number | null
   pos_rank_ppg_n: number | null
   /** Coefficient of variation: week-to-week spread divided by the average.
-   *  See ConsistencyTable for why the card ranks on this and not on
-   *  `ppg_std`. */
+   *  The Steady panel ranks on this rather than on `ppg_std` because
+   *  volatility is scored per point -- a bigger scorer is not punished for
+   *  scoring. */
   cv: number | null
   cv_rank: number | null
   cv_rank_n: number | null
@@ -119,9 +122,9 @@ export interface LineQualityData {
 /** The board row the profile is built from. `api.ts`'s `Player` is the
  *  subset /api/players serves to the board table; the profile header is the
  *  whole row, which also carries the projection and the value over
- *  replacement the verdict strip leads with (plus `composite`, `proj_scale`,
- *  `espn_id`, `ffc_rank` and the five raw factors, none of which this card
- *  reads). */
+ *  replacement the popup's four figures lead with (plus `composite`,
+ *  `proj_scale`, `espn_id`, `ffc_rank` and the five raw factors, none of
+ *  which this card reads). */
 export interface ProfileHeader extends Player {
   proj_points: number | null
   vor: number | null
@@ -233,9 +236,19 @@ export function rankTone(rank: number | null, of: number | null): 'good' | 'mid'
   return 'mid'
 }
 
-/** The `--pos-*` hue for a position, as a class that sets `--pos-hue`.
- *  Charts read that variable so one class colours the bars, the badge and
- *  the legend swatch together. */
-export function posHueClass(position: string): string {
-  return `pp-hue-${position.toLowerCase()}`
+/** His room, or null if the chart has none for him. Whichever group actually
+ *  holds him comes before the one his board position names: a player charted
+ *  somewhere other than where the board ranks him (a receiver taking snaps at
+ *  running back) belongs in the room he is actually competing in. The
+ *  fallback is not a nicety -- `is_me` is false for every row of a player the
+ *  chart could not be joined to by id, which is every rookie who is on the
+ *  board under an `adp_` id, and Sleeper still charts him by name.
+ *
+ *  Here rather than in DepthChartCard because the thin-payload notice
+ *  (MissingData) tells the reader the room is one of the real things on his
+ *  popup, and the card and the notice have to give the same answer. */
+export function depthGroup(groups: DepthChartGroup[], position: string): DepthChartGroup | null {
+  const mine = groups.find((g) => g.players.some((p) => p.is_me))
+    ?? groups.find((g) => g.position === position)
+  return mine && mine.players.length > 0 ? mine : null
 }

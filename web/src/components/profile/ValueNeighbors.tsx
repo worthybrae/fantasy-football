@@ -9,7 +9,7 @@ import { fmtRank } from './payload'
 // looked like his, whose `rank` is where those players sit on TODAY's board
 // and has nothing to do with his own -- and drawing them here would put
 // Alvin Kamara at 273 under a card that claims to be about the picks around
-// this one. Task 6's comparable-seasons card is where those belong.
+// this one. `ComparableSeasons` is the card those belong on.
 const NEIGHBOURS = 4
 
 interface NeighbourRow {
@@ -48,7 +48,9 @@ export default function ValueNeighbors({ mode, players, me, onSelectPlayer }: {
 
   return (
     <PopCard title="Near you" note="by board rank">
-      <div className="pp-pop-list is-board">
+      {/* Ordered, because board rank is the order: the rows are a run of
+          picks and the list markup says which run. */}
+      <ol className="pp-pop-list is-board">
         {shown.map((r) => {
           // A `const` rather than `r.id` at the click site: narrowing an
           // object's property does not survive into a closure, and this is
@@ -68,24 +70,25 @@ export default function ValueNeighbors({ mode, players, me, onSelectPlayer }: {
           // His own row, and any neighbour the board has no id for, is not a
           // control: opening the profile that is already open does nothing,
           // and fetching a player this season's pool has never heard of 404s
-          // and wipes the card. Same rule SimilarPlayers follows.
+          // and wipes the card. Same rule ComparableSeasons follows.
           if (r.me || id === null) {
             return (
-              <div className={`pp-pop-list-row${r.me ? ' is-me' : ''}`} key={key}>{cells}</div>
+              <li className={`pp-pop-list-row${r.me ? ' is-me' : ''}`} key={key}>{cells}</li>
             )
           }
           return (
-            <button
-              type="button"
-              className="pp-pop-list-row"
-              key={key}
-              onClick={() => onSelectPlayer(id)}
-            >
-              {cells}
-            </button>
+            <li key={key}>
+              <button
+                type="button"
+                className="pp-pop-list-row"
+                onClick={() => onSelectPlayer(id)}
+              >
+                {cells}
+              </button>
+            </li>
           )
         })}
-      </div>
+      </ol>
     </PopCard>
   )
 }

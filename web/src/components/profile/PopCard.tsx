@@ -20,9 +20,13 @@ export default function PopCard({ title, note, className = '', children }: {
     <section className={`pp-pop-card${className ? ` ${className}` : ''}`}>
       {/* The hover panel's own head (see App.css), which the season panels
           already use: two cards side by side cannot label themselves two
-          different ways. */}
+          different ways. The title is a real heading -- every card in the
+          popup comes through here, so this is the one place that decides
+          whether the popup is a document a screen reader can walk or a
+          picture of one. `.pp-pop-card .ctip-head > h3` takes the browser's
+          own heading styling back off it. */}
       <div className="ctip-head">
-        <span>{title}</span>
+        <h3>{title}</h3>
         {note !== null && note !== undefined && <span className="ctip-head-note">{note}</span>}
       </div>
       {children}

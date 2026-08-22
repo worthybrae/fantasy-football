@@ -315,9 +315,10 @@ const ChangeMeter = memo(function ChangeMeter({ change }: { change: number }): R
 
 // -- positional finish, season by season -----------------------------------
 //
-// The same five bands SeasonFinish uses on the profile, on the same cut
-// points, so the small version in the table and the big one in the card
-// cannot disagree about whether a season was good. Fractions of the number
+// The same five bands the profile popup's Finish panel uses (`finishCols`
+// in panels.ts), on the same cut points, so the small version in the table
+// and the big one in the popup cannot disagree about whether a season was
+// good. Fractions of the number
 // of players a 12-team league starts at the position, which is why one rule
 // reads a quarterback and a running back correctly.
 // Careers run from one season to ten, so the arc is RIGHT-ALIGNED: the most

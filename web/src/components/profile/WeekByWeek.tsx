@@ -1,6 +1,7 @@
 import { Chart } from '../draft/Chart'
 import { weekCols } from '../draft/panels'
 import { barTone } from '../draft/weeks'
+import PopCard from './PopCard'
 import type { GameRow, SeasonRow } from './payload'
 
 // The season as a shape, and under it the games it is made of.
@@ -42,15 +43,19 @@ export default function WeekByWeek({ games, seasons, position }: {
     : summary.ppg
 
   return (
-    <section className="pp-pop-panel pp-pop-weeks">
-      <div className="ctip-head">
-        <span>{season} by week</span>
-        <span className="ctip-head-note">
+    // The same card as the four season panels above and the dense ones
+    // below (PopCard), one row wide: it is the last of those seasons in
+    // detail, not a different kind of object.
+    <PopCard
+      title={`${season} by week`}
+      note={(
+        <>
           {`avg ${avg.toFixed(1)}`}
           {summary !== null && ` · finished ${position}${summary.pos_finish}`}
-        </span>
-      </div>
-
+        </>
+      )}
+      className="pp-pop-panel pp-pop-weeks"
+    >
       <Chart cols={weekCols(games, season, position)} />
 
       {/* Same weeks, twice: the hairline is where the picture stops and the
@@ -79,6 +84,6 @@ export default function WeekByWeek({ games, seasons, position }: {
           ))}
         </div>
       </div>
-    </section>
+    </PopCard>
   )
 }

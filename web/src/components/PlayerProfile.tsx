@@ -6,17 +6,13 @@ import { startersAt } from './draft/finish'
 import { finishCols, healthCols, perGameCols, seasonLength, steadyCols, year } from './draft/panels'
 import DepthChartCard from './DepthChartCard'
 import PageSkeleton from './PageSkeleton'
-import SimilarPlayers from './SimilarPlayers'
-import CohortNext from './profile/CohortNext'
+import ComparableSeasons from './profile/ComparableSeasons'
 import InjuryStatus from './profile/InjuryStatus'
 import NewsPanel from './profile/NewsPanel'
 import PopCard from './profile/PopCard'
-import ConsistencyTable from './profile/ConsistencyTable'
-import SeasonFinish from './profile/SeasonFinish'
 import LineQuality from './profile/LineQuality'
 import MarketRow from './profile/MarketRow'
 import MissingData from './profile/MissingData'
-import RoomGap from './profile/RoomGap'
 import ScheduleRanks from './profile/ScheduleRanks'
 import UsageLine from './profile/UsageLine'
 import ValueNeighbors from './profile/ValueNeighbors'
@@ -78,12 +74,13 @@ interface PlayerProfileProps {
 
 // -- the popup, top to bottom ----------------------------------------------
 //
-// Header, status line, the four season panels, last season by week, and then
-// two rows of three dense cards. The panels are drawn by the board's own
-// `Chart` off the board's own column builders (draft/panels.ts), never by a
-// second copy of either: someone who has spent a draft learning what a tall
-// green column means in a hover panel should not have to learn it again the
-// moment the same seasons open in a popup.
+// Header, status line, the notice a thin payload earns, the four season
+// panels, last season by week, and then three rows of dense cards. The
+// panels are drawn by the board's own `Chart` off the board's own column
+// builders (draft/panels.ts), never by a second copy of either: someone who
+// has spent a draft learning what a tall green column means in a hover panel
+// should not have to learn it again the moment the same seasons open in a
+// popup.
 
 // The depth slot, from whichever source actually has one. Sleeper's chart
 // (`status`) knows a rookie's place before the board's `outlook` does --
@@ -170,8 +167,8 @@ function PopFigures({ header }: { header: ProfileHeader }): ReactNode {
 
 // One line for the two facts that can make every panel under it irrelevant --
 // a designation, and where he actually stands on his own depth chart -- with
-// the edge over the room on its right end. That edge had a card of its own
-// (RoomGap); it is one number, and this is the line it belongs on.
+// the edge over the room on its right end. That edge used to have a card of
+// its own; it is one number, and this is the line it belongs on.
 function StatusLine({ profile }: { profile: ProfilePayload }): ReactNode {
   const status = profile.status ?? null
   // NEVER "healthy": a null designation is the absence of a claim, not a
@@ -305,14 +302,15 @@ function PopPanels({ profile, settings }: {
   )
 }
 
-// Six cards in two rows, under the seasons: where he plays, who he plays
-// with, and what the room charges for him. Each is a card the same size as
-// the panels above, and each decides for itself whether it has anything to
-// say -- a rookie has no usage to average, a defense has no line in front of
-// it, and a card with nothing in it is not drawn at all rather than drawn as
-// a frame of dashes. That is why the rows carry no conditions of their own:
-// see `.pp-pop-row:empty` in App.css for the one case that needs handling,
-// a row where every card opted out.
+// Eight cards in three rows, under the seasons: where he plays, who he plays
+// with, what the room charges for him, and what happened to the players his
+// season looks like. Each is a card the same size as the panels above, and
+// each decides for itself whether it has anything to say -- a rookie has no
+// usage to average, a defense has no line in front of it, and a card with
+// nothing in it is not drawn at all rather than drawn as a frame of dashes.
+// That is why the rows carry no conditions of their own: see
+// `.pp-pop-row:empty` in App.css for the one case that needs handling, a row
+// where every card opted out.
 function PopCards({ profile, onSelectPlayer }: {
   profile: ProfilePayload; onSelectPlayer: (id: string) => void
 }): ReactNode {
@@ -331,6 +329,12 @@ function PopCards({ profile, onSelectPlayer }: {
           marketRank={header.market_rank}
           marketSpread={header.market_spread}
           sources={header.market_sources}
+          // Only for the thin state, where the whole popup carries one
+          // forward-looking number and this is it -- for everyone else the
+          // Per game panel and the week chart are already that, and a fifth
+          // row here would be the market card answering a question nobody
+          // asked it. Sparse.dc.html draws it exactly here.
+          impliedPoints={hasHistory(profile) ? null : profile.outlook.implied_points}
         />
       </div>
       <div className="pp-pop-row">
@@ -345,6 +349,23 @@ function PopCards({ profile, onSelectPlayer }: {
           me={header}
           onSelectPlayer={onSelectPlayer}
         />
+      </div>
+      {/* Last row, and the only one that looks backwards: everything above
+          it is this player now, and these are the seasons that already went
+          where his might go, beside what has been written about him this
+          week. Comparable seasons is the `stat_twins` half of `similar` and
+          Near you, one row up, is the `value_neighbors` half -- so a player
+          with no stat line to match leaves News here on its own, which is
+          what Sparse.dc.html draws. */}
+      <div className="pp-pop-row">
+        <ComparableSeasons
+          mode={profile.similar.mode}
+          players={profile.similar.players}
+          targetAge={profile.similar.target_age ?? null}
+          cohort={profile.cohort}
+          onSelectPlayer={onSelectPlayer}
+        />
+        <NewsPanel items={profile.news ?? []} />
       </div>
     </>
   )
@@ -468,8 +489,6 @@ export default function PlayerProfile({
   const bye = profile?.outlook.bye ?? ident?.bye ?? null
   meta.push(`bye ${bye ?? '—'}`)
 
-  const sparse = profile !== null && !hasHistory(profile)
-
   return (
     <div className={`player-page${embedded ? ' player-page-embedded' : ''}`}>
       {!embedded && (
@@ -516,6 +535,12 @@ export default function PlayerProfile({
       {error && <p className="error">{error}</p>}
 
       {profile && <StatusLine profile={profile} />}
+      {/* Under the status line and above the panels it is about: a reader
+          who is told what is empty BEFORE he looks at it reads three cards
+          of baseline marks as a fact about this player. Told afterwards, he
+          has already read them as a broken popup. Draws nothing at all when
+          nothing is missing. */}
+      {profile && <MissingData payload={profile} />}
       {profile && <PopPanels profile={profile} settings={settings} />}
       {/* Full width, under the four: the season panels are a career at a
           glance and this is the last year of it in detail. It draws nothing
@@ -528,94 +553,6 @@ export default function PlayerProfile({
         />
       )}
       {profile && <PopCards profile={profile} onSelectPlayer={onSelectPlayer} />}
-
-      {header && profile && (
-        <div className="pp-grid">
-          {sparse ? (
-            <>
-              {/* A card with no history makes ONE claim -- the gap between
-                  what the board thinks and what the room charges -- and then
-                  says what is missing and why. Six panels of em-dashes would
-                  be worse than the admission. */}
-              <section className="pp-card pp-span12 pp-card-lead">
-                <h3 className="is-accent">Where this disagrees with the room</h3>
-                <RoomGap rank={header.rank} marketRank={header.market_rank} edge={header.edge} />
-              </section>
-
-              <section className="pp-card pp-span7">
-                <h3>What this card can’t show, and why</h3>
-                <MissingData payload={profile} />
-                {profile.outlook.implied_points !== null && (
-                  <p className="pp-implied">
-                    <span className="mono pp-implied-value">
-                      {profile.outlook.implied_points.toFixed(1)}
-                    </span>
-                    <span>
-                      points a game implied for {header.team}&apos;s own offence by
-                      this season&apos;s betting lines — the one forward-looking
-                      number that still applies
-                      {header.position === 'DST' && ', though it describes the'
-                        + ' side of the ball that leaves the field when this unit'
-                        + ' comes on'}.
-                    </span>
-                  </p>
-                )}
-              </section>
-            </>
-          ) : (
-            <>
-              <section className="pp-card pp-span7">
-                <h3>Season by season</h3>
-                <p className="pp-sub">
-                  volatility is scored per point — spread divided by average, so a
-                  bigger scorer isn’t punished for scoring
-                </p>
-                {/* The chart before the table: a career's shape is the one
-                    thing a column of numbers is worst at showing, and
-                    "TE40 -> TE7 -> TE2 -> TE1" is the whole story of a
-                    breakout in four bars. The table underneath is where you
-                    go once the shape has made you curious. */}
-                <SeasonFinish seasons={profile.seasons} position={header.position} />
-                <ConsistencyTable seasons={profile.seasons} position={header.position} />
-              </section>
-
-              {profile.cohort && (
-                <section className="pp-card pp-span5">
-                  <h3 className="is-accent">What players like him did next</h3>
-                  <CohortNext cohort={profile.cohort} />
-                </section>
-              )}
-            </>
-          )}
-
-          {!sparse && (
-            <section className="pp-card pp-span7">
-              <h3>Comparable players</h3>
-              <SimilarPlayers
-                mode={profile.similar.mode}
-                players={profile.similar.players}
-                targetAge={profile.similar.target_age ?? null}
-                onSelectPlayer={onSelectPlayer}
-              />
-            </section>
-          )}
-
-          {/* News, last in the grid: it is the only section whose length is
-              unbounded, and it is the one a manager reads after the numbers
-              rather than instead of them. Rendered only when the payload
-              actually carries items -- the `news` key arrives with a change
-              landing alongside this card, and is an empty list both for a
-              player nobody wrote about and for every defense. An empty
-              "News" card with a dash in it would be a promise the payload
-              cannot keep. */}
-          {profile.news && profile.news.length > 0 && (
-            <section className="pp-card pp-span12">
-              <h3>Recent news</h3>
-              <NewsPanel items={profile.news} />
-            </section>
-          )}
-        </div>
-      )}
     </div>
   )
 }

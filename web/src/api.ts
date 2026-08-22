@@ -55,8 +55,9 @@ export interface Player {
   // within position), and market_rank - rank ("edge": positive = the model
   // likes this player more than the market does). Dropped from the board
   // table's columns in 1f8ba18 as too dense for a sortable grid, but still
-  // computed on every board row -- the player page's header strip, RoomGap
-  // and DraftBoardGrid's popover surface them. edge is nullable because
+  // computed on every board row -- the profile popup's header figures and
+  // status line, and DraftBoardGrid's popover, surface them. edge is
+  // nullable because
   // it's undefined whenever market_rank is (no market source covers the
   // player at all).
   rank: number; tier: number; edge: number | null;
