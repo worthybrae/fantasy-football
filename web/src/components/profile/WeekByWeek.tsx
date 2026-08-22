@@ -6,6 +6,45 @@ import { barTone } from '../draft/weeks'
 import PopCard from './PopCard'
 import type { GameRow, SeasonRow } from './payload'
 
+// What a week was made of, in columns rather than in a sentence.
+//
+// The log used to render `stat_line` -- "19 car, 80 yds, 0 TD - 3 rec, 33
+// yds" -- in one wide cell. It reads fine as one row and badly as six: the
+// numbers never land under each other, so comparing two weeks means reading
+// two sentences instead of running an eye down a column, and the cell is
+// ellipsised on the widest lines while the space to its right goes unused.
+// `stats` is on every row already; these are the same numbers, aligned.
+//
+// Per position, because the columns that matter are: a back's carries are a
+// receiver's targets. K and DST have no entry -- `GameStats` carries the
+// skill columns only -- so they keep the sentence, which is the whole of
+// what the payload can say about their week.
+type LogColumn = { head: string; cell: (g: GameRow) => string }
+
+const LOG: Record<string, LogColumn[]> = {
+  QB: [
+    { head: 'C/A', cell: (g) => `${g.stats.completions}/${g.stats.attempts}` },
+    { head: 'Yds', cell: (g) => String(g.stats.pass_yards) },
+    { head: 'TD', cell: (g) => String(g.stats.pass_tds) },
+    { head: 'Int', cell: (g) => String(g.stats.interceptions) },
+    { head: 'Ru', cell: (g) => String(g.stats.rush_yards) },
+  ],
+  RB: [
+    { head: 'Car', cell: (g) => String(g.stats.carries) },
+    { head: 'Ru', cell: (g) => String(g.stats.rush_yards) },
+    { head: 'Rec', cell: (g) => String(g.stats.receptions) },
+    { head: 'Re', cell: (g) => String(g.stats.rec_yards) },
+    { head: 'TD', cell: (g) => String(g.stats.rush_tds + g.stats.rec_tds) },
+  ],
+  WR: [
+    { head: 'Tgt', cell: (g) => String(g.stats.targets) },
+    { head: 'Rec', cell: (g) => String(g.stats.receptions) },
+    { head: 'Yds', cell: (g) => String(g.stats.rec_yards + g.stats.rush_yards) },
+    { head: 'TD', cell: (g) => String(g.stats.rec_tds + g.stats.rush_tds) },
+  ],
+}
+LOG.TE = LOG.WR
+
 // The season as a shape, and under it the games it is made of.
 //
 // The chart is the board's own picture drawn by the board's own builder
@@ -48,6 +87,7 @@ export default function WeekByWeek({ games, seasons, position }: {
   // differently from the Per game panel two inches above it. The fallback is
   // for a game log whose season has no summary row, which is the only case
   // where there is no shared number to agree with.
+  const columns = LOG[position]
   const summary = seasons.find((s) => s.season === season) ?? null
   const avg = summary === null
     ? log.reduce((total, g) => total + g.ppr_points, 0) / log.length
@@ -114,7 +154,11 @@ export default function WeekByWeek({ games, seasons, position }: {
         <div className="pp-pop-log-head">
           <span className="pp-pop-log-wk">Wk</span>
           <span className="pp-pop-log-opp">Opp</span>
-          <span className="pp-pop-log-line">Line</span>
+          {columns === undefined
+            ? <span className="pp-pop-log-line">Line</span>
+            : columns.map((c) => (
+              <span className="pp-pop-log-stat" key={c.head}>{c.head}</span>
+            ))}
           <span className="pp-pop-log-pts">Pts</span>
         </div>
         <div className="pp-pop-log-body">
@@ -122,7 +166,11 @@ export default function WeekByWeek({ games, seasons, position }: {
             <div className="pp-pop-log-row" key={g.week}>
               <span className="mono pp-pop-log-wk">{g.week}</span>
               <span className="mono pp-pop-log-opp">{g.opponent ?? '—'}</span>
-              <span className="pp-pop-log-line">{g.stat_line}</span>
+              {columns === undefined
+                ? <span className="pp-pop-log-line">{g.stat_line}</span>
+                : columns.map((c) => (
+                  <span className="mono pp-pop-log-stat" key={c.head}>{c.cell(g)}</span>
+                ))}
               {/* The tone the bar above it took, off the same function: a
                   week cannot be green in the chart and amber in its row. */}
               <span className={`mono pp-pop-log-pts ${barTone(g.ppr_points, position)}`}>

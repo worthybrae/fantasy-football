@@ -4329,6 +4329,19 @@ button.roster-row:focus-visible {
   color: var(--text-2);
 }
 
+/* One stat, one column. Even shares of what the row has left after the week,
+   the opponent and the points, so five columns for a back and four for a
+   receiver both fill the row instead of leaving the space the old one-cell
+   sentence left unused. Right-aligned, because the whole reason for columns
+   is running an eye DOWN one. */
+.pp-pop-log-stat {
+  flex: 1 1 0;
+  min-width: 0;
+  text-align: right;
+  font-size: 10px;
+  color: var(--text-2);
+}
+
 /* The one cell in the row that is coloured, and it takes the chart's ramp
    (see `.ctip-col-val` above, which these join). */
 .pp-pop-log-pts {
@@ -4384,6 +4397,51 @@ button.roster-row:focus-visible {
   /* The floor a week draws at when its percentile rounds to nothing: the
      eighteen columns are an axis, and a missing one would read as a bye. */
   min-height: 4px;
+}
+
+/* A small season table: a label column that takes what it needs and one
+   equal column per season. Grid rather than rows of flex, so "Snap share"
+   and "Target share" line their years up with each other -- the whole point
+   of the card is reading ACROSS a row and DOWN a column, and flex rows would
+   let a wider number in one row shift its column out from under the next. */
+.pp-pop-seasons {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.pp-pop-seasons-head,
+.pp-pop-seasons-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) repeat(3, 34px);
+  gap: var(--space-1);
+  align-items: baseline;
+}
+
+.pp-pop-seasons-head {
+  font-size: 9px;
+  letter-spacing: 0.07em;
+  color: var(--text-3);
+}
+
+.pp-pop-seasons-row {
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+
+/* The numbers right-aligned under their year, the label left where the eye
+   picks the row up. */
+.pp-pop-seasons-head > span:not(:first-child),
+.pp-pop-seasons-row > span:not(:first-child) {
+  text-align: right;
+  font-size: 10px;
+  color: var(--text-1);
+}
+
+.pp-pop-seasons-row > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* An arrow on each side of the week chart, for walking the career a season
