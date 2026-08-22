@@ -17,7 +17,7 @@ import ScheduleRanks from './profile/ScheduleRanks'
 import UsageLine from './profile/UsageLine'
 import ValueNeighbors from './profile/ValueNeighbors'
 import WeekByWeek from './profile/WeekByWeek'
-import { fmtRank, fmtSigned, hasHistory, type PlayerStatus, type ProfileHeader, type ProfilePayload } from './profile/payload'
+import { fmtRank, fmtSigned, hasHistory, type PlayerStatus, type ProfileHeader, type ProfilePayload, type RankedPlayer } from './profile/payload'
 
 // Everything the opener already knew about this player, so the profile can
 // paint on the frame it opens instead of behind a skeleton.
@@ -65,6 +65,21 @@ interface PlayerProfileProps {
   // behind it. Optional and defaulted for the same reason `startersAt` has a
   // fallback at all: before a session is connected there is no league to ask.
   settings?: LiveSettings | null
+  // The room's ranked board, straight through from DraftRoom the same way
+  // `settings` is. "Near you" is a run of picks around his own, and the
+  // payload can only supply one for a player it has no stat line to match
+  // (see RankedPlayer, and ValueNeighbors' own comment). Empty by default:
+  // the card then renders only for the players the payload can answer for,
+  // which is exactly how it behaved before this was threaded.
+  ranked?: RankedPlayer[]
+  // Takes the player this profile is describing. Present ONLY while the room
+  // could actually send that pick -- see DraftRoom, which owns that question
+  // -- so the footer can offer the board back instead of a button that would
+  // be refused. It opens the confirm dialog; it does not pick.
+  //
+  // Not to be confused with `onToggleDrafted` above, which is the manual
+  // research-board flag. This one is a real pick, on ESPN's socket.
+  onDraftPlayer?: (playerId: string) => void
   // Rendered inside PlayerOverlay's popup (the only caller left -- the
   // standalone /players/:slug page this used to also back is gone): drop the
   // chrome the overlay supplies itself (its own close control, its own
@@ -130,6 +145,24 @@ function blankSeasonCols(season: number): Col[] {
       empty: true,
     }
   })
+}
+
+// Generational suffixes, which are not surnames: ten of the 252 players on
+// this board carry one, so "DRAFT III" is not a hypothetical.
+const NAME_SUFFIXES = new Set(['jr', 'jr.', 'sr', 'sr.', 'ii', 'iii', 'iv', 'v'])
+
+// What the footer button calls him: the surname alone, as the artboard has
+// it ("DRAFT GIBBS"). One word, because the button is read under a pick
+// clock by someone who is already looking at his full name in the header.
+function draftName(name: string, position: string): string {
+  // A defense has no surname, and every one of them ends in the same word --
+  // "Houston Defense" would read as DRAFT DEFENSE. The city is the name.
+  if (position === 'DST') return name.replace(/\s+Defense$/, '')
+  const parts = name.trim().split(/\s+/)
+  while (parts.length > 1 && NAME_SUFFIXES.has(parts[parts.length - 1].toLowerCase())) {
+    parts.pop()
+  }
+  return parts[parts.length - 1] || name
 }
 
 // The four figures the pick is made on, right-aligned across from the name.
@@ -311,8 +344,8 @@ function PopPanels({ profile, settings }: {
 // That is why the rows carry no conditions of their own: see
 // `.pp-pop-row:empty` in App.css for the one case that needs handling, a row
 // where every card opted out.
-function PopCards({ profile, onSelectPlayer }: {
-  profile: ProfilePayload; onSelectPlayer: (id: string) => void
+function PopCards({ profile, ranked, onSelectPlayer }: {
+  profile: ProfilePayload; ranked: RankedPlayer[]; onSelectPlayer: (id: string) => void
 }): ReactNode {
   const { header } = profile
   return (
@@ -346,6 +379,7 @@ function PopCards({ profile, onSelectPlayer }: {
         <ValueNeighbors
           mode={profile.similar.mode}
           players={profile.similar.players}
+          ranked={ranked}
           me={header}
           onSelectPlayer={onSelectPlayer}
         />
@@ -353,10 +387,11 @@ function PopCards({ profile, onSelectPlayer }: {
       {/* Last row, and the only one that looks backwards: everything above
           it is this player now, and these are the seasons that already went
           where his might go, beside what has been written about him this
-          week. Comparable seasons is the `stat_twins` half of `similar` and
-          Near you, one row up, is the `value_neighbors` half -- so a player
-          with no stat line to match leaves News here on its own, which is
-          what Sparse.dc.html draws. */}
+          week. Comparable seasons is the `stat_twins` half of `similar`, so
+          a player with no stat line to match leaves News here on its own,
+          which is what Sparse.dc.html draws. (Near you, one row up, draws
+          for him either way now: the payload's own neighbours when it has
+          them, the room's ranked board when it has not.) */}
       <div className="pp-pop-row">
         <ComparableSeasons
           mode={profile.similar.mode}
@@ -373,7 +408,7 @@ function PopCards({ profile, onSelectPlayer }: {
 
 export default function PlayerProfile({
   playerId, onClose, onToggleDrafted, onSelectPlayer, seed = null, settings = null,
-  embedded = false,
+  ranked = [], onDraftPlayer, embedded = false,
 }: PlayerProfileProps) {
   const [profile, setProfile] = useState<ProfilePayload | null>(null)
   const [loading, setLoading] = useState(true)
@@ -552,7 +587,36 @@ export default function PlayerProfile({
           position={profile.header.position}
         />
       )}
-      {profile && <PopCards profile={profile} onSelectPlayer={onSelectPlayer} />}
+      {profile && <PopCards profile={profile} ranked={ranked} onSelectPlayer={onSelectPlayer} />}
+
+      {/* The last thing in the popup, and the whole point of it: the profile
+          takes the player it is describing. It opens the confirm dialog and
+          stops there -- every pick this room sends goes through the same
+          confirmation, whether it started on the board or in here.
+
+          Drawn off `ident`, so it is on screen in the frame the popup opens
+          rather than three and a half seconds later when the payload lands.
+          A person on the clock who has already decided should not have to
+          wait for a dossier he is not going to read.
+
+          `onDraftPlayer` absent means the room has no pick to make for him
+          -- he is already gone, he was never on the ranked list, or it is
+          not your turn (see DraftRoom, which owns that test). The footer
+          then offers the way out that IS available, because a button that
+          cannot do what it says is worse than one that admits it. */}
+      {onDraftPlayer && ident ? (
+        <button
+          type="button"
+          className="pp-pop-foot is-draft"
+          onClick={() => onDraftPlayer(playerId)}
+        >
+          Draft {draftName(ident.name, ident.position)}
+        </button>
+      ) : (
+        <button type="button" className="pp-pop-foot" onClick={onClose}>
+          Back to the board
+        </button>
+      )}
     </div>
   )
 }

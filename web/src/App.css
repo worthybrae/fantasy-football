@@ -2015,9 +2015,11 @@ button.roster-row:focus-visible {
   font-weight: 700;
 }
 
-/* Solid accent on a dark label, the `.plan-round-now` pill's treatment: the
-   only filled control in the overlay, because it is the only one with
-   somewhere to be. */
+/* Solid accent on a dark label, the `.plan-round-now` pill's treatment. The
+   footer's draft button (`.pp-pop-foot.is-draft`) wears the same accent as a
+   12% tint, and the difference is deliberate: this one is attached to a
+   clock that is running, and a banner nobody notices is a banner that did
+   not work. */
 .player-overlay-clock-back {
   flex-shrink: 0;
   padding: 4px 10px;
@@ -4675,5 +4677,60 @@ button.pp-pop-comp:focus-visible {
    row. */
 .pp-pop-news-tag.is-exact {
   border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+/* -- the footer: what you do about him (PlayerProfile.tsx) ----------------
+   Full width and last, off the artboard. Everything above it is a case; this
+   is the one control in the popup that changes anything outside it -- every
+   other button in here only opens another player.
+
+   Two states, one box, because they occupy the same slot for the same
+   reason: the pick when the room can make it, and the way back when it
+   cannot (already drafted, off the ranked list, or somebody else's clock).
+   The second is not a consolation -- with the profile open over the board,
+   the board is where the other two hundred players are.
+
+   9px and 16px are the artboard's own padding, and 9 is the same figure the
+   cards above are set in (`.pp-pop-card`); no token sits on it. */
+.pp-pop-foot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  padding: 9px var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-1);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.pp-pop-foot:hover {
+  border-color: var(--accent-border);
+  color: var(--text-1);
+}
+
+.pp-pop-foot:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 2px;
+}
+
+/* The accent, as a tint rather than as a fill. The clock banner's own button
+   (`.player-overlay-clock-back`) is the filled one and stays that way: two
+   solid accent controls on one screen would compete for a "look here" the
+   running clock has the better claim to. */
+.pp-pop-foot.is-draft {
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+.pp-pop-foot.is-draft:hover {
+  background: color-mix(in srgb, var(--accent) 22%, var(--bg-1));
   color: var(--accent);
 }

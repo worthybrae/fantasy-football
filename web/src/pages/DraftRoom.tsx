@@ -552,17 +552,36 @@ export default function DraftRoom() {
     return ids
   }, [board])
 
+  // The join table in board-rank order, for the popup's "Near you" card --
+  // the run of picks around whoever is open (see PlayerProfile's `ranked`).
+  // NOT `state.candidates`, which this room calls the ranked list and which
+  // is a different order for a different question (what to take next, given
+  // this roster and this horizon). The table itself is keyed by id, so the
+  // order /api/players served it in is gone by the time anything reads it;
+  // sorted here, once per board load, rather than inside a popup that
+  // remounts on every comp click.
+  //
+  // NOT filtered by `draftedIds` either: the card is about where the board
+  // prices him, not who is still on it, and the payload's own neighbours (a
+  // rookie's, a kicker's) reach the same card unfiltered. One card cannot
+  // mean two things depending on which player opened it.
+  const boardByRank = useMemo(
+    () => Object.values(players).sort((a, b) => a.rank - b.rank),
+    [players],
+  )
+
   function handleOpenBoardPlayer(p: BoardPlayer) {
     setOpenPlayer({ playerId: p.player_id, seed: seedFromBoardPlayer(p, players[p.player_id]) })
   }
 
   // A comp clicked inside the profile. Only swaps for a player this room can
-  // actually name -- SimilarPlayers legitimately lists players who are not
-  // in this season's pool at all, and there is no seed to paint for one. No
-  // seed, no instant open, so the click does nothing rather than opening an
-  // empty box with a spinner in it. (RosterPanel's own handler below is
-  // different: a roster player must always open, since the user definitely
-  // owns him -- see handleOpenRosterPlayer's own comment.)
+  // actually name -- ComparableSeasons lists seasons back to 2017, whose
+  // players are not all in this year's pool, and the join table may not have
+  // landed yet either; there is no seed to paint for one. No seed, no
+  // instant open, so the click does nothing rather than opening an empty box
+  // with a spinner in it. (RosterPanel's own handler below is different: a
+  // roster player must always open, since the user definitely owns him --
+  // see handleOpenRosterPlayer's own comment.)
   function handleSelectPlayer(id: string) {
     const p = players[id]
     if (p) setOpenPlayer({ playerId: id, seed: seedFromPlayer(p) })
@@ -574,12 +593,12 @@ export default function DraftRoom() {
   // where the id already resolves against the one-time /api/players join
   // table -- same seed, same path, nothing duplicated. The one place it
   // diverges: handleSelectPlayer's own "no seed in the join table, no open"
-  // rule is right for a SimilarPlayers comp that may not be in this season's
-  // pool at all, but wrong here -- a roster player is never a stranger to
-  // this room, ESPN's own feed says the user owns him, so a join-table miss
-  // (not yet loaded, or a synthetic id it never covers) still opens, seeded
-  // from just the fields RosterPlayer carries rather than dropping the
-  // click.
+  // rule is right for a comparable season whose player may not be in this
+  // season's pool at all, but wrong here -- a roster player is never a
+  // stranger to this room, ESPN's own feed says the user owns him, so a
+  // join-table miss (not yet loaded, or a synthetic id it never covers)
+  // still opens, seeded from just the fields RosterPlayer carries rather
+  // than dropping the click.
   function handleOpenRosterPlayer(rp: RosterPlayer) {
     if (players[rp.player_id]) {
       handleSelectPlayer(rp.player_id)
@@ -598,6 +617,25 @@ export default function DraftRoom() {
     setPickStatus('idle')
     setPickError(null)
   }, [])
+
+  // The profile popup's own draft button, by player id -- the only thing it
+  // knows about the player it is describing. It ends in handleDraftClick
+  // above, so a pick started in the popup and a pick started on the board are
+  // the same pick: one LiveCandidate, one confirm dialog, one socket. The
+  // popup never sends anything itself.
+  //
+  // The candidate is resolved HERE, at the click, and not carried in from
+  // the render that drew the button: a pick can land between the two (the
+  // list recomputes about a second after every one), and re-resolving means
+  // the dialog can only ever open on a player still on the current list.
+  // Gone by then, and the click is dropped rather than confirming a pick
+  // ESPN would refuse.
+  const handleDraftPlayer = useCallback((id: string) => {
+    const candidate = state?.active
+      ? state.candidates.find((c) => c.player_id === id)
+      : undefined
+    if (candidate) handleDraftClick(candidate)
+  }, [state, handleDraftClick])
 
   function handleCancelConfirm() {
     setConfirming(null)
@@ -666,6 +704,16 @@ export default function DraftRoom() {
       setAutodraftPending(false)
     }
   }
+
+  // Whether the open profile has a pick behind it at all. `state.candidates`
+  // is the only place a LiveCandidate exists, and it holds exactly the
+  // players still available -- so a miss here is "already drafted", "never
+  // on the board" (a roster player seeded off ESPN's feed) or "no live
+  // session", and all three mean the same thing to the popup's footer: no
+  // draft button.
+  const openCandidate = openPlayer !== null && state?.active
+    ? state.candidates.find((c) => c.player_id === openPlayer.playerId) ?? null
+    : null
 
   return (
     <div className="draft-room">
@@ -943,6 +991,15 @@ export default function DraftRoom() {
           onSelectPlayer={handleSelectPlayer}
           onTheClock={youAreUp}
           settings={state?.settings}
+          ranked={boardByRank}
+          // Handed over only while this room could actually send the pick:
+          // the player is on the ranked list (`openCandidate`) and it is
+          // your turn on a live socket (`isMyTurn`, the same gate the
+          // board's own Draft buttons carry, so the popup and the table
+          // never disagree about whether a pick is available). Absent is
+          // what the footer reads as "no pick to make here", and it offers
+          // the board back instead of a button ESPN would refuse.
+          onDraftPlayer={openCandidate !== null && isMyTurn ? handleDraftPlayer : undefined}
         />
       )}
 

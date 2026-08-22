@@ -130,6 +130,18 @@ export interface ProfileHeader extends Player {
   vor: number | null
 }
 
+/** One row of the room's own ranked board, as `/api/players` serves it --
+ *  `Player` satisfies it by construction, so the room hands its join table
+ *  straight over without building a second shape.
+ *
+ *  The popup needs the WHOLE list because the payload can only name a
+ *  player's board neighbours when it has no stat line to match him on
+ *  (`similar.mode === 'value_neighbors'`). For everyone else `similar` is
+ *  stat twins, whose `rank` is where those players sit on TODAY's board --
+ *  Alvin Kamara at 273 -- and has nothing to do with where this one does.
+ *  See ValueNeighbors, which reads this when the payload cannot answer. */
+export type RankedPlayer = Pick<Player, 'player_id' | 'name' | 'rank' | 'market_rank'>
+
 /** One headline. `attribution` is the whole reason this is a record and not
  *  a (headline, url) pair: 'espn_athlete_id' means ESPN tagged the article
  *  with this player's athlete id, 'name_team_query' means a name+team search

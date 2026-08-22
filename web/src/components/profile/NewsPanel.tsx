@@ -7,7 +7,7 @@ import { ATTR_EXACT, type NewsItem } from './payload'
 // is the primary key and attribution only the tiebreak).
 //
 // Two, not eight: this card sits in a row beside four comparable seasons and
-// the popup is 534px wide. The count in the head is what says there is more,
+// the popup is 562px wide. The count in the head is what says there is more,
 // and the headline itself is a link to the story.
 const HEADLINES = 2
 
