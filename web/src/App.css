@@ -150,12 +150,6 @@ td:first-child {
   padding: var(--space-4);
 }
 
-/* Keeps a long name out from under the overlay's close control, which
-   floats over this corner (see `.player-overlay-close`). */
-.player-page-embedded .pp-header {
-  padding-right: var(--space-6);
-}
-
 .player-page-back {
   background: transparent;
   color: var(--text-2);
@@ -181,46 +175,6 @@ td:first-child {
 
 .player-page {
   animation: pp-fade-in 0.18s ease-out;
-}
-
-.pp-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  /* Wraps rather than crushing: the verdict strip is up to seven cells and
-     the overlay panel is narrower than the standalone page, so on a small
-     window the strip drops under the name instead of squeezing it. */
-  flex-wrap: wrap;
-  gap: var(--space-4);
-  margin-bottom: var(--space-4);
-}
-
-.pp-ident {
-  min-width: 0;
-}
-
-/* Badge, then name, then the meta line under both -- the artboard's order.
-   The badge leads because the position is the first thing that decides
-   whether the rest of the card is worth reading during a pick. */
-.pp-name-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-}
-
-.pp-name {
-  margin: 0;
-  font-size: 23px;
-  letter-spacing: -0.015em;
-}
-
-/* "DET · RB1 · age 24 · 4th NFL season · bye 6". Age and service year are
-   the payload's alone, so this line grows by two facts when the request
-   lands -- inline, on a line already on screen, so nothing below it moves. */
-.pp-meta {
-  margin-top: 5px;
-  font-size: var(--text-xs);
-  color: var(--text-3);
 }
 
 /* The verdict strip (see VerdictStrip.tsx): the handful of numbers the pick
@@ -4975,4 +4929,226 @@ button.roster-row:focus-visible {
   border-left: 1px dashed var(--border);
   padding-left: 6px;
   margin-left: 3px;
+}
+
+/* -- the in-draft profile popup: header, status line, season panels -------
+   PlayerProfile.tsx's top three sections, cut on the artboard in
+   .design/profile-popup. The panels draw through the board's own `Chart`
+   (the `.ctip-*` rules above) rather than through a second set of bar rules,
+   so these declarations size the cards around that picture and decide
+   nothing about the picture itself. */
+
+.pp-pop-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: 9px;
+}
+
+/* The overlay's close control floats over this corner (see
+   `.player-overlay-close`), and the VOR figure would sit under it. */
+.player-page-embedded .pp-pop-head {
+  padding-right: var(--space-6);
+}
+
+.pp-pop-ident {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  /* So a long name shrinks this column rather than pushing the figures off
+     the right edge of the popup. */
+  min-width: 0;
+}
+
+/* Baseline, not centre: the chip is set beside the name as a word in the
+   same line, and centring a 9px box against 19px type floats it. */
+.pp-pop-name-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.pp-pop-name {
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+/* The board's position hue in the chip the artboard cut for a name line:
+   squarer and a step smaller than the pill the tables wear. Geometry only --
+   the colour stays with `.pos-badge-*`, so a position means one hue
+   everywhere it appears. */
+.pp-pop-pos {
+  padding: 2px 5px;
+  border-radius: var(--radius);
+  font-size: 9px;
+  letter-spacing: normal;
+}
+
+.pp-pop-meta {
+  font-size: 10px;
+  color: var(--text-3);
+}
+
+.pp-pop-figures {
+  margin-left: auto;
+  /* Never squeezed: these four are the numbers the pick is made on, and the
+     name beside them is the thing with room to give. */
+  flex: 0 0 auto;
+  display: flex;
+  gap: var(--space-4);
+}
+
+.pp-pop-figure {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.pp-pop-figure-label {
+  font-size: 8px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+/* `line-height: 1` so the four values sit on one line with their captions
+   however tall the caption's own font wants to be. */
+.pp-pop-figure-value {
+  font-size: 15px;
+  line-height: 1;
+  color: var(--text-1);
+}
+
+/* The two facts that can make every panel under them irrelevant, on one
+   line: a designation, and where he stands on his own depth chart. */
+.pp-pop-status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: 9px;
+  padding: 6px 10px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  /* Inherited by the icon's `currentColor`: the row's state is set once,
+     here, rather than on each mark inside it. */
+  color: var(--ok);
+}
+
+/* A designation, and the border to match. Amber is what this app reserves
+   for a signal, and a signal is exactly what this is. */
+.pp-pop-status.is-flagged {
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+.pp-pop-status-icon {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+}
+
+.pp-pop-status-text {
+  min-width: 0;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+
+/* The one word in the sentence that is a fact about this player rather than
+   about the sentence. */
+.pp-pop-slot {
+  color: var(--text-1);
+}
+
+/* The same designation InjuryStatus draws on a card, folded into a line: no
+   pill, no timestamp, set at the size of the sentence around it. The
+   COMPONENT still decides what to say and how loud (see InjuryStatus.tsx) --
+   this is only the row telling it how much room it has. */
+.pp-pop-status .pp-injury {
+  display: inline-flex;
+  margin-top: 0;
+  gap: var(--space-1);
+}
+
+.pp-pop-status .pp-injury-pill {
+  padding: 0;
+  border: 0;
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+/* The same separator the rest of the row uses between facts, without asking
+   the component whether it has a body part to separate. */
+.pp-pop-status .pp-injury-detail::before {
+  content: '· ';
+  color: var(--text-3);
+}
+
+/* How old the report is is provenance, not the pick. It belongs where there
+   is room to say it; this row is one line. */
+.pp-pop-status .pp-injury-age {
+  display: none;
+}
+
+.pp-pop-edge {
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-size: 10px;
+}
+
+/* Four cards, one row, each the picture the board already taught. */
+.pp-pop-panels {
+  display: flex;
+  gap: var(--space-2);
+  margin-bottom: 9px;
+}
+
+.pp-pop-panel {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 9px 10px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+/* Per game carries a fourth column -- the projection, behind its dashed
+   rule -- so it takes a third more width than the three beside it rather
+   than drawing the same columns narrower. */
+.pp-pop-panel.is-wide {
+  flex: 1.35 1 0;
+}
+
+/* The hover panel's own head, a step smaller: these four sit side by side in
+   a popup instead of alone in a tooltip. The card is a flex column with its
+   own gap, so the head's bottom margin would double it. */
+.pp-pop-panel .ctip-head {
+  gap: var(--space-2);
+  font-size: 9px;
+  letter-spacing: 0.07em;
+  margin-bottom: 0;
+}
+
+/* A long career is more columns than a quarter of this popup can hold, and
+   the columns are fixed-width on purpose (Health's stack of circles IS the
+   count -- see `.ctip-units`). So it scrolls inside its own card rather than
+   overflowing it or pushing the row wider than the panel. */
+.pp-pop-panel .ctip-chart {
+  overflow-x: auto;
+}
+
+/* And the columns inside it keep their own width while it does. `.ctip-col`
+   sets an explicit `min-width`, which replaces the min-content floor a flex
+   item would otherwise get, so in a card that is allowed to squeeze them a
+   nine-season career prints two seasons' values on top of each other. */
+.pp-pop-panel .ctip-col {
+  flex: 0 0 auto;
 }

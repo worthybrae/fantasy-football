@@ -8,7 +8,10 @@ import type { Col } from './Chart'
 import { finishPosition, finishTone } from './finish'
 import { BAR_CEILING, SEASON_WEEKS, barTone } from './weeks'
 
-function year(season: number): string {
+// Exported: the popup's Per game panel puts baseline marks for the seasons a
+// rookie has not played beside the columns these builders make, in the same
+// chart. Two spellings of a season would show up as two axes in one picture.
+export function year(season: number): string {
   return `’${String(season).slice(2)}`
 }
 

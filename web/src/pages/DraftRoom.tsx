@@ -942,6 +942,7 @@ export default function DraftRoom() {
           onClose={() => setOpenPlayer(null)}
           onSelectPlayer={handleSelectPlayer}
           onTheClock={youAreUp}
+          settings={state?.settings}
         />
       )}
 

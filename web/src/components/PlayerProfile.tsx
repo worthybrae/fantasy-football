@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
-import { fetchProfile, type Player } from '../api'
+import type { ReactNode } from 'react'
+import { fetchProfile, type LiveSettings, type Player } from '../api'
+import { Chart, type Col } from './draft/Chart'
+import { startersAt } from './draft/finish'
+import { finishCols, healthCols, perGameCols, seasonLength, steadyCols, year } from './draft/panels'
 import DepthChartCard from './DepthChartCard'
 import PageSkeleton from './PageSkeleton'
 import SimilarPlayers from './SimilarPlayers'
@@ -16,8 +20,7 @@ import ScheduleRanks from './profile/ScheduleRanks'
 import UsageLine from './profile/UsageLine'
 import ValueNeighbors from './profile/ValueNeighbors'
 import WeekByWeek from './profile/WeekByWeek'
-import VerdictStrip, { type VerdictFigure } from './profile/VerdictStrip'
-import { fmtRank, fmtSigned, hasHistory, ordinal, type ProfileHeader, type ProfilePayload } from './profile/payload'
+import { fmtRank, fmtSigned, hasHistory, type PlayerStatus, type ProfileHeader, type ProfilePayload } from './profile/payload'
 
 // Everything the opener already knew about this player, so the profile can
 // paint on the frame it opens instead of behind a skeleton.
@@ -58,6 +61,13 @@ interface PlayerProfileProps {
   // Instant paint (see ProfileSeed). Null/absent restores the original
   // behaviour exactly: skeleton until the request lands.
   seed?: ProfileSeed | null
+  // The league's own shape, straight through from the room (DraftRoom ->
+  // PlayerOverlay). The Finish panel grades a season against how many of a
+  // position START here, so a popup left to the twelve-team fallback would
+  // colour the same season differently from the board column three inches
+  // behind it. Optional and defaulted for the same reason `startersAt` has a
+  // fallback at all: before a session is connected there is no league to ask.
+  settings?: LiveSettings | null
   // Rendered inside PlayerOverlay's popup (the only caller left -- the
   // standalone /players/:slug page this used to also back is gone): drop the
   // chrome the overlay supplies itself (its own close control, its own
@@ -65,23 +75,220 @@ interface PlayerProfileProps {
   embedded?: boolean
 }
 
-function depthSlotLabel(position: string, depthSlot: number | null): string | null {
-  if (depthSlot === null) return null
-  return `${position}${depthSlot}`
+// -- the popup, top to bottom ----------------------------------------------
+//
+// Header, status line, then the four season panels. The panels are drawn by
+// the board's own `Chart` off the board's own column builders
+// (draft/panels.ts), never by a second copy of either: someone who has spent
+// a draft learning what a tall green column means in a hover panel should not
+// have to learn it again the moment the same seasons open in a popup.
+
+// The depth slot, from whichever source actually has one. Sleeper's chart
+// (`status`) knows a rookie's place before the board's `outlook` does --
+// Jeremiyah Love is charted RB1 in Arizona with `depth_slot` still null --
+// and it carries the position he is charted AT, which is not always the
+// position the board ranks him at.
+function depthSlotLabel(
+  position: string, status: PlayerStatus | null, depthSlot: number | null,
+): string | null {
+  const order = status?.depth_chart_order ?? depthSlot
+  if (!order) return null
+  return `${status?.depth_chart_position ?? position}${order}`
 }
 
-// The verdict, read off the board row -- the un-embedded fallback's version
-// of the figure strip (see `embedded` above), where there is no seed because
-// nothing opened this from a list it had already ranked. Same five facts the
-// sparse artboard leads with, in the same order.
-function headerFigures(h: ProfileHeader): VerdictFigure[] {
-  return [
-    { label: 'Board rank', value: `#${h.rank}`, accent: true },
-    { label: 'Tier', value: h.tier === null || h.tier === undefined ? '—' : `T${h.tier}` },
-    { label: 'Projected', value: h.proj_points === null ? '—' : String(Math.round(h.proj_points)) },
-    { label: 'Over replacement', value: fmtSigned(h.vor) },
-    { label: 'ADP', value: fmtRank(h.market_rank) },
+// How loud the disagreement with the room is allowed to be. Under ten slots
+// your board and the market take him in the same round of any league this
+// tool supports (8 to 14 teams), so there is no decision in the gap and it
+// reads as a note. Ten or more is a round he would fall past, which is the
+// version of this number worth colouring as a bargain.
+const ROUND = 10
+
+function edgeTone(slots: number): string {
+  if (slots >= ROUND) return 'is-good'
+  if (slots > 0) return 'is-accent'
+  // Zero is agreement, not a failure -- it takes the row's own body colour.
+  if (slots === 0) return ''
+  return 'is-bad'
+}
+
+// A rookie's Per game panel is one column, the projection, with nothing to
+// be read against. The seasons he did not play go back on the axis as
+// baseline marks: the panel is the shape of a career, and "there is not one
+// yet" is a shape. Three, because three is what the veterans beside him show.
+const BLANK_SEASONS = 3
+
+function blankSeasonCols(season: number): Col[] {
+  return Array.from({ length: BLANK_SEASONS }, (_, i) => {
+    const s = season - BLANK_SEASONS + i
+    return {
+      key: s,
+      label: year(s),
+      value: '·',
+      tone: '',
+      fill: 0,
+      // Not a zero: he did not play, which `Chart` draws as a mark on the
+      // baseline rather than as a column of no height.
+      empty: true,
+    }
+  })
+}
+
+// The four figures the pick is made on, right-aligned across from the name.
+// All four are the loaded payload's own. The seed the room paints from
+// carries a different set per source -- a live candidate has no board rank
+// on it at all -- and a strip that swapped its columns when the request
+// landed would move the reader's eye off the number it was already on.
+function PopFigures({ header }: { header: ProfileHeader }): ReactNode {
+  const figures = [
+    // First and in accent: the only one of the four this app computes rather
+    // than reports, and the one the other three are read against.
+    { label: 'Your board', value: String(header.rank), accent: true },
+    { label: 'ADP', value: fmtRank(header.market_rank) },
+    {
+      label: 'Tier',
+      value: header.tier === null || header.tier === undefined ? '—' : String(header.tier),
+    },
+    // Whole points: a value over replacement is a season total, and its
+    // decimals are noise beside three ranks.
+    { label: 'VOR', value: header.vor === null ? '—' : String(Math.round(header.vor)) },
   ]
+  return (
+    <div className="pp-pop-figures">
+      {figures.map((f) => (
+        <div key={f.label} className="pp-pop-figure">
+          <span className="pp-pop-figure-label">{f.label}</span>
+          <span className={`mono pp-pop-figure-value${f.accent ? ' is-accent' : ''}`}>
+            {f.value}
+          </span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// One line for the two facts that can make every panel under it irrelevant --
+// a designation, and where he actually stands on his own depth chart -- with
+// the edge over the room on its right end. That edge had a card of its own
+// (RoomGap); it is one number, and this is the line it belongs on.
+function StatusLine({ profile }: { profile: ProfilePayload }): ReactNode {
+  const status = profile.status ?? null
+  // NEVER "healthy": a null designation is the absence of a claim, not a
+  // clean bill of health. InjuryStatus renders nothing for it (see its own
+  // comment), so this row says the thing it can actually source instead.
+  const flagged = status !== null && status.injury_status !== null
+  const slot = depthSlotLabel(profile.header.position, status, profile.outlook.depth_slot)
+  const { edge, market_rank: marketRank, team } = profile.header
+  const slots = edge === null ? null : Math.round(edge)
+  return (
+    <div className={`pp-pop-status${flagged ? ' is-flagged' : ''}`}>
+      {/* `currentColor`, so the row's own state colours the mark once. */}
+      <svg
+        className="pp-pop-status-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"
+      >
+        {flagged ? (
+          <>
+            <path d="M12 9v5" />
+            <path d="M12 17.5v.01" />
+            <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+          </>
+        ) : (
+          <path d="M20 6 9 17l-5-5" />
+        )}
+      </svg>
+      <p className="pp-pop-status-text">
+        {flagged && status
+          ? <InjuryStatus status={status} />
+          : 'No injury designation'}
+        {slot !== null && (
+          <>
+            {' · '}
+            <span className="pp-pop-slot">{slot}</span>
+            {` on ${team === null ? 'the' : `${team}’s`} depth chart`}
+          </>
+        )}
+      </p>
+      {slots !== null && marketRank !== null && (
+        <span className={`mono pp-pop-edge ${edgeTone(slots)}`}>
+          {`${fmtSigned(edge)} ${Math.abs(slots) === 1 ? 'slot' : 'slots'} vs consensus`}
+        </span>
+      )}
+    </div>
+  )
+}
+
+function PopPanel({ title, note, cols, wide = false }: {
+  title: string; note: string; cols: Col[]; wide?: boolean
+}): ReactNode {
+  return (
+    <section className={`pp-pop-panel${wide ? ' is-wide' : ''}`}>
+      {/* The hover panel's own head, one step smaller (see App.css): a title
+          and the yardstick the numbers under it are out of. */}
+      <div className="ctip-head">
+        <span>{title}</span>
+        <span className="ctip-head-note">{note}</span>
+      </div>
+      <Chart cols={cols} />
+    </section>
+  )
+}
+
+// Health, Finish, Steady, Per game -- the same four the board sorts on, in
+// the same order the board's columns run. A panel is DROPPED rather than
+// drawn empty when its own data is missing: a rookie has no games to count,
+// no finish to place and no coefficient to rank, and three cards of baseline
+// marks would be three ways of saying the same nothing. Per game survives
+// because a projection is not history.
+function PopPanels({ profile, settings }: {
+  profile: ProfilePayload; settings?: LiveSettings | null
+}): ReactNode {
+  const { header, seasons } = profile
+  const health = healthCols(seasons)
+  const finish = finishCols(seasons, startersAt(header.position, settings))
+  const steady = steadyCols(seasons)
+  // Newest first in the payload, so the first rated season carries the pool
+  // the last column was ranked in. A denominator that moves year to year,
+  // and this note is here to make that column legible, not to average them.
+  const rated = seasons.filter((s) => s.cv_rank_n)
+  const played = seasons.filter((s) => s.games > 0)
+  const proj = profile.summary?.proj_ppg ?? null
+  const scoring = perGameCols(seasons, proj, header.position)
+  const perGame = played.length
+    ? scoring : [...blankSeasonCols(profile.bio.season), ...scoring]
+  const delta = played.length && proj !== null ? proj - played[0].ppg : null
+  // A defense has none of these: no games counted, no positional finish, no
+  // coefficient, and no per-game projection either. An empty row would still
+  // cost the gap above the section under it.
+  if (!health.length && !finish.length && !steady.length && !scoring.length) return null
+  return (
+    <div className="pp-pop-panels">
+      {health.length > 0 && (
+        <PopPanel
+          title="Health"
+          // Off the last column's own season, not off today: a 16-game 2019
+          // is a full year, and "of 17" against it would invent an injury.
+          note={`of ${seasonLength(health[health.length - 1].key as number)}`}
+          cols={health}
+        />
+      )}
+      {finish.length > 0 && (
+        <PopPanel title="Finish" note={header.position} cols={finish} />
+      )}
+      {steady.length > 0 && (
+        <PopPanel title="Steady" note={`of ${rated[0].cv_rank_n}`} cols={steady} />
+      )}
+      {scoring.length > 0 && (
+        <PopPanel
+          title="Per game"
+          note={delta === null
+            ? 'projection only'
+            : `${delta >= 0 ? '+' : ''}${delta.toFixed(1)}`}
+          cols={perGame}
+          wide
+        />
+      )}
+    </div>
+  )
 }
 
 // The o-line section's heading, which is about where the player stands
@@ -96,7 +303,8 @@ function lineHeading(position: string): string {
 }
 
 export default function PlayerProfile({
-  playerId, onClose, onToggleDrafted, onSelectPlayer, seed = null, embedded = false,
+  playerId, onClose, onToggleDrafted, onSelectPlayer, seed = null, settings = null,
+  embedded = false,
 }: PlayerProfileProps) {
   const [profile, setProfile] = useState<ProfilePayload | null>(null)
   const [loading, setLoading] = useState(true)
@@ -191,29 +399,24 @@ export default function PlayerProfile({
   // in for. Without one this is unchanged: skeleton until the request lands.
   if (loading && !profile && !seed) return <PageSkeleton />
 
-  // The strip never re-renders from the response when a seed exists. The
-  // room's figures are the ones the pick is being made on and the payload
-  // cannot reproduce three of them, so swapping them out for the board's
-  // five when the request lands would replace the better numbers with worse
-  // ones and move the reader's eye while it was on them.
-  const figures = seed ? seed.figures : header ? headerFigures(header) : []
-
-  // Meta line, in the design's order: team, depth slot, age, service year,
-  // bye. Age and service year are the payload's alone (`bio`), so the line
-  // grows by two facts when the request lands -- inline, in a line that is
-  // already on screen, rather than as a block that appears and shoves
-  // everything under it down.
+  // Meta line, in the artboard's order: team, age, service year, bye. The
+  // depth slot left it for the status line, which is where a designation and
+  // a depth chart now argue with each other in one sentence.
+  //
+  // Age and service year are the payload's alone (`bio`), so the line grows
+  // by two facts when the request lands -- inline, in a line that is already
+  // on screen, rather than as a block that appears and shoves everything
+  // under it down.
   const meta: string[] = []
   if (ident) meta.push(ident.team ?? '—')
-  const depthSlot = header && profile
-    ? depthSlotLabel(header.position, profile.outlook.depth_slot) : null
-  if (depthSlot) meta.push(depthSlot)
-  if (profile?.bio.age !== null && profile?.bio.age !== undefined) {
-    meta.push(`age ${profile.bio.age}`)
-  }
-  if (profile?.bio.nfl_season !== null && profile?.bio.nfl_season !== undefined) {
-    meta.push(`${ordinal(profile.bio.nfl_season)} NFL season`)
-  }
+  const age = profile?.bio.age ?? null
+  // "rookie" where a veteran carries an age: `bio` is all-null for a player
+  // nflverse has no biography for, which is every rookie until he has
+  // played. His first NFL year is the one fact about him that needs none.
+  if (age !== null) meta.push(`age ${age}`)
+  else if (ident?.rookie) meta.push('rookie')
+  const nflSeason = profile?.bio.nfl_season ?? (ident?.rookie ? 1 : null)
+  if (nflSeason !== null) meta.push(`NFL yr ${nflSeason}`)
   const bye = profile?.outlook.bye ?? ident?.bye ?? null
   meta.push(`bye ${bye ?? '—'}`)
 
@@ -230,18 +433,18 @@ export default function PlayerProfile({
         </button>
       )}
       {ident && (
-        <div className="pp-header">
-          <div className="pp-ident">
-            <div className="pp-name-row">
-              <span className={`pos-badge pos-badge-${ident.position.toLowerCase()}`}>
+        <div className="pp-pop-head">
+          <div className="pp-pop-ident">
+            {/* Name first, chip second: the artboard reads it as a sentence,
+                and the position is the qualifier on the name rather than a
+                label the eye has to step over to reach it. */}
+            <div className="pp-pop-name-row">
+              <h2 className="pp-pop-name">{ident.name}</h2>
+              <span className={`pos-badge pos-badge-${ident.position.toLowerCase()} pp-pop-pos`}>
                 {ident.position}
               </span>
-              <h2 className="pp-name">
-                {ident.name}
-                {ident.rookie && <span className="rookie-badge">R</span>}
-              </h2>
             </div>
-            <p className="mono pp-meta">
+            <p className="mono pp-pop-meta">
               {meta.join(' · ')}
               {!profile && loading && (
                 <span className="pp-loading-tail">
@@ -251,14 +454,8 @@ export default function PlayerProfile({
                 </span>
               )}
             </p>
-            {/* The injury line sits in the header because that is where it
-                changes a pick: a designation can make every number below it
-                irrelevant. Absent from the payload until the change that
-                adds it lands, and absent for every defense after that, so
-                it is read defensively rather than assumed. */}
-            {profile?.status && <InjuryStatus status={profile.status} />}
           </div>
-          <VerdictStrip figures={figures} />
+          {header && <PopFigures header={header} />}
           {onToggleDrafted && header && (
             <button type="button" className="drawer-draft-btn" onClick={handleToggleDraftedClick}>
               {header.drafted ? 'Undo draft' : 'Mark drafted'}
@@ -267,11 +464,14 @@ export default function PlayerProfile({
         </div>
       )}
 
-      {/* Below the header and the verdict strip, not above them: when this
-          arrives it arrives late (the request has to fail first), and a
-          block inserted above a header that is already painted would shove
-          the whole profile down under the reader's eyes. */}
+      {/* Below the header, not above it: when this arrives it arrives late
+          (the request has to fail first), and a block inserted above a
+          header that is already painted would shove the whole profile down
+          under the reader's eyes. */}
       {error && <p className="error">{error}</p>}
+
+      {profile && <StatusLine profile={profile} />}
+      {profile && <PopPanels profile={profile} settings={settings} />}
 
       {header && profile && (
         <div className="pp-grid">

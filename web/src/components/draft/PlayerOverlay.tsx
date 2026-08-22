@@ -1,4 +1,5 @@
 import { useEffect } from 'react'
+import type { LiveSettings } from '../../api'
 import PlayerProfile, { type ProfileSeed } from '../PlayerProfile'
 
 // What the room hands over to open a profile: the id to fetch, and
@@ -26,6 +27,11 @@ interface PlayerOverlayProps {
   // has not been updated) still type-checks, the same defaulting precedent
   // ClockPanel's `board` and `onSetAutodraft` set.
   onTheClock?: boolean
+  // Straight through to the profile, which grades a season's finish against
+  // how many of a position start in THIS league (see PlayerProfile's own
+  // `settings` comment). Passed rather than fetched for the same reason
+  // `onTheClock` is: the room already holds it.
+  settings?: LiveSettings | null
 }
 
 // The in-draft player profile: over the board, never instead of it.
@@ -55,7 +61,7 @@ interface PlayerOverlayProps {
 // task report; matching the established pattern beat inventing a second one
 // here.
 export default function PlayerOverlay({
-  target, onClose, onSelectPlayer, onTheClock = false,
+  target, onClose, onSelectPlayer, onTheClock = false, settings = null,
 }: PlayerOverlayProps) {
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -136,6 +142,7 @@ export default function PlayerOverlay({
           key={target.playerId}
           playerId={target.playerId}
           seed={target.seed}
+          settings={settings}
           embedded
           onClose={onClose}
           onSelectPlayer={onSelectPlayer}
