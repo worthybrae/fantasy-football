@@ -421,9 +421,6 @@ export default function PlayerProfile({
   meta.push(`bye ${bye ?? '—'}`)
 
   const sparse = profile !== null && !hasHistory(profile)
-  const lastSeason = profile && profile.game_log.length > 0
-    ? Math.max(...profile.game_log.map((g) => g.season))
-    : null
 
   return (
     <div className={`player-page${embedded ? ' player-page-embedded' : ''}`}>
@@ -472,6 +469,16 @@ export default function PlayerProfile({
 
       {profile && <StatusLine profile={profile} />}
       {profile && <PopPanels profile={profile} settings={settings} />}
+      {/* Full width, under the four: the season panels are a career at a
+          glance and this is the last year of it in detail. It draws nothing
+          for a player with no game log, so a rookie gets no empty frame. */}
+      {profile && (
+        <WeekByWeek
+          games={profile.game_log}
+          seasons={profile.seasons}
+          position={profile.header.position}
+        />
+      )}
 
       {header && profile && (
         <div className="pp-grid">
@@ -541,13 +548,6 @@ export default function PlayerProfile({
                 <section className="pp-card pp-span5">
                   <h3 className="is-accent">What players like him did next</h3>
                   <CohortNext cohort={profile.cohort} />
-                </section>
-              )}
-
-              {lastSeason !== null && (
-                <section className="pp-card pp-span7">
-                  <h3>{lastSeason} week by week</h3>
-                  <WeekByWeek games={profile.game_log} position={header.position} />
                 </section>
               )}
 

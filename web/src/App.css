@@ -143,11 +143,16 @@ td:first-child {
    would mean an inner scrollbar that stops at a boundary the eye cannot
    see). Padding comes down a step: this is a card over a board, not a page.
    Everything else -- the grid, the cards, the charts -- is unchanged, which
-   is the point of embedding rather than reimplementing. */
+   is the point of embedding rather than reimplementing.
+
+   13px is the artboard's own padding, and the number `.player-overlay-panel`'s
+   width is set against: 534 of content plus this twice plus the panel's two
+   borders. No token sits on 13 -- --space-3 is 12 and --space-4 is 16 -- and
+   the pair of numbers only means anything held together. */
 .player-page-embedded {
   min-height: 0;
   overflow: visible;
-  padding: var(--space-4);
+  padding: 13px;
 }
 
 .player-page-back {
@@ -519,122 +524,6 @@ td:first-child {
 
 .pp-usage .pp-cap {
   margin-right: 6px;
-}
-
-/* -- last season, week by week -- */
-
-.pp-weeks-legend {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  margin-bottom: var(--space-2);
-  font-size: 10px;
-  color: var(--text-3);
-}
-
-.pp-legend-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-}
-
-.pp-legend-bar {
-  width: 9px;
-  height: 4px;
-  border-radius: 1px;
-  background: var(--pos-hue, var(--text-2));
-}
-
-.pp-legend-line {
-  width: 9px;
-  height: 2px;
-  background: var(--accent);
-}
-
-.pp-weeks-spacer { flex-grow: 1; }
-
-/* Height is duplicated in WeekByWeek.tsx's VIEW_H so the snap line's
-   coordinate space and the bars' pixel box are the same box -- change one
-   and the line detaches from the weeks it describes. */
-.pp-weeks-plot {
-  position: relative;
-  height: 150px;
-}
-
-.pp-weeks-bars {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: flex-end;
-  gap: 3px;
-}
-
-.pp-week {
-  flex-grow: 1;
-  min-width: 0;
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: flex-end;
-}
-
-.pp-week-val {
-  font-size: 8.5px;
-  font-weight: 700;
-  margin-bottom: 2px;
-  color: var(--text-3);
-}
-
-.player-page .pp-week-val.is-good { color: var(--ok); }
-.player-page .pp-week-val.is-bad { color: var(--fail); }
-
-.pp-week-bar {
-  width: 100%;
-  border-radius: 1px;
-  background: var(--pos-hue, var(--text-2));
-}
-
-.pp-week-bar.is-good { background: var(--ok); }
-.pp-week-bar.is-bad { background: var(--fail); }
-
-/* A week he did not play is a gap in the bars, not a bar of height zero:
-   zero points is a performance, a bye is not. */
-.pp-week-dnp {
-  width: 100%;
-  height: 4px;
-  background: repeating-linear-gradient(
-    -45deg, var(--text-3) 0 2px, transparent 2px 4px);
-}
-
-.pp-weeks-line {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-}
-
-.pp-weeks-line polyline {
-  fill: none;
-  stroke: var(--accent);
-  stroke-width: 1.6;
-  stroke-linejoin: round;
-}
-
-.pp-weeks-opps {
-  display: flex;
-  gap: 3px;
-  margin-top: 5px;
-}
-
-.pp-week-opp {
-  flex-grow: 1;
-  min-width: 0;
-  text-align: center;
-  font-size: 8px;
-  letter-spacing: -0.04em;
-  color: var(--text-3);
 }
 
 /* -- what players like him did next -- */
@@ -2887,9 +2776,14 @@ button.roster-row:focus-visible {
   backdrop-filter: blur(6px);
 }
 
+/* Popup-sized, off the artboard: 534px of content inside 13px of padding
+   (`.player-page-embedded`) inside a 1px border. It was 1180px -- the width
+   of the page this profile used to also be -- which made a card over a board
+   into a second full-width screen, and stretched four season panels that are
+   sized by their own columns across a third of a monitor. */
 .player-overlay-panel {
   position: relative;
-  width: min(1180px, 100%);
+  width: min(562px, 100%);
   max-height: 100%;
   /* The panel is the scroll container, not the page and not
      `.player-page` -- see `.player-page-embedded`, which gives up the
@@ -4896,13 +4790,22 @@ button.roster-row:focus-visible {
   background: var(--tone);
 }
 /* The value above the bar is TEXT, so it takes the ramp as a colour rather
-   than as a fill -- these override the backgrounds set above. */
+   than as a fill -- these override the backgrounds set above.
+
+   The popup's game log joins these rules rather than restating them: its
+   points column is the same number as the bar over it, off the same
+   `barTone`, and a week that came out green in the chart and amber in the
+   row underneath would be two answers to one question. `barTone` has three
+   steps, which is why only three of the five lines below name it. */
 .ctip-col-val { background: none !important; }
-.ctip-col-val.is-good, .ctip-col-val.is-elite { color: var(--ok); }
+.ctip-col-val.is-good, .ctip-col-val.is-elite,
+.pp-pop-log-pts.is-good { color: var(--ok); }
 .ctip-col-val.is-strong { color: #7cb342; }
-.ctip-col-val.is-mid, .ctip-col-val.is-starter { color: #b3c132; }
+.ctip-col-val.is-mid, .ctip-col-val.is-starter,
+.pp-pop-log-pts.is-mid { color: #b3c132; }
 .ctip-col-val.is-fringe { color: var(--accent); }
-.ctip-col-val.is-bad, .ctip-col-val.is-out { color: var(--fail); }
+.ctip-col-val.is-bad, .ctip-col-val.is-out,
+.pp-pop-log-pts.is-bad { color: var(--fail); }
 
 /* The projection is the only column in any panel that has not happened yet,
    and it was drawn exactly like the seasons beside it: same ramp, same solid
@@ -5151,4 +5054,142 @@ button.roster-row:focus-visible {
    nine-season career prints two seasons' values on top of each other. */
 .pp-pop-panel .ctip-col {
   flex: 0 0 auto;
+}
+
+/* -- the week chart and the games it is made of (WeekByWeek.tsx) ----------
+   The same card as the four season panels above it, one row wide instead of
+   a quarter: the chart, a hairline, and the log of the weeks in it. The
+   picture is `Chart` again, so these rules decide how wide a week is and
+   how the rows underneath line up, and nothing about the picture itself. */
+.pp-pop-weeks {
+  margin-bottom: 9px;
+}
+
+/* Unlike the season panels, this strip FILLS its card. A season is a fixed
+   number of weeks (SEASON_WEEKS), so eighteen columns always fit and there
+   is nothing to scroll; leaving them at their own width would park the whole
+   season in the left two thirds of the popup. */
+.pp-pop-weeks .ctip-chart {
+  gap: 2px;
+  overflow-x: visible;
+}
+
+.pp-pop-weeks .ctip-col {
+  flex: 1 1 0;
+  min-width: 0;
+  gap: 3px;
+}
+
+/* No number over the bar. The log directly underneath carries every one of
+   them to a decimal, and eighteen rounded copies stacked over eighteen bars
+   is the same fact twice at a size nobody reads it at. */
+.pp-pop-weeks .ctip-col-val {
+  display: none;
+}
+
+/* Shorter than the 68px the season panels share: that slot has to clear a
+   stack of seventeen circles and this one holds a bar. A week at the
+   30-point ceiling (weeks.ts) fills it. */
+.pp-pop-weeks .ctip-col-slot {
+  width: 100%;
+  height: 42px;
+}
+
+/* One step down from the season panels' labels: these are eighteen columns
+   in the width they draw three or four in. */
+.pp-pop-weeks .ctip-col-label {
+  font-size: 8px;
+}
+
+/* Where the picture stops and the words for it start. */
+.pp-pop-rule {
+  height: 1px;
+  margin: 2px 0;
+  background: var(--border);
+}
+
+.pp-pop-log {
+  /* The row height is stated once, here, because the body's cap below is
+     exactly six of them. */
+  --pp-log-row: 21px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Outside the scroller, so the four words stay over the columns they name
+   however far into the season the log is scrolled. */
+.pp-pop-log-head {
+  display: flex;
+  gap: var(--space-2);
+  padding-bottom: var(--space-1);
+}
+
+/* `> span` rather than `> *`: the head's cells wear the same width classes
+   as the rows' so the two line up, and a bare universal selector would lose
+   the tie to them. */
+.pp-pop-log-head > span {
+  font-size: 8px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+/* Six games, and the rest of the season scrolling behind them: six is the
+   most this card can show without the popup growing past a screen, and by
+   the sixth row back a game is history rather than form. `overscroll-
+   behavior` so hitting the end of the log does not carry on into the popup
+   it sits in. */
+.pp-pop-log-body {
+  max-height: calc(var(--pp-log-row) * 6);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.pp-pop-log-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  /* Fixed rather than left to the type in it, so the cap above is exactly
+     six rows: a row that grew half a pixel with its own font would leave a
+     seventh one peeking under the fold. */
+  height: var(--pp-log-row);
+  padding: 3px 0;
+  border-top: 1px solid var(--border);
+  line-height: 13px;
+}
+
+/* The week number is the axis restating itself -- the row's place in the
+   list already says it -- so it is set at the dimmest of the three. */
+.pp-pop-log-wk {
+  flex: 0 0 20px;
+  font-size: 10px;
+  color: var(--text-3);
+}
+
+.pp-pop-log-opp {
+  flex: 0 0 30px;
+  font-size: 10px;
+  color: var(--text-2);
+}
+
+/* One line, whatever the line says: this is the widest cell in the row and
+   the only one that survives being cut short. */
+.pp-pop-log-line {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  /* Half a pixel under --text-xs, which is what buys "19 car, 80 yds, 0 TD
+     · 3 rec, 33 yds" its last few characters at this width. */
+  font-size: 10.5px;
+  color: var(--text-2);
+}
+
+/* The one cell in the row that is coloured, and it takes the chart's ramp
+   (see `.ctip-col-val` above, which these join). */
+.pp-pop-log-pts {
+  flex: 0 0 34px;
+  text-align: right;
+  font-size: var(--text-xs);
 }
