@@ -561,13 +561,23 @@ export default function DraftRoom() {
   // sorted here, once per board load, rather than inside a popup that
   // remounts on every comp click.
   //
-  // NOT filtered by `draftedIds` either: the card is about where the board
-  // prices him, not who is still on it, and the payload's own neighbours (a
-  // rookie's, a kicker's) reach the same card unfiltered. One card cannot
-  // mean two things depending on which player opened it.
+  // Filtered by `draftedIds`, which is the difference between "the picks
+  // around this one" and a list of players. The card names the run you are
+  // choosing among; four rows into round six, an unfiltered board fills it
+  // with names that went in round one. `draftedIds` is the board's own
+  // drafted set, so a row leaves this list the moment its pick lands rather
+  // than a second later when the next ranking finishes.
+  //
+  // It costs the card for a player who is himself off the board -- a roster
+  // player opened from RosterPanel -- because ValueNeighbors windows the
+  // list on his own row and cannot find one that is not there. That is the
+  // right answer for a card whose whole claim is which picks are still
+  // available: there is no run around a player nobody can take.
   const boardByRank = useMemo(
-    () => Object.values(players).sort((a, b) => a.rank - b.rank),
-    [players],
+    () => Object.values(players)
+      .filter((p) => !draftedIds.has(p.player_id))
+      .sort((a, b) => a.rank - b.rank),
+    [players, draftedIds],
   )
 
   function handleOpenBoardPlayer(p: BoardPlayer) {

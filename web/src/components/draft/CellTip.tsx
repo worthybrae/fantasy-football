@@ -18,7 +18,10 @@ import { fetchProfile } from '../../api'
 import type { LiveSettings, PlayerProfileData } from '../../api'
 import { Chart } from './Chart'
 import { startersAt, weightedFinish } from './finish'
-import { finishCols, healthCols, perGameCols, seasonLength, steadyCols, weekCols } from './panels'
+import {
+  finishCols, healthCols, perGameCols, playedSeasons, ratedSeasons, seasonLength, steadyCols,
+  weekCols,
+} from './panels'
 
 export type CellTipKind = 'health' | 'games' | 'finish' | 'steady' | 'change'
 
@@ -129,13 +132,11 @@ function FinishBody({ data, settings }: BodyProps): ReactNode {
 // tier structure to stretch. (Tone cut points live with the builder, in
 // `panels.ts`, alongside the fill they colour.)
 function SteadyBody({ data }: BodyProps): ReactNode {
-  // `cv_rank_n` counts only the seasons that HAVE a coefficient: a season
-  // whose mean is zero or negative gets none, ranks nowhere, and would draw
-  // as a column with no place on the ladder it is being plotted against.
-  const rows = data.seasons.filter(
-    (s) => s.cv_rank !== null && s.cv_rank !== undefined
-      && s.cv_rank_n !== null && s.cv_rank_n !== undefined && s.cv_rank_n > 0,
-  )
+  // The builder's own row filter (`panels.ts`), not a second copy of it: the
+  // note below quotes a pool off `rows[0]`, and a filter that disagreed with
+  // the one the columns were cut from would quote it from a season this
+  // panel never drew.
+  const rows = ratedSeasons(data.seasons)
   if (!rows.length) {
     return <div className="ctip-empty">No season long enough to measure.</div>
   }
@@ -161,7 +162,10 @@ function SteadyBody({ data }: BodyProps): ReactNode {
 // Change column is the gap between the last of these and that one -- and a
 // gap is the one thing a single number cannot show you the size of.
 function ChangeBody({ data }: BodyProps): ReactNode {
-  const rows = data.seasons.filter((s) => s.games > 0)
+  // Same rule the builder cuts its season columns on, imported rather than
+  // repeated: `last` is read off `rows[0]`, so this list and the chart have
+  // to agree about which season is the most recent one played.
+  const rows = playedSeasons(data.seasons)
   const proj = data.summary?.proj_ppg ?? null
   if (!rows.length && proj === null) {
     return <div className="ctip-empty">Nothing to compare yet.</div>

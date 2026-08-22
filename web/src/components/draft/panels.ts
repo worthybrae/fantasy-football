@@ -10,7 +10,8 @@ import { BAR_CEILING, SEASON_WEEKS, barTone } from './weeks'
 
 // Exported: the popup's Per game panel puts baseline marks for the seasons a
 // rookie has not played beside the columns these builders make, in the same
-// chart. Two spellings of a season would show up as two axes in one picture.
+// chart, and its comps card tags a season the same way one card over. Two
+// spellings of a season would show up as two axes in one picture.
 export function year(season: number): string {
   return `’${String(season).slice(2)}`
 }
@@ -101,7 +102,10 @@ export function finishCols(seasons: SeasonSummary[], starters: number): Col[] {
 // Linear, not log-spaced like Finish: RB1 to RB6 is the difference between
 // rounds, which is why that ladder is log, but consistency has no equivalent
 // tier structure to stretch.
-export function steadyTone(rank: number, pool: number): string {
+//
+// Not exported: the cut points belong with the fill they colour, and every
+// caller wants the column, not the class name on it.
+function steadyTone(rank: number, pool: number): string {
   const pct = rank / pool
   if (pct <= 0.25) return 'is-elite'
   if (pct <= 0.5) return 'is-strong'
@@ -110,14 +114,28 @@ export function steadyTone(rank: number, pool: number): string {
   return 'is-out'
 }
 
-export function steadyCols(seasons: SeasonSummary[]): Col[] {
-  // `cv_rank_n` counts only the seasons that HAVE a coefficient: a season
-  // whose mean is zero or negative gets none, ranks nowhere, and would draw
-  // as a column with no place on the ladder it is being plotted against.
-  const rows = seasons.filter(
+/** The seasons the Steady panel can place, newest first as the payload has
+ *  them.
+ *
+ *  `cv_rank_n` counts only the seasons that HAVE a coefficient: a season
+ *  whose mean is zero or negative gets none, ranks nowhere, and would draw
+ *  as a column with no place on the ladder it is being plotted against.
+ *
+ *  Exported for the same reason the column builders are. Both views say "of
+ *  N" beside this panel and both decide whether to draw it at all, and the
+ *  pool they quote has to come off the same first row the columns were cut
+ *  from -- a looser test here quotes a denominator from a season the chart
+ *  never drew.
+ */
+export function ratedSeasons(seasons: SeasonSummary[]): SeasonSummary[] {
+  return seasons.filter(
     (s) => s.cv_rank !== null && s.cv_rank !== undefined
       && s.cv_rank_n !== null && s.cv_rank_n !== undefined && s.cv_rank_n > 0,
   )
+}
+
+export function steadyCols(seasons: SeasonSummary[]): Col[] {
+  const rows = ratedSeasons(seasons)
   return rows.slice().reverse().map((r) => {
     const rank = r.cv_rank as number
     const pool = r.cv_rank_n as number
@@ -134,13 +152,25 @@ export function steadyCols(seasons: SeasonSummary[]): Col[] {
   })
 }
 
+/** The seasons with football in them, newest first. A row of zero games is a
+ *  year he was hurt or was not in the league; averaging points over no games
+ *  is a division nobody performed, and the payload's `ppg` for one is a zero
+ *  that would draw as a season he scored nothing in.
+ *
+ *  Exported alongside `ratedSeasons`, and for the same reason: this is the
+ *  test for whether there is any history to compare the projection against,
+ *  and both views ask it. */
+export function playedSeasons(seasons: SeasonSummary[]): SeasonSummary[] {
+  return seasons.filter((s) => s.games > 0)
+}
+
 // Scoring by season with the PROJECTION as the final column, because the
 // Change column is the gap between the last of these and that one -- and a
 // gap is the one thing a single number cannot show you the size of.
 export function perGameCols(
   seasons: SeasonSummary[], projPpg: number | null, position: string,
 ): Col[] {
-  const rows = seasons.filter((s) => s.games > 0)
+  const rows = playedSeasons(seasons)
   const ceiling = Math.max(...rows.map((r) => r.ppg), projPpg ?? 0, 1)
   const cols: Col[] = rows.slice().reverse().map((r) => ({
     key: r.season,

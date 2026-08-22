@@ -238,16 +238,6 @@ export function ordinal(n: number): string {
   }
 }
 
-/** Where a rank falls in its own field, as a three-way tone. Terciles, not
- *  invented cutoffs: "21st of 32" and "7th of 12" mean the same thing here
- *  and read the same way. */
-export function rankTone(rank: number | null, of: number | null): 'good' | 'mid' | 'bad' {
-  if (rank === null || of === null || of <= 0) return 'mid'
-  if (rank <= of / 3) return 'good'
-  if (rank > (of * 2) / 3) return 'bad'
-  return 'mid'
-}
-
 /** His room, or null if the chart has none for him. Whichever group actually
  *  holds him comes before the one his board position names: a player charted
  *  somewhere other than where the board ranks him (a receiver taking snaps at

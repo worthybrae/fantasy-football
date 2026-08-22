@@ -15,10 +15,17 @@ import { ordinal } from './payload'
 // 16th. The exact rank stays on every bar's tooltip, where a reader who wants
 // the number can still have it.
 
-// The five-step ramp, cut on the softness percentile. Same class names as the
-// season panels' bars, so one colour means one thing in every picture in this
-// popup -- these cut points are the strip's own, since a percentile is not a
-// finish and has no starters to be graded against.
+// The five-step ramp, cut on the softness percentile, so one colour means one
+// thing in every picture in this popup -- these cut points are the strip's
+// own, since a percentile is not a finish and has no starters to be graded
+// against.
+//
+// The names are the ramp's OTHER spelling, not the season panels'. Three of
+// its five steps answer to two class names apiece -- `is-good`/`is-elite`,
+// `is-mid`/`is-starter`, `is-bad`/`is-out` -- aliased onto the same rule in
+// App.css (see the ".ctip-col-bar" ramp), which is why the two middle steps
+// here read the same as the panels'. A sixth step added in one spelling only
+// would come out unstyled, so add it to both.
 const TONES: [number, string][] = [
   [75, 'is-good'], [60, 'is-strong'], [40, 'is-mid'], [25, 'is-fringe'],
 ]

@@ -4201,7 +4201,14 @@ button.roster-row:focus-visible {
 /* Unlike the season panels, this strip FILLS its card. A season is a fixed
    number of weeks (SEASON_WEEKS), so eighteen columns always fit and there
    is nothing to scroll; leaving them at their own width would park the whole
-   season in the left two thirds of the popup. */
+   season in the left two thirds of the popup.
+
+   THIS BLOCK MUST STAY BELOW `.pp-pop-panel`'s. The week card carries both
+   classes (WeekByWeek renders `pp-pop-panel pp-pop-weeks`), so these rules
+   and that section's are the same specificity on the same elements and only
+   source order decides which wins. Moved above it, the columns go back to
+   the panels' fixed width and scroll behaviour and the strip stops filling
+   the card -- with nothing in either rule to say why. */
 .pp-pop-weeks .ctip-chart {
   gap: 2px;
   overflow-x: visible;

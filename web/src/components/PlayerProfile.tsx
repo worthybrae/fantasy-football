@@ -3,7 +3,9 @@ import type { ReactNode } from 'react'
 import { fetchProfile, type LiveSettings, type Player } from '../api'
 import { Chart, type Col } from './draft/Chart'
 import { startersAt } from './draft/finish'
-import { finishCols, healthCols, perGameCols, seasonLength, steadyCols, year } from './draft/panels'
+import {
+  finishCols, healthCols, perGameCols, playedSeasons, ratedSeasons, seasonLength, steadyCols, year,
+} from './draft/panels'
 import DepthChartCard from './DepthChartCard'
 import PageSkeleton from './PageSkeleton'
 import ComparableSeasons from './profile/ComparableSeasons'
@@ -293,8 +295,13 @@ function PopPanels({ profile, settings }: {
   // Newest first in the payload, so the first rated season carries the pool
   // the last column was ranked in. A denominator that moves year to year,
   // and this note is here to make that column legible, not to average them.
-  const rated = seasons.filter((s) => s.cv_rank_n)
-  const played = seasons.filter((s) => s.games > 0)
+  //
+  // Both filters are the builders' own (`panels.ts`), never a local copy:
+  // the board's hover panel quotes the same "of N" for the same player three
+  // inches behind this popup, and a looser test here would quote it off a
+  // season neither chart drew.
+  const rated = ratedSeasons(seasons)
+  const played = playedSeasons(seasons)
   const proj = profile.summary?.proj_ppg ?? null
   const scoring = perGameCols(seasons, proj, header.position)
   const perGame = played.length

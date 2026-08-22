@@ -1,4 +1,5 @@
 import type { SimilarPlayer } from '../../api'
+import { year } from '../draft/panels'
 import PopCard from './PopCard'
 import { fmtSigned, type Cohort } from './payload'
 
@@ -15,10 +16,6 @@ import { fmtSigned, type Cohort } from './payload'
 // "Near you". Two neighbour cards on one popup is the bug this guard exists
 // to prevent.
 const COMPS = 4
-
-function seasonTag(season: number): string {
-  return `’${String(season).slice(-2)}`
-}
 
 // The note: what the whole cohort did, not what these four did. The four
 // rows are the shape of the thing; "13 of 19 declined" is whether the shape
@@ -73,7 +70,7 @@ export default function ComparableSeasons({
             const cells = (
               <>
                 <span className="pp-pop-comp-name">{p.name}</span>
-                <span className="mono pp-pop-comp-yr">{seasonTag(p.season)}</span>
+                <span className="mono pp-pop-comp-yr">{year(p.season)}</span>
                 <span className="mono pp-pop-comp-ppg">{p.ppg.toFixed(1)}</span>
                 {/* Green up, red down -- the same two tokens the rest of the
                     popup spends on "better" and "worse". */}

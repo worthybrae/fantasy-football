@@ -61,14 +61,17 @@ function fromPayload(players: SimilarPlayer[], me: Me): NeighbourRow[] {
   return windowOn(rows, rows.findIndex((r) => r.me))
 }
 
-// The room's board, in rank order, which already holds his own row -- so
-// this one windows first and shapes four rows rather than five hundred.
+// The room's board, in rank order and already down to who is still
+// available (DraftRoom filters it by the drafted set), which holds his own
+// row -- so this one windows first and shapes four rows rather than five
+// hundred.
 //
 // Matched by id, not by rank: the two agree (both are the same board build),
 // but an id is the thing that identifies him and a rank is a position two
 // players could be argued into sharing. An id the list has never heard of --
-// a roster player seeded from ESPN's feed, or a board that has not loaded --
-// leaves the card undrawn rather than drawing a run he is not in.
+// a roster player seeded from ESPN's feed, a player already picked, or a
+// board that has not loaded -- leaves the card undrawn rather than drawing a
+// run he is not in.
 function fromBoard(ranked: RankedPlayer[], me: Me): NeighbourRow[] {
   const mine = ranked.findIndex((p) => p.player_id === me.player_id)
   if (mine === -1) return []

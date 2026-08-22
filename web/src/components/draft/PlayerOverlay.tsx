@@ -133,16 +133,23 @@ export default function PlayerOverlay({
           // warning is a way to turn it off and then forget.
           <div className="player-overlay-clock" role="alert">
             <strong>You are on the clock.</strong>
-            {/* Still here now that the footer can draft: this player is not
-                always the one you want, and the board is where the other
-                two hundred are. */}
-            <button
-              type="button"
-              className="player-overlay-clock-back"
-              onClick={onClose}
-            >
-              Back to the board
-            </button>
+            {/* Only against a footer that drafts. It is here because this
+                player is not always the one you want and the board is where
+                the other two hundred are -- but with no pick to make for him
+                the footer IS "Back to the board" (see PlayerProfile), and
+                two identical buttons on one popup make the reader choose
+                between them for no reason. The footer owns that way out: it
+                is drawn in every state, including the ones where no clock is
+                running and this alert is not on screen at all. */}
+            {onDraftPlayer && (
+              <button
+                type="button"
+                className="player-overlay-clock-back"
+                onClick={onClose}
+              >
+                Back to the board
+              </button>
+            )}
           </div>
         )}
         {/* Keyed on the player: a comp click swaps the target, and the key
