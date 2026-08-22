@@ -93,12 +93,7 @@ export default function UsageLine({ seasons, position }: {
     }))
 
   const candidates: [string, Cell[]][] = [
-    // Snap share has no percentile yet and so no colour: the league-wide snap
-    // frame is keyed by name and team rather than by player, so ranking it
-    // would take a second join to the one this number already comes from --
-    // and a colour derived from a different join than its number is a colour
-    // that can argue with it.
-    ['Snap %', cells(shown.map((s) => pct(s.snap_share)), null)],
+    ['Snap %', cells(shown.map((s) => pct(s.snap_share)), 'snap_share')],
     ['Target %', cells(shown.map((s) => pct(s.target_share)), 'target_share')],
     ...(RATES[position] ?? []).map(([label, keys, key]): [string, Cell[]] =>
       [label, cells(shown.map((s) => perGame(s, keys)), key)]),

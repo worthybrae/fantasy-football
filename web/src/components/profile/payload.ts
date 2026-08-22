@@ -24,9 +24,10 @@ import type {
 
 /** One season row: `SeasonSummary` plus the six the redesign asked for. */
 /** Where each usage number places among the same position that season, 0-1,
- *  higher better. Null for a season the pool could not rank. Snap share is
- *  deliberately absent -- see scoring/profile_cache.season_rank_frame. */
+ *  higher better. Null for a season the pool could not rank -- a snap table
+ *  with no row for him, or a rate his position does not have. */
 export interface SeasonPercentiles {
+  snap_share: number | null
   target_share: number | null
   carries_pg: number | null
   targets_pg: number | null

@@ -2153,3 +2153,46 @@ def test_proj_pos_finish_ties_share_the_better_place():
     assert _proj_pos_finish(board, "a") == 1
     assert _proj_pos_finish(board, "b") == 1
     assert _proj_pos_finish(board, "c") == 3
+
+
+def test_snap_share_percentile_reads_the_same_number_the_card_prints(tmp_path):
+    """The colour and the number under it come from ONE join.
+
+    `season_summaries` resolves a player's team as the last `recent_team` of
+    his season, normalises his name, and merges the snap frame on (name, team,
+    season). `season_rank_frame` ranks snap share so the usage card can tint
+    it. If those two ever reached the snap table by different routes, the card
+    would paint a percentile computed off a number it is not showing -- so
+    this asserts they agree row for row, which is the only thing that keeps
+    them honest as either side is edited.
+    """
+    import numpy as np
+    from scoring.profile_cache import _snap_share_by_player, snap_share_by_season
+
+    weekly = pd.DataFrame({
+        "player_id": ["a"] * 2 + ["b"] * 2,
+        "season": [2024, 2024, 2024, 2024],
+        "week": [1, 2, 1, 2],
+        "recent_team": ["DET", "DET", "GB", "GB"],
+    })
+    feats = pd.DataFrame({
+        "player_id": ["a", "b"], "season": [2024, 2024],
+        "name": ["Jahmyr Gibbs", "Josh Jacobs"], "position": ["RB", "RB"],
+    })
+    snaps = pd.DataFrame({
+        "player": ["Jahmyr Gibbs", "Josh Jacobs"],
+        "team": ["DET", "GB"], "season": [2024, 2024],
+        "offense_pct": [0.67, 0.55],
+    })
+    share = snap_share_by_season(snaps)
+    q = feats.copy()
+    got = _snap_share_by_player(weekly, feats, share, q)
+
+    # The same values `season_summaries`' own merge would land on those rows.
+    assert got.tolist() == [0.67, 0.55]
+
+    # And no snap table at all is NaN, not a zero -- a zero would rank as the
+    # least-used season in the league rather than as an unknown.
+    none = _snap_share_by_player(weekly, feats, None, q)
+    assert none.isna().all()
+    assert np.isnan(none.iloc[0])

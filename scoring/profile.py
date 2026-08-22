@@ -308,7 +308,8 @@ def season_summaries(weekly: pd.DataFrame, snaps: pd.DataFrame | None, player_id
                  # among the same position that season. See
                  # profile_cache.season_rank_frame for why snap share is not
                  # among them.
-                 "target_share_pctl", "carries_pg_pctl", "targets_pg_pctl",
+                 "snap_share_pctl", "target_share_pctl", "carries_pg_pctl",
+                 "targets_pg_pctl",
                  "receptions_pg_pctl", "yards_pg_pctl"]
     if ranks is not None and not ranks.empty:
         mine = mine.merge(ranks[["player_id", "season"] + rank_cols],
@@ -397,8 +398,8 @@ def season_summaries(weekly: pd.DataFrame, snaps: pd.DataFrame | None, player_id
             # One object rather than five loose keys: they are read together,
             # by one card, and a season row is already wide.
             "pcts": {k: _round_or_none(r[f"{k}_pctl"], 3) for k in
-                     ("target_share", "carries_pg", "targets_pg",
-                      "receptions_pg", "yards_pg")},
+                     ("snap_share", "target_share", "carries_pg",
+                      "targets_pg", "receptions_pg", "yards_pg")},
         })
     return rows
 

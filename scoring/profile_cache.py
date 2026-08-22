@@ -146,6 +146,7 @@ import threading
 from collections import OrderedDict
 from dataclasses import dataclass
 
+import numpy as np
 import pandas as pd
 
 from pipeline.db import read_table
@@ -189,7 +190,7 @@ _SEASON_RANK_COLUMNS = ["player_id", "season", "position", "pos_rank_ppg",
                         "cv_pos_median",
                         # Percentiles within (season, position), for the
                         # usage card's colour. See `season_rank_frame`.
-                        "target_share_pctl", "carries_pg_pctl",
+                        "snap_share_pctl", "target_share_pctl", "carries_pg_pctl",
                         "targets_pg_pctl", "receptions_pg_pctl",
                         "yards_pg_pctl"]
 _COMP_POOL_COLUMNS = ["player_id", "name", "season", "position", "games",
@@ -329,8 +330,34 @@ def snap_share_by_season(snaps: pd.DataFrame | None) -> pd.DataFrame | None:
              ["offense_pct"].mean())
 
 
+def _snap_share_by_player(weekly: pd.DataFrame, feats: pd.DataFrame,
+                          share: pd.DataFrame | None,
+                          q: pd.DataFrame) -> pd.Series:
+    """Every qualified player-season's snap share, by the per-player rule.
+
+    `season_summaries` resolves one player's team as the LAST `recent_team` of
+    each of his seasons, normalises his name, and merges the snap frame on
+    (name, team, season). This is that, for everyone, so the number the card
+    prints and the pool it is coloured against are the same computation and
+    cannot drift apart. Returns NaN where the snap table has no row -- which
+    `rank(pct=True)` leaves out of the pool rather than ranking as a zero.
+    """
+    if share is None:
+        return pd.Series(np.nan, index=q.index)
+    team = (weekly.groupby(["player_id", "season"])["recent_team"].last()
+            .rename("team").reset_index())
+    keyed = (feats[["player_id", "season", "name"]].merge(team,
+             on=["player_id", "season"], how="left"))
+    keyed["_norm_name"] = keyed["name"].map(_norm_name)
+    keyed = keyed.merge(share, on=["_norm_name", "team", "season"], how="left")
+    lookup = keyed.set_index(["player_id", "season"])["offense_pct"]
+    idx = pd.MultiIndex.from_arrays([q["player_id"], q["season"]])
+    return pd.Series(lookup.reindex(idx).to_numpy(), index=q.index)
+
+
 def season_rank_frame(weekly: pd.DataFrame, feats: pd.DataFrame,
-                      rules: dict | None) -> pd.DataFrame:
+                      rules: dict | None,
+                      share: pd.DataFrame | None = None) -> pd.DataFrame:
     """Positional rank and volatility rank for every qualified player-season.
 
     Two ranks per (season, position) pool, both restricted to seasons of at
@@ -418,14 +445,16 @@ def season_rank_frame(weekly: pd.DataFrame, feats: pd.DataFrame,
     # one of these -- more snaps, more targets, more yards -- so none of them
     # inverts the way `cv_rank` does.
     #
-    # NOT SNAP SHARE, and that is not an oversight. The league-wide snap frame
-    # is keyed by (normalised name, team, season) and `feats` carries no team
-    # column, so a percentile for it would come from a SECOND join to the one
-    # `season_summaries` already does per player -- and the day those two
-    # disagree, the card paints a colour that argues with the number under it.
-    # Colouring snap share means giving that frame a player_id first.
+    # Snap share is ranked too, and the join that reaches it is the SAME one
+    # `season_summaries` does per player -- same key, same team rule (the last
+    # team of the season), same `share` frame, applied to everyone at once
+    # rather than to one player. That is the whole reason it is done here: a
+    # percentile computed off a second, similar-looking join is a colour that
+    # can argue with the number it is painted behind.
+    q["_snap_share"] = _snap_share_by_player(weekly, feats, share, q)
     q["_yards_pg"] = (q["rush_yards"] + q["rec_yards"]) / q["games"]
-    for col, source in (("target_share_pctl", q["target_share"]),
+    for col, source in (("snap_share_pctl", q["_snap_share"]),
+                        ("target_share_pctl", q["target_share"]),
                         ("carries_pg_pctl", q["carries"] / q["games"]),
                         ("targets_pg_pctl", q["targets"] / q["games"]),
                         ("receptions_pg_pctl", q["receptions"] / q["games"]),
@@ -600,15 +629,19 @@ def _build(conn, rules: dict | None) -> ProfileFrames:
         season_len = weekly.groupby("season")["week"].max()
 
     players = read_table(conn, "players")
+    # Built once and handed to both the frame the card reads and the frame
+    # the card's colours are ranked in: two calls would be two chances for
+    # a snap share and its own percentile to come from different numbers.
+    share = snap_share_by_season(snaps)
     return ProfileFrames(
         weekly_empty=bool(weekly.empty),
         season_features=feats,
-        snap_share=snap_share_by_season(snaps),
+        snap_share=share,
         prior_weekly=prior,
         season_len=season_len,
         schedules=read_table(conn, "schedules"),
         players=players,
-        season_ranks=season_rank_frame(weekly, feats, rules),
+        season_ranks=season_rank_frame(weekly, feats, rules, share),
         comp_pool=comparable_pool(feats, players),
         pfr_to_gsis=_pfr_crosswalk(conn, snaps),
         line_quality=_line_quality(conn, CURRENT_SEASON, snaps),
