@@ -10,6 +10,7 @@ import SimilarPlayers from './SimilarPlayers'
 import CohortNext from './profile/CohortNext'
 import InjuryStatus from './profile/InjuryStatus'
 import NewsPanel from './profile/NewsPanel'
+import PopCard from './profile/PopCard'
 import ConsistencyTable from './profile/ConsistencyTable'
 import SeasonFinish from './profile/SeasonFinish'
 import LineQuality from './profile/LineQuality'
@@ -77,11 +78,12 @@ interface PlayerProfileProps {
 
 // -- the popup, top to bottom ----------------------------------------------
 //
-// Header, status line, then the four season panels. The panels are drawn by
-// the board's own `Chart` off the board's own column builders
-// (draft/panels.ts), never by a second copy of either: someone who has spent
-// a draft learning what a tall green column means in a hover panel should not
-// have to learn it again the moment the same seasons open in a popup.
+// Header, status line, the four season panels, last season by week, and then
+// two rows of three dense cards. The panels are drawn by the board's own
+// `Chart` off the board's own column builders (draft/panels.ts), never by a
+// second copy of either: someone who has spent a draft learning what a tall
+// green column means in a hover panel should not have to learn it again the
+// moment the same seasons open in a popup.
 
 // The depth slot, from whichever source actually has one. Sleeper's chart
 // (`status`) knows a rookie's place before the board's `outlook` does --
@@ -221,17 +223,20 @@ function PopPanel({ title, note, cols, wide = false }: {
   title: string; note: string; cols: Col[]; wide?: boolean
 }): ReactNode {
   return (
-    <section className={`pp-pop-panel${wide ? ' is-wide' : ''}`}>
-      {/* The hover panel's own head, one step smaller (see App.css): a title
-          and the yardstick the numbers under it are out of. */}
-      <div className="ctip-head">
-        <span>{title}</span>
-        <span className="ctip-head-note">{note}</span>
-      </div>
+    // The same card as the six below (PopCard), plus the class that says
+    // this one holds a chart: how a long career scrolls inside it, and how
+    // much wider Per game is allowed to be, are the only two things a panel
+    // decides for itself.
+    <PopCard title={title} note={note} className={`pp-pop-panel${wide ? ' is-wide' : ''}`}>
       <Chart cols={cols} />
-    </section>
+    </PopCard>
   )
 }
+
+// The most recent seasons the popup's panels draw, newest first in the
+// payload. See PopPanels for why the popup caps a career and the board's own
+// hover panels do not.
+const POPUP_SEASONS = 5
 
 // Health, Finish, Steady, Per game -- the same four the board sorts on, in
 // the same order the board's columns run. A panel is DROPPED rather than
@@ -242,7 +247,16 @@ function PopPanel({ title, note, cols, wide = false }: {
 function PopPanels({ profile, settings }: {
   profile: ProfilePayload; settings?: LiveSettings | null
 }): ReactNode {
-  const { header, seasons } = profile
+  const { header } = profile
+  // The popup's own cap, applied here and nowhere else: `panels.ts` still
+  // builds a whole career for the board's hover panels, where there is room
+  // for one. Four cards a quarter of a 562px popup wide hold about five
+  // columns before they start scrolling, and a nine-season back
+  // (McCaffrey) opened on 2017 -- the seasons that decide a 2026 pick were
+  // off the left edge of every panel. Five, weighted toward the recent, is
+  // already how this project answers "what is he now": see RECENCY_WEIGHTS
+  // in draft/finish.ts.
+  const seasons = profile.seasons.slice(0, POPUP_SEASONS)
   const health = healthCols(seasons)
   const finish = finishCols(seasons, startersAt(header.position, settings))
   const steady = steadyCols(seasons)
@@ -261,7 +275,7 @@ function PopPanels({ profile, settings }: {
   // cost the gap above the section under it.
   if (!health.length && !finish.length && !steady.length && !scoring.length) return null
   return (
-    <div className="pp-pop-panels">
+    <div className="pp-pop-row">
       {health.length > 0 && (
         <PopPanel
           title="Health"
@@ -291,15 +305,49 @@ function PopPanels({ profile, settings }: {
   )
 }
 
-// The o-line section's heading, which is about where the player stands
-// relative to the five men in front of him -- a running back runs behind
-// them, a quarterback is protected by them, a kicker only needs them to get
-// the offence close enough.
-function lineHeading(position: string): string {
-  if (position === 'RB') return 'The line he runs behind'
-  if (position === 'QB') return 'The line protecting him'
-  if (position === 'K') return 'The line that gets him in range'
-  return 'The line in front of him'
+// Six cards in two rows, under the seasons: where he plays, who he plays
+// with, and what the room charges for him. Each is a card the same size as
+// the panels above, and each decides for itself whether it has anything to
+// say -- a rookie has no usage to average, a defense has no line in front of
+// it, and a card with nothing in it is not drawn at all rather than drawn as
+// a frame of dashes. That is why the rows carry no conditions of their own:
+// see `.pp-pop-row:empty` in App.css for the one case that needs handling,
+// a row where every card opted out.
+function PopCards({ profile, onSelectPlayer }: {
+  profile: ProfilePayload; onSelectPlayer: (id: string) => void
+}): ReactNode {
+  const { header } = profile
+  return (
+    <>
+      <div className="pp-pop-row">
+        <ScheduleRanks weeks={profile.schedule} sosPct={profile.outlook.sos_pct} />
+        <DepthChartCard
+          team={header.team}
+          position={header.position}
+          groups={profile.depth_chart}
+        />
+        <MarketRow
+          rank={header.rank}
+          marketRank={header.market_rank}
+          marketSpread={header.market_spread}
+          sources={header.market_sources}
+        />
+      </div>
+      <div className="pp-pop-row">
+        <UsageLine summary={profile.summary} position={header.position} />
+        {/* Null for every defense by construction (see LineQualityData): the
+            o-line is a fact about the eleven who leave the field when this
+            unit comes on. */}
+        {profile.oline && <LineQuality oline={profile.oline} />}
+        <ValueNeighbors
+          mode={profile.similar.mode}
+          players={profile.similar.players}
+          me={header}
+          onSelectPlayer={onSelectPlayer}
+        />
+      </div>
+    </>
+  )
 }
 
 export default function PlayerProfile({
@@ -479,6 +527,7 @@ export default function PlayerProfile({
           position={profile.header.position}
         />
       )}
+      {profile && <PopCards profile={profile} onSelectPlayer={onSelectPlayer} />}
 
       {header && profile && (
         <div className="pp-grid">
@@ -512,15 +561,6 @@ export default function PlayerProfile({
                   </p>
                 )}
               </section>
-
-              <section className="pp-card pp-span5">
-                <h3>Others at this value</h3>
-                <p className="pp-sub">nearest by board rank, not by stat line</p>
-                <ValueNeighbors
-                  players={profile.similar.players}
-                  onSelectPlayer={onSelectPlayer}
-                />
-              </section>
             </>
           ) : (
             <>
@@ -537,11 +577,6 @@ export default function PlayerProfile({
                     go once the shape has made you curious. */}
                 <SeasonFinish seasons={profile.seasons} position={header.position} />
                 <ConsistencyTable seasons={profile.seasons} position={header.position} />
-                {/* The old card led with nine stat tiles; the redesign leads
-                    with the verdict instead. The usage they carried is not
-                    lost, it is one line under the seasons it was averaged
-                    from. */}
-                <UsageLine summary={profile.summary} position={header.position} />
               </section>
 
               {profile.cohort && (
@@ -550,35 +585,7 @@ export default function PlayerProfile({
                   <CohortNext cohort={profile.cohort} />
                 </section>
               )}
-
-              <section className="pp-card pp-span5">
-                <h3>Where the market has him</h3>
-                <MarketRow
-                  marketRank={header.market_rank}
-                  marketSpread={header.market_spread}
-                  sources={header.market_sources}
-                />
-              </section>
             </>
-          )}
-
-          {/* Everything below here is common to both cards: a defense has a
-              schedule of its own, a rookie has a line in front of him, and
-              neither has to be a special case to say so. Each section is
-              omitted when its own data is empty rather than drawn as a row
-              of dashes. */}
-          {profile.schedule.length > 0 && (
-            <section className="pp-card pp-span7">
-              <h3>{profile.bio.season} schedule</h3>
-              <ScheduleRanks weeks={profile.schedule} />
-            </section>
-          )}
-
-          {profile.oline && (
-            <section className="pp-card pp-span5">
-              <h3>{lineHeading(header.position)}</h3>
-              <LineQuality oline={profile.oline} />
-            </section>
           )}
 
           {!sparse && (
@@ -590,13 +597,6 @@ export default function PlayerProfile({
                 targetAge={profile.similar.target_age ?? null}
                 onSelectPlayer={onSelectPlayer}
               />
-            </section>
-          )}
-
-          {profile.depth_chart.length > 0 && (
-            <section className="pp-card pp-span5">
-              <h3>Depth chart</h3>
-              <DepthChartCard team={header.team} groups={profile.depth_chart} />
             </section>
           )}
 

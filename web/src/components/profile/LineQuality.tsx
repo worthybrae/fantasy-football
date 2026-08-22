@@ -1,78 +1,38 @@
 import type { LineQualityData } from './payload'
-import { ordinal, rankTone } from './payload'
+import PopCard, { PopRows, type PopRow } from './PopCard'
+import { ordinal } from './payload'
 
-// Mean seasons in the league, drawn against a ten-year line. A fixed scale
-// rather than a percentile because the payload serves the RAW component and
-// not its rank among the 32 -- inventing a distribution to normalise
-// against would be drawing a comparison nobody computed.
-const EXPERIENCE_SCALE = 10
-
-// The line the player's own production runs through. The composite alone is
-// an opaque 0-100, so the four parts scoring/oline.py built it from are
-// drawn beside it: a line that is 21st because its starters keep getting
-// hurt is a different bet from one that is 21st because it was rebuilt in
-// March, and only the parts tell them apart.
+// The line the player's own production runs through, led by the only number
+// on it that is a comparison: 20th of 32. The composite it is ranked on is an
+// opaque 0-100 and is left off -- a reader who wants to know why the line is
+// 20th is served by the two parts under the rank, not by the score they were
+// averaged into.
+//
+// Continuity and returning, of the four parts `scoring/oline.py` builds, for
+// the same reason: they are the two that say whether this is the same line as
+// last year. Both are shares of one, printed raw -- the card used to spell
+// returning as "3 of 5", which reads better alone but not stacked over a
+// continuity of 0.81, where the eye takes the two as one unit.
+//
+// The rank is plain rather than toned. Every other colour in this popup is
+// carrying a season of the player's own; his team's line is the context those
+// seasons happened in, and a red 24th beside them would compete with them.
 export default function LineQuality({ oline }: { oline: LineQualityData }) {
-  const tone = rankTone(oline.rank, oline.teams)
-  // Only the three share-of-one measures are comparable to each other;
-  // `experience` is in seasons and is deliberately left out of the "what
-  // drags it" sentence rather than scaled into looking comparable.
-  const shares = [
-    { label: 'continuity', value: oline.continuity },
-    { label: 'availability', value: oline.availability },
-    { label: 'returning starters', value: oline.returning },
-  ].filter((s): s is { label: string; value: number } => s.value !== null)
-  const weakest = shares.length
-    ? shares.reduce((a, b) => (b.value < a.value ? b : a))
-    : null
-
-  const bars: { label: string; pct: number; value: string }[] = []
+  const rows: PopRow[] = []
   if (oline.continuity !== null) {
-    bars.push({ label: 'continuity', pct: oline.continuity * 100, value: oline.continuity.toFixed(2) })
-  }
-  if (oline.availability !== null) {
-    bars.push({ label: 'availability', pct: oline.availability * 100, value: oline.availability.toFixed(2) })
+    rows.push({ label: 'Continuity', value: oline.continuity.toFixed(2) })
   }
   if (oline.returning !== null) {
-    // The raw share is what the payload carries; "3 of 5" is the same fact
-    // in the unit the depth chart is written in.
-    bars.push({ label: 'returning', pct: oline.returning * 100, value: `${Math.round(oline.returning * 5)} of 5` })
-  }
-  if (oline.experience !== null) {
-    bars.push({
-      label: 'experience',
-      pct: Math.min(100, (oline.experience / EXPERIENCE_SCALE) * 100),
-      value: `${oline.experience.toFixed(1)} yr`,
-    })
+    rows.push({ label: 'Returning', value: oline.returning.toFixed(1) })
   }
 
   return (
-    <div className="pp-oline">
-      <div className="pp-section-meta mono">
-        <span className={`pp-strong is-${tone}`}>
-          {ordinal(oline.rank)} of {oline.teams}
-        </span>
-        {oline.line_quality !== null && <> · {oline.line_quality.toFixed(1)} / 100</>}
+    <PopCard title="Blocking" note={oline.team}>
+      <div className="pp-pop-lead">
+        <span className="mono pp-pop-lead-value">{ordinal(oline.rank)}</span>
+        <span className="mono pp-pop-lead-of">of {oline.teams}</span>
       </div>
-      <div className="pp-oline-rows">
-        {bars.map((b) => (
-          <div className="pp-oline-row" key={b.label}>
-            <div className="pp-oline-label">{b.label}</div>
-            <div className="pp-oline-track">
-              <div className="pp-oline-fill" style={{ width: `${Math.max(0, Math.min(100, b.pct))}%` }} />
-            </div>
-            <div className="mono pp-oline-value">{b.value}</div>
-          </div>
-        ))}
-      </div>
-      <p className="pp-note">
-        {oline.team}&apos;s {oline.season} line, weighted continuity 0.35,
-        availability 0.30, returning 0.20, experience 0.15 and normalised
-        across the 32 teams.
-        {weakest && ` What drags it is ${weakest.label}, at ${weakest.value.toFixed(2)} of 1.`}
-        {' '}The bars are the raw parts, not their league ranks — the rank
-        above is the only comparison the payload carries.
-      </p>
-    </div>
+      {rows.length > 0 && <PopRows rows={rows} />}
+    </PopCard>
   )
 }

@@ -1,55 +1,83 @@
 import type { ScheduleRankWeek } from './payload'
-import { ordinal, rankTone } from './payload'
+import PopCard from './PopCard'
+import { ordinal } from './payload'
 
-// The season's matchups as league ranks, not percentiles. "20th of 32" is a
-// fact you can act on at a glance; "41st percentile" is one you have to
-// convert first, and the owner asked for it in exactly those words.
+// The season as eighteen bars: one per week, tall where the defence in front
+// of him gave up the most to his position last year.
 //
-// THE DIRECTION IS INVERTED FROM INTUITION AND THE LABELS SAY SO: rank 1 is
-// the SOFTEST defence -- the one that gave up the most to this position last
-// season -- because a high fantasy-points-allowed is a good matchup. Reading
-// it as a difficulty rank turns the best week of the season into the worst.
-export default function ScheduleRanks({ weeks }: { weeks: ScheduleRankWeek[] }) {
-  const ranked = weeks.filter((w) => w.rank !== null)
-  if (weeks.length === 0) return null
+// THE DIRECTION IS INVERTED FROM INTUITION AND THE COPY SAYS SO: a tall green
+// week is a SOFT one, and the card's note calls the season figure "softest"
+// for the same reason. Reading it as a difficulty rank turns the best week of
+// the season into the worst.
+//
+// `pct` rather than `rank`, because the strip is a picture: a rank is a place
+// in a list and would draw 1st and 32nd the same distance apart as 15th and
+// 16th. The exact rank stays on every bar's tooltip, where a reader who wants
+// the number can still have it.
 
-  const sorted = [...ranked].map((w) => w.rank as number).sort((a, b) => a - b)
-  const median = sorted.length
-    ? sorted.length % 2
-      ? sorted[(sorted.length - 1) / 2]
-      : Math.round((sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2)
-    : null
-  const of = ranked.length ? ranked[0].rank_n : null
+// The five-step ramp, cut on the softness percentile. Same class names as the
+// season panels' bars, so one colour means one thing in every picture in this
+// popup -- these cut points are the strip's own, since a percentile is not a
+// finish and has no starters to be graded against.
+const TONES: [number, string][] = [
+  [75, 'is-good'], [60, 'is-strong'], [40, 'is-mid'], [25, 'is-fringe'],
+]
+
+function softnessTone(pct: number): string {
+  return TONES.find(([floor]) => pct >= floor)?.[1] ?? 'is-bad'
+}
+
+/** The season figure, as a place among the league rather than as the
+ *  percentile the payload carries. `sos_pct` is a percentile RANK over the
+ *  32 teams at this position (`profile.py` takes pandas' `rank(pct=True)`),
+ *  so the place it came from is exact rather than reconstructed -- 84.4 of
+ *  32 teams is the 27th hardest, which is the 6th softest. Ties come back
+ *  averaged and round to the nearer of the two places they share. */
+function softestRank(pct: number, teams: number): number {
+  const ascending = Math.round((pct / 100) * teams)
+  return Math.min(teams, Math.max(1, teams - ascending + 1))
+}
+
+export default function ScheduleRanks({ weeks, sosPct }: {
+  weeks: ScheduleRankWeek[]
+  sosPct: number | null
+}) {
+  // Nothing to draw is nothing to say: a position the fantasy-points-allowed
+  // table has no column for gets no card, not eighteen grey stubs.
+  if (!weeks.some((w) => w.pct !== null)) return null
+  const teams = weeks.find((w) => w.rank_n !== null)?.rank_n ?? null
+  const note = sosPct !== null && teams !== null
+    ? `${ordinal(softestRank(sosPct, teams))} softest of ${teams}`
+    : undefined
 
   return (
-    <div className="pp-sched">
-      <div className="pp-section-meta mono">
-        {median !== null && of !== null
-          ? <>median matchup <span className={`pp-strong is-${rankTone(median, of)}`}>
-            {ordinal(median)} of {of}</span> · 1 = softest</>
-          : 'no matchup ranks for this position'}
-      </div>
-      <div className="pp-sched-weeks">
+    // Wider than its third of the row: "6th softest of 32" is the whole
+    // point of the card and does not survive being wrapped or cut.
+    <PopCard title="Schedule" note={note} className="is-wide">
+      <div className="pp-pop-strip">
         {weeks.map((w) => {
-          const bye = w.opponent === null
+          const opponent = w.opponent === null
+            ? 'bye'
+            : `wk ${w.week} ${w.home === false ? 'at ' : 'vs '}${w.opponent}`
+          if (w.pct === null) {
+            // A bye, or a week whose opponent this position is not ranked
+            // against: the chart's own mark for "nothing happened here",
+            // drawn on the baseline rather than left as a hole in the row.
+            return <div className="ctip-col-none" key={w.week} title={opponent} />
+          }
           return (
-            <div className={`pp-sched-week${bye ? ' is-bye' : ''}`} key={w.week}>
-              <div className="mono pp-sched-wk">{w.week}</div>
-              <div className="mono pp-sched-opp">
-                {bye ? 'BYE' : `${w.home === false ? '@' : ''}${w.opponent}`}
-              </div>
-              <div
-                className={`mono pp-sched-rank is-${rankTone(w.rank, w.rank_n)}`}
-                title={w.rank !== null && w.fpa_pg !== null
-                  ? `${ordinal(w.rank)} softest of ${w.rank_n} — allowed ${w.fpa_pg.toFixed(1)} a game to this position last season`
-                  : 'bye week'}
-              >
-                {w.rank ?? '—'}
-              </div>
-            </div>
+            <div
+              key={w.week}
+              className={`ctip-col-bar ${softnessTone(w.pct)}`}
+              style={{ height: `${w.pct}%` }}
+              title={w.rank !== null && w.rank_n !== null && w.fpa_pg !== null
+                ? `${opponent} — ${ordinal(w.rank)} softest of ${w.rank_n}, `
+                  + `allowed ${w.fpa_pg.toFixed(1)} a game to this position last season`
+                : opponent}
+            />
           )
         })}
       </div>
-    </div>
+    </PopCard>
   )
 }

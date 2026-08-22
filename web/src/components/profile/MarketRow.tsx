@@ -1,4 +1,5 @@
 import type { MarketSources } from '../../api'
+import PopCard, { PopRows, type PopRow } from './PopCard'
 import { fmtRank } from './payload'
 
 // The five sources, labels and order of `scoring/market.py`'s consensus --
@@ -6,45 +7,54 @@ import { fmtRank } from './payload'
 const SOURCES: { key: keyof Omit<MarketSources, 'fp_tier'>; label: string }[] = [
   { key: 'ffc', label: 'FFC' },
   { key: 'espn', label: 'ESPN' },
-  { key: 'fp', label: 'FPros' },
+  { key: 'fp', label: 'FantasyPros' },
   { key: 'mfl', label: 'MFL' },
   { key: 'cbs', label: 'CBS' },
 ]
 
-// Where the market has him: the five source ranks the board's consensus is
-// built from, side by side. The consensus alone cannot tell you whether the
-// room agrees with itself, and a player five sites rank 1st is a different
-// pick from one they rank 1st, 3rd, 40th, 42nd and nowhere.
-export default function MarketRow({ marketRank, marketSpread, sources }: {
+// Where the market has him, in four lines: your board, the consensus, and the
+// two sources the consensus is stretched between.
+//
+// The card used to print all five ranks as tiles. Five is more than this
+// column can hold and four of them usually say the same thing -- what the
+// note states is the SPREAD, and the two rows under it are who is at each end
+// of it. A player five sites rank 1st is a different pick from one they rank
+// 3rd and 40th, and those two rows are the shortest way to see which this is.
+export default function MarketRow({ rank, marketRank, marketSpread, sources }: {
+  rank: number
   marketRank: number | null
   marketSpread: number | null
   sources: MarketSources
 }) {
-  const covered = SOURCES.filter(({ key }) => sources[key] !== null).length
+  const covered = SOURCES
+    .map(({ key, label }) => ({ label, rank: sources[key] }))
+    .filter((s): s is { label: string; rank: number } => s.rank !== null)
+
+  const rows: PopRow[] = [
+    // First and in accent, the one number on this card the app computes
+    // rather than reports -- the other three are what it is read against.
+    { label: 'Your board', value: String(rank), tone: 'accent' },
+  ]
+  if (marketRank !== null) rows.push({ label: 'Consensus', value: fmtRank(marketRank) })
+  if (covered.length > 0) {
+    const low = covered.reduce((a, b) => (b.rank < a.rank ? b : a))
+    const high = covered.reduce((a, b) => (b.rank > a.rank ? b : a))
+    rows.push({ label: low.label, value: fmtRank(low.rank) })
+    // Ties are broken by `market.py`'s own order, so one source can hold both
+    // ends -- when it does, that is one row, not the same row twice.
+    if (high.label !== low.label) rows.push({ label: high.label, value: fmtRank(high.rank) })
+  }
+
   return (
-    <div className="pp-market">
-      <div className="pp-section-meta mono">
-        {marketRank === null
-          ? 'no source covers him'
-          : <>avg <span className="pp-strong">{fmtRank(marketRank)}</span>
-            {marketSpread !== null && <> · they disagree by {Math.round(marketSpread)}</>}</>}
-      </div>
-      <div className="pp-market-cells">
-        {SOURCES.map(({ key, label }) => (
-          <div className={`pp-market-cell${sources[key] === null ? ' is-empty' : ''}`} key={key}>
-            <div className="pp-cap">{label}</div>
-            <div className="mono pp-market-rank">{fmtRank(sources[key])}</div>
-          </div>
-        ))}
-      </div>
-      <p className="pp-note">
-        {covered === 0
-          ? 'Undrafted everywhere the board looks — the consensus rank on this card is his board rank, not a market one.'
-          : covered < SOURCES.length
-            ? `Only ${covered} of the five sources rank him at all; the consensus is an average of those.`
-            : 'All five sources rank him, so the consensus is a real average rather than one site speaking for the room.'}
-        {sources.fp_tier !== null && ` FantasyPros has him in tier ${sources.fp_tier}.`}
-      </p>
-    </div>
+    <PopCard
+      title="Market"
+      note={marketSpread !== null
+        ? `spread ${fmtRank(marketSpread)}`
+        : covered.length > 0
+          ? `${covered.length} of ${SOURCES.length} sources`
+          : 'unranked'}
+    >
+      <PopRows rows={rows} />
+    </PopCard>
   )
 }
