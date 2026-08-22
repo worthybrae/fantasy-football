@@ -15,12 +15,20 @@ const HEADLINES = 2
 // section. An ESPN-tagged item is about this player because ESPN said so; a
 // name-matched item is about this player because a search for his name and
 // team returned it, which measured 93-96% relevant and is therefore right
-// most of the time and wrong sometimes. In a card this size the distinction
-// is a filled mark against a hollow one -- shape, not colour alone -- and
-// the link's own title says which in words.
-const ATTR_TITLE = {
-  exact: 'ESPN tagged this article with his athlete id',
-  match: 'Matched by searching his name and team — usually him, not always',
+// most of the time and wrong sometimes.
+//
+// So EVERY item carries the word for its own feed. The first attempt at this
+// card spent a 4px mark on it -- filled against hollow -- and hid the words
+// in a `title`: a two-pixel difference nobody can see, behind a hover no
+// keyboard and no screen reader ever performs. Under a pick clock this is
+// the difference between a headline you trust and one you go and check, so
+// it is text, on screen, on both.
+const ATTR = {
+  exact: { label: 'tagged', title: 'ESPN tagged this article with his athlete id' },
+  match: {
+    label: 'name match',
+    title: 'Matched by searching his name and team — usually him, not always',
+  },
 }
 
 export default function NewsPanel({ items }: { items: NewsItem[] }) {
@@ -33,12 +41,11 @@ export default function NewsPanel({ items }: { items: NewsItem[] }) {
       <ul className="pp-pop-news">
         {items.slice(0, HEADLINES).map((item) => {
           const tagged = item.attribution === ATTR_EXACT
+          const attr = tagged ? ATTR.exact : ATTR.match
           return (
             <li className="pp-pop-news-item" key={item.url}>
-              <span
-                className={`pp-pop-news-dot${tagged ? ' is-exact' : ''}`}
-                aria-hidden="true"
-              />
+              {/* A bullet, nothing more -- see `.pp-pop-news-dot`. */}
+              <span className="pp-pop-news-dot" aria-hidden="true" />
               <div className="pp-pop-news-body">
                 <a
                   className="pp-pop-news-link"
@@ -48,13 +55,22 @@ export default function NewsPanel({ items }: { items: NewsItem[] }) {
                   // and the tab it opens would otherwise get a handle on
                   // this one.
                   rel="noreferrer noopener"
-                  title={tagged ? ATTR_TITLE.exact : ATTR_TITLE.match}
                 >
                   {item.headline}
                 </a>
                 <div className="mono pp-pop-news-meta">
-                  {item.source ?? 'unattributed'}
-                  {item.published_at !== null && ` · ${ageLabel(item.published_at)}`}
+                  <span>
+                    {item.source ?? 'unattributed'}
+                    {item.published_at !== null && ` · ${ageLabel(item.published_at)}`}
+                  </span>
+                  {/* The `title` is the long form for a reader who wants it,
+                      never the only form: the label carries the claim. */}
+                  <span
+                    className={`pp-pop-news-tag${tagged ? ' is-exact' : ''}`}
+                    title={attr.title}
+                  >
+                    {attr.label}
+                  </span>
                 </div>
               </div>
             </li>

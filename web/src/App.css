@@ -4607,22 +4607,18 @@ button.pp-pop-comp:focus-visible {
   gap: 7px;
 }
 
-/* Filled for a headline ESPN tagged with his own athlete id, hollow for one
-   a name-and-team search returned. Those are different claims -- the second
-   measured 93-96% relevant, so it is right most of the time and wrong some
-   of it -- and this is the smallest mark that can hold them apart. Shape
-   rather than colour alone, and the link beside it says which in words. */
+/* A bullet, and only a bullet: it says a headline starts here. It used to
+   carry the attribution as filled-versus-hollow, which at 4px is a two-pixel
+   interior nobody can see -- and a distinction that decides whether you trust
+   a headline or check it cannot live in two pixels. It is stated in words
+   below (`.pp-pop-news-tag`) instead. */
 .pp-pop-news-dot {
   flex: 0 0 auto;
   width: 4px;
   height: 4px;
   margin-top: 5px;
-  border: 1px solid var(--accent);
-  border-radius: 50%;
-}
-
-.pp-pop-news-dot.is-exact {
   background: var(--accent);
+  border-radius: 50%;
 }
 
 .pp-pop-news-body {
@@ -4647,8 +4643,37 @@ button.pp-pop-comp:focus-visible {
   text-decoration: underline;
 }
 
+/* Source, age, and how the headline was attributed to him. A flex row rather
+   than one run of text so the tag drops whole to a second line under a long
+   source name instead of breaking across one. */
 .pp-pop-news-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 5px;
   margin-top: 2px;
   font-size: 9px;
   color: var(--text-3);
+}
+
+/* WHICH FEED SAID THIS IS ABOUT HIM, in words, on every item. `tagged` is
+   ESPN's own athlete id on the article; `name match` is a name-and-team
+   search that measured 93-96% relevant, which is right most of the time and
+   wrong some of it. The same two words the card used before it was a card,
+   and the same pill: visible without hovering, reachable without a mouse,
+   and read out as text rather than as a colour. */
+.pp-pop-news-tag {
+  flex: 0 0 auto;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text-3);
+}
+
+/* The confident one takes the accent, as it did on the old card. The quiet
+   one is the default because a guess should not be the loudest thing in the
+   row. */
+.pp-pop-news-tag.is-exact {
+  border-color: var(--accent-border);
+  color: var(--accent);
 }
