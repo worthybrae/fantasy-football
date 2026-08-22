@@ -201,7 +201,21 @@ export function perGameDelta(seasons: SeasonSummary[], projPpg: number | null):
 { label: string; tone: string } | null {
   const rows = playedSeasons(seasons)
   if (!rows.length || projPpg === null) return null
-  const shown = Math.round((projPpg - rows[0].ppg) * 10) / 10
+  return signedChange(projPpg - rows[0].ppg)
+}
+
+/** How a change is printed and which way it is painted, in one place: the
+ *  board's Proj/G column and the hover panel behind it both show the same
+ *  move against last season, and a sign or a colour that disagreed between
+ *  them would be two answers to one question.
+ *
+ *  Rounded BEFORE the sign is read, so the colour cannot disagree with the
+ *  number beside it -- a change of -0.04 prints "0.0", and painting that red
+ *  would claim a fall the number is not showing. A change that rounds to
+ *  nothing gets no tone: there is no direction to paint.
+ */
+export function signedChange(value: number): { label: string; tone: string } {
+  const shown = Math.round(value * 10) / 10
   return {
     label: `${shown > 0 ? '+' : ''}${shown.toFixed(1)}`,
     tone: shown > 0 ? 'is-up' : shown < 0 ? 'is-down' : '',

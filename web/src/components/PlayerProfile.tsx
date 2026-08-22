@@ -339,7 +339,7 @@ function PopPanels({ profile, settings }: {
           // direction rather than a level, and the direction is why it is
           // there. The panel's own columns already say the levels.
           note={delta === null ? 'projection only'
-            : <span className={`ctip-delta ${delta.tone}`}>{delta.label}</span>}
+            : <span className={`delta-tone ${delta.tone}`}>{delta.label}</span>}
           cols={perGame}
           wide
         />

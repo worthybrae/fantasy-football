@@ -183,7 +183,7 @@ function ChangeBody({ data }: BodyProps): ReactNode {
               {/* Green up, red down -- the one number on this panel that is a
                   direction rather than a level, and the direction is the
                   point of it. */}
-              <span className={`ctip-delta ${delta.tone}`}>{delta.label}</span>
+              <span className={`delta-tone ${delta.tone}`}>{delta.label}</span>
               {' vs last season'}
             </>
           )}

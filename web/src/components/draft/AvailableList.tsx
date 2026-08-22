@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import type { LiveCandidate, LiveSettings, Player } from '../../api'
 import { CellTip, loadProfile, type CellTipKind } from './CellTip'
 import { finishHeight, finishTone, startersAt, weightedFinish } from './finish'
+import { signedChange } from './panels'
 import { BAR_CEILING, SEASON_GAMES, barThresholds, barTone } from './weeks'
 import { riskTone } from './tone'
 
@@ -655,6 +656,17 @@ const AvailableRow = memo(function AvailableRow({
                     every row by the same constant cannot reorder them. */}
                 <td className="avail-col-num mono avail-proj">
                   {(c.proj_points / SEASON_GAMES).toFixed(1)}
+                  {/* The projection, and next to it which way it moved. The
+                      CHANGE meter two columns left bands the same number --
+                      the meter answers "is this a big move", this answers
+                      "by how much, and up or down". Null for a player with
+                      no last season to move from, where a signed zero would
+                      be a claim about a season he has not played. */}
+                  {change !== null && (
+                    <span className={`avail-proj-delta delta-tone ${signedChange(change).tone}`}>
+                      {signedChange(change).label}
+                    </span>
+                  )}
                 </td>
                 {/* null survive_pct (no roster to survive FOR yet) gets no
                     riskTone color at all -- riskTone's red/amber/green ramp

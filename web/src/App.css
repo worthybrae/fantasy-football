@@ -4403,8 +4403,28 @@ button.roster-row:focus-visible {
    already uses for a direction (`--ok` / `--fail`, the status pair, not the
    five-step ramp -- a rise is not a tier). A move that rounds to zero keeps
    the note's own colour: there is no direction to paint. */
-.ctip-delta.is-up { color: var(--ok); }
-.ctip-delta.is-down { color: var(--fail); }
+/* The signed move sits after the projection in the same cell, a step down in
+   size so the projection stays the number the column is read for and sorted
+   on. `min-width` reserves the widest it gets ("+10.0"), so a column of rows
+   whose deltas differ in width does not ripple. */
+.avail-proj-delta {
+  display: inline-block;
+  min-width: 30px;
+  margin-left: var(--space-1);
+  text-align: right;
+  font-size: 10px;
+}
+
+/* One line, always. Wrapped onto a second the delta would grow the height of
+   every row on the board -- a table this dense pays for a row's height once
+   per player, and the projection is not worth that. The column widens by the
+   delta instead, which it pays for once. */
+.avail-proj {
+  white-space: nowrap;
+}
+
+.delta-tone.is-up { color: var(--ok); }
+.delta-tone.is-down { color: var(--fail); }
 
 /* A small season table: a label column that takes what it needs and one
    equal column per season. Grid rather than rows of flex, so "Snap share"
