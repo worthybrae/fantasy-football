@@ -83,8 +83,15 @@ export default function PickTicker({ board, onOpenPlayer }: PickTickerProps) {
                     )}
                     <span className="pick-ticker-no mono">{cell.overall}</span>
                     {posBadge(cell.player.position)}
-                    <span className="pick-ticker-name">{cell.player.name}</span>
-                    <span className="pick-ticker-team">{team}</span>
+                    {/* Stacked, not in a row. Sharing one line, the name and
+                        the team each got half the width and both ellipsised
+                        -- "Bijan R..." next to "Tristan's Tal..." names
+                        neither the player nor the manager. Two lines give
+                        each of them the whole entry to use. */}
+                    <span className="pick-ticker-who">
+                      <span className="pick-ticker-name">{cell.player.name}</span>
+                      <span className="pick-ticker-team">{team}</span>
+                    </span>
                   </button>
                 ) : (
                   <span className="pick-ticker-pick" aria-label={label}>
@@ -97,8 +104,15 @@ export default function PickTicker({ board, onOpenPlayer }: PickTickerProps) {
                     )}
                     <span className="pick-ticker-no mono">{cell.overall}</span>
                     {posBadge(cell.player.position)}
-                    <span className="pick-ticker-name">{cell.player.name}</span>
-                    <span className="pick-ticker-team">{team}</span>
+                    {/* Stacked, not in a row. Sharing one line, the name and
+                        the team each got half the width and both ellipsised
+                        -- "Bijan R..." next to "Tristan's Tal..." names
+                        neither the player nor the manager. Two lines give
+                        each of them the whole entry to use. */}
+                    <span className="pick-ticker-who">
+                      <span className="pick-ticker-name">{cell.player.name}</span>
+                      <span className="pick-ticker-team">{team}</span>
+                    </span>
                   </span>
                 )}
               </li>
