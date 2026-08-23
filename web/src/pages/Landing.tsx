@@ -122,8 +122,20 @@ function useCanDrag(): boolean {
 // mark: a bookmark's title is the anchor's textContent, so an inline <svg>
 // would be dropped on the way to the bar and the label would arrive naked.
 // Nothing else may be added inside the anchor for the same reason.
-function bookmarkAnchor(): string {
+//
+// `describedBy` points at the copy hint beside it. The chip is the hero's
+// first tab stop and, by design, does nothing on Enter -- a click would run
+// the bookmarklet against this page rather than a draft. A keyboard reader
+// who is told only "Draft Assistant" and then gets silence has hit a dead
+// end; described by the hint, they are told the same thing the sighted
+// reader is, that the route for them is the copy button next along.
+//
+// An attribute, not content: `textContent` is what becomes the bookmark's
+// title, so this cannot disturb it the way an inner element would.
+function bookmarkAnchor(describedBy?: string): string {
+  const described = describedBy ? "aria-describedby='" + describedBy + "' " : ""
   return "<a class='lp-bookmark' title='Drag me to your bookmarks bar' "
+    + described
     + "onclick='return false' href='" + BOOKMARKLET + "'>"
     + "<span aria-hidden='true'>🏈</span>&nbsp;Draft&nbsp;Assistant</a>"
 }
@@ -593,7 +605,7 @@ export default function Landing() {
                   Drag this to your bookmarks bar
                 </p>
                 <div className="lp-drag-chip">
-                  <span dangerouslySetInnerHTML={{ __html: bookmarkAnchor() }} />
+                  <span dangerouslySetInnerHTML={{ __html: bookmarkAnchor('hero-copy-hint') }} />
                   {/* The chip's onclick returns false on purpose (see
                       bookmarkAnchor) -- it does nothing for a mouse click or a
                       keyboard Enter alike. This is the route a keyboard user
@@ -704,7 +716,7 @@ export default function Landing() {
               above for why this is raw HTML. */}
           {!canDrag && <p className="lp-nodrag-line">{NO_DRAG_LINE}</p>}
           <div className="lp-bookmark-row">
-            <span dangerouslySetInnerHTML={{ __html: bookmarkAnchor() }} />
+            <span dangerouslySetInnerHTML={{ __html: bookmarkAnchor('setup-copy-hint') }} />
             {canDrag && (
               <span className="lp-bookmark-hint">← drag this to your bookmarks bar</span>
             )}
