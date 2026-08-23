@@ -261,3 +261,60 @@ def test_the_real_captures_first_frame_states_autodraft_before_anything_else():
         lis.on_frame(p)
     assert lis.my_team_id == 2
     assert lis.my_autodraft is False
+
+
+# ---------------------------------------------------------------------------
+# Arrival times: the only place a frame's timestamp can ever be learned.
+# ---------------------------------------------------------------------------
+
+
+def test_every_event_carries_the_time_it_arrived():
+    """ESPN's frames carry no clock and neither does the recorded capture, so
+    if this object does not stamp a frame as it lands, how long a pick took is
+    gone the moment the draft ends. `mock_farm.draft_timeline` folds these
+    stamps into `seconds_to_pick`."""
+    ticks = iter([10.0, 11.5, 14.0])
+    lis = DraftListener({}, clock=lambda: next(ticks))
+    lis.on_frame("SELECTING 3 30000")
+    lis.on_frame("CLOCK 0 21500")
+    lis.on_frame("SELECTED 3 100 2")
+    assert [e.received_at for e in lis.events] == [10.0, 11.5, 14.0]
+
+
+def test_a_frame_that_parses_to_nothing_is_not_stamped_or_kept():
+    """An empty frame is not an event, so it neither lands in `events` nor
+    burns a reading of the clock -- the timestamp belongs to a frame, not to
+    the socket waking up."""
+    calls = []
+
+    def clock():
+        calls.append(1)
+        return float(len(calls))
+
+    lis = DraftListener({}, clock=clock)
+    assert lis.on_frame("   ") is False
+    assert lis.events == []
+    assert calls == []
+
+
+def test_the_default_clock_is_monotonic_and_never_goes_backwards():
+    """Wall clock can step backwards under an NTP correction, which would
+    turn a real ten-second deliberation into a negative one. Only differences
+    within one session are ever taken from this, so monotonic costs nothing
+    and rules that out."""
+    lis = DraftListener({})
+    for frame in ("SELECTING 3 30000", "CLOCK 0 29000", "SELECTED 3 100 2"):
+        lis.on_frame(frame)
+    stamps = [e.received_at for e in lis.events]
+    assert all(s is not None for s in stamps)
+    assert stamps == sorted(stamps)
+
+
+def test_an_event_built_without_a_listener_has_no_arrival_time():
+    """`parse_frame` is a pure text split -- `picks_from_events` and the tests
+    call it over recorded captures, where "now" would be a lie. None means
+    "never timestamped" and every consumer has to treat it as such rather than
+    as zero."""
+    from pipeline.espn_live import parse_frame
+
+    assert parse_frame("SELECTED 3 100 2").received_at is None

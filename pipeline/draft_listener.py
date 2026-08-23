@@ -15,14 +15,30 @@ same team, which ESPN may not tolerate.
 whole protocol is testable from the recorded fixture. `run_listener` is the
 only part that needs a browser.
 """
+import time
+
 from pipeline.espn_live import LivePicks, parse_frame, picks_from_events
 
 
 class DraftListener:
     """Accumulates draft frames and folds them into picks on demand."""
 
-    def __init__(self, crosswalk: dict):
+    def __init__(self, crosswalk: dict, clock=time.monotonic):
         self.crosswalk = dict(crosswalk or {})
+        # THE ONLY PLACE A FRAME'S ARRIVAL TIME CAN BE LEARNED. Nothing ESPN
+        # sends carries a timestamp -- not the frames, not the recorded
+        # capture in data/draft_room_trace.jsonl -- so if this object does
+        # not stamp a frame as it lands, how long a pick took is gone the
+        # moment the draft ends. `mock_farm.draft_timeline` folds these
+        # stamps into `seconds_to_pick` / `clock_seconds` per pick.
+        #
+        # Injectable so a test can replay a capture through a clock it
+        # controls and assert exact durations. `time.monotonic` is the
+        # default and the reason is in `DraftEvent.received_at`: only
+        # differences within one session are ever taken, and monotonic
+        # cannot step backwards under an NTP correction the way wall clock
+        # can.
+        self._clock = clock
         self.events = []
         self.on_the_clock = None
         self.ms_remaining = None
@@ -75,6 +91,15 @@ class DraftListener:
         event = parse_frame(payload)
         if event is None:
             return False
+        # Stamped BEFORE anything is folded, and before the two `picks()`
+        # folds below, which walk the whole accumulated event list and grow
+        # with the draft -- by the last pick of a 128-pick room that is two
+        # passes over 128 picks' worth of frames, and charging that to the
+        # frame's own arrival time would inflate every measured deliberation
+        # by the cost of our own bookkeeping. A malformed clock is not a
+        # concern here (the callable is ours), so no guard: a clock that
+        # raises is a programming error and should surface as one.
+        event = event._replace(received_at=self._clock())
         before_picks = len(self.picks().rows)
         had_team = self.my_team_id is not None
         self.events.append(event)

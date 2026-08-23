@@ -153,6 +153,25 @@ LINEUP_SLOTS = {0: "QB", 2: "RB", 4: "WR", 6: "TE", 16: "DST", 17: "K"}
 class DraftEvent(NamedTuple):
     verb: str
     args: list
+    # When this frame reached us, as `time.monotonic` reads it -- stamped by
+    # `DraftListener.on_frame`, which is the only place in this project that
+    # sees a frame arrive, and NOT by `parse_frame`, which is a pure text
+    # split that a test (and `picks_from_events`) calls over a recorded
+    # capture where "now" would be a lie.
+    #
+    # MONOTONIC, NOT WALL CLOCK, and the choice matters: the only thing ever
+    # computed from this is a DIFFERENCE between two frames of the same
+    # session (see mock_farm.draft_timeline), and `time.time` can step
+    # backwards under an NTP correction, which would turn a real ten-second
+    # deliberation into a negative one. The cost is that the value is
+    # meaningless as an absolute instant and is never stored as one; the
+    # corpus keeps the difference, not this.
+    #
+    # Defaulted to None so every existing construction site -- and every
+    # event built by a caller with no clock at all -- still type-checks and
+    # still compares equal to a freshly parsed frame. Consumers must treat
+    # None as "this frame was never timestamped" rather than as zero.
+    received_at: float | None = None
 
 
 def parse_frame(payload: str) -> "DraftEvent | None":

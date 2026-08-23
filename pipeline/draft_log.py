@@ -70,9 +70,10 @@ _DRAFT_COLUMNS = ["draft_id", "source", "league_id", "season", "recorded_at",
                   "settings_json", "human_seats"]
 _PICK_COLUMNS = ["draft_id", "pick_no", "round", "slot", "owner_key",
                  "is_anonymous", "player_id", "position", "adp_rank",
-                 "proj_points", "autodrafted", "had_owner"]
+                 "proj_points", "autodrafted", "had_owner",
+                 "seconds_to_pick", "clock_seconds"]
 _POOL_COLUMNS = ["draft_id", "player_id", "position", "team", "adp_rank",
-                 "proj_points"]
+                 "proj_points", "espn_rank", "espn_proj", "bye"]
 
 
 def corpus_conn(path: str | None = None):
@@ -139,6 +140,51 @@ def ensure_schema(conn) -> None:
     # filter and should not have to aggregate 128 pick rows to ask.
     conn.execute(
         "ALTER TABLE draft_log ADD COLUMN IF NOT EXISTS human_seats INTEGER")
+    # THE BOARD THE ROOM WAS ACTUALLY LOOKING AT. Everything stored above
+    # prices a player against the consensus market (`adp_rank`), and the
+    # measurement in docs/superpowers/specs/2026-08-23-best-opponent-model-
+    # design.md says that is the wrong list: a drafter in an ESPN room reads
+    # ESPN's own ranking, on screen, sorted by ESPN's rank, and 23.1% of
+    # human picks are the top name on THAT list against 15.9% on the market
+    # one. A model that cannot see the list its subjects are reading is
+    # guessing at their input. So the pool snapshot gains ESPN's rank and
+    # ESPN's displayed projection alongside the market ones, and `bye`,
+    # which several of the new candidate features (bye conflicts against the
+    # roster already drafted) need and which no other stored column implies.
+    #
+    # NULL is a real answer here and has two distinct causes: a draft
+    # recorded before these columns existed (fillable, and
+    # pipeline.backfill_espn_board fills it -- see that module for why
+    # today's board is an honest source for a preseason quantity), and a
+    # player ESPN has no ranking for at all (not fillable, and not a defect:
+    # ESPN publishes 500 rows and the pool is larger).
+    conn.execute(
+        "ALTER TABLE draft_log_pool ADD COLUMN IF NOT EXISTS espn_rank DOUBLE")
+    conn.execute(
+        "ALTER TABLE draft_log_pool ADD COLUMN IF NOT EXISTS espn_proj DOUBLE")
+    conn.execute(
+        "ALTER TABLE draft_log_pool ADD COLUMN IF NOT EXISTS bye INTEGER")
+    # HOW LONG THE PICK TOOK, and how long it was allowed to take. ESPN's
+    # socket has always carried both -- `SELECTING <teamId> <clock_ms>` opens
+    # a turn and the team's next `SELECTED` closes it -- and we threw the
+    # timing away, keeping only the order. It is the most behavioral thing in
+    # the stream: a three-second pick is somebody clicking the top of the
+    # list, a sixty-second pick is somebody deliberating, and an autodrafted
+    # pick sits exactly at the clock's expiry. `clock_seconds` is stored
+    # beside it rather than assumed to be 30, because it is a room setting
+    # and "took 25 seconds" means opposite things on a 30-second clock and a
+    # 90-second one.
+    #
+    # UNRECOVERABLE FOR EVERY DRAFT ALREADY RECORDED. Nothing on disk holds
+    # the frame arrival times of a draft that has already been played, so
+    # those rows stay NULL forever -- never 0, never a mean, never the clock
+    # length. A default here would be indistinguishable from a real
+    # instantaneous pick to every reader, and this column exists precisely to
+    # tell those two apart.
+    conn.execute("ALTER TABLE draft_log_pick "
+                 "ADD COLUMN IF NOT EXISTS seconds_to_pick DOUBLE")
+    conn.execute("ALTER TABLE draft_log_pick "
+                 "ADD COLUMN IF NOT EXISTS clock_seconds DOUBLE")
 
 
 def draft_id_for(source: str, league_id, season, started_at=None) -> str:

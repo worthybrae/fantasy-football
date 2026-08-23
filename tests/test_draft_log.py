@@ -211,3 +211,78 @@ def test_a_rolled_back_record_leaves_the_connection_usable(corpus):
     assert len(dl.picks(corpus)) == 4
     assert corpus.execute("SELECT count(*) FROM draft_log WHERE draft_id = ?",
                           [draft_id]).fetchone()[0] == 1
+
+
+def test_the_espn_and_timing_columns_land_on_a_corpus_that_already_has_rows():
+    """The migration that matters most, because it ran against a live file.
+
+    `espn_rank`/`espn_proj`/`bye` on the pool and `seconds_to_pick`/
+    `clock_seconds` on the picks were added while three farm processes were
+    writing drafts into the real corpus. ALTER ... ADD COLUMN IF NOT EXISTS
+    is the only shape that is safe there: a rebuild would destroy the one
+    copy of every draft ever recorded (see this module's docstring), and the
+    existing rows must come out the other side unchanged, with NULL in the
+    new columns rather than a default.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = f"{tmp}/old_corpus.duckdb"
+        conn = duckdb.connect(path)
+        # The DDL as it stood BEFORE this change, written by hand rather than
+        # imported, so this test keeps meaning the same thing afterwards.
+        conn.execute("""CREATE TABLE draft_log_pick (
+            draft_id VARCHAR, pick_no INTEGER, round INTEGER, slot INTEGER,
+            owner_key VARCHAR, is_anonymous BOOLEAN, player_id VARCHAR,
+            position VARCHAR, adp_rank DOUBLE, proj_points DOUBLE,
+            autodrafted BOOLEAN, had_owner BOOLEAN,
+            PRIMARY KEY (draft_id, pick_no))""")
+        conn.execute("""CREATE TABLE draft_log_pool (
+            draft_id VARCHAR, player_id VARCHAR, position VARCHAR,
+            team VARCHAR, adp_rank DOUBLE, proj_points DOUBLE,
+            PRIMARY KEY (draft_id, player_id))""")
+        conn.execute("INSERT INTO draft_log_pick VALUES "
+                     "('d1', 1, 1, 1, 'anon:d1:1', true, 'p1', 'RB', 1.0, "
+                     "200.0, false, true)")
+        conn.execute("INSERT INTO draft_log_pool VALUES "
+                     "('d1', 'p1', 'RB', 'DET', 1.0, 200.0)")
+
+        dl.ensure_schema(conn)
+        dl.ensure_schema(conn)         # idempotent: every open runs this
+
+        pick = conn.execute("SELECT * FROM draft_log_pick").df()
+        pool = conn.execute("SELECT * FROM draft_log_pool").df()
+        assert len(pick) == 1 and len(pool) == 1, "existing rows must survive"
+        assert pick["player_id"].iloc[0] == "p1"
+        assert bool(pick["had_owner"].iloc[0]) is True
+        # NULL on a draft recorded before the column existed, and for
+        # `seconds_to_pick` that is permanent: nothing on disk holds the
+        # frame arrival times of a draft that is already over.
+        for col in ("seconds_to_pick", "clock_seconds"):
+            assert pd.isna(pick[col].iloc[0]), col
+        for col in ("espn_rank", "espn_proj", "bye"):
+            assert pd.isna(pool[col].iloc[0]), col
+        conn.close()
+
+
+def test_a_writer_that_omits_the_new_columns_still_records_its_draft(corpus):
+    """A farm process holding the OLD module keeps writing while the schema
+    moves under it -- that is the normal way this change lands, not an edge
+    case. `_shape` fills what the frame omits, and `record` names its columns
+    so a drifted frame fails loudly instead of writing every value one column
+    to the left."""
+    old_pool = pd.DataFrame({"player_id": ["p0"], "position": ["RB"],
+                             "team": ["DET"], "adp_rank": [1.0],
+                             "proj_points": [250.0]})
+    draft_id = dl.record(corpus, dl.DraftRecord(
+        source=dl.SOURCE_MOCK, season=2026, started_at="t",
+        picks=_picks(2), pool=old_pool))
+
+    pool = corpus.execute("SELECT * FROM draft_log_pool WHERE draft_id = ?",
+                          [draft_id]).df()
+    picks = corpus.execute("SELECT * FROM draft_log_pick WHERE draft_id = ?",
+                           [draft_id]).df()
+    assert len(pool) == 1 and len(picks) == 2
+    assert pool["proj_points"].iloc[0] == 250.0     # not shifted a column
+    assert pd.isna(pool["espn_rank"].iloc[0])
+    assert pd.isna(picks["seconds_to_pick"]).all()

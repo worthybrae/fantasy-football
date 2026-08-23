@@ -191,11 +191,22 @@ class PickFrame(NamedTuple):
     changed is that the first case is now rare rather than usual, because a
     seat with no owner is known to be autodrafting before a single frame
     arrives.
+
+    `seconds_to_pick` and `clock_seconds` are the turn's timing, and they are
+    None together whenever this pick's turn was never seen opening -- a
+    connect that lands mid-turn is the real case. None, never 0.0: an
+    instantaneous pick is a real and interesting thing (somebody clicking the
+    top of the list the moment it is their turn) and it must stay
+    distinguishable from a pick we simply could not time. Defaulted so the
+    hand-built `PickFrame`s in the tests, and any caller folding an event
+    list that carries no timestamps, keep working unchanged.
     """
     pick_no: int
     team_id: int | None
     espn_id: int | None
     autodrafted: bool | None
+    seconds_to_pick: float | None = None
+    clock_seconds: float | None = None
 
 
 def draft_timeline(events, owners: dict | None = None) -> list:
@@ -247,6 +258,46 @@ def draft_timeline(events, owners: dict | None = None) -> list:
     the flag, 1113 the pick), so reading the flag as the SELECTED arrives
     attributes it to the right pick.
 
+    THE TIMING IS A SECOND STATE MACHINE OVER THE SAME FRAMES, and it is
+    folded here rather than measured live for exactly the reason the
+    autodraft flag is: each pick wants ITS OWN turn's numbers, and a
+    latest-value field on the listener only ever answers "now".
+
+      - `SELECTING <teamId> <clock_ms>` OPENS a turn. The third argument is
+        how long that turn is allowed to last (30000 in every one of the 128
+        turns in data/draft_room_trace.jsonl, but read rather than assumed --
+        it is a room setting, and "took 25 seconds" means opposite things on
+        a 30-second clock and a 90-second one).
+      - That team's next `SELECTED` CLOSES it. `seconds_to_pick` is the
+        difference between the two frames' `received_at`, which
+        `DraftListener.on_frame` stamps from a monotonic clock.
+      - EXACTLY ONE TURN IS OPEN AT A TIME, because the room has exactly one
+        clock. A `SELECTING` for a different team therefore replaces the open
+        turn rather than joining it -- otherwise a turn that somehow never
+        produced a pick would sit there and attach its start time to that
+        team's NEXT pick, several minutes later, and report a deliberation
+        that never happened.
+      - A REPEATED `SELECTING` FOR THE TEAM ALREADY ON THE CLOCK KEEPS THE
+        FIRST TIMESTAMP. ESPN re-sends the room's current state on every
+        (re)JOIN and this process reconnects whenever the socket drops, so
+        the repeat is a replay of a turn already in progress; taking the
+        later stamp would silently shorten a real deliberation to the age of
+        the reconnect. The same reconnect replays the whole draft's SELECTED
+        frames, and those are deduped above -- BEFORE this fold sees them --
+        so a replay can neither close a turn twice nor emit a second timing
+        for a pick already counted.
+      - A pick with NO open turn for its team is None/None, not zero: the
+        farm's own connect can land mid-turn, and "we did not see this turn
+        start" is not "he picked instantly". A negative difference (which
+        monotonic makes unreachable in one session, but a hand-assembled or
+        merged event list could still produce) is discarded the same way,
+        because a duration that cannot be true is worse than a missing one.
+      - AUTODRAFTED PICKS ARE NOT SPECIAL-CASED and should not be. ESPN
+        makes them the instant the clock expires, so they fall out of this
+        arithmetic at `seconds_to_pick ~= clock_seconds` -- which is the
+        signal, not noise: it is how a model tells "the engine picked" from
+        "a person picked quickly" without trusting the flag.
+
     `owners` omitted, or missing a team, leaves that seat NULL until a frame
     says otherwise -- the old behaviour, kept for the case where the mTeam
     read failed. NULL now means genuinely unknown rather than "usual".
@@ -266,8 +317,27 @@ def draft_timeline(events, owners: dict | None = None) -> list:
     seen: set = set()
     out: list = []
     pick_no = 0
+    # The one open turn, or Nones when nobody is on a clock we watched start.
+    # `open_at` is a `received_at` stamp off the frame itself, so an event
+    # list assembled without a listener (no timestamps) simply produces
+    # None durations rather than failing.
+    open_team = None
+    open_at = None
+    open_clock_ms = None
     for event in events:
         if event is None:
+            continue
+        if event.verb == "SELECTING" and event.args:
+            team = _as_int(event.args[0])
+            clock_ms = _as_int(event.args[1]) if len(event.args) > 1 else None
+            if team != open_team:
+                open_team, open_at = team, event.received_at
+                open_clock_ms = clock_ms
+            elif open_clock_ms is None:
+                # Same team, still on the clock: keep the earlier start (see
+                # the docstring on reconnect replays) but take a clock length
+                # the first frame did not carry.
+                open_clock_ms = clock_ms
             continue
         if event.verb == "AUTODRAFT" and len(event.args) > 1:
             team = _as_int(event.args[0])
@@ -284,7 +354,19 @@ def draft_timeline(events, owners: dict | None = None) -> list:
         if espn_id is not None:
             seen.add(espn_id)
         team = _as_int(event.args[0]) if event.args else None
-        out.append(PickFrame(pick_no, team, espn_id, autodraft.get(team)))
+        seconds = None
+        clock_seconds = None
+        if team is not None and team == open_team:
+            landed = event.received_at
+            if open_at is not None and landed is not None and landed >= open_at:
+                seconds = float(landed - open_at)
+            if open_clock_ms is not None:
+                clock_seconds = open_clock_ms / 1000.0
+            # Closed whether or not it could be timed: this pick consumed the
+            # turn, and leaving it open would hand its start to the next one.
+            open_team = open_at = open_clock_ms = None
+        out.append(PickFrame(pick_no, team, espn_id, autodraft.get(team),
+                             seconds, clock_seconds))
     return out
 
 
@@ -447,6 +529,77 @@ class Tool:
     names: list | None = None
 
 
+def espn_pool_columns(board: pd.DataFrame, conn) -> pd.DataFrame:
+    """`player_id` -> the board as ESPN publishes it: rank, projection, bye.
+
+    THE LIST THE ROOM IS ACTUALLY READING. Everything else the pool snapshot
+    stores prices a player against the consensus market; the people in an
+    ESPN mock are looking at ESPN's own ranking on screen, and the
+    measurement behind this (docs/superpowers/specs/
+    2026-08-23-best-opponent-model-design.md) puts 23.1% of human picks on
+    the top name of that list against 15.9% on the market's. Recorded per
+    draft, in the draft's own pool snapshot, because ESPN's rank is a
+    preseason quantity that a later reader cannot recover for a draft played
+    weeks ago except by assuming it never moved.
+
+    THREE COLUMNS, TWO SOURCES, and the split is not arbitrary. `board`
+    carries `espn_ppr_rank` (ESPN's PPR ranking, market.py's own name for
+    it) and `bye`, both already joined to our `player_id`. It does NOT carry
+    `espn_proj`: `_BOARD_COLUMNS` drops it, because the board's own
+    `proj_points` is that number re-priced into the league's scoring rules
+    (see `proj_scale`), and re-adding it to the board would change a frame
+    half this project reads. So the raw projection is taken from `espn_adp`
+    itself, joined on the `espn_id` the board already carries -- ESPN's own
+    key, not a name match, so this join cannot put one player's projection on
+    another's row.
+
+    Shared with `pipeline.backfill_espn_board` deliberately: the backfill
+    exists to give already-recorded drafts the same three columns this farm
+    now writes at record time, and two implementations of "ESPN's rank for
+    this player" would be two different answers in one column.
+    """
+    from pipeline.db import read_table
+
+    if board is None or board.empty:
+        return pd.DataFrame(columns=["player_id", "espn_rank", "espn_proj",
+                                     "bye"])
+    # One row per player: the board can hold a duplicate player_id (two ADP
+    # rows folded onto one nflverse id), and `first` is the same tie-break
+    # `build_tool` already uses for `team` and `name` just below.
+    rows = board.drop_duplicates("player_id", keep="first")
+    out = pd.DataFrame({
+        # The board's own key, uncast, so this joins to a pool frame exactly
+        # the way `build_tool`'s `team` map already does. A caller joining to
+        # the corpus (where `player_id` is VARCHAR) casts on its own side.
+        "player_id": rows["player_id"],
+        "espn_rank": (pd.to_numeric(rows["espn_ppr_rank"], errors="coerce")
+                      if "espn_ppr_rank" in rows.columns else np.nan),
+        "bye": (pd.to_numeric(rows["bye"], errors="coerce")
+                if "bye" in rows.columns else np.nan),
+    })
+
+    espn = read_table(conn, "espn_adp")
+    if (not espn.empty and {"espn_id", "espn_proj"} <= set(espn.columns)
+            and "espn_id" in rows.columns):
+        keyed = espn.assign(_key=pd.to_numeric(espn["espn_id"],
+                                               errors="coerce"))
+        keyed = keyed.dropna(subset=["_key"]).drop_duplicates("_key",
+                                                              keep="first")
+        proj = keyed.set_index("_key")["espn_proj"]
+        out["espn_proj"] = (pd.to_numeric(rows["espn_id"], errors="coerce")
+                            .map(proj).to_numpy(dtype=float))
+    else:
+        # No `espn_adp` in this database (a fixture, or a snapshot taken
+        # before the ESPN job ran). NULL rather than an absent column, so the
+        # frame's shape does not depend on what the database happened to
+        # hold -- `draft_log._shape` would fill it anyway, and a caller
+        # counting coverage should see a column full of nulls rather than a
+        # KeyError.
+        out["espn_proj"] = np.nan
+    return out[["player_id", "espn_rank", "espn_proj", "bye"]].reset_index(
+        drop=True)
+
+
 def build_tool(conn, settings) -> Tool:
     """Board, pool and crosswalk for one room's settings.
 
@@ -486,6 +639,18 @@ def build_tool(conn, settings) -> Tool:
     team_by_player = (board.drop_duplicates("player_id", keep="first")
                       .set_index("player_id")["team"])
     pool_df["team"] = pool_df["player_id"].map(team_by_player)
+
+    # ESPN's own rank, projection and bye, joined on the same key. This is
+    # the one place the two mock writers now DIFFER: `mock_backfill` reads a
+    # finished league file and has no board contemporaneous with the draft it
+    # is importing, so it leaves these NULL and
+    # `pipeline.backfill_espn_board` fills them from today's board afterwards
+    # -- which is honest for a preseason quantity and would not be for
+    # anything that moves in-season. Written here at record time because this
+    # writer HAS the right board in hand: it is the board this draft was
+    # played from, three lines up.
+    pool_df = pool_df.merge(espn_pool_columns(board, conn),
+                            on="player_id", how="left")
 
     name_by_player = (board.drop_duplicates("player_id", keep="first")
                       .set_index("player_id")["name"]
@@ -585,10 +750,15 @@ def build_record(timeline, tool, settings, league_id, season, my_slot,
             "autodrafted": frame.autodrafted,
             "had_owner": (None if owners is None
                           else owners.get(frame.team_id)),
+            # Straight off the frame, both of them, including the Nones --
+            # `draft_timeline` has already decided which turns it could time
+            # and a default invented here would be a fact nobody observed.
+            "seconds_to_pick": frame.seconds_to_pick,
+            "clock_seconds": frame.clock_seconds,
         })
     picks = pd.DataFrame(rows, columns=[
         "pick_no", "round", "slot", "owner_key", "is_anonymous", "player_id",
-        "autodrafted", "had_owner"])
+        "autodrafted", "had_owner", "seconds_to_pick", "clock_seconds"])
     picks = picks.merge(
         tool.pool_df[["player_id", "position", "adp_rank", "proj_points"]],
         on="player_id", how="left")

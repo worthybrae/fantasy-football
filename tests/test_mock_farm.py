@@ -61,6 +61,20 @@ TRACE_OWNERS = {1: True, 2: True, 3: True, 4: False,
 TRACE_AUTO_WITH_OWNERS = 94
 TRACE_HUMAN_WITH_OWNERS = 34
 
+# Every one of the capture's 128 turns opened with `SELECTING <team> 30000`.
+# A real value off the wire, not a default: `clock_seconds` is stored per
+# pick precisely because a room can run a different clock, and "took 25
+# seconds" means opposite things on a 30-second clock and a 90-second one.
+TRACE_CLOCK_SECONDS = 30.0
+# What the capture's first three picks measure when the replay clock advances
+# one second per frame (see `_ticking_clock`): a pick's duration is then
+# exactly the number of frames ESPN sent between the SELECTING that opened
+# its turn and the SELECTED that closed it. Counted from the file once and
+# pinned here, the same way TRACE_PICKS is, so a change in the fold fails
+# here rather than passing quietly.
+TRACE_FIRST_SECONDS = [1.0, 3.0, 4.0]
+TRACE_SLOWEST_SECONDS = 10.0
+
 
 @pytest.fixture(autouse=True)
 def _isolated_live_dir(tmp_path, monkeypatch):
@@ -77,16 +91,23 @@ def _isolated_live_dir(tmp_path, monkeypatch):
     return tmp_path / "farm-live"
 
 
-def _trace_listener() -> DraftListener:
+def _trace_listener(clock=None) -> DraftListener:
     """The real recorded draft, replayed through the real listener.
 
     Frames are filtered to the fantasydraft host: the capture also holds
     ESPN's unrelated bamgrid connection, whose frames are JSON blobs the
     draft protocol knows nothing about.
+
+    `clock` replaces the listener's own `time.monotonic`. The capture carries
+    no timestamps of its own -- it is a list of frames, nothing more -- so a
+    replay through the real clock finishes in milliseconds and every pick
+    "takes" a few microseconds. Handing in a scripted clock is what makes the
+    durations assertable: see `_ticking_clock`.
     """
     if not TRACE.exists():
         pytest.skip(f"{TRACE} is not present in this checkout")
-    listener = DraftListener({})
+    listener = (DraftListener({}) if clock is None
+                else DraftListener({}, clock=clock))
     for line in TRACE.read_text().splitlines():
         try:
             row = json.loads(line)
@@ -263,6 +284,151 @@ def test_an_unrecognised_autodraft_value_leaves_the_last_known_flag():
                   "SELECTED 1 100 2\n"]:
         listener.on_frame(frame)
     assert mf.draft_timeline(listener.events)[0].autodrafted is True
+
+
+# ---------------------------------------------------------------------------
+# How long each pick took: the most behavioral signal in the stream.
+# ---------------------------------------------------------------------------
+
+
+def _ticking_clock(step=1.0, start=0.0):
+    """A clock that advances `step` on every reading.
+
+    One reading per frame (`DraftListener.on_frame` stamps exactly once), so
+    a duration measured through this clock is the frame COUNT between two
+    frames -- deterministic, and derived from the capture rather than from
+    wall-clock timing that would make the assertions flaky.
+    """
+    state = {"t": start - step}
+
+    def clock():
+        state["t"] += step
+        return state["t"]
+
+    return clock
+
+
+def _listener_at(times, frames) -> DraftListener:
+    """Replay `frames` with one scripted arrival time each.
+
+    Used where the exact seconds matter more than the frame count -- a
+    thirty-second autodraft expiry, a reconnect that arrives out of order.
+    """
+    ticks = iter(times)
+    listener = DraftListener({}, clock=lambda: next(ticks))
+    for frame in frames:
+        listener.on_frame(frame)
+    return listener
+
+
+def test_the_recorded_draft_times_every_one_of_its_128_picks():
+    """The capture is 128 clean SELECTING/SELECTED pairs, so nothing in it
+    should come back untimed. `seconds_to_pick` is the thing this whole
+    change exists to capture and a fold that quietly produced Nones would
+    still pass every other test in this file."""
+    timeline = mf.draft_timeline(_trace_listener(_ticking_clock()).events)
+    assert len(timeline) == TRACE_PICKS
+    assert all(f.seconds_to_pick is not None for f in timeline)
+    assert [f.seconds_to_pick for f in timeline[:3]] == TRACE_FIRST_SECONDS
+    assert max(f.seconds_to_pick for f in timeline) == TRACE_SLOWEST_SECONDS
+    # Read off the wire, one per turn, never assumed.
+    assert {f.clock_seconds for f in timeline} == {TRACE_CLOCK_SECONDS}
+
+
+def test_a_pick_whose_turn_we_never_saw_open_is_untimed_not_instant():
+    """Joining mid-turn is the real case: the farm's socket can attach after
+    ESPN has already put somebody on the clock. Zero would say "he clicked
+    the top of the list the moment it was his turn", which is a real
+    behaviour this column exists to spot -- so the two must not collide."""
+    listener = _listener_at([100.0, 104.0, 110.0],
+                            ["SELECTED 1 100 2\n",         # joined mid-turn
+                             "SELECTING 2 30000\n",
+                             "SELECTED 2 200 4\n"])
+    timeline = mf.draft_timeline(listener.events)
+    assert timeline[0].seconds_to_pick is None
+    assert timeline[0].clock_seconds is None
+    assert timeline[1].seconds_to_pick == 6.0
+
+
+def test_a_reconnect_replay_neither_duplicates_a_timing_nor_reverses_one():
+    """ESPN re-sends the whole draft on every (re)JOIN and this loop
+    reconnects whenever the socket drops. The replayed SELECTED frames arrive
+    seconds after the picks they describe, so a fold that timed them would
+    report durations that never happened -- and, once the replay is followed
+    by the live turn, a negative one."""
+    listener = _listener_at(
+        [0.0, 3.0, 3.5, 9.0,          # the live draft: two real picks
+         20.0, 20.5, 21.0,            # the reconnect replays both, then the
+         27.0],                       # team already on the clock picks
+        ["SELECTING 1 30000\n", "SELECTED 1 100 2\n",
+         "SELECTING 2 30000\n", "SELECTED 2 200 4\n",
+         "SELECTED 1 100 2\n", "SELECTED 2 200 4\n", "SELECTING 3 30000\n",
+         "SELECTED 3 300 6\n"])
+    timeline = mf.draft_timeline(listener.events)
+    assert [f.espn_id for f in timeline] == [100, 200, 300]
+    assert [f.seconds_to_pick for f in timeline] == [3.0, 5.5, 6.0]
+    assert all(f.seconds_to_pick >= 0 for f in timeline)
+
+
+def test_a_repeated_selecting_for_the_team_on_the_clock_keeps_the_first_start():
+    """A reconnect mid-turn replays the SELECTING for whoever is picking.
+    Taking the later stamp would shorten a real forty-second deliberation to
+    the age of the reconnect, which is precisely backwards: the interesting
+    picks are the slow ones."""
+    listener = _listener_at([0.0, 25.0, 40.0],
+                            ["SELECTING 1 30000\n", "SELECTING 1 30000\n",
+                             "SELECTED 1 100 2\n"])
+    assert mf.draft_timeline(listener.events)[0].seconds_to_pick == 40.0
+
+
+def test_an_autodraft_pick_lands_at_the_clocks_expiry():
+    """Not special-cased, and that is the point: ESPN makes the pick the
+    instant the clock runs out, so an autodrafted pick falls out of the same
+    arithmetic at seconds_to_pick == clock_seconds. That equality is how a
+    model tells "the engine picked" from "a person picked fast" without
+    having to trust the flag."""
+    listener = _listener_at([0.0, 30.0, 30.0],
+                            ["SELECTING 1 30000\n", "AUTODRAFT 1 true\n",
+                             "SELECTED 1 100 2\n"])
+    frame = mf.draft_timeline(listener.events)[0]
+    assert frame.autodrafted is True
+    assert frame.seconds_to_pick == frame.clock_seconds == 30.0
+
+
+def test_a_turn_that_never_produced_a_pick_does_not_time_the_next_one():
+    """The room has one clock, so one turn is open at a time. A stale turn
+    left open would attach its start to that team's NEXT pick, minutes later,
+    and record a deliberation nobody had."""
+    listener = _listener_at([0.0, 100.0, 103.0, 200.0, 204.0],
+                            ["SELECTING 1 30000\n",   # never picks
+                             "SELECTING 2 30000\n", "SELECTED 2 200 4\n",
+                             "SELECTING 1 30000\n", "SELECTED 1 100 2\n"])
+    timeline = mf.draft_timeline(listener.events)
+    assert [f.seconds_to_pick for f in timeline] == [3.0, 4.0]
+
+
+def test_a_clock_length_the_frame_omitted_is_null_not_thirty():
+    """30000 in every turn of the capture, and still read rather than
+    assumed. A room on a different clock is the case where an assumed 30
+    would silently mislabel every pick in it."""
+    listener = _listener_at([0.0, 4.0],
+                            ["SELECTING 1\n", "SELECTED 1 100 2\n"])
+    frame = mf.draft_timeline(listener.events)[0]
+    assert frame.seconds_to_pick == 4.0
+    assert frame.clock_seconds is None
+
+
+def test_an_event_list_with_no_timestamps_produces_no_durations():
+    """`parse_frame` stamps nothing -- only the listener does. Anything that
+    folds bare parsed events (a fixture, another test) must come back with
+    Nones rather than raising or inventing zeros."""
+    from pipeline.espn_live import parse_frame
+
+    events = [parse_frame(f) for f in ["SELECTING 1 30000", "SELECTED 1 100 2"]]
+    frame = mf.draft_timeline(events)[0]
+    assert frame.seconds_to_pick is None
+    # The clock LENGTH is still known: it came off the frame, not the clock.
+    assert frame.clock_seconds == 30.0
 
 
 # ---------------------------------------------------------------------------
@@ -457,6 +623,147 @@ def test_taken_order_keeps_a_place_for_an_unresolvable_pick():
     timeline = mf.draft_timeline(listener.events)
     tool = _tool_for([f for f in timeline if f.espn_id != 999])
     assert mf.taken_order_from(timeline, tool) == [0, None, 1]
+
+
+def test_the_pick_timings_reach_the_corpus(tmp_path):
+    """Built AND stored. `seconds_to_pick` and `clock_seconds` are two more
+    columns added by ALTER, and a record that builds fine but does not store
+    is the failure that would not surface until a refit found a column of
+    NULLs -- which is exactly what every draft farmed before this landed
+    already has, permanently."""
+    timeline = mf.draft_timeline(_trace_listener(_ticking_clock()).events)
+    record, _ = mf.build_record(
+        timeline, _tool_for(timeline), _mock_settings(), league_id="999",
+        season=2026, my_slot=3, started_at=None, teams=TRACE_TEAMS,
+        rounds=TRACE_ROUNDS)
+    corpus = dl.corpus_conn(str(tmp_path / "corpus.duckdb"))
+    try:
+        draft_id = dl.record(corpus, record)
+        stored = corpus.execute(
+            "SELECT count(seconds_to_pick), min(seconds_to_pick), "
+            "       max(seconds_to_pick), count(DISTINCT clock_seconds), "
+            "       max(clock_seconds) "
+            "FROM draft_log_pick WHERE draft_id = ?", [draft_id]).fetchone()
+        assert stored == (TRACE_PICKS, TRACE_FIRST_SECONDS[0],
+                          TRACE_SLOWEST_SECONDS, 1, TRACE_CLOCK_SECONDS)
+    finally:
+        corpus.close()
+
+
+def test_an_untimed_pick_stores_null_rather_than_zero(tmp_path):
+    """The one thing this column must never do is make "we could not time
+    this pick" look like "he picked instantly"."""
+    listener = _listener_at([100.0], ["SELECTED 1 100 2\n"])
+    timeline = mf.draft_timeline(listener.events)
+    record, _ = mf.build_record(
+        timeline, _tool_for(timeline), _mock_settings(), league_id="999",
+        season=2026, my_slot=1, started_at=None, teams=1, rounds=1)
+    corpus = dl.corpus_conn(str(tmp_path / "corpus.duckdb"))
+    try:
+        draft_id = dl.record(corpus, record)
+        assert corpus.execute(
+            "SELECT seconds_to_pick, clock_seconds FROM draft_log_pick "
+            "WHERE draft_id = ?", [draft_id]).fetchone() == (None, None)
+    finally:
+        corpus.close()
+
+
+# ---------------------------------------------------------------------------
+# The board ESPN puts on the drafters' screens.
+# ---------------------------------------------------------------------------
+
+
+def _board_db(rows):
+    """An in-memory database holding nothing but an `espn_adp` table."""
+    import duckdb
+
+    conn = duckdb.connect()
+    conn.execute("CREATE TABLE espn_adp (espn_id BIGINT, espn_name VARCHAR, "
+                 "position VARCHAR, team VARCHAR, espn_adp DOUBLE, "
+                 "espn_ppr_rank BIGINT, espn_proj DOUBLE)")
+    for row in rows:
+        conn.execute("INSERT INTO espn_adp VALUES (?, ?, ?, ?, ?, ?, ?)", row)
+    return conn
+
+
+def test_the_pool_records_the_list_the_room_was_reading():
+    """ESPN's rank, ESPN's projection and the bye, per player, per draft.
+
+    The rank and the bye ride on the board already; the PROJECTION does not
+    -- `_BOARD_COLUMNS` drops it, because the board's own `proj_points` is
+    that number re-priced into the league's scoring. So it is joined from
+    `espn_adp` on ESPN's own id, which is why this test carries a database at
+    all.
+    """
+    board = pd.DataFrame({
+        "player_id": ["p1", "p2"], "espn_ppr_rank": [1.0, 12.0],
+        "bye": [7.0, 9.0], "espn_id": [4001.0, 4002.0]})
+    conn = _board_db([(4001, "A", "RB", "DET", 1.2, 1, 310.5),
+                      (4002, "B", "WR", "GB", 12.4, 12, 240.0)])
+    try:
+        got = mf.espn_pool_columns(board, conn)
+    finally:
+        conn.close()
+    assert list(got["player_id"]) == ["p1", "p2"]
+    assert list(got["espn_rank"]) == [1.0, 12.0]
+    assert list(got["espn_proj"]) == [310.5, 240.0]
+    assert list(got["bye"]) == [7.0, 9.0]
+
+
+def test_a_player_espn_does_not_rank_gets_nulls_not_a_guess():
+    """ESPN publishes 500 players and a draft pool is larger. An unranked
+    player is a real and expected NULL -- filling him in with a sentinel
+    would put a fake rank into the column the model reads first."""
+    board = pd.DataFrame({
+        "player_id": ["p1", "p9"], "espn_ppr_rank": [1.0, np.nan],
+        "bye": [7.0, np.nan], "espn_id": [4001.0, np.nan]})
+    conn = _board_db([(4001, "A", "RB", "DET", 1.2, 1, 310.5)])
+    try:
+        got = mf.espn_pool_columns(board, conn)
+    finally:
+        conn.close()
+    assert got.loc[1, "player_id"] == "p9"
+    assert pd.isna(got.loc[1, "espn_rank"])
+    assert pd.isna(got.loc[1, "espn_proj"])
+    assert pd.isna(got.loc[1, "bye"])
+
+
+def test_a_database_with_no_espn_table_still_answers_with_the_column():
+    """A fixture, or a snapshot taken before the ESPN job ran. The frame's
+    SHAPE must not depend on what the database happened to hold, or a caller
+    counting coverage gets a KeyError instead of a zero."""
+    import duckdb
+
+    conn = duckdb.connect()
+    try:
+        got = mf.espn_pool_columns(
+            pd.DataFrame({"player_id": ["p1"], "espn_ppr_rank": [3.0],
+                          "bye": [11.0], "espn_id": [4001.0]}), conn)
+    finally:
+        conn.close()
+    assert list(got.columns) == ["player_id", "espn_rank", "espn_proj", "bye"]
+    assert got["espn_rank"].iloc[0] == 3.0
+    assert pd.isna(got["espn_proj"].iloc[0])
+
+
+def test_the_pool_snapshot_round_trips_the_espn_columns(tmp_path):
+    """Stored, not merely computed -- the same ALTER-added-column risk the
+    pick timings carry."""
+    pool = pd.DataFrame({"player_id": ["p1", "p2"], "position": ["RB", "WR"],
+                         "team": ["DET", "GB"], "adp_rank": [1.0, 2.0],
+                         "proj_points": [250.0, 240.0],
+                         "espn_rank": [1.0, 12.0],
+                         "espn_proj": [310.5, 240.0], "bye": [7, 9]})
+    corpus = dl.corpus_conn(str(tmp_path / "corpus.duckdb"))
+    try:
+        draft_id = dl.record(corpus, dl.DraftRecord(
+            source=dl.SOURCE_MOCK, season=2026, started_at="t", pool=pool))
+        got = corpus.execute(
+            "SELECT espn_rank, espn_proj, bye FROM draft_log_pool "
+            "WHERE draft_id = ? ORDER BY player_id", [draft_id]).fetchall()
+        assert got == [(1.0, 310.5, 7), (12.0, 240.0, 9)]
+    finally:
+        corpus.close()
 
 
 # ---------------------------------------------------------------------------
