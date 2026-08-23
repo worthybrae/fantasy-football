@@ -128,6 +128,93 @@ function bookmarkAnchor(): string {
     + "<span aria-hidden='true'>🏈</span>&nbsp;Draft&nbsp;Assistant</a>"
 }
 
+// ---------------------------------------------------------------------------
+// The keyboard path for the chip above: not dragging it, copying it.
+// ---------------------------------------------------------------------------
+//
+// The anchor bookmarkAnchor() renders is a drag target and, deliberately,
+// nothing else -- its onclick returns false so neither a stray click nor an
+// Enter/Space on a focused chip does anything (see the comment on
+// bookmarkAnchor). That is correct for a mouse, where the chip is never
+// clicked, only dragged. It is a dead end for a keyboard: the chip is the
+// hero's first tab stop, Enter does nothing, and nothing on the page says
+// another route exists. Dragging is inherently mouse-only and that part
+// cannot be fixed -- but the dead end is not inherent, so this is the
+// button a keyboard user reaches instead. It copies the exact same
+// `javascript:` string, verbatim, so it can be pasted as a hand-made
+// bookmark's address.
+async function copyBookmarklet(): Promise<boolean> {
+  // The Clipboard API needs a secure context (https, or localhost -- both
+  // covered here) and can still reject (permission denied, an iframe
+  // without the right allow policy). Either way, fall through to the
+  // legacy path rather than surface that as the only route.
+  if (typeof navigator !== 'undefined' && navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(BOOKMARKLET)
+      return true
+    } catch {
+      /* fall through */
+    }
+  }
+  // document.execCommand('copy') needs no permission and no secure context,
+  // which is what makes it worth keeping as a fallback rather than just
+  // reporting failure. An off-screen, unfocusable-by-tab textarea holds the
+  // text just long enough to select and copy it, then is removed.
+  try {
+    const ta = document.createElement('textarea')
+    ta.value = BOOKMARKLET
+    ta.setAttribute('readonly', '')
+    ta.style.position = 'fixed'
+    ta.style.opacity = '0'
+    ta.style.left = '-9999px'
+    document.body.appendChild(ta)
+    ta.select()
+    const ok = document.execCommand('copy')
+    document.body.removeChild(ta)
+    return ok
+  } catch {
+    return false
+  }
+}
+
+// Rendered beside the chip everywhere it appears (the hero, and again in
+// the setup block). `idPrefix` keeps the two instances' ids from colliding
+// when both are on the page at once. The result is announced through
+// role="status"/aria-live so a screen reader hears it without focus ever
+// leaving the button -- the button's own label never changes.
+function BookmarkCopy({ idPrefix }: { idPrefix: string }) {
+  const [status, setStatus] = useState<'idle' | 'ok' | 'fail'>('idle')
+  const onCopy = useCallback(() => {
+    copyBookmarklet().then((ok) => setStatus(ok ? 'ok' : 'fail'))
+  }, [])
+  return (
+    <div className="lp-copy">
+      <button
+        type="button"
+        className="lp-copy-btn"
+        onClick={onCopy}
+        aria-describedby={`${idPrefix}-copy-hint`}
+      >
+        Copy install link
+      </button>
+      <p id={`${idPrefix}-copy-hint`} className="lp-copy-hint">
+        Can’t drag it? Copy the link, then create a bookmark and paste it as the address.
+      </p>
+      <span
+        className={
+          status === 'idle' ? 'lp-copy-status'
+            : status === 'ok' ? 'lp-copy-status is-ok' : 'lp-copy-status is-fail'
+        }
+        role="status"
+        aria-live="polite"
+      >
+        {status === 'ok' && 'Copied — paste it as a bookmark’s address.'}
+        {status === 'fail' && 'Couldn’t copy automatically — try dragging the chip instead.'}
+      </span>
+    </div>
+  )
+}
+
 // The one sentence a visitor who cannot drag gets instead of the chip. Said
 // once, in the hero, and again above the setup block's own drag target so
 // that scrolling down does not land them back on the thing they were just
@@ -505,7 +592,14 @@ export default function Landing() {
                   <span className="lp-drag-arrow" aria-hidden="true">↑</span>
                   Drag this to your bookmarks bar
                 </p>
-                <span dangerouslySetInnerHTML={{ __html: bookmarkAnchor() }} />
+                <div className="lp-drag-chip">
+                  <span dangerouslySetInnerHTML={{ __html: bookmarkAnchor() }} />
+                  {/* The chip's onclick returns false on purpose (see
+                      bookmarkAnchor) -- it does nothing for a mouse click or a
+                      keyboard Enter alike. This is the route a keyboard user
+                      gets instead. See copyBookmarklet/BookmarkCopy above. */}
+                  <BookmarkCopy idPrefix="hero" />
+                </div>
                 <p className="lp-drag-note">
                   Once, ever. Then click it in your ESPN draft room — a mock
                   counts — and your board opens here, priced before the first pick.
@@ -614,6 +708,7 @@ export default function Landing() {
             {canDrag && (
               <span className="lp-bookmark-hint">← drag this to your bookmarks bar</span>
             )}
+            <BookmarkCopy idPrefix="setup" />
           </div>
 
           {/* Numbered because this genuinely is a sequence: each step is only

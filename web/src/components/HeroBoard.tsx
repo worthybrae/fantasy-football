@@ -10,11 +10,15 @@ import { Fragment } from 'react'
 // tokens the room reads (so a change to --pos-wr or --bg-1 carries here on
 // its own), and freezes to a static filled board with four lines of CSS.
 //
-// Everything in it is invented. There is no fetch, no import from `api.ts`
-// and no player who exists: the names below were made up for this file, and
-// the point of the panel next to it (`PROOF_ROWS` in pages/Landing.tsx) is
-// that THOSE numbers are real. A backdrop that quietly showed real players
-// would blur that line, which is the one thing this page cannot afford.
+// Nothing in it names a player. There is no fetch and no import from
+// `api.ts` -- and, unlike an earlier version of this file, no invented name
+// either: eighty made-up names were legible at hero width, and a reader who
+// idly scans one and clocks that it is fake has just learned this page
+// shows made-up things, on the page whose whole pitch is that the panel
+// next to it (`PROOF_ROWS` in pages/Landing.tsx) is real. Position badges,
+// pick numbers and the room's own structure carry the same argument --
+// this is what the product looks like -- without that risk, so that is all
+// this backdrop shows.
 //
 // What it borrows from the real board (components/DraftBoardGrid.tsx) is the
 // *structure*, because that is what makes it read as the product rather than
@@ -38,10 +42,9 @@ import { Fragment } from 'react'
 //     to layout and cannot shift anything when it mounts.
 
 // A ten-team board, eight rounds deep. Ten because that is a real league
-// size and it gives cells wide enough for a name at hero width; eight
-// because the board is cropped by the hero's bottom edge anyway, and the
-// first eight rounds of a fantasy draft contain no kickers or defences --
-// which keeps the palette to the four hues anyone recognises.
+// size; eight because the board is cropped by the hero's bottom edge
+// anyway, and the first eight rounds of a fantasy draft contain no kickers
+// or defences -- which keeps the palette to the four hues anyone recognises.
 const TEAMS = 10
 const ROUNDS = 8
 // Zero-based column that gets the "this one is yours" accent, the same
@@ -82,29 +85,6 @@ const POSITIONS: Pos[][] = [
   ['QB', 'RB', 'WR', 'WR', 'TE', 'RB', 'QB', 'WR', 'RB', 'WR'],
   ['WR', 'TE', 'RB', 'QB', 'WR', 'RB', 'WR', 'WR', 'QB', 'TE'],
   ['RB', 'WR', 'TE', 'RB', 'WR', 'QB', 'WR', 'RB', 'TE', 'WR'],
-]
-
-// Eighty invented players. Written out one by one rather than combined from
-// a pool of first and last names, so that every name on the page could be
-// read and checked against nobody in the league -- a generator makes eighty
-// combinations nobody has looked at.
-const NAMES: string[][] = [
-  ['Deshun Ferrell', 'Malik Ostrander', 'Corbin Latham', 'Nico Halvorsen', 'Jaylen Prichard',
-   'Kade Bellamy', 'Damari Whitlock', 'Rashad Kingsley', 'Elias Thornbury', 'Marquan Doyle'],
-  ['Tyrese Vandermeer', 'Bryce Ashworth', 'Jamarr Ledoux', 'Owen Castellano', 'Deion Rutledge',
-   'Xavier Bonham', 'Trell Hutchins', 'Amari Lockridge', 'Cade Brubaker', 'Isaiah Pomeroy'],
-  ['Roman Devereaux', 'Jaxon Priestley', 'Keyshawn Alder', 'Tobias Renfroe', 'Devante Cordell',
-   'Micah Sutcliffe', 'Zion Harlow', 'Braylen Ostrom', 'Caleb Winstead', 'Dontae Marchetti'],
-  ['Nasir Colburn', 'Eli Vanderkamp', 'Rondell Pierce', 'Kian Mattox', 'Jerome Ashby',
-   'Trevonte Sallis', 'Grayson Kettles', 'Dashawn Ricci', 'Malachi Fontaine', 'Booker Lindsay'],
-  ['Terrell Nakamura', 'Casey Ballard', 'Jamil Ordway', 'Weston Pardue', 'Kavon Trice',
-   'Silas Brenner', 'Aiden Mulholland', 'Rico Vandenberg', 'Josiah Kemper', 'Landon Sowell'],
-  ['Demetrius Falk', 'Ryder Novak', 'Tarik Ellsworth', 'Beau Ivory', 'Zaire Fontenot',
-   'Nate Kirkwood', 'Julius Rainey', 'Trey Osgood', 'Marlon Sheppard', 'Colby Truitt'],
-  ['Devin Ottoman', 'Khalil Barstow', 'Emory Lattimore', 'Payton Vance', 'Jarrell Duquette',
-   'Tucker Amos', 'Sione Fifita', 'Bryson Halliwell', 'Marcus Delgado', 'Kyren Wooldridge'],
-  ['Dane Kupfer', 'Ronan Stipe', 'Jalen Mercado', 'Chase Pomerantz', 'Tavien Rourke',
-   'Miles Ackerley', 'Zeke Dunwoody', 'Preston Vialpando', 'Andre Kilgore', 'Braxton Ferrer'],
 ]
 
 // Real league abbreviations against invented players, the same way the room's
@@ -170,7 +150,6 @@ export default function HeroBoard() {
                       <span className={`pos-badge pos-badge-${pos.toLowerCase()}`}>{pos}</span>
                       <span className="lp-hb-club mono">{CLUBS[(overall - 1) % CLUBS.length]}</span>
                     </span>
-                    <span className="lp-hb-name">{NAMES[round - 1][col]}</span>
                   </span>
                 </div>
               )

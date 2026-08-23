@@ -252,6 +252,17 @@
   gap: 7px;
 }
 
+/* The chip and its keyboard alternative (BookmarkCopy in Landing.tsx), side
+   by side so the copy button reads as part of the same control rather than
+   a separate feature. Wraps below the width where both plus a status line
+   would collide. */
+.lp-drag-chip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 16px;
+}
+
 /* Points where the thing has to end up. The bookmarks bar is above the
    page, not on it, and that is the single fact a first-time visitor is
    missing when they click the chip and nothing happens. */
@@ -321,6 +332,64 @@
 .lp-nodrag-line strong {
   color: var(--text-1);
   font-weight: 600;
+}
+
+/* -- the copy fallback: the keyboard path to the same chip --------------- */
+/* The bookmarklet chip (`.lp-bookmark`, from bookmarkAnchor() in
+   Landing.tsx) is a drag target and, deliberately, nothing else -- its
+   onclick returns false so neither a stray click nor an Enter/Space on a
+   focused chip does anything. Dragging is inherently mouse-only, but a
+   keyboard user who lands on the chip and gets nothing needs a real next
+   step, not just an explanation of why it failed. This is that step: a
+   button that copies the exact same `javascript:` URL so it can be pasted
+   as a bookmark's address by hand. Rendered by the BookmarkCopy component,
+   beside the chip in both places it appears (the hero and the setup
+   block). */
+.lp-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.lp-copy-btn {
+  padding: 7px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  color: var(--text-1);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.lp-copy-btn:hover {
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+.lp-copy-hint {
+  max-width: 32ch;
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--text-3);
+}
+
+/* Empty until the button is actually clicked (BookmarkCopy's `status`
+   state starts 'idle', which renders neither line below). role="status"
+   plus aria-live="polite" means a screen reader hears whichever line
+   appears even though focus never leaves the button. */
+.lp-copy-status {
+  font-size: var(--text-xs);
+  color: var(--text-2);
+}
+
+.lp-copy-status.is-ok {
+  color: var(--ok);
+}
+
+.lp-copy-status.is-fail {
+  color: var(--fail);
 }
 
 /* -- the hero backdrop: a synthetic draft board ------------------------- */
@@ -395,14 +464,17 @@
 }
 
 /* The pick landing on that slot. Opaque, so it covers the pick number as it
-   arrives -- the number crossfades into the player, which is exactly the
-   substitution the real board makes. */
+   arrives -- the number crossfades into the badge and club, which is
+   exactly the substitution the real board makes, minus the name (see
+   HeroBoard.tsx's header for why there is no name to show). Centered
+   vertically: with only one row of content now, top-aligning it in a 72px
+   cell left visible dead air below. */
 .lp-hb-pick {
   position: absolute;
   inset: 0;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  justify-content: center;
   padding: 6px 8px;
   background: var(--bg-1);
   opacity: 0;
@@ -457,19 +529,6 @@
 .lp-hb-club {
   font-size: 9px;
   color: var(--text-3);
-}
-
-.lp-hb-name {
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1.15;
-  color: var(--text-2);
-  /* Two lines, then clip -- the same clamp the room's cells use, so a long
-     invented name behaves the way a long real one does. */
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
 }
 
 .lp-hb-round {
@@ -1176,7 +1235,8 @@
 .lp-cta:focus-visible,
 .lp-plan-btn:focus-visible,
 .lp-band-action:focus-visible,
-.lp-bookmark:focus-visible {
+.lp-bookmark:focus-visible,
+.lp-copy-btn:focus-visible {
   outline: 2px solid var(--accent-border);
   outline-offset: 2px;
 }
