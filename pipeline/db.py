@@ -23,6 +23,10 @@ UNIVERSAL_TABLES = frozenset({
     "weekly", "snap_counts", "depth_charts", "players", "schedules",
     "adp", "espn_adp", "fp_ecr", "cbs_ranks", "mfl_adp",
     "historic_adp", "historic_espn_cs", "sleeper_ids", "meta", "model_backtest",
+    # Season-long player betting markets (pipeline/sources.fetch_player_futures).
+    # Universal for the same reason `adp` is: what a book prices Gibbs at to
+    # lead the league in rushing does not depend on whose league is reading it.
+    "player_futures",
     # ESPN's per-week D/ST stat lines (pipeline/sources.fetch_espn_dst).
     # Universal for the same reason `weekly` is: what the Broncos defense did
     # in week 4 is the same fact in every league. The LEAGUE-specific half is

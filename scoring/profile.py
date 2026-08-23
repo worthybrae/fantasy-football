@@ -427,6 +427,100 @@ def career_summary(seasons: list[dict]) -> dict:
     return {"w_ppg": round(w_ppg, 1), "w_stats": stats}
 
 
+# What each market is called on the card. Short, because the card has room
+# for a label and a price and nothing else.
+_FUTURES_LABELS = {
+    "rush_yards": "Rushing leader",
+    "rec_yards": "Receiving leader",
+    "pass_yards": "Passing leader",
+    "mvp": "MVP",
+    "opoy": "Offensive POY",
+    "oroy": "Offensive rookie",
+}
+
+
+def _player_futures(conn, player_id: str, name: str, position: str,
+                    season: int) -> list[dict]:
+    """This player's season-long betting markets, with his place in each field.
+
+    Joined on ESPN's athlete id through the sleeper crosswalk -- the same two
+    steps `_espn_projection` takes, and for the same reason: every other market
+    source in this project joins on a folded name and pays for it.
+
+    A price alone says little to anyone who does not read odds daily, so each
+    market carries the size of the field and where he sits in it. "+600" is
+    "second shortest of sixty-one", and that is the sentence a reader needs.
+    """
+    futures = read_table(conn, "player_futures")
+    if futures.empty or "market" not in futures.columns:
+        return []
+    if "season" in futures.columns:
+        futures = futures[futures["season"] == season]
+    if futures.empty:
+        return []
+
+    espn_id = None
+    sleeper = read_table(conn, "sleeper_ids")
+    if not sleeper.empty and {"gsis_id", "espn_id"}.issubset(sleeper.columns):
+        hit = sleeper[sleeper["gsis_id"] == player_id]
+        ids = pd.to_numeric(hit["espn_id"], errors="coerce").dropna()
+        if not ids.empty:
+            espn_id = int(ids.iloc[0])
+    if espn_id is None:
+        espn = read_table(conn, "espn_adp")
+        if not espn.empty and {"espn_id", "espn_name"}.issubset(espn.columns):
+            hit = espn[(espn.get("position") == position)
+                       & (espn["espn_name"].map(_norm_name) == _norm_name(name))]
+            ids = pd.to_numeric(hit["espn_id"], errors="coerce").dropna()
+            if not ids.empty:
+                espn_id = int(ids.iloc[0])
+    if espn_id is None:
+        return []
+
+    futures = futures.copy()
+    futures["espn_id"] = pd.to_numeric(futures["espn_id"], errors="coerce")
+    out = []
+    for market, field in futures.groupby("market"):
+        mine = field[field["espn_id"] == espn_id]
+        if mine.empty:
+            continue
+        # Shortest price first: the favourite is 1st. `implied_pct` rather than
+        # the American number, which does not sort (+600 is longer than -150
+        # and reads as larger).
+        order = field.sort_values("implied_pct", ascending=False).reset_index(drop=True)
+        place = int(order.index[order["espn_id"] == espn_id][0]) + 1
+        out.append({
+            "market": str(market),
+            "label": _FUTURES_LABELS.get(str(market), str(market)),
+            "american": _str_or_none_price(mine.iloc[0].get("american")),
+            "implied_pct": _round_or_none(mine.iloc[0].get("implied_pct"), 1),
+            "place": place,
+            "field": int(len(field)),
+        })
+    # Shortest price first, so the market that likes him most leads.
+    out.sort(key=lambda f: -(f["implied_pct"] or 0))
+    return out
+
+
+def _str_or_none_price(v) -> str | None:
+    return None if v is None or (isinstance(v, float) and pd.isna(v)) else str(v)
+
+
+def _with_futures(vegas: dict | None, futures: list[dict]) -> dict | None:
+    """The team's implied totals and the player's own markets in one object.
+
+    They are one card and one idea -- what the market thinks of the offence he
+    plays in, and of him -- so a player with no lines on his team but a price
+    to lead the league still gets a card.
+    """
+    if vegas is None and not futures:
+        return None
+    if vegas is None:
+        return {"implied": None, "rank": None, "teams": None, "priced": 0,
+                "weeks_total": None, "weeks": [], "futures": futures}
+    return {**vegas, "futures": futures}
+
+
 def _vegas(schedules: pd.DataFrame, team: str | None,
            season: int) -> dict | None:
     """What the market prices this player's offence at, week by week.
@@ -1568,7 +1662,10 @@ def build_profile(conn, player_id: str, weights: dict | None = None,
         "outlook": outlook_out,
         # What the market prices his offence at, week by week. Team totals,
         # not player props -- see `_vegas`.
-        "vegas": _vegas(schedules, header.get("team"), frames.draft_season),
+        "vegas": _with_futures(
+            _vegas(schedules, header.get("team"), frames.draft_season),
+            _player_futures(conn, player_id, header["name"], header["position"],
+                            frames.draft_season)),
         "depth_chart": team_depth_chart(depth, header["team"], player_id),
         "schedule": weekly_difficulty(schedules, prior, header["team"],
                                       header["position"], rules),

@@ -477,3 +477,88 @@ def fetch_sleeper_ids() -> pd.DataFrame:
     resp = requests.get(SLEEPER_URL, headers=UA, timeout=60)
     resp.raise_for_status()
     return parse_sleeper(resp.json())
+
+# ESPN's own season-long futures board, which is the only player-level betting
+# market anywhere in this pipeline. The game lines that ride along with
+# nflverse `schedules` price a TEAM; these price a player against the field.
+#
+# Leader markets, not milestones: "most regular season rushing yards" is a
+# price on finishing first, not an over/under on a yardage total. A short
+# price is a market read on CEILING, which is a different question from ADP
+# (where the room takes him) and from the projection (what he is expected to
+# do), and that is the whole reason to carry it.
+#
+# Keyed by ESPN's own athlete id rather than by name. Every other market
+# source here joins on a folded name and pays for it -- see
+# `oline.reconcile_pfr_to_gsis`, where a son collides with his father -- and
+# this one comes with the id the board already carries on `espn_adp`.
+FUTURES_URL = ("https://sports.core.api.espn.com/v2/sports/football/leagues/nfl"
+               "/seasons/{year}/futures?limit=50")
+
+# The markets worth keeping. ESPN posts a couple of dozen, most of them team
+# or coach awards that say nothing about a draft pick.
+_FUTURES_MARKETS = {
+    "Most Regular Season Passing Yards": "pass_yards",
+    "Most Regular Season Rushing Yards": "rush_yards",
+    "Most Regular Season Receiving Yards": "rec_yards",
+    "Regular Season MVP": "mvp",
+    "Offensive Player of the Year": "opoy",
+    "Offensive Rookie of the Year": "oroy",
+}
+
+_FUTURES_COLUMNS = ["season", "market", "espn_id", "american", "implied_pct",
+                    "provider"]
+
+
+def _american_to_implied(price: str | None) -> float | None:
+    """A moneyline price as the probability it states.
+
+    +600 is 100 / 700 = 14.3%; -150 is 150 / 250 = 60%. The book's margin is
+    left in, because taking it out means assuming how it is distributed across
+    a sixty-runner field, and every player on the board is quoted on the same
+    inflated scale anyway.
+    """
+    if not price:
+        return None
+    try:
+        n = float(str(price).replace("+", ""))
+    except ValueError:
+        return None
+    if n == 0:
+        return None
+    p = 100 / (n + 100) if n > 0 else (-n) / ((-n) + 100)
+    return round(p * 100, 2)
+
+
+def fetch_player_futures(year: int) -> pd.DataFrame:
+    """Season-long player futures, one row per (market, player).
+
+    Returns an EMPTY frame rather than raising when ESPN serves no futures for
+    a season -- these are posted months before a season and pulled after it, so
+    "not up yet" is an ordinary state for this source and not a failed refresh.
+    """
+    resp = requests.get(FUTURES_URL.format(year=year), headers=UA, timeout=30)
+    resp.raise_for_status()
+    rows = []
+    for item in resp.json().get("items", []):
+        market = _FUTURES_MARKETS.get(item.get("name") or item.get("displayName"))
+        if market is None:
+            continue
+        for book in item.get("futures", []):
+            provider = (book.get("provider") or {}).get("name")
+            for entry in book.get("books", []):
+                ref = (entry.get("athlete") or {}).get("$ref", "")
+                if "/athletes/" not in ref:
+                    continue
+                espn_id = ref.split("/athletes/")[-1].split("?")[0]
+                if not espn_id.isdigit():
+                    continue
+                rows.append({
+                    "season": year,
+                    "market": market,
+                    "espn_id": int(espn_id),
+                    "american": entry.get("value"),
+                    "implied_pct": _american_to_implied(entry.get("value")),
+                    "provider": provider,
+                })
+    return pd.DataFrame(rows, columns=_FUTURES_COLUMNS)

@@ -31,17 +31,26 @@ function height(implied: number): number {
   return Math.max(6, Math.min(1, share) * 100)
 }
 
+// How many of his own markets the card shows. Three is what fits under the
+// week bars, and they arrive shortest-price first, so the three shown are the
+// three the market likes him most for.
+const SHOWN_MARKETS = 3
+
 export default function VegasCard({ vegas }: { vegas: Vegas | null }) {
-  // No lines posted for this team at all, or no team to ask about: no card.
-  if (!vegas || vegas.implied === null || vegas.weeks.length === 0) return null
+  const futures = vegas?.futures ?? []
+  // Nothing priced about his offence AND nothing priced about him: no card.
+  const hasTeam = vegas && vegas.implied !== null && vegas.weeks.length > 0
+  if (!vegas || (!hasTeam && futures.length === 0)) return null
 
   const byWeek = new Map(vegas.weeks.map((w) => [w.week, w]))
   const weeks = vegas.weeks_total ?? 18
-  const note = vegas.rank !== null && vegas.teams !== null
+  const note = hasTeam && vegas.rank !== null && vegas.teams !== null
     ? `${ordinal(vegas.rank)} of ${vegas.teams}` : undefined
 
   return (
     <PopCard title="Vegas" note={note}>
+      {hasTeam && (
+      <>
       <div className="pp-pop-vegas-head">
         <span className="mono pp-pop-vegas-figure">{vegas.implied}</span>
         {/* The unit, spelled out. "26.8" beside a rank could be read as
@@ -67,6 +76,24 @@ export default function VegasCard({ vegas }: { vegas: Vegas | null }) {
       <div className="pp-pop-vegas-foot mono">
         {vegas.priced} of {weeks} weeks priced
       </div>
+      </>
+      )}
+      {futures.length > 0 && (
+        <div className="pp-pop-futures">
+          {futures.slice(0, SHOWN_MARKETS).map((f) => (
+            <div className="pp-pop-futures-row" key={f.market}>
+              <span className="pp-pop-futures-label">{f.label}</span>
+              {/* The price, then what it is worth knowing about the price:
+                  "+700" means nothing to most readers, "4th of 61" means he
+                  is near the front of a big field. */}
+              <span className="mono pp-pop-futures-price">{f.american}</span>
+              <span className="mono pp-pop-futures-place">
+                {ordinal(f.place)} of {f.field}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
     </PopCard>
   )
 }

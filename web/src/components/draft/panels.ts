@@ -213,12 +213,19 @@ export function perGameDelta(seasons: SeasonSummary[], projPpg: number | null):
  *  number beside it -- a change of -0.04 prints "0.0", and painting that red
  *  would claim a fall the number is not showing. A change that rounds to
  *  nothing gets no tone: there is no direction to paint.
+ *
+ *  `zero` is that same case named, so a caller can drop the number instead of
+ *  printing it. Whether "+0.0" is worth the ink depends on where it sits: in
+ *  a labelled note it says "he is where he was", in a dense column it is a
+ *  row of characters that carry no move.
  */
-export function signedChange(value: number): { label: string; tone: string } {
+export function signedChange(value: number):
+{ label: string; tone: string; zero: boolean } {
   const shown = Math.round(value * 10) / 10
   return {
     label: `${shown > 0 ? '+' : ''}${shown.toFixed(1)}`,
     tone: shown > 0 ? 'is-up' : shown < 0 ? 'is-down' : '',
+    zero: shown === 0,
   }
 }
 

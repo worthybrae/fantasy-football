@@ -552,6 +552,10 @@ const AvailableRow = memo(function AvailableRow({
   const steady = steadyLevel(player?.consistency_pct)
   const arc = player?.season_finishes ?? null
   const change = player?.proj_change ?? null
+  // Printed once here rather than at the cell: the sign, the tone and the
+  // "is there a move at all" question are one answer, and calling for it
+  // twice was two chances for them to be read apart.
+  const projDelta = change === null ? null : signedChange(change)
   return (
               <tr key={c.player_id} data-pid={c.player_id}
                   className={isTaken ? 'avail-row-taken' : undefined}
@@ -661,10 +665,14 @@ const AvailableRow = memo(function AvailableRow({
                       the meter answers "is this a big move", this answers
                       "by how much, and up or down". Null for a player with
                       no last season to move from, where a signed zero would
-                      be a claim about a season he has not played. */}
-                  {change !== null && (
-                    <span className={`avail-proj-delta delta-tone ${signedChange(change).tone}`}>
-                      {signedChange(change).label}
+                      be a claim about a season he has not played.
+                      Nothing for a move that rounds to nothing either: "+0.0"
+                      is a whole column's width spent saying the projection
+                      beside it already stands, and down a list of thirty rows
+                      those zeroes read as movement until you focus on one. */}
+                  {projDelta !== null && !projDelta.zero && (
+                    <span className={`avail-proj-delta delta-tone ${projDelta.tone}`}>
+                      {projDelta.label}
                     </span>
                   )}
                 </td>

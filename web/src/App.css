@@ -84,6 +84,17 @@ td:first-child {
   text-align: center;
 }
 
+/* The positional rank inside the tag -- the 7 of QB7. A shade quieter than
+   the letters and without their tracking, so the position still leads and
+   the number reads as its index rather than as two more characters of the
+   name of a position. */
+.pos-badge-rank {
+  margin-left: 1px;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
+}
+
 .pos-badge-qb {
   background: color-mix(in srgb, var(--pos-qb) 18%, transparent);
   color: var(--pos-qb);
@@ -771,20 +782,27 @@ td:first-child {
   display: flex;
   align-items: center;
   align-self: stretch;
-  padding: 0 var(--space-2) 0 var(--space-3);
+  padding: 0 var(--space-2);
   border-left: 1px solid var(--border);
 }
 
+/* Horizontal and on a chip. It used to be 9px sideways type, which saved
+   about a dozen pixels of rail and cost the reader the one thing the marker
+   is for -- it had to be decoded rather than read, and at a glance it looked
+   like a rendering fault between two picks. Read flat it is legible at a
+   pass, and a round number is two or three characters, so the width it costs
+   back is less than the gap beside it. */
 .pick-ticker-round > span {
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 700;
-  letter-spacing: 0.1em;
-  color: var(--text-3);
-  /* Vertical, so a marker costs a few pixels of the strip's width rather
-     than a whole entry's worth. */
-  writing-mode: vertical-rl;
-  text-orientation: mixed;
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  padding: 3px 6px;
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  color: var(--text-2);
 }
 
 /* The marker already carries a rule, so the entry after it does not need a
@@ -4655,6 +4673,45 @@ button.roster-row:focus-visible {
 }
 
 .pp-pop-vegas-foot {
+  font-size: 9px;
+  color: var(--text-3);
+}
+
+/* His own markets, under the team's. Label, price, and what the price is
+   worth knowing -- "+700" says nothing to most readers, "4th of 61" says he
+   is near the front of a big field. */
+.pp-pop-futures {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border);
+}
+
+.pp-pop-futures-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.pp-pop-futures-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--text-2);
+}
+
+.pp-pop-futures-price {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--accent);
+}
+
+.pp-pop-futures-place {
+  flex: 0 0 auto;
   font-size: 9px;
   color: var(--text-3);
 }

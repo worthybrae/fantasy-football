@@ -31,9 +31,19 @@ function adpDelta(value: number | null | undefined): ReactNode {
 
 // duplicated from DraftBoardGrid.tsx / RosterPanel.tsx (unexported in both):
 // a four-line pure function isn't worth a shared module between four views.
-function posBadge(position: string | undefined): ReactNode {
+//
+// `rank` is how many at that position had gone by the time this one did --
+// the 7 in QB7. It rides inside the tag rather than beside it because that
+// is the unit people say out loud, and because a loose number on this line
+// would read as another stat next to the pick number and the ADP move.
+function posBadge(position: string | undefined, rank: number | undefined): ReactNode {
   if (!position) return null
-  return <span className={`pos-badge pos-badge-${position.toLowerCase()}`}>{position}</span>
+  return (
+    <span className={`pos-badge pos-badge-${position.toLowerCase()}`}>
+      {position}
+      {rank !== undefined && <span className="pos-badge-rank">{rank}</span>}
+    </span>
+  )
 }
 
 // EVERY pick, not the last few. The strip started at eight because it could
@@ -67,6 +77,20 @@ export default function PickTicker({ board, onOpenPlayer }: PickTickerProps) {
 
   const recent: BoardCell[] = [...board.cells].sort((a, b) => b.overall - a.overall)
 
+  // QB7: the seventh quarterback off the board, keyed by the pick that was
+  // him. Counted here off the same `board.cells` the rail already has --
+  // walking it oldest-first -- rather than asked of the API, because it is a
+  // running total over picks that have landed and nothing else knows it.
+  const posRank = new Map<number, number>()
+  const takenAtPos = new Map<string, number>()
+  for (let i = recent.length - 1; i >= 0; i--) {
+    const pos = recent[i].player.position
+    if (!pos) continue
+    const n = (takenAtPos.get(pos) ?? 0) + 1
+    takenAtPos.set(pos, n)
+    posRank.set(recent[i].overall, n)
+  }
+
   // Column headers keyed by slot, so each pick can name the team that made
   // it. The board serves exactly one column per slot, but a missing entry
   // falls back to the slot number rather than rendering "undefined".
@@ -86,7 +110,13 @@ export default function PickTicker({ board, onOpenPlayer }: PickTickerProps) {
             const startsRound = i === 0 || recent[i - 1].round !== cell.round
             const column = teamBySlot.get(cell.slot)
             const team = column?.team_name ?? `Team ${cell.slot}`
-            const label = `Pick ${cell.overall}, ${cell.player.name}, ${team}`
+            const rank = posRank.get(cell.overall)
+            // The tag is decoration to a screen reader elsewhere on this
+            // line, so the spoken label is where "QB7" has to be said.
+            const posSaid = cell.player.position
+              ? `${cell.player.position}${rank ?? ''}, `
+              : ''
+            const label = `Pick ${cell.overall}, ${cell.player.name}, ${posSaid}${team}`
             return (
               <Fragment key={cell.overall}>
               {startsRound && (
@@ -136,7 +166,7 @@ export default function PickTicker({ board, onOpenPlayer }: PickTickerProps) {
                         {adpDelta(cell.player.value)}
                       </span>
                       <span className="pick-ticker-detail">
-                        {posBadge(cell.player.position)}
+                        {posBadge(cell.player.position, posRank.get(cell.overall))}
                         <span className="pick-ticker-team">{team}</span>
                       </span>
                     </span>
@@ -174,7 +204,7 @@ export default function PickTicker({ board, onOpenPlayer }: PickTickerProps) {
                         {adpDelta(cell.player.value)}
                       </span>
                       <span className="pick-ticker-detail">
-                        {posBadge(cell.player.position)}
+                        {posBadge(cell.player.position, posRank.get(cell.overall))}
                         <span className="pick-ticker-team">{team}</span>
                       </span>
                     </span>

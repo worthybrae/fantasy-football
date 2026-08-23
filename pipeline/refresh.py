@@ -73,6 +73,10 @@ def main() -> int:
         "fp_ecr": lambda: _fetch_multi_format(
             sources.fetch_fp_ecr, FORMATS_BY_SOURCE["fp_ecr"]),
         "sleeper_ids": sources.fetch_sleeper_ids,
+        # Season-long player futures. Cheap (one request) and allowed to come
+        # back empty: these are posted months before a season and pulled after
+        # it, so "not up yet" is an ordinary state rather than a failure.
+        "player_futures": lambda: sources.fetch_player_futures(CURRENT_SEASON),
         # LAST, and in this order, on purpose. Both read the board, which
         # reads almost every table above them, so they have to run after
         # those are current; and player_news is the slow one (~223 Google

@@ -88,6 +88,16 @@ export interface GameRow extends GameLogRow {
  *  `implied` is the team's average implied total over the weeks a line is
  *  posted for, `rank` its place among the teams the market has priced, and
  *  `weeks` one entry per priced game. A TEAM total, never a player prop. */
+export interface PlayerFuture {
+  market: string
+  label: string
+  american: string | null
+  implied_pct: number | null
+  /** Where his price sits in that market's field, shortest first. */
+  place: number
+  field: number
+}
+
 export interface Vegas {
   implied: number | null
   rank: number | null
@@ -96,6 +106,9 @@ export interface Vegas {
   weeks_total: number | null
   weeks: { week: number | null; opponent: string | null; home: boolean;
            implied: number | null }[]
+  /** His own season-long markets, shortest price first. Empty for anyone no
+   *  book has priced -- most of the board past the early rounds. */
+  futures: PlayerFuture[]
 }
 
 /** One schedule week plus the league rank the owner asked for.
