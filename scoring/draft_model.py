@@ -1030,7 +1030,7 @@ def log_likelihood(beta, X_list, chosen_list) -> float:
 
 
 def neg_log_likelihood(beta, X_list, chosen_list, prior=None, lam=0.0,
-                       offsets=None):
+                       offsets=None, weights=None):
     """Value and gradient of the ridge-penalized negative log-likelihood.
 
     Convex in beta, which is why L-BFGS-B finds the global optimum rather than
@@ -1042,11 +1042,27 @@ def neg_log_likelihood(beta, X_list, chosen_list, prior=None, lam=0.0,
     the frozen columns contribute a fixed per-player score and drop out of the
     gradient entirely, which is a genuinely smaller optimization problem
     rather than the same one with some coefficients discouraged.
+
+    `weights`, when given, is one non-negative number per choice set and scales
+    that set's contribution to both the value and the gradient. It is the
+    M-step of `scoring.mixture`'s EM: a latent-class fit maximizes the EXPECTED
+    complete-data log-likelihood, which is the ordinary log-likelihood with
+    each pick counted by the responsibility its seat's posterior puts on the
+    class being fitted. A fractional count cannot be expressed by duplicating
+    rows, so it has to enter the objective here.
+
+    The penalty is deliberately NOT scaled by the weights. `lam` is an absolute
+    number of pseudo-observations' worth of pull toward `prior`, so a class
+    holding a tenth of the corpus is shrunk ten times harder toward the pooled
+    fit than one holding all of it -- which is the behavior the mixture wants,
+    since it is the small class that has too few picks to estimate 29
+    coefficients from.
     """
     value = 0.0
     grad = np.zeros_like(beta, dtype=float)
-    for X, k, off in zip(X_list, chosen_list,
-                         repeat(None) if offsets is None else offsets):
+    for X, k, off, w in zip(X_list, chosen_list,
+                            repeat(None) if offsets is None else offsets,
+                            repeat(1.0) if weights is None else weights):
         scores = X @ beta
         if off is not None:
             scores = scores + off
@@ -1054,8 +1070,8 @@ def neg_log_likelihood(beta, X_list, chosen_list, prior=None, lam=0.0,
         exp_sum = exp.sum()
         probs = exp / exp_sum
         log_sum_exp = scores.max() + np.log(exp_sum)
-        value -= scores[k] - log_sum_exp
-        grad += probs @ X - X[k]
+        value -= w * (scores[k] - log_sum_exp)
+        grad += w * (probs @ X - X[k])
     if prior is not None and lam:
         diff = beta - prior
         value += lam * float(diff @ diff)
@@ -1064,13 +1080,31 @@ def neg_log_likelihood(beta, X_list, chosen_list, prior=None, lam=0.0,
 
 
 def fit(X_list, chosen_list, prior=None, lam: float = 0.0,
-        offsets=None) -> np.ndarray:
+        offsets=None, weights=None, start=None) -> np.ndarray:
+    """The penalized conditional logit fit. Convex, so `start` cannot change
+    the answer -- only how long L-BFGS-B takes to reach it.
+
+    `start` exists to separate WHERE THE SEARCH BEGINS from WHAT THE PENALTY
+    PULLS TOWARD, which `prior` had been doing both of. `scoring.mixture`'s EM
+    refits every class on every iteration, always shrinking toward the same
+    pooled vector but always resuming from that class's previous coefficients;
+    restarting each of those fits from `prior` costs a full cold solve per
+    class per iteration (~3s here) instead of a few L-BFGS steps (~0.1s), which
+    is the difference between a K sweep that runs in minutes and one that runs
+    overnight. Defaulting to `prior` (then zeros) keeps every existing caller
+    on exactly the path it was on.
+    """
     n_features = X_list[0].shape[1] if X_list else len(FEATURE_NAMES)
-    start = np.zeros(n_features) if prior is None else np.asarray(prior, dtype=float).copy()
+    if start is not None:
+        start = np.asarray(start, dtype=float).copy()
+    elif prior is None:
+        start = np.zeros(n_features)
+    else:
+        start = np.asarray(prior, dtype=float).copy()
     if not X_list:
         return start
     result = minimize(neg_log_likelihood, start,
-                      args=(X_list, chosen_list, prior, lam, offsets),
+                      args=(X_list, chosen_list, prior, lam, offsets, weights),
                       jac=True, method="L-BFGS-B")
     if not result.success:
         warnings.warn(

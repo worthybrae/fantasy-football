@@ -1944,3 +1944,89 @@ def test_fit_all_never_reports_a_manager_on_the_cold_start_path(tmp_path):
     fit_all(get_conn(str(tmp_path / "empty.duckdb")),
             on_manager=lambda *a: calls.append(a))
     assert calls == []
+
+
+# --- `fit`'s two new arguments: a fractional per-observation count, and a
+# --- starting point separate from the shrinkage target. Both exist for
+# --- `scoring.mixture`'s EM, and both are strict generalizations -- the
+# --- assertions below are as much that the DEFAULTS did not move as that the
+# --- new behaviour is right.
+
+def test_a_weight_of_zero_removes_an_observation_from_the_fit():
+    """Responsibility-weighted means responsibility-weighted.
+
+    The mixture's M-step fits every class on the WHOLE corpus with a weight
+    column rather than on a subset, because responsibilities are fractional.
+    That is only the same thing as fitting on the class's own members if a
+    zero weight contributes exactly nothing to the value and the gradient.
+    """
+    from scoring.draft_model import fit
+    rng = np.random.default_rng(5)
+    X_list, chosen, weights = [], [], []
+    for i in range(80):
+        X = rng.normal(size=(6, 3))
+        scores = X @ (np.array([3.0, 0.0, 0.0]) if i < 40
+                      else np.array([-3.0, 0.0, 0.0]))
+        probs = np.exp(scores - scores.max())
+        X_list.append(X)
+        chosen.append(int(rng.choice(6, p=probs / probs.sum())))
+        weights.append(1.0 if i < 40 else 0.0)
+    weighted = fit(X_list, chosen, weights=np.array(weights))
+    subset = fit(X_list[:40], chosen[:40])
+    assert weighted == pytest.approx(subset, abs=1e-4)
+
+
+def test_weights_default_to_counting_every_pick_once():
+    """The default path is byte-for-byte the old one, which is the only reason
+    a shared objective could take this argument at all."""
+    from scoring.draft_model import fit, neg_log_likelihood
+    rng = np.random.default_rng(6)
+    X_list = [rng.normal(size=(5, 3)) for _ in range(30)]
+    chosen = [int(rng.integers(5)) for _ in range(30)]
+    beta = rng.normal(size=3)
+    plain = neg_log_likelihood(beta, X_list, chosen)
+    ones = neg_log_likelihood(beta, X_list, chosen, weights=np.ones(30))
+    assert plain[0] == pytest.approx(ones[0])
+    assert plain[1] == pytest.approx(ones[1])
+    assert fit(X_list, chosen) == pytest.approx(
+        fit(X_list, chosen, weights=np.ones(30)), abs=1e-5)
+
+
+def test_a_warm_start_reaches_the_same_answer_as_a_cold_one():
+    """`start` may move only the cost, never the answer.
+
+    The objective is convex, so this is a property of the problem rather than
+    of the optimizer -- which is exactly why it is safe for the EM to resume
+    each class from its previous coefficients. A `start` that changed the
+    result would mean the objective is not what it is documented to be.
+    """
+    from scoring.draft_model import fit
+    rng = np.random.default_rng(7)
+    X_list = [rng.normal(size=(8, 3)) for _ in range(60)]
+    truth = np.array([2.0, -1.0, 0.5])
+    chosen = []
+    for X in X_list:
+        scores = X @ truth
+        probs = np.exp(scores - scores.max())
+        chosen.append(int(rng.choice(8, p=probs / probs.sum())))
+    cold = fit(X_list, chosen)
+    warm = fit(X_list, chosen, start=cold + 0.4)
+    assert warm == pytest.approx(cold, abs=1e-4)
+
+
+def test_start_and_prior_are_different_things():
+    """`start` is where the search begins; `prior` is what the penalty pulls
+    toward. They had been the same argument, and the mixture needs them apart:
+    every class is shrunk toward the SAME pooled vector while resuming from its
+    OWN previous coefficients."""
+    from scoring.draft_model import fit
+    rng = np.random.default_rng(8)
+    X_list = [rng.normal(size=(6, 3)) for _ in range(12)]
+    chosen = [int(rng.integers(6)) for _ in range(12)]
+    prior = np.array([5.0, 0.0, 0.0])
+    # A huge lambda collapses the fit onto `prior` no matter where it started.
+    from_prior = fit(X_list, chosen, prior=prior, lam=1e6)
+    from_elsewhere = fit(X_list, chosen, prior=prior, lam=1e6,
+                         start=np.array([-9.0, 9.0, -9.0]))
+    assert from_prior == pytest.approx(prior, abs=1e-3)
+    assert from_elsewhere == pytest.approx(prior, abs=1e-3)
