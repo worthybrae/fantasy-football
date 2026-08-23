@@ -4698,28 +4698,6 @@ button.roster-row:focus-visible {
 .delta-tone.is-up { color: var(--ok); }
 .delta-tone.is-down { color: var(--fail); }
 
-/* The implied total, and the unit it is in. The number is the card's answer
-   and the words beside it are the guard against reading it as his own
-   projection. */
-.pp-pop-vegas-head {
-  display: flex;
-  align-items: baseline;
-  gap: 5px;
-  flex-wrap: wrap;
-}
-
-.pp-pop-vegas-figure {
-  font-size: 19px;
-  line-height: 1;
-  color: var(--text-1);
-}
-
-.pp-pop-vegas-unit {
-  font-size: 9.5px;
-  line-height: 1.3;
-  color: var(--text-3);
-}
-
 /* The rank, at the size the card's most quotable fact deserves. It used to
    live in the header note beside the word "Vegas", in 9px grey, where it was
    the smallest thing on a card whose whole subject it is. */

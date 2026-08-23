@@ -2,16 +2,16 @@ import type { Vegas } from './payload'
 import PopCard from './PopCard'
 import { ordinal } from './payload'
 
-// What the betting market prices this player's offence at.
+// What the betting market prices this player's offence at, and what it
+// prices him at.
 //
-// An implied team total is the half of a line that is about scoring:
-// (total + spread) / 2 for the home side. It is the same arithmetic behind the
-// board's `environment` factor, so this card and that percentile cannot
-// disagree about whose offence the market likes.
-//
-// A TEAM total, and the note says so. Nothing here claims how many of
-// Detroit's 27.8 points go to one back -- a card that let a reader take it for
-// a player projection would be worse than no card.
+// The number the rank is computed from -- an implied team total, (total +
+// spread) / 2 for the home side, the same arithmetic behind the board's
+// `environment` factor -- IS NOT PRINTED. "26.6 implied team pts / game"
+// needed a sentence of explaining, could be misread as a projection for the
+// player rather than his team, and after all that said nothing the rank
+// beneath it did not say better. The placing is the fact; the points were
+// the arithmetic that produced it.
 //
 // THERE IS NO WEEK STRIP ANY MORE. This card used to draw one bar per week
 // of the season under the total -- eighteen of them, most greyed out because
@@ -22,10 +22,13 @@ import { ordinal } from './payload'
 // What survives is the provenance -- how many weeks the average is over --
 // which is the only thing the strip said that nothing else does.
 
-// How many of his own markets the card shows. Three is what fits under the
-// week bars, and they arrive shortest-price first, so the three shown are the
-// three the market likes him most for.
-const SHOWN_MARKETS = 3
+// How many of his own markets the card shows. Four, which is what the card
+// has room for now that the implied total and the week strip are gone -- it
+// renders a shade under the Market card it shares a row with, and an empty
+// bottom third would be worse than a fourth market. They arrive
+// shortest-price first, so the four shown are the four the market likes him
+// most for.
+const SHOWN_MARKETS = 4
 
 export default function VegasCard({ vegas }: { vegas: Vegas | null }) {
   const futures = vegas?.futures ?? []
@@ -46,17 +49,11 @@ export default function VegasCard({ vegas }: { vegas: Vegas | null }) {
     <PopCard title="Vegas" className="is-widest">
       {hasTeam && (
       <>
-      <div className="pp-pop-vegas-head">
-        <span className="mono pp-pop-vegas-figure">{vegas.implied}</span>
-        {/* The unit, spelled out. "26.8" beside a rank could be read as
-            anything; this is the team's points, not his. */}
-        <span className="pp-pop-vegas-unit">implied team pts / game</span>
-      </div>
       {ranked && (
-        // The rank, promoted out of the card's header note and given the
-        // size the number deserves: of everything on this card it is the one
-        // fact that needs no explaining and survives being the only thing a
-        // reader takes away.
+        // The rank, and now the card's opening line rather than a note under
+        // a number: of everything Vegas says about a player's offence it is
+        // the one fact that needs no explaining and survives being the only
+        // thing a reader takes away.
         <div className="pp-pop-vegas-rank">
           <span className="mono pp-pop-vegas-rank-place">{ordinal(vegas.rank!)}</span>
           <span className="pp-pop-vegas-rank-of">of {vegas.teams} offences</span>
@@ -65,11 +62,11 @@ export default function VegasCard({ vegas }: { vegas: Vegas | null }) {
           </span>
         </div>
       )}
-      {/* What the average is over, and what the percentages below it are.
+      {/* Where the rank comes from, and what the percentages below it are.
           Both are provenance rather than findings, which is why they share
           one 9px line instead of costing two. */}
       <div className="pp-pop-vegas-foot mono">
-        avg of {vegas.priced} priced weeks{futures.length > 0 && ' · book prices'}
+        over {vegas.priced} priced weeks{futures.length > 0 && ' · book prices'}
       </div>
       </>
       )}
