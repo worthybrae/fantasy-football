@@ -115,13 +115,28 @@
   gap: clamp(28px, 4vw, 60px);
   align-items: start;
   padding-top: clamp(44px, 6vw, 78px);
-  padding-bottom: clamp(40px, 5vw, 64px);
+  /* Deeper than it was (40/64px). The extra is not whitespace: it is the
+     bottom edge of the region the backdrop board occupies, and without it
+     the board would be sliced off flush against the section's rule instead
+     of running out under it. */
+  padding-bottom: clamp(66px, 6vw, 96px);
+  /* The containing block for the backdrop. */
+  position: relative;
 }
 
 @media (max-width: 1040px) {
   .lp-hero {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+/* Both hero columns sit above the backdrop, and both are opaque enough to
+   carry their own text: the copy over the scrim's darkest band, the proof
+   panel on its own --bg-1 fill. */
+.lp-hero-copy,
+.lp-hero .lp-proof {
+  position: relative;
+  z-index: 1;
 }
 
 .lp-hero-copy {
@@ -184,6 +199,401 @@
 .lp-cta-note {
   font-size: var(--text-base);
   color: var(--text-3);
+}
+
+/* The demoted "try it in a mock draft". It used to be the hero's only
+   button; the bookmarklet is the primary action now, and two filled amber
+   buttons side by side would leave neither of them leading. Outlined, same
+   size, same words. Declared after `.lp-cta` and `.lp-cta:hover` on purpose:
+   both selectors have the same specificity, so source order is what decides
+   this, not weight. */
+.lp-cta-ghost {
+  border-color: var(--border);
+  background: transparent;
+  color: var(--text-1);
+  font-weight: 600;
+}
+
+.lp-cta-ghost:hover {
+  border-color: var(--accent-border);
+  background: transparent;
+  color: var(--accent);
+}
+
+/* -- the hero's primary action: the bookmarklet, or the honest substitute
+      for it ------------------------------------------------------------- */
+
+/* One stack for whichever of the two the browser gets, so the lobby strip
+   below sits the same distance under either. Items stretch: the lobby
+   strip's room list is a three-column grid and has to keep the copy
+   column's full width, so alignment is left to the blocks inside. */
+.lp-hero-act {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+}
+
+/* The drag path. No box around it: the bookmark is already a raised,
+   accent-bordered object, and putting a second bordered panel around it
+   would give the hero two competing frames and make neither read as the
+   thing to grab. Caption above, chip, sentence, then the secondary button
+   -- ordinary type hierarchy, with the one physical object in the middle
+   of it. */
+.lp-drag {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 11px;
+}
+
+.lp-drag-cap {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+/* Points where the thing has to end up. The bookmarks bar is above the
+   page, not on it, and that is the single fact a first-time visitor is
+   missing when they click the chip and nothing happens. */
+.lp-drag-arrow {
+  font-size: 12px;
+  line-height: 1;
+  transform: translateY(-1px);
+}
+
+/* Bigger than the one in the setup block below, accent-bordered rather than
+   accent-tinted, and sitting in its own soft ring -- it is the brightest,
+   most physical object on the page, which is what a primary action has to
+   be when it cannot be a button. The compound selector beats plain
+   `.lp-bookmark` regardless of where either rule lands in the file. */
+.lp-drag .lp-bookmark {
+  padding: 11px 20px 11px 15px;
+  border-color: var(--accent);
+  background: linear-gradient(color-mix(in srgb, var(--accent) 13%, var(--bg-2)), var(--bg-1));
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.06) inset,
+    0 3px 12px rgba(0, 0, 0, 0.5),
+    0 0 0 4px color-mix(in srgb, var(--accent) 9%, transparent);
+  font-size: var(--text-md);
+  /* Transform only. The shadow above is static and stays static: box-shadow
+     is a paint property and cannot be composited, which this repo already
+     paid for once on the available-list pulse. */
+  transition: transform 0.12s ease;
+}
+
+.lp-drag .lp-bookmark:hover {
+  transform: translateY(-1px);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.08) inset,
+    0 3px 12px rgba(0, 0, 0, 0.5),
+    0 0 0 4px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.lp-drag-note {
+  max-width: 48ch;
+  font-size: var(--text-base);
+  line-height: 1.6;
+  color: var(--text-3);
+}
+
+.lp-drag-note kbd {
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+/* The no-drag path: a phone, a tablet, anything whose primary input cannot
+   drag a link onto browser chrome. See `useCanDrag` in pages/Landing.tsx for
+   what is actually tested (capability, never width). Says the one true thing
+   and then offers the button that does work, rather than showing a drag
+   target that cannot be dragged. */
+.lp-nodrag-line {
+  max-width: 48ch;
+  font-size: var(--text-md);
+  line-height: 1.6;
+  color: var(--text-2);
+  text-wrap: pretty;
+}
+
+.lp-nodrag-line strong {
+  color: var(--text-1);
+  font-weight: 600;
+}
+
+/* -- the hero backdrop: a synthetic draft board ------------------------- */
+/* Built in components/HeroBoard.tsx -- read its header for what it is and
+   what it deliberately is not. Everything here is either geometry or the
+   scrim; the only animated declarations are opacity and transform.
+
+   Layering inside the hero:
+     .lp-hb        clipping frame, absolute over the whole section
+     .lp-hb-grid     the board, anchored to the hero's BOTTOM edge
+     .lp-hb-scrim    a static gradient, over the board, under the copy
+   and both hero columns carry `z-index: 1` (see .lp-hero-copy above), so
+   nothing readable is ever underneath a lit cell. */
+
+.lp-hb {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  /* Decoration: it must not take a click meant for the copy over it, and it
+     carries aria-hidden in the markup so it is not read out either. */
+  pointer-events: none;
+}
+
+/* Anchored to the bottom, not stretched to fit. A fixed 64px row means the
+   board looks identical whatever the hero's height turns out to be, and the
+   rows that do not fit are simply cropped by the frame above -- which is
+   what a real board does anyway (`.board-wrap` scrolls; no viewport holds
+   sixteen rounds). Rounds are laid out top-down, so the crop takes the
+   EARLIEST rounds, and the rounds nearest the fold are the deep ones a
+   visitor would be looking at late in a draft. */
+.lp-hb-grid {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  /* Past the section's right edge on purpose, so the clip runs THROUGH a
+     cell rather than landing exactly on the seam between two of them -- a
+     board that stops flush at a border reads as a graphic, one that is cut
+     mid-cell reads as a board that carries on. The scrim darkens this strip
+     to hide the cut itself. */
+  right: -34px;
+  display: grid;
+  /* A shade taller than the room's own 62px cell. The board is 720px of
+     rows against a hero that lands near 930px, which puts its top edge well
+     up into the part of the scrim that is still near-opaque -- so the board
+     has no visible top edge at all, it simply stops being lit. */
+  grid-auto-rows: 72px;
+  /* One dial for how present the whole board is, applied to the layer rather
+     than to each colour, so a change here does not have to be re-checked
+     against six position hues. Multiplied by whatever the scrim lets
+     through -- see the stops below. */
+  opacity: 0.7;
+}
+
+/* Same empty slot the room draws: a hairline cell with the overall pick
+   number in it, waiting. */
+.lp-hb-cell {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-2) 45%, transparent);
+}
+
+.lp-hb-n {
+  position: absolute;
+  top: 6px;
+  left: 8px;
+  font-size: 10px;
+  color: var(--text-3);
+  opacity: 0.55;
+}
+
+/* The pick landing on that slot. Opaque, so it covers the pick number as it
+   arrives -- the number crossfades into the player, which is exactly the
+   substitution the real board makes. */
+.lp-hb-pick {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px 8px;
+  background: var(--bg-1);
+  opacity: 0;
+  /* 44s = TEAMS x ROUNDS x STEP_S in HeroBoard.tsx (10 x 8 x 0.55). The two
+     have to move together: the component hands every cell its own
+     animation-delay off that same arithmetic, and a duration that did not
+     match the total stagger would leave a seam in the loop. */
+  animation: lp-hb-pick 44s linear infinite;
+}
+
+/* Fills over ~1.3s, holds for four fifths of the cycle, clears over ~3s.
+   The hold is what makes the board read as a board rather than as a
+   shimmer: at any instant about seven cells in eighty are empty, and they
+   are contiguous in draft order, so what moves across the grid is one
+   quiet gap being redrafted rather than eighty things flickering. */
+@keyframes lp-hb-pick {
+  0% { opacity: 0; transform: translateY(3px); }
+  3% { opacity: 1; transform: translateY(0); }
+  82% { opacity: 1; transform: translateY(0); }
+  89%, 100% { opacity: 0; transform: translateY(0); }
+}
+
+/* A static, fully drafted board. Nothing fades in, nothing clears, and the
+   page still shows the product rather than an empty grid -- which is the
+   whole reason this is DOM and not a video, where the same promise needs a
+   separate poster image to keep. */
+@media (prefers-reduced-motion: reduce) {
+  .lp-hb-pick {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.lp-hb-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+/* The room's own badge, from App.css, at backdrop scale. Compound selector,
+   so it beats `.pos-badge` on specificity and does not depend on which of
+   the two stylesheets the bundler happens to emit first. */
+.lp-hb-pick .pos-badge {
+  min-width: 0;
+  padding: 0 4px;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+}
+
+.lp-hb-club {
+  font-size: 9px;
+  color: var(--text-3);
+}
+
+.lp-hb-name {
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.15;
+  color: var(--text-2);
+  /* Two lines, then clip -- the same clamp the room's cells use, so a long
+     invented name behaves the way a long real one does. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.lp-hb-round {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-1) 70%, transparent);
+}
+
+.lp-hb-round-n {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-3);
+}
+
+/* The snake's direction, the one thing on this backdrop that is an argument
+   rather than decoration: the wave fills left to right, turns at the end of
+   the round and comes back, which is the order the whole tool is about. */
+.lp-hb-dir {
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--accent);
+  opacity: 0.5;
+}
+
+/* Your column. A translucent wash OVER the cells rather than a fill behind
+   them (z-index, hence the position) so it tints filled and empty slots
+   alike -- an empty slot in your column is still yours, which is the point
+   `.board-col-mine` makes in the room. */
+.lp-hb-mine {
+  position: relative;
+  z-index: 1;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border-left: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-right: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+/* The scrim: two stacked gradients whose transmissions multiply.
+
+   The hero is not a blank canvas -- the copy fills the left column top to
+   bottom and the proof panel fills the top of the right one, and the ONE
+   region with nothing in it is the quadrant under that panel. So that is
+   where the board is allowed to be a board, and the panel ends up sitting on
+   it the way a card sits on a table. Everywhere the copy runs, the horizontal
+   layer alone is already near-opaque, which is what makes the contrast
+   promise cheap to keep: it does not depend on where a headline happens to
+   wrap or on whether the lobby strip found anything to show.
+
+   Transmission (the fraction of the board that reaches the eye) is the
+   product of the two, then the grid's own 0.8:
+
+     over the copy column, at any height      <= 0.07 x 0.7 =  5%
+     under the proof panel, lower two fifths   0.54 x 0.7   = 38%
+     the very bottom edge, full width          fades back down, so the board
+                                               runs out under the section's
+                                               rule instead of being cut by it
+
+   Worst case for contrast is the lowest line of copy in the left column with
+   a lit cell directly behind it, at 5%: --text-2 goes from 7.4:1 to 7.1:1
+   and --text-3 from 2.87:1 to 2.78:1. Neither is a ratio this page did not
+   already ship. */
+.lp-hb-scrim {
+  position: absolute;
+  inset: 0;
+  background:
+    /* Across: the copy column is covered, the right of the hero is open.
+       The plateau runs to 47%, which is where the copy column's right edge
+       lands at every width this layout has two columns at (45.6% at 1440px,
+       45.8% at 1240px, 45.9% at 1100px -- the fractions barely move because
+       the gutters and the gap are clamps of the same vw). The ramp after it
+       is 13% of the hero wide and spends most of that behind the proof
+       panel, so what shows below the panel is a soft fade rather than an
+       edge. The last stop closes the right side again: the grid is drawn
+       34px past the section, so the clip runs through a cell, and this is
+       what stops that cut from being visible. */
+    linear-gradient(
+      to right,
+      color-mix(in srgb, var(--bg-0) 93%, transparent) 0,
+      color-mix(in srgb, var(--bg-0) 93%, transparent) 47%,
+      color-mix(in srgb, var(--bg-0) 40%, transparent) 55%,
+      transparent 60%,
+      transparent 88%,
+      color-mix(in srgb, var(--bg-0) 82%, transparent) 100%
+    ),
+    /* Down: nothing behind the headline, opening from the panel's lower half
+       to the fold, then closing again over the last few pixels. */
+    linear-gradient(
+      to bottom,
+      var(--bg-0) 0,
+      var(--bg-0) 20%,
+      color-mix(in srgb, var(--bg-0) 90%, transparent) 38%,
+      color-mix(in srgb, var(--bg-0) 70%, transparent) 54%,
+      color-mix(in srgb, var(--bg-0) 50%, transparent) 72%,
+      color-mix(in srgb, var(--bg-0) 46%, transparent) 90%,
+      color-mix(in srgb, var(--bg-0) 78%, transparent) 100%
+    );
+}
+
+/* The backdrop depends on the hero having two columns: the whole scrim above
+   is built around the fact that the copy occupies the left 47% and the one
+   region with nothing in it is the quadrant under the proof panel. At this
+   breakpoint the hero stacks, the copy runs the full width, and that region
+   stops existing -- the board would have nowhere to be except a strip under
+   the fold with text sitting on top of it. So it is dropped, along with the
+   padding that was there to hold it. Half a good idea is worse than none,
+   and on a phone it would also be a hundred animated elements on the
+   weakest hardware that loads this page.
+
+   This IS a width test, and width is the right question here: it asks how
+   much room the board would be drawn in. The drag test in Landing.tsx asks
+   what the visitor's hands can do, which width cannot answer, and must
+   never be written this way. */
+@media (max-width: 1040px) {
+  .lp-hb {
+    display: none;
+  }
+
+  .lp-hero {
+    padding-bottom: clamp(40px, 5vw, 60px);
+  }
 }
 
 /* -- the proof panel ---------------------------------------------------- */

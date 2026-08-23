@@ -7,6 +7,7 @@ import { Logo } from '../components/Logo'
 import ConnectScreen from '../components/ConnectScreen'
 import ReadinessStrip from '../components/ReadinessStrip'
 import LobbyStrip from '../components/LobbyStrip'
+import HeroBoard from '../components/HeroBoard'
 // This page's own stylesheet, not App.css: see the header comment in it for
 // why, and for why every class below is `lp-` prefixed.
 import '../landing.css'
@@ -53,6 +54,90 @@ function tokenFromHash(hash: string) {
   if (!leagueId || !teamId || !swid || !token) return null
   return { leagueId, teamId, swid, token, season: p.get('season') || '' }
 }
+
+// ---------------------------------------------------------------------------
+// Can this browser actually drag a link onto the bookmarks bar?
+// ---------------------------------------------------------------------------
+//
+// The hero's primary action is a drag target, and a drag target on a phone
+// is a button that does nothing: there is no bookmarks bar to drop it on and
+// no gesture that would reach one. So the page has to know, and it has to
+// know before first paint (a hero that swaps its main action a moment after
+// it renders is a layout shift on the most important block of the page).
+//
+// DELIBERATELY NOT A WIDTH TEST. Width answers a different question than the
+// one being asked. A desktop window dragged down to 700px still drags
+// perfectly; a 1366px-wide tablet cannot drag at all. Two capability facts
+// answer the real one:
+//
+//   'draggable' in a <div>  -- the HTML drag-and-drop API exists here.
+//   (hover: hover) and (pointer: fine) -- the browser's PRIMARY input is a
+//   precise pointer that can hover, which is what dragging something out of
+//   the page and onto the browser's own chrome requires. iPadOS reports
+//   (hover: none) and (pointer: coarse) no matter how wide the window is; a
+//   laptop reports fine/hover at 320px.
+//
+// A hybrid -- a touchscreen laptop, a tablet with a trackpad attached --
+// reports its primary input as fine/hover and gets the drag target, which is
+// the right answer: it has a mouse. Detaching that trackpad fires the change
+// event below and the hero switches over.
+//
+// When there is no matchMedia at all, the answer is "no". The fallback is a
+// working page with an honest sentence; the drag target is the branch that
+// breaks if it is shown to the wrong browser, so it is the branch that has
+// to be earned.
+const DRAG_QUERY = '(hover: hover) and (pointer: fine)'
+
+function canDragNow(): boolean {
+  if (typeof window === 'undefined' || !window.matchMedia) return false
+  if (!('draggable' in document.createElement('div'))) return false
+  return window.matchMedia(DRAG_QUERY).matches
+}
+
+function useCanDrag(): boolean {
+  // Computed in the initialiser, not in an effect, so the first paint is
+  // already the right hero.
+  const [canDrag, setCanDrag] = useState(canDragNow)
+  useEffect(() => {
+    if (!window.matchMedia) return
+    const mq = window.matchMedia(DRAG_QUERY)
+    const sync = () => setCanDrag(canDragNow())
+    mq.addEventListener('change', sync)
+    return () => mq.removeEventListener('change', sync)
+  }, [])
+  return canDrag
+}
+
+// The bookmarklet as a real `javascript:` anchor.
+//
+// Present from first paint so a drag to the bookmarks bar copies IT, not
+// this page's URL -- setting the href after mount was too late, and the drag
+// grabbed localhost instead. React strips `javascript:` from href props, so
+// it is injected as raw HTML. The string has no single quotes (verified in
+// bookmarklet.ts, which also explains why it is comment-free and must not be
+// reformatted), so a single-quoted href is safe; onclick returns false so a
+// stray click does nothing -- it is a drag target, not a button.
+//
+// The football rides in the anchor's TEXT, as an emoji rather than the SVG
+// mark: a bookmark's title is the anchor's textContent, so an inline <svg>
+// would be dropped on the way to the bar and the label would arrive naked.
+// Nothing else may be added inside the anchor for the same reason.
+function bookmarkAnchor(): string {
+  return "<a class='lp-bookmark' title='Drag me to your bookmarks bar' "
+    + "onclick='return false' href='" + BOOKMARKLET + "'>"
+    + "<span aria-hidden='true'>🏈</span>&nbsp;Draft&nbsp;Assistant</a>"
+}
+
+// The one sentence a visitor who cannot drag gets instead of the chip. Said
+// once, in the hero, and again above the setup block's own drag target so
+// that scrolling down does not land them back on the thing they were just
+// told they cannot use.
+const NO_DRAG_LINE = (
+  <>
+    Draft Assistant installs as a <strong>bookmark you drag to your browser’s
+    bookmarks bar</strong>, so setting it up needs a desktop browser.
+  </>
+)
 
 // ---------------------------------------------------------------------------
 // The page's content. Every number below is a real reading off this tool, and
@@ -158,6 +243,7 @@ export default function Landing() {
   // Bumped by Retry. Every connect-owned piece of state is keyed off it, so a
   // retry starts from a blank screen rather than from the last one's rows.
   const [attempt, setAttempt] = useState(0)
+  const canDrag = useCanDrag()
   const navigate = useNavigate()
 
   // The token the bookmarklet delivered, kept for the whole session. It has
@@ -304,8 +390,10 @@ export default function Landing() {
   // There is no payment integration and no hosted signup, so a button that
   // implied either would be lying about what happens next. What actually
   // starts a draft -- free or paid, mock or real -- is the bookmarklet, and
-  // the honest thing a CTA can do is put it in front of you. So all four
-  // buttons scroll to the setup block and nothing else claims to happen.
+  // the honest thing a CTA can do is put it in front of you. The hero does
+  // that literally now (the bookmarklet IS its primary action); every other
+  // button on the page scrolls to the setup block, where the same chip sits
+  // above the three steps, and nothing else claims to happen.
   //
   // `smooth` only when the visitor has not asked for less motion; a page
   // that ignores that preference to animate a scroll is the exact case the
@@ -376,6 +464,15 @@ export default function Landing() {
 
       {/* -- the argument, and the proof of it, above the fold -- */}
       <section className="lp-sec lp-hero">
+        {/* A synthetic draft board, drafting itself, behind everything in
+            this section. Decoration -- aria-hidden and pointer-events: none
+            -- and absolutely positioned, so it adds nothing to the layout
+            and shifts nothing when it mounts. See components/HeroBoard.tsx
+            for why it is DOM rather than a video, and landing.css for the
+            scrim that keeps every line of copy below at the contrast it had
+            before the board existed. */}
+        <HeroBoard />
+
         <div className="lp-hero-copy">
           <p className="lp-cap lp-cap-accent">For ESPN fantasy leagues</p>
           {/* Two sentences, two blocks rather than one string with a <br>:
@@ -393,13 +490,46 @@ export default function Landing() {
             measures both — and simulates the picks between now and your next
             turn to work out the difference.
           </p>
-          <div className="lp-cta-row">
-            <button className="lp-cta" onClick={toSetup}>Try it in a mock draft</button>
-            <span className="lp-cta-note">free, no account</span>
+          {/* The hero's action. There is no signup and no download: what a
+              visitor actually has to do is move one object onto their
+              bookmarks bar, so that object is the primary action rather than
+              a button that scrolls to where it was hidden.
+
+              Where it cannot be done, it is not offered. See `useCanDrag`
+              above for what is tested; the branch is decided before first
+              paint, so neither version arrives late. */}
+          <div className="lp-hero-act">
+            {canDrag ? (
+              <div className="lp-drag">
+                <p className="lp-cap lp-cap-accent lp-drag-cap">
+                  <span className="lp-drag-arrow" aria-hidden="true">↑</span>
+                  Drag this to your bookmarks bar
+                </p>
+                <span dangerouslySetInnerHTML={{ __html: bookmarkAnchor() }} />
+                <p className="lp-drag-note">
+                  Once, ever. Then click it in your ESPN draft room — a mock
+                  counts — and your board opens here, priced before the first pick.
+                </p>
+                <div className="lp-cta-row">
+                  <button className="lp-cta lp-cta-ghost" onClick={toSetup}>
+                    Try it in a mock draft
+                  </button>
+                  <span className="lp-cta-note">free, no account</span>
+                </div>
+              </div>
+            ) : (
+              <>
+                <p className="lp-nodrag-line">{NO_DRAG_LINE}</p>
+                <div className="lp-cta-row">
+                  <button className="lp-cta" onClick={toSetup}>Try it in a mock draft</button>
+                  <span className="lp-cta-note">free, no account</span>
+                </div>
+              </>
+            )}
+            {/* Renders nothing until ESPN's own lobby answers, and nothing at
+                all if it can't -- see LobbyStrip's module comment. */}
+            <LobbyStrip />
           </div>
-          {/* Renders nothing until ESPN's own lobby answers, and nothing at
-              all if it can't -- see LobbyStrip's module comment. */}
-          <LobbyStrip />
         </div>
 
         {/* Not a screenshot and not an illustration: a board this tool
@@ -471,24 +601,19 @@ export default function Landing() {
           <p className="lp-cap">How it works</p>
           <h2 className="lp-h2">One click from the draft room you’re already in.</h2>
 
-          {/* The real javascript: link, present from first paint so a drag to
-              the bookmarks bar copies IT, not this page's URL (setting the href
-              after mount was too late -- the drag grabbed localhost instead).
-              React strips javascript: from href props, so it is injected as raw
-              HTML. The string has no single quotes (verified in
-              bookmarklet.ts), so a single-quoted href is safe; onclick returns
-              false so a stray click here does nothing -- it is a drag target,
-              not a button. */}
+          {/* The same chip the hero hands over, kept here because this is
+              where the three steps explain what to do with it. On a browser
+              that cannot drag it, the honest line comes first rather than
+              letting someone who was just told they need a desktop land back
+              on the drag target -- the chip stays visible underneath it, for
+              anyone whose browser the test read wrong. See bookmarkAnchor
+              above for why this is raw HTML. */}
+          {!canDrag && <p className="lp-nodrag-line">{NO_DRAG_LINE}</p>}
           <div className="lp-bookmark-row">
-            <span
-              dangerouslySetInnerHTML={{
-                __html:
-                  "<a class='lp-bookmark' title='Drag me to your bookmarks bar' "
-                  + "onclick='return false' href='" + BOOKMARKLET + "'>"
-                  + "<span aria-hidden='true'>🏈</span>&nbsp;Draft&nbsp;Assistant</a>",
-              }}
-            />
-            <span className="lp-bookmark-hint">← drag this to your bookmarks bar</span>
+            <span dangerouslySetInnerHTML={{ __html: bookmarkAnchor() }} />
+            {canDrag && (
+              <span className="lp-bookmark-hint">← drag this to your bookmarks bar</span>
+            )}
           </div>
 
           {/* Numbered because this genuinely is a sequence: each step is only
