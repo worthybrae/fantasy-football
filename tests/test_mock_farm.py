@@ -535,3 +535,160 @@ def test_join_raises_when_espn_names_no_seat():
     with pytest.raises(ValueError, match="did not say"):
         lobby.join(lambda url, payload: json.dumps([{"teamId": -1}]),
                    42, "{ABC}", 2026)
+
+
+# ---------------------------------------------------------------------------
+# The run loop: counting, resilience, and the wait for a room to open.
+# ---------------------------------------------------------------------------
+
+
+class _FakeConn:
+    """Stands in for the read-only board connection `farm` opens and closes.
+    Nothing in these tests reaches the board -- `play_draft` is replaced."""
+
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+def _live_room(**overrides) -> dict:
+    """A room the policy accepts against the REAL clock, since `farm` calls
+    `pick_room` with no `now_ms` of its own."""
+    import time as _time
+    now_ms = _time.time() * 1000
+    return _room(draftDate=now_ms + 300_000,
+                 draftAvailableDate=now_ms + 210_000, **overrides)
+
+
+def _stub_farm_deps(monkeypatch, rooms):
+    monkeypatch.setattr(mf, "load_cookies",
+                        lambda: {"SWID": "{X}", "espn_s2": "s2"})
+    monkeypatch.setattr(mf, "http_fetch", lambda cookies: (lambda url: "[]"))
+    monkeypatch.setattr(mf, "open_board_db",
+                        lambda path=None, out=print: _FakeConn())
+    monkeypatch.setattr(lobby, "list_mock_leagues",
+                        lambda fetch, season: list(rooms))
+    monkeypatch.setattr(mf.time, "sleep", lambda seconds: None)
+
+
+def test_a_recorded_draft_is_counted_once(monkeypatch, tmp_path):
+    """`recorded` is both a status name and the counter the loop's `while`
+    reads. Counting it in one place made a run asked for N stop at N/2."""
+    _stub_farm_deps(monkeypatch, [_live_room(leagueId=11),
+                                  _live_room(leagueId=12)])
+    seen = []
+
+    def fake_play(conn, corpus_path, cookies, room, rng, season=2026,
+                  out=print):
+        seen.append(room["leagueId"])
+        return {"status": "recorded", "picks": 128, "league_id": room["leagueId"]}
+
+    monkeypatch.setattr(mf, "play_draft", fake_play)
+    counts = mf.farm(2, corpus_path=str(tmp_path / "c.duckdb"),
+                     out=lambda *a: None)
+    assert counts["recorded"] == 2
+    assert counts["picks"] == 256
+    assert counts["by_status"] == {"recorded": 2}
+    assert seen == [11, 12]
+
+
+def test_one_rooms_crash_does_not_end_the_night(monkeypatch, tmp_path):
+    """This runs unattended for hours. A single room raising -- ESPN
+    unreachable for a moment, a room that vanished -- must cost that room and
+    nothing else."""
+    _stub_farm_deps(monkeypatch, [_live_room(leagueId=21, teamsJoined=6),
+                                  _live_room(leagueId=22, teamsJoined=1)])
+
+    def fake_play(conn, corpus_path, cookies, room, rng, season=2026,
+                  out=print):
+        if room["leagueId"] == 21:
+            raise RuntimeError("ESPN said no")
+        return {"status": "recorded", "picks": 128, "league_id": 22}
+
+    monkeypatch.setattr(mf, "play_draft", fake_play)
+    counts = mf.farm(1, corpus_path=str(tmp_path / "c.duckdb"),
+                     out=lambda *a: None)
+    assert counts["recorded"] == 1
+    assert counts["by_status"] == {"crashed": 1, "recorded": 1}
+    assert counts["attempted"] == 2
+
+
+def test_a_room_is_never_attempted_twice(monkeypatch, tmp_path):
+    """ESPN keeps a room in the directory after we take a seat, so without
+    the exclusion the loop would re-join the room it just played."""
+    _stub_farm_deps(monkeypatch, [_live_room(leagueId=31),
+                                  _live_room(leagueId=32)])
+    seen = []
+
+    def fake_play(conn, corpus_path, cookies, room, rng, season=2026,
+                  out=print):
+        seen.append(room["leagueId"])
+        return {"status": "incomplete", "league_id": room["leagueId"],
+                "picks": 40}
+
+    monkeypatch.setattr(mf, "play_draft", fake_play)
+    # Both rooms fail, so the loop runs out of rooms; the lobby stub keeps
+    # returning the same two and `pick_room` returns None once both are
+    # excluded, which would spin forever -- so stop it after two attempts.
+    calls = {"n": 0}
+
+    def counted_sleep(seconds):
+        calls["n"] += 1
+        if calls["n"] > 6:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(mf.time, "sleep", counted_sleep)
+    counts = mf.farm(1, corpus_path=str(tmp_path / "c.duckdb"),
+                     out=lambda *a: None)
+    assert seen == [31, 32]
+    assert counts["by_status"] == {"incomplete": 2}
+
+
+def test_the_loop_waits_for_the_room_to_open_before_connecting():
+    """ESPN's draft socket answers HTTP 500 for a room that has not opened
+    yet -- a failure that reads exactly like a bad token. `draftAvailableDate`
+    is ESPN's own answer for when that stops being true."""
+    import time as _time
+    slept = []
+    room = {"draftAvailableDate": _time.time() * 1000 + 30_000,
+            "draftDate": _time.time() * 1000 + 120_000}
+    real_sleep = mf.time.sleep
+    try:
+        mf.time.sleep = lambda seconds: slept.append(seconds)
+        mf._wait_until_available(room, lambda *a: None)
+    finally:
+        mf.time.sleep = real_sleep
+    assert len(slept) == 1
+    assert 30 < slept[0] < 40      # 30s plus the margin, minus test overhead
+
+
+def test_a_room_that_is_already_open_is_not_waited_for():
+    import time as _time
+    slept = []
+    room = {"draftAvailableDate": _time.time() * 1000 - 10_000,
+            "draftDate": _time.time() * 1000 + 60_000}
+    real_sleep = mf.time.sleep
+    try:
+        mf.time.sleep = lambda seconds: slept.append(seconds)
+        mf._wait_until_available(room, lambda *a: None)
+    finally:
+        mf.time.sleep = real_sleep
+    assert slept == []
+
+
+def test_the_open_time_falls_back_to_ninety_seconds_before_the_draft():
+    """Every directory row observed carried `draftAvailableDate` ~90s before
+    `draftDate`; a row without one is not a reason to connect too early."""
+    import time as _time
+    slept = []
+    room = {"draftDate": _time.time() * 1000 + 200_000}
+    real_sleep = mf.time.sleep
+    try:
+        mf.time.sleep = lambda seconds: slept.append(seconds)
+        mf._wait_until_available(room, lambda *a: None)
+    finally:
+        mf.time.sleep = real_sleep
+    assert len(slept) == 1
+    assert 110 < slept[0] < 120    # 200s - 90s lead + 5s margin

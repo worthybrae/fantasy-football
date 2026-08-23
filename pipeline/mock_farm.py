@@ -396,6 +396,11 @@ class Tool:
     espn_by_index: list             # pool index -> espn id (or None)
     index_by_player: dict           # board player_id -> pool index
     sendable: np.ndarray            # pool-aligned bool
+    # Display only, and defaulted so a test can build a Tool without a board.
+    # The log this bot leaves behind is the only account of an unattended
+    # night that anyone reads in the morning, and "pick 14: 00-0039139" is not
+    # an account of anything.
+    names: list | None = None
 
 
 def build_tool(conn, settings) -> Tool:
@@ -438,9 +443,14 @@ def build_tool(conn, settings) -> Tool:
                       .set_index("player_id")["team"])
     pool_df["team"] = pool_df["player_id"].map(team_by_player)
 
+    name_by_player = (board.drop_duplicates("player_id", keep="first")
+                      .set_index("player_id")["name"]
+                      if "name" in board.columns else {})
+    names = [str(name_by_player.get(str(pid), pid)) for pid in pool.player_id]
+
     return Tool(board=board, pool=pool, pool_df=pool_df, crosswalk=crosswalk,
                 espn_by_index=espn_by_index, index_by_player=index_by_player,
-                sendable=sendable)
+                sendable=sendable, names=names)
 
 
 def taken_order_from(timeline, tool) -> list:
@@ -686,7 +696,8 @@ def _make_pick(session, tool, settings, slots, timeline, my_slot, caps,
             out("  no candidate left to send")
             return False
         espn_id = tool.espn_by_index[idx]
-        name = str(tool.pool.player_id[idx])
+        name = (tool.names[idx] if tool.names else str(tool.pool.player_id[idx]))
+        name = f"{name} ({tool.pool.position[idx]})"
         try:
             session.socket.send(f"SELECT {espn_id}\n")
         except Exception as exc:                # noqa: BLE001 -- the socket
@@ -878,8 +889,22 @@ def play_draft(conn, corpus_path, cookies, room, rng,
                 except Exception as exc:        # noqa: BLE001
                     out(f"  could not turn autodraft off: {exc}")
 
-            if (my_slot is not None and listener.on_the_clock == team_id
-                    and session.socket is not None):
+            # BOTH authorities have to agree that it is our turn, and the
+            # second clause is not belt-and-braces. ESPN's SELECTING frame
+            # is what sets `on_the_clock`, and it arrives a beat AFTER the
+            # SELECTED that ended the previous pick -- including the SELECTED
+            # confirming our own. So for a fraction of a second after we
+            # pick, ESPN's last word still names us while the snake has
+            # already moved on, and a loop trusting `on_the_clock` alone
+            # would re-enter `_make_pick` for a turn that is not ours and
+            # spend the whole turn budget sending SELECTs ESPN ignores --
+            # long enough, at a snake turn, to miss the pick that IS ours.
+            # `slots[n]` is the same "is it my turn" test /api/live/select
+            # makes with `picks_until_turn`, against the same snake this
+            # draft is recorded under.
+            if (my_slot is not None and session.socket is not None
+                    and n < len(slots) and slots[n] == my_slot
+                    and listener.on_the_clock == team_id):
                 _make_pick(session, tool, settings, slots, timeline, my_slot,
                            caps, turns, rng, out)
                 continue
@@ -981,11 +1006,23 @@ def farm(n: int, season: int = CURRENT_SEASON, seed: int = 0,
     fetch = http_fetch(cookies)
     rng = np.random.default_rng(seed)
     conn = open_board_db(db_path, out=out)
-    counts = {"attempted": 0, "recorded": 0, "picks": 0}
+    # Statuses live in their own nested dict rather than alongside the
+    # totals. Flattening them collided: `recorded` is both a status name and
+    # the counter the loop's own `while` reads, so a recorded draft
+    # incremented it twice and a run asked for N stopped at N/2.
+    counts = {"attempted": 0, "recorded": 0, "picks": 0, "by_status": {}}
     played: set = set()
     try:
         while counts["recorded"] < n:
-            rooms = lobby.list_mock_leagues(fetch, season)
+            try:
+                rooms = lobby.list_mock_leagues(fetch, season)
+            except Exception as exc:            # noqa: BLE001 -- a directory
+                # read that fails is nearly always a transient HTTP blip, and
+                # ending an overnight run over one is worse than waiting.
+                out(f"could not read the lobby ({exc}) -- retrying in "
+                    f"{LOBBY_RETRY_SECONDS:.0f}s")
+                time.sleep(LOBBY_RETRY_SECONDS)
+                continue
             room = lobby.pick_room(rooms, exclude=played)
             if room is None:
                 out(f"no 8-team PPR snake room in the lobby's "
@@ -995,10 +1032,23 @@ def farm(n: int, season: int = CURRENT_SEASON, seed: int = 0,
                 continue
             played.add(str(room["leagueId"]))
             counts["attempted"] += 1
-            result = play_draft(conn, corpus_path, cookies, room, rng,
-                                season=season, out=out)
-            counts[result["status"]] = counts.get(result["status"], 0) + 1
-            if result["status"] == "recorded":
+            try:
+                result = play_draft(conn, corpus_path, cookies, room, rng,
+                                    season=season, out=out)
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:            # noqa: BLE001 -- one room's
+                # unexpected failure must not end the night's farming. The
+                # traceback is printed rather than summarised: this runs
+                # unattended, and the log is the only account of it there
+                # will be in the morning.
+                import traceback
+                out(f"room {room.get('leagueId')} raised: {exc}")
+                out(traceback.format_exc())
+                result = {"status": "crashed", "league_id": room.get("leagueId")}
+            status = result["status"]
+            counts["by_status"][status] = counts["by_status"].get(status, 0) + 1
+            if status == "recorded":
                 counts["recorded"] += 1
                 counts["picks"] += result["picks"]
                 out(f"{counts['recorded']}/{n} drafts recorded")
