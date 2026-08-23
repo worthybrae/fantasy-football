@@ -75,10 +75,19 @@ whether ESPN's engine made a given pick rather than a person is not a fact
 these files carry, so it is not a fact this module can report. Both are
 NULL, never a guessed default (see `pipeline.draft_log.ensure_schema`'s
 comment on the same column for the live-draft case where it IS known).
+
+THIS MODULE ALSO CONTAINS `corpus_report`, the read-only description of what
+the harvest (and `pipeline.mock_farm`, writing the same tables) has produced
+so far -- see that function's own docstring for why it exists and how it
+reads `my_slot`. Backfilling grows the corpus; reporting is how anyone finds
+out, before fitting anything on it, whether what grew is people or ESPN's
+autodraft repeating its own ranking back at itself.
 """
 import dataclasses
 import glob
 import hashlib
+import shutil
+import tempfile
 from pathlib import Path
 
 import duckdb
@@ -384,13 +393,359 @@ def _print_summary(counts: dict) -> None:
     print(f"stale rows reconciled (old draft_id, same file): {counts['stale_rows_removed']}")
 
 
+# Round-bucket boundaries, by ROUND NUMBER -- not by team count or by how
+# many rounds any one draft ran. "Early" is the top of the board where
+# consensus lives; "late" is where K/DST and pure preference take over. See
+# `corpus_report`'s docstring for why the round NUMBER these buckets sort on
+# is computed per draft from `draft_log.teams` rather than assumed.
+_EARLY_MAX_ROUND = 3   # rounds 1-3
+_MID_MAX_ROUND = 10     # rounds 4-10; anything above is "late" (11+)
+
+
+def _round_bucket(round_no: int) -> str:
+    """Classify an already-computed round number. Does not touch teams or
+    pick_no itself -- see `corpus_report` for where round comes from."""
+    if round_no <= _EARLY_MAX_ROUND:
+        return "early"
+    if round_no <= _MID_MAX_ROUND:
+        return "mid"
+    return "late"
+
+
+def _deviation_stats(df: "pd.DataFrame") -> dict:
+    """Mean and median |pick_no - adp_rank| over the rows in `df` that HAVE
+    an adp_rank.
+
+    A pick the ADP join never matched (see `_picks_frame`'s own "dropped"
+    counting for the backfill-time version of this same problem) is simply
+    excluded here, not coerced to a 0 deviation or a missing row silently
+    dropped from the corpus -- `n` is returned alongside so a reader can see
+    how much of the mean/median is actually resting on real matches. `df`
+    empty, or nothing in it with a known adp_rank, reports `n=0` and `None`
+    for both stats rather than letting pandas hand back a silent NaN.
+    """
+    known = df[df["adp_rank"].notna()]
+    dev = (known["pick_no"] - known["adp_rank"]).abs()
+    return {
+        "n": int(len(dev)),
+        "mean": float(dev.mean()) if len(dev) else None,
+        "median": float(dev.median()) if len(dev) else None,
+    }
+
+
+def _first_round_positions(df: "pd.DataFrame") -> dict:
+    """Position counts at round 1 -- the corpus-gate-finding's check that a
+    broken ADP join could not fake: a near-even RB/WR split with QB
+    essentially absent is a real strategic distribution, not a ranking read
+    off in pick order. Unlike `_deviation_stats`, this does not filter on
+    adp_rank -- a pick's position is known whether or not the ADP join
+    matched it.
+    """
+    first = df[df["round"] == 1]
+    return {pos: int(n) for pos, n in first["position"].value_counts().items()}
+
+
+def _position_share_by_bucket(df: "pd.DataFrame") -> dict:
+    """Position mix within each round bucket, as a percentage of THAT
+    bucket's own picks -- not of the whole corpus, so early/mid/late can be
+    compared on equal footing even though they hold different pick counts.
+
+    Kickers and defenses living almost entirely in the late bucket is
+    exactly the late-round structure real drafting produces and a corpus of
+    pure autodraft would not (autodraft has no reason to wait on K/DST any
+    more than on anyone else). An empty bucket reports `{}` rather than
+    raising on `value_counts` of nothing.
+    """
+    out = {}
+    for bucket in ("early", "mid", "late"):
+        sub = df[df["bucket"] == bucket]
+        if sub.empty:
+            out[bucket] = {}
+            continue
+        share = sub["position"].value_counts(normalize=True) * 100
+        out[bucket] = {pos: round(float(pct), 1) for pos, pct in share.items()}
+    return out
+
+
+def _population_stats(picks_df: "pd.DataFrame", heads_df: "pd.DataFrame") -> dict:
+    """Every number this report computes, for ONE population of mock drafts
+    (backfilled, live-farmed, or the two pooled) -- see `corpus_report` for
+    why the population split matters and what `picks_df`/`heads_df` must
+    already carry (`round`, `bucket` columns on `picks_df`; both frames
+    already filtered to the one population).
+
+    `heads_df` (rows of `draft_log`), not `picks_df["draft_id"].nunique()`,
+    is the draft count -- deliberately: a recorded draft that somehow ended
+    up with zero picks would silently vanish from a picks-derived count
+    while still being a real row in the corpus.
+    """
+    n_picks = int(len(picks_df))
+    adp_null = int(picks_df["adp_rank"].isna().sum())
+    autodraft_known = picks_df["autodrafted"].notna()
+    n_known = int(autodraft_known.sum())
+    n_true = int((picks_df["autodrafted"] == True).sum())  # noqa: E712
+    return {
+        "drafts": int(heads_df["draft_id"].nunique()),
+        "picks": n_picks,
+        "adp_null": adp_null,
+        "adp_known": n_picks - adp_null,
+        "autodrafted_known": n_known,
+        "autodrafted_unknown": n_picks - n_known,
+        "autodrafted_true": n_true,
+        "autodrafted_share": (n_true / n_known) if n_known else None,
+        "deviation": _deviation_stats(picks_df),
+        "by_bucket": {b: _deviation_stats(picks_df[picks_df["bucket"] == b])
+                     for b in ("early", "mid", "late")},
+        "first_round_positions": _first_round_positions(picks_df),
+        "position_share_by_bucket": _position_share_by_bucket(picks_df),
+    }
+
+
+def corpus_report(conn) -> dict:
+    """Describe what `conn` currently holds: drafts and picks by source
+    (`pipeline.draft_log.summary`), then -- for the mock corpus specifically
+    -- whether pick_no tracks adp_rank closely (ESPN's autodraft, following
+    its own fixed ranking) or diverges from it the way a room of people
+    does. This is the corpus-gate-finding's one-off analysis
+    (`.superpowers/sdd/2026-08-23-mock-draft-corpus-plan/
+    corpus-gate-finding.md`), turned into something that can be rerun as the
+    corpus grows rather than computed by hand again.
+
+    WHY THE MOCK CORPUS IS SPLIT INTO TWO POPULATIONS, NOT READ AS ONE.
+    `pipeline.mock_backfill` and `pipeline.mock_farm` both write
+    `source='mock'` rows into the same three tables, but they are not the
+    same kind of draft. A backfilled draft (`my_slot IS NULL`) came from a
+    `drafted` table that never recorded which picks, if any, were ESPN's
+    engine rather than a person -- `autodrafted` is NULL on every one of its
+    picks, unknown, not "no". A live-farmed draft (`my_slot IS NOT NULL`)
+    is one this tool's own bot sat in, and ESPN told the listener, per pick,
+    whether that pick was autodrafted -- ground truth, not inference.
+    Averaging the two populations together would let a farmed draft's KNOWN
+    autodraft picks and a backfilled draft's UNKNOWN ones blend into one
+    number that looks more certain than either population actually is on
+    its own, which is exactly the thing this report exists to keep visible
+    rather than hide. So every stat below is computed three times --
+    `backfilled`, `live_farmed`, and `combined` (the straight pool of both)
+    -- where `combined` is what reproduces the original finding's headline
+    number, and the population split is what tells a reader whether that
+    number is stable across two different kinds of draft or an artifact of
+    whichever one currently dominates the corpus.
+
+    ROUND IS COMPUTED PER DRAFT FROM `draft_log.teams`, deliberately not
+    hardcoded to `MOCK_TEAMS` (8). Every backfilled draft happens to be
+    8-team (see this module's own "THE 8x16 ASSUMPTION"), but a live-farmed
+    draft's team count is read off ESPN's own room settings by
+    `pipeline.mock_farm` and can differ. A hardcoded 8 would silently
+    mis-bucket every pick of a non-8-team farmed draft into the wrong round
+    -- not fail loudly, just quietly lie about which bucket a pick belongs
+    to -- which is worse than any error this function could raise instead.
+    """
+    # NOT `dl.summary(conn)` -- it calls `ensure_schema`, and DuckDB refuses
+    # to run ANY statement of type CREATE against a read-only-attached
+    # database, even a no-op `CREATE TABLE IF NOT EXISTS` against a schema
+    # that already matches. A read-only connection is exactly what
+    # `report_main` hands this function (see `_open_corpus_read_only`), so
+    # this is `summary`'s own query, copied rather than called, with the
+    # `ensure_schema` call it opens with left out.
+    by_source = conn.execute("""
+        SELECT d.source, count(DISTINCT d.draft_id) AS drafts,
+               count(p.pick_no) AS picks,
+               count(DISTINCT CASE WHEN NOT p.is_anonymous THEN p.owner_key END)
+                   AS known_owners
+        FROM draft_log d LEFT JOIN draft_log_pick p USING (draft_id)
+        GROUP BY d.source ORDER BY d.source""").df()
+
+    heads = conn.execute(
+        "SELECT draft_id, teams, my_slot FROM draft_log WHERE source = ?",
+        [dl.SOURCE_MOCK]).df()
+    picks = conn.execute(
+        """SELECT p.draft_id, p.pick_no, p.position, p.adp_rank,
+                  p.autodrafted, d.teams, d.my_slot
+           FROM draft_log_pick p JOIN draft_log d USING (draft_id)
+           WHERE d.source = ?""", [dl.SOURCE_MOCK]).df()
+
+    # `teams` should never be null on a mock row -- both writers set it (see
+    # this function's own "ROUND IS COMPUTED..." above) -- but a round
+    # computed against a null divisor would raise and take the whole report
+    # down over one bad row, rather than reporting everything else. Excluded
+    # and counted instead, the same discipline `_picks_frame` uses for a
+    # pick the pool join can't match.
+    unknown_teams = int(picks["teams"].isna().sum())
+    picks = picks[picks["teams"].notna()].copy()
+    picks["round"] = ((picks["pick_no"] - 1) // picks["teams"] + 1).astype(int)
+    picks["bucket"] = picks["round"].map(_round_bucket)
+
+    backfilled = picks["my_slot"].isna()
+    heads_backfilled = heads["my_slot"].isna()
+
+    return {
+        "by_source": by_source,
+        "unknown_teams_excluded": unknown_teams,
+        "mock": {
+            "combined": _population_stats(picks, heads),
+            "backfilled": _population_stats(
+                picks[backfilled], heads[heads_backfilled]),
+            "live_farmed": _population_stats(
+                picks[~backfilled], heads[~heads_backfilled]),
+        },
+    }
+
+
+def _fmt_stat(stats: dict) -> str:
+    if stats["n"] == 0:
+        return "n=0 (no adp-matched picks)"
+    return f"n={stats['n']}, mean={stats['mean']:.2f}, median={stats['median']:.2f}"
+
+
+def _print_population(label: str, pop: dict) -> None:
+    print(f"\n-- {label} --")
+    print(f"drafts: {pop['drafts']}   picks: {pop['picks']}")
+    if pop["picks"] == 0:
+        print("  (no picks recorded for this population yet)")
+        return
+    null_share = pop["adp_null"] / pop["picks"] * 100
+    print(f"adp_rank unknown: {pop['adp_null']} of {pop['picks']} picks "
+          f"({null_share:.1f}%) -- excluded from every deviation number below")
+    if pop["autodrafted_known"]:
+        share = pop["autodrafted_share"] * 100
+        print(f"autodrafted (known): {pop['autodrafted_true']} of "
+              f"{pop['autodrafted_known']} flagged picks ({share:.1f}%); "
+              f"{pop['autodrafted_unknown']} picks unknown")
+    else:
+        print(f"autodrafted: unknown for all {pop['autodrafted_unknown']} "
+              f"picks (this population carries no per-pick flag)")
+    print(f"mean |pick_no - adp_rank|: {_fmt_stat(pop['deviation'])}")
+    print("  by round bucket:")
+    for bucket in ("early", "mid", "late"):
+        print(f"    {bucket:5s}: {_fmt_stat(pop['by_bucket'][bucket])}")
+    if pop["first_round_positions"]:
+        mix = ", ".join(f"{pos} {n}" for pos, n in
+                        sorted(pop["first_round_positions"].items(),
+                               key=lambda kv: -kv[1]))
+        print(f"  first-round positions: {mix}")
+    for bucket in ("early", "mid", "late"):
+        share = pop["position_share_by_bucket"].get(bucket)
+        if not share:
+            continue
+        row = ", ".join(f"{pos} {pct:.1f}%" for pos, pct in
+                        sorted(share.items(), key=lambda kv: -kv[1]))
+        print(f"  {bucket} position share: {row}")
+
+
+def _print_report(report: dict) -> None:
+    print("=== corpus contents, by source ===")
+    print(report["by_source"].to_string(index=False))
+    if report["unknown_teams_excluded"]:
+        print(f"\n({report['unknown_teams_excluded']} mock picks excluded "
+              f"from every round-bucketed stat below -- draft_log.teams was "
+              f"NULL for their draft)")
+
+    combined = report["mock"]["combined"]
+    print("\n=== the headline number ===")
+    print(f"mean |pick_no - adp_rank| across all mock picks: "
+          f"{_fmt_stat(combined['deviation'])}")
+    print(
+        "\nHow to read that: ESPN's autodraft works down a fixed ranking, so "
+        "a corpus dominated by it would sit near zero -- pick_no and "
+        "adp_rank would coincide almost every time, and a prior fitted on "
+        "it would just relearn the market instead of learning how people "
+        "deviate from it. A large, round-shaped number -- tight near the "
+        "top of the board where consensus is tight, wide by the late "
+        "rounds where preference and sleepers pull picks away from rank -- "
+        "is the signature of real drafting instead. Some part of a nonzero "
+        "number is still source disagreement (ESPN's own autodraft ranking "
+        "is not this corpus's adp_rank, not the same list); the early-round "
+        "figure below, where market consensus is tightest, bounds how large "
+        "that part can be without eliminating it as a possibility."
+    )
+
+    print("\n=== mock corpus, by population ===")
+    print(
+        "Backfilled and live-farmed mock drafts are different populations "
+        "-- see corpus_report's own docstring -- so every number below is "
+        "given for each separately as well as pooled. `combined` above and "
+        "below is what reproduces the original one-off finding's headline "
+        "figure."
+    )
+    _print_population("combined (backfilled + live-farmed)", combined)
+    _print_population("backfilled (my_slot IS NULL, autodrafted unknown)",
+                      report["mock"]["backfilled"])
+    _print_population("live-farmed (my_slot IS NOT NULL, autodrafted known)",
+                      report["mock"]["live_farmed"])
+
+
+def _open_corpus_read_only(path: str | None = None, out=print):
+    """A read-only connection to the draft corpus, for reporting only.
+
+    Read-only is not a style preference here: `pipeline.draft_log`'s module
+    docstring is explicit that this corpus is the one thing this tool
+    cannot rebuild if damaged -- a mock draft that is not written down is
+    gone for good -- and a report has no legitimate reason to hold write
+    access to describe what is already there. `duckdb.connect(...,
+    read_only=True)` enforces that at the connection level rather than
+    trusting this module to simply never call INSERT/DELETE.
+
+    THE FARM LOOP MAKES THIS CONTENTIOUS, NOT JUST CAUTIOUS. `pipeline.
+    mock_farm` can hold a read-write connection to this same file for the
+    length of a live draft, and DuckDB is single-writer per file -- it does
+    not let a reader in while a writer holds the lock (see `mock_farm.
+    open_board_db`'s own comment, hitting the identical problem against
+    `data/nfl.duckdb`). A report that simply failed whenever the farm loop
+    was mid-write would be unusable exactly while the corpus is most
+    interesting to look at. So, like `open_board_db`, a lock error falls
+    back to a read-only connection against a plain file copy -- the report
+    may be a few picks stale, and it says so, but it runs.
+    """
+    target = path or dl.CORPUS_PATH
+    try:
+        return duckdb.connect(target, read_only=True)
+    except Exception as exc:                    # noqa: BLE001
+        if "lock" not in str(exc).lower():
+            raise
+        snapshot = str(Path(tempfile.mkdtemp(prefix="corpus-report-")) /
+                       Path(target).name)
+        out(f"{target} is locked (the farm loop is likely writing) -- "
+            f"reading a snapshot copy at {snapshot} instead; this report "
+            f"may be a few picks stale")
+        shutil.copy2(target, snapshot)
+        return duckdb.connect(snapshot, read_only=True)
+
+
+def report_main(argv: list) -> int:
+    """Print `corpus_report` for the real corpus (or `argv[0]` if given).
+
+    A missing corpus file is reported plainly rather than as a traceback --
+    it is the ordinary state of things before the first `make mock-backfill`
+    or `make farm-mocks` has ever run, not a bug in this report.
+    """
+    target = argv[0] if argv else dl.CORPUS_PATH
+    if not Path(target).exists():
+        print(f"no corpus at {target} -- nothing to report yet (run "
+              f"`make mock-backfill` or `make farm-mocks` first)")
+        return 0
+    conn = _open_corpus_read_only(target)
+    try:
+        report = corpus_report(conn)
+    finally:
+        conn.close()
+    _print_report(report)
+    return 0
+
+
 def main(argv: list) -> int:
     """Harvest every complete ESPN mock draft in `data/leagues/*.duckdb`
     into the cross-league draft corpus, and report what it found.
 
     Run: python -m pipeline.mock_backfill [glob]
-    `glob`, if given, overrides LEAGUE_GLOB.
+         python -m pipeline.mock_backfill --report [corpus_path]
+
+    `--report` prints `corpus_report` instead of running the harvest -- a
+    read-only description of what the corpus (this module's writes AND
+    `pipeline.mock_farm`'s) currently holds, not a write of any kind. See
+    `corpus_report`'s own docstring for what it describes.
     """
+    if len(argv) > 1 and argv[1] == "--report":
+        return report_main(argv[2:])
     pattern = argv[1] if len(argv) > 1 else LEAGUE_GLOB
     paths = sorted(glob.glob(pattern))
     corpus = dl.corpus_conn()

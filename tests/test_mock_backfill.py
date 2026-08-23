@@ -295,3 +295,196 @@ def test_mock_settings_is_an_8_team_16_round_league():
     settings = mock_backfill._mock_settings()
     assert settings.teams == 8
     assert settings.rounds == 16
+
+
+# ---------------------------------------------------------------------------
+# corpus_report
+#
+# Two hand-built drafts, deliberately NOT 8-team, so a bucketing bug that
+# only shows up off the backfill's own 8x16 shape (see corpus_report's "ROUND
+# IS COMPUTED PER DRAFT FROM draft_log.teams" -- exactly the bug a hardcoded
+# 8 would hide) has a chance to be caught here.
+#
+# D1 ("d1", teams=3, my_slot=None -> backfilled): 9 picks, rounds 1-3, so
+# entirely in the "early" bucket. adp_rank is deliberately NOT pick_no, so
+# the deviation numbers below are real arithmetic, not a trivially-zero
+# fixture -- and pick 9's adp_rank is NULL, to exercise adp_null counting.
+# `autodrafted` is left out of the frame entirely, matching a real backfill
+# row: `record`'s `_shape` fills the missing column with NULL for every row.
+#
+# D2 ("d2", teams=2, my_slot=3 -> live-farmed): 14 picks, rounds 1-7 (rounds
+# 1-3 early, 4-7 mid), adp_rank == pick_no throughout (deviation 0 -- a
+# separate, deliberately trivial fixture from D1's, so the two populations'
+# numbers are easy to tell apart in the assertions below), and a real
+# `autodrafted` flag per pick, including two NULLs, to exercise "known vs
+# unknown" on a population where the flag CAN be known.
+#
+# Expected numbers below were computed independently with the stdlib
+# `statistics` module against this exact fixture (not by re-deriving
+# `mock_backfill`'s own pandas code), so this is a real check against
+# ground truth rather than the implementation checking itself.
+# ---------------------------------------------------------------------------
+
+def _seed_report_corpus(corpus) -> None:
+    d1_picks = pd.DataFrame({
+        "pick_no": [1, 2, 3, 4, 5, 6, 7, 8, 9],
+        "position": ["RB", "WR", "RB", "WR", "RB", "TE", "WR", "RB", "DST"],
+        "adp_rank": [1, 5, 2, 10, 4, 9, 1, 8, None],
+    })
+    dl.record(corpus, dl.DraftRecord(
+        source=dl.SOURCE_MOCK, league_id="d1", season=2026, teams=3, rounds=3,
+        my_slot=None, draft_id=f"{dl.SOURCE_MOCK}:reporttestd1aaaa",
+        picks=d1_picks))
+
+    d2_picks = pd.DataFrame({
+        "pick_no": list(range(1, 15)),
+        "position": ["RB", "WR", "RB", "WR", "RB", "WR",
+                     "QB", "QB", "QB", "QB", "QB", "QB", "QB", "QB"],
+        "adp_rank": list(range(1, 15)),
+        "autodrafted": [True, False, True, False, True, False, None, None,
+                        True, False, True, False, True, False],
+    })
+    dl.record(corpus, dl.DraftRecord(
+        source=dl.SOURCE_MOCK, league_id="d2", season=2026, teams=2, rounds=7,
+        my_slot=3, draft_id=f"{dl.SOURCE_MOCK}:reporttestd2bbbb",
+        picks=d2_picks))
+
+
+def test_corpus_report_computes_deviation_by_round_bucket_per_draft_teams(tmp_path):
+    """Round must come from EACH draft's own `teams` column (3 for D1, 2 for
+    D2), not a hardcoded 8 -- and the by-bucket deviation numbers must be
+    real computed arithmetic, verified against an independent calculation."""
+    corpus = dl.corpus_conn(str(tmp_path / "corpus.duckdb"))
+    _seed_report_corpus(corpus)
+
+    report = mock_backfill.corpus_report(corpus)
+
+    combined = report["mock"]["combined"]
+    assert combined["drafts"] == 2
+    assert combined["picks"] == 23
+    assert combined["adp_null"] == 1        # D1 pick 9 only
+    assert combined["deviation"]["n"] == 22
+    assert combined["deviation"]["mean"] == pytest.approx(0.9090909090909091)
+    assert combined["deviation"]["median"] == pytest.approx(0.0)
+    assert combined["by_bucket"]["early"]["n"] == 14
+    assert combined["by_bucket"]["early"]["mean"] == pytest.approx(1.4285714285714286)
+    assert combined["by_bucket"]["early"]["median"] == pytest.approx(0.0)
+    assert combined["by_bucket"]["mid"] == {"n": 8, "mean": 0.0, "median": 0.0}
+    assert combined["by_bucket"]["late"] == {"n": 0, "mean": None, "median": None}
+    assert combined["first_round_positions"] == {"RB": 3, "WR": 2}
+    assert combined["position_share_by_bucket"]["mid"] == {"QB": 100.0}
+    assert combined["position_share_by_bucket"]["late"] == {}
+
+    corpus.close()
+
+
+def test_corpus_report_splits_backfilled_from_live_farmed_populations(tmp_path):
+    """The whole point of the split (see corpus_report's own docstring): a
+    backfilled draft's autodrafted flag is unknown on every pick, a
+    live-farmed draft's is real ground truth, and neither population's
+    numbers should be inferred from the other."""
+    corpus = dl.corpus_conn(str(tmp_path / "corpus.duckdb"))
+    _seed_report_corpus(corpus)
+
+    report = mock_backfill.corpus_report(corpus)
+    backfilled = report["mock"]["backfilled"]
+    live = report["mock"]["live_farmed"]
+
+    # D1 alone.
+    assert backfilled["drafts"] == 1
+    assert backfilled["picks"] == 9
+    assert backfilled["adp_null"] == 1
+    assert backfilled["autodrafted_known"] == 0
+    assert backfilled["autodrafted_unknown"] == 9
+    assert backfilled["autodrafted_share"] is None
+    assert backfilled["deviation"] == {"n": 8, "mean": 2.5, "median": 2.0}
+    assert backfilled["by_bucket"]["early"] == {"n": 8, "mean": 2.5, "median": 2.0}
+    assert backfilled["by_bucket"]["mid"] == {"n": 0, "mean": None, "median": None}
+    assert backfilled["first_round_positions"] == {"RB": 2, "WR": 1}
+    assert backfilled["position_share_by_bucket"]["early"] == {
+        "RB": 44.4, "WR": 33.3, "TE": 11.1, "DST": 11.1}
+
+    # D2 alone.
+    assert live["drafts"] == 1
+    assert live["picks"] == 14
+    assert live["adp_null"] == 0
+    assert live["autodrafted_known"] == 12
+    assert live["autodrafted_true"] == 6
+    assert live["autodrafted_unknown"] == 2
+    assert live["autodrafted_share"] == pytest.approx(0.5)
+    assert live["deviation"] == {"n": 14, "mean": 0.0, "median": 0.0}
+    assert live["by_bucket"]["early"] == {"n": 6, "mean": 0.0, "median": 0.0}
+    assert live["by_bucket"]["mid"] == {"n": 8, "mean": 0.0, "median": 0.0}
+    assert live["first_round_positions"] == {"RB": 1, "WR": 1}
+    assert live["position_share_by_bucket"]["mid"] == {"QB": 100.0}
+
+    corpus.close()
+
+
+def test_corpus_report_on_an_empty_corpus_reports_zero_not_a_crash(tmp_path):
+    """Nothing hardcodes a draft or pick count anywhere in this report --
+    an empty corpus (before the first backfill or farm run) must describe
+    itself as empty rather than raising on an empty frame."""
+    corpus = dl.corpus_conn(str(tmp_path / "corpus.duckdb"))
+
+    report = mock_backfill.corpus_report(corpus)
+
+    for pop in report["mock"].values():
+        assert pop["drafts"] == 0
+        assert pop["picks"] == 0
+        assert pop["deviation"] == {"n": 0, "mean": None, "median": None}
+    corpus.close()
+
+
+def test_open_corpus_read_only_cannot_write(tmp_path):
+    """The connection `report_main` actually uses must be one DuckDB itself
+    refuses to write through -- not merely a connection this module happens
+    not to call INSERT/DELETE on. Deliberately NOT `dl.picks`/`dl.summary`
+    here to read back with: both call `ensure_schema`, which issues `CREATE
+    TABLE IF NOT EXISTS` -- and DuckDB rejects any CREATE, even a no-op one,
+    against a read-only-attached database, so calling either against this
+    connection would raise for a reason that has nothing to do with what
+    this test is checking. `corpus_report` itself avoids that trap (see its
+    own comment); a raw count is the equivalent read for a test."""
+    path = tmp_path / "corpus.duckdb"
+    seed = dl.corpus_conn(str(path))
+    _seed_report_corpus(seed)
+    seed.close()
+
+    conn = mock_backfill._open_corpus_read_only(str(path))
+    try:
+        assert conn.execute(
+            "SELECT count(*) FROM draft_log_pick").fetchone()[0] == 23
+        with pytest.raises(duckdb.Error):
+            conn.execute("DELETE FROM draft_log_pick")
+    finally:
+        conn.close()
+
+
+def test_corpus_report_runs_end_to_end_against_a_true_read_only_connection(tmp_path):
+    """The regression this fixture exists to catch: `dl.summary` (which an
+    earlier version of `corpus_report` called directly) opens with
+    `ensure_schema`, and DuckDB refuses that CREATE statement against a
+    read-only-attached database even when the schema already matches --
+    so `corpus_report` must never call it, only reproduce its query. This
+    runs the whole function through the exact connection `report_main`
+    uses in production, not a read-write stand-in."""
+    path = tmp_path / "corpus.duckdb"
+    seed = dl.corpus_conn(str(path))
+    _seed_report_corpus(seed)
+    seed.close()
+
+    conn = mock_backfill._open_corpus_read_only(str(path))
+    try:
+        report = mock_backfill.corpus_report(conn)
+    finally:
+        conn.close()
+    assert report["mock"]["combined"]["picks"] == 23
+
+
+def test_report_main_on_a_missing_corpus_says_so_and_does_not_raise(tmp_path):
+    """Before anything has ever been backfilled or farmed, there is no
+    corpus file at all -- `report_main` must say that plainly rather than
+    surface a raw duckdb IO error."""
+    missing = str(tmp_path / "does-not-exist.duckdb")
+    assert mock_backfill.report_main([missing]) == 0

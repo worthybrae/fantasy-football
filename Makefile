@@ -2,7 +2,7 @@
 # One-time setup: make setup && make refresh
 # Draft night:    make up   (then open http://localhost:5173)
 
-.PHONY: setup refresh api web up test build espn-import fit-managers sim mock-backfill farm-mocks
+.PHONY: setup refresh api web up test build espn-import fit-managers sim mock-backfill farm-mocks corpus-report
 
 setup: ## create venv, install python + web deps
 	python3 -m venv .venv
@@ -26,6 +26,9 @@ farm-mocks: ## play live ESPN mock drafts and record them: make farm-mocks N=5 [
 	# a room that fills up, never starts, or ends early does not count against
 	# it. Each draft is 20-40 minutes of wall clock, one at a time.
 	.venv/bin/python -m pipeline.mock_farm "$(or $(N),1)" --seed=$(or $(SEED),0)
+
+corpus-report: ## describe the mock draft corpus: humans vs ESPN autodraft, by round bucket and position -- read-only
+	.venv/bin/python -m pipeline.mock_backfill --report
 
 fit-managers: ## fit per-manager pick models from imported draft history (REDUCED=1 also measures reduced personal models -- slow)
 	# filter-out, not a bare $(if): $(if) tests emptiness, so REDUCED=0 would
