@@ -816,6 +816,20 @@ def _parity_fixture():
                      -8.0, 15.0, np.nan, -6.0, 9.0, -1.0])
     trend = np.array([1.2, -0.5, 0.0, 2.1, -1.8, 0.3,
                       -0.9, 1.5, 0.7, -0.2, 2.4, -1.1])
+    # The Task 3 stat profile, with a NaN in each column so the "unknown
+    # centres to neutral" path is exercised on both sides too, and with real
+    # spread inside each repeated position so the centring has something to
+    # do.
+    profile = {
+        "usage": np.array([34.0, 18.0, 9.0, 4.5, np.nan, np.nan,
+                           11.0, 14.0, 29.0, 6.0, 21.0, 7.5]),
+        "efficiency": np.array([0.42, 0.85, 1.10, 0.95, np.nan, np.nan,
+                                0.60, 1.35, 0.51, 0.78, 0.70, 1.02]),
+        "played_share": np.array([1.0, 0.65, 0.90, 0.80, 1.0, 1.0,
+                                  0.55, 0.95, np.nan, 0.70, 1.0, 0.85]),
+        "peak_gap": np.array([3.0, 1.5, 6.0, 0.5, 0.0, 0.0,
+                              8.25, -1.0, 2.0, np.nan, 4.75, 0.25]),
+    }
 
     pool = SimPool(
         player_id=np.array([f"p{i}" for i in range(n)]),
@@ -824,38 +838,54 @@ def _parity_fixture():
         availability=np.full(n, 90.0),
         vor=np.linspace(300.0, 60.0, n),
         market_rank=adp_rank, age=age, no_track_record=no_track_record,
-        hype=hype, trend=trend)
+        hype=hype, trend=trend, **profile)
 
     roster = {"RB": 2, "WR": 1, "QB": 1}       # RB need false, others true
     recent = ["WR", "RB", "RB", "QB", "TE"]    # fills RUN_WINDOW exactly
+    # This team's own pick history, as of the LATE parity test below (pick
+    # 50, round 7 of an 8-team draft): its most recent RB went in round 3,
+    # its WR in round 4, its QB in round 6, so `rounds_since_pos` reads 4, 3
+    # and 1 rounds. TE, K and DST are absent on purpose, so the never-taken
+    # branch and `first_at_pos` are both live rather than every position
+    # reading the same way. The early test passes {} instead -- see there.
+    last_pick = {"RB": 20, "WR": 29, "QB": 44}
 
     obs_pool = pd.DataFrame({
         "norm": norms[available], "position": positions[available],
         "adp_rank": adp_rank[available], "market_rank": adp_rank[available],
         "age": age[available],
         "no_track_record": no_track_record[available],
-        "hype": hype[available], "trend": trend[available]})
+        "hype": hype[available], "trend": trend[available],
+        **{name: values[available] for name, values in profile.items()}})
 
-    return pool, available, roster, recent, obs_pool
+    return pool, available, roster, recent, obs_pool, last_pick
 
 
 def test_live_features_matches_feature_matrix_on_an_early_round_pick():
-    pool, available, roster, recent, obs_pool = _parity_fixture()
+    pool, available, roster, recent, obs_pool, _ = _parity_fixture()
     overall_pick = 5                            # round 1 of 8 teams: early
+    # Round 1, so this team cannot have a previous pick at any position.
+    # That is the never-taken branch of `rounds_since_pos` across the whole
+    # choice set, and it has to agree on both sides too.
+    last_pick = {}
     obs = PickObservation(season=2024, overall_pick=overall_pick, manager="m",
-                          chosen=0, pool=obs_pool, roster=roster, recent=recent)
+                          chosen=0, pool=obs_pool, roster=roster,
+                          recent=recent, last_pick_at_pos=last_pick)
     expected = feature_matrix(obs, S)
-    actual = _live_features(pool, available, overall_pick, roster, recent, S)
+    actual = _live_features(pool, available, overall_pick, roster, recent, S,
+                            last_pick)
     np.testing.assert_allclose(actual, expected)
 
 
 def test_live_features_matches_feature_matrix_on_a_late_round_pick():
-    pool, available, roster, recent, obs_pool = _parity_fixture()
+    pool, available, roster, recent, obs_pool, last_pick = _parity_fixture()
     overall_pick = 50                           # round 7 of 8 teams: late
     obs = PickObservation(season=2024, overall_pick=overall_pick, manager="m",
-                          chosen=0, pool=obs_pool, roster=roster, recent=recent)
+                          chosen=0, pool=obs_pool, roster=roster,
+                          recent=recent, last_pick_at_pos=last_pick)
     expected = feature_matrix(obs, S)
-    actual = _live_features(pool, available, overall_pick, roster, recent, S)
+    actual = _live_features(pool, available, overall_pick, roster, recent, S,
+                            last_pick)
     np.testing.assert_allclose(actual, expected)
 
 
@@ -2672,9 +2702,19 @@ def test_live_features_matches_feature_matrix_on_the_new_columns():
         "hype": [-4.0, 7.0, np.nan, 25.0],
         "age": [23.0, 29.0, 34.0, np.nan],
         "no_track_record": [False, False, True, False],
-        "trend": [2.5, -1.75, 0.0, 0.4]})
+        "trend": [2.5, -1.75, 0.0, 0.4],
+        "usage": [16.0, 8.5, 33.0, np.nan],
+        "efficiency": [0.9, 1.2, 0.45, 0.8],
+        "played_share": [1.0, 0.75, np.nan, 0.6],
+        "peak_gap": [2.0, -1.5, 4.25, 0.0]})
+    roster = {"RB": 1}
+    # This team took its RB at pick 1 and has taken nothing else, so
+    # `held_at_pos`, `first_at_pos` and `rounds_since_pos` all have both of
+    # their branches live in this one comparison.
+    last_pick = {"RB": 1}
     obs = PickObservation(season=2026, overall_pick=9, manager="m", chosen=0,
-                          pool=pool_df, roster={"RB": 1}, recent=["WR", "RB"])
+                          pool=pool_df, roster=roster, recent=["WR", "RB"],
+                          last_pick_at_pos=last_pick)
     sim = SimPool(
         player_id=np.array(["a", "b", "c", "d"]),
         norm=pool_df["norm"].to_numpy(), position=pool_df["position"].to_numpy(),
@@ -2684,11 +2724,93 @@ def test_live_features_matches_feature_matrix_on_the_new_columns():
         market_rank=pool_df["market_rank"].to_numpy(),
         age=pool_df["age"].to_numpy(),
         no_track_record=pool_df["no_track_record"].to_numpy(),
-        hype=pool_df["hype"].to_numpy(), trend=pool_df["trend"].to_numpy())
+        hype=pool_df["hype"].to_numpy(), trend=pool_df["trend"].to_numpy(),
+        usage=pool_df["usage"].to_numpy(),
+        efficiency=pool_df["efficiency"].to_numpy(),
+        played_share=pool_df["played_share"].to_numpy(),
+        peak_gap=pool_df["peak_gap"].to_numpy())
     available = np.arange(4)
     np.testing.assert_allclose(
-        _live_features(sim, available, 9, {"RB": 1}, ["WR", "RB"], S),
+        _live_features(sim, available, 9, roster, ["WR", "RB"], S, last_pick),
         feature_matrix(obs, S))
+
+
+def test_build_pool_fills_every_stat_profile_column(tmp_path):
+    """`SimPool`'s four stat-profile fields default to None so hand-built
+    fixtures keep working, and None expands to a neutral all-NaN column.
+    That default must never be what production runs on: it would serve the
+    model a 0.0 where the fit saw a number, silently, on a column the fit
+    has a coefficient for. `build_pool` is the one production constructor,
+    so this pins that it populates all four.
+    """
+    from scoring.draft_model import _STAT_PROFILE_FEATURES
+    conn = get_conn(str(tmp_path / "profile.duckdb"))
+    board = pd.DataFrame([
+        {"player_id": "p1", "name": "Some Back", "position": "RB",
+         "team": "DET", "ffc_rank": 1.0, "market_rank": 1.0,
+         "durability": 90.0, "stats": None},
+        {"player_id": "p2", "name": "Some Receiver", "position": "WR",
+         "team": "DAL", "ffc_rank": 2.0, "market_rank": 2.0,
+         "durability": 90.0, "stats": None},
+    ])
+    pool = build_pool(conn, board, S)
+    for name in _STAT_PROFILE_FEATURES:
+        values = getattr(pool, name)
+        assert values is not None, f"build_pool left {name} at its None default"
+        assert len(values) == len(pool.player_id)
+
+
+def test_seed_rosters_rebuilds_when_each_team_last_took_each_position():
+    """`counts` is a tally with no timing in it, so a resumed draft that
+    rebuilt only counts would tell every opponent they have never taken a
+    running back one pick after they took one -- and `rounds_since_pos` is
+    read off exactly that.
+
+    8-team snake: picks 1-8 go to slots 1-8, then pick 9 turns back to slot
+    8. So slot 1 owns pick 1 only, and slot 8 owns picks 8 and 9.
+    """
+    pool = _pool(12)
+    order = list(range(9))               # pool indices 0..8, in pick order
+    rosters, _ = _seed_rosters(pool, S, order)
+
+    assert rosters[1]["last_pick"] == {pool.position[0]: 1}
+    slot8 = rosters[8]["last_pick"]
+    # Slot 8 picked twice; the later pick is the one recorded for its
+    # position, because "rounds SINCE" is about the most recent one.
+    assert slot8[pool.position[8]] == 9
+    if pool.position[7] != pool.position[8]:
+        assert slot8[pool.position[7]] == 8
+
+
+def test_a_pick_with_no_pool_row_advances_the_snake_without_a_timestamp():
+    """Same treatment `counts` and `recent` already give a None entry: it
+    consumed its turn, but its position is unknowable, so it cannot be
+    recorded against any position."""
+    pool = _pool(12)
+    rosters, _ = _seed_rosters(pool, S, [0, None, 2])
+    assert rosters[2]["last_pick"] == {}          # its only pick was the hole
+    assert rosters[1]["last_pick"] == {pool.position[0]: 1}
+    assert rosters[3]["last_pick"] == {pool.position[2]: 3}
+
+
+def test_a_resumed_opponent_sees_a_real_rounds_since_pos():
+    """End to end: the state `_seed_rosters` rebuilds has to reach the
+    served feature matrix, not just exist on the roster dict."""
+    from scoring.draft_model import FEATURE_NAMES
+    pool = _pool(24)
+    rosters, _ = _seed_rosters(pool, S, list(range(9)))
+    slot = 1
+    taken_pos = pool.position[0]
+    available = np.arange(9, 24)
+
+    X = _live_features(pool, available, 17, rosters[slot]["counts"], [], S,
+                       rosters[slot]["last_pick"])
+    since = X[:, FEATURE_NAMES.index("rounds_since_pos")]
+    positions = pool.position[available]
+    # Slot 1's only pick was overall 1 (round 1); pick 17 is round 3, so any
+    # candidate at that position is two rounds on. Everyone else reads 0.0.
+    np.testing.assert_allclose(since[positions == taken_pos], 2 / S.rounds)
+    np.testing.assert_allclose(since[positions != taken_pos], 0.0)
 
 
 # --- `taken_order` is indexed by pick number, not by row --------------------

@@ -1049,13 +1049,14 @@ def test_cold_start_prior_pads_the_new_columns_with_zero():
         assert COLD_START_PRIOR[FEATURE_NAMES.index(name)] == 0.0
 
 
-def test_pos_count_is_what_this_team_holds_at_the_candidates_position():
+def test_held_at_pos_is_what_this_team_holds_at_the_candidates_position():
     """`need` clips at the starter count; this does not, which is the point
     -- it can tell a manager's third running back from his fifth."""
     from scoring.draft_model import FEATURE_NAMES, feature_matrix
 
     obs = _shape_obs(roster={"RB": 3, "WR": 1})
-    counts = feature_matrix(obs, _settings())[:, FEATURE_NAMES.index("pos_count")]
+    X = feature_matrix(obs, _settings())
+    counts = X[:, FEATURE_NAMES.index("held_at_pos")]
     # Pool order is rb1, rb2, wr1, te1, qb1.
     assert list(counts) == [3.0, 3.0, 1.0, 0.0, 0.0]
 
@@ -1087,25 +1088,27 @@ def test_first_at_pos_round_is_the_empty_position_flag_times_the_round():
     assert (late <= 1.0).all()
 
 
-def test_pos_gap_counts_rounds_since_this_team_last_took_the_position():
+def test_rounds_since_pos_counts_rounds_since_this_team_took_the_position():
     from scoring.draft_model import FEATURE_NAMES, feature_matrix
 
     # Pick 41 is round 6; RB last taken at pick 25 (round 4), WR at 33
     # (round 5). So RB is two rounds ago and WR one.
-    gap = feature_matrix(_shape_obs(), _settings())[:, FEATURE_NAMES.index("pos_gap")]
+    X = feature_matrix(_shape_obs(), _settings())
+    gap = X[:, FEATURE_NAMES.index("rounds_since_pos")]
     assert gap[0] == pytest.approx(2 / 15)
     assert gap[1] == pytest.approx(2 / 15)
     assert gap[2] == pytest.approx(1 / 15)
 
 
-def test_pos_gap_is_zero_for_a_position_this_team_has_never_taken():
+def test_rounds_since_pos_is_zero_for_a_position_never_taken():
     """0.0 means "never", and it cannot collide with a real gap: a team picks
     once per round, so their previous pick at a position is at least a full
     round back and the smallest real value is 1/rounds."""
     from scoring.draft_model import FEATURE_NAMES, feature_matrix
 
     obs = _shape_obs(last_pick_at_pos={"RB": 40})     # pick 40 is round 5
-    gap = feature_matrix(obs, _settings())[:, FEATURE_NAMES.index("pos_gap")]
+    X = feature_matrix(obs, _settings())
+    gap = X[:, FEATURE_NAMES.index("rounds_since_pos")]
     assert gap[0] == pytest.approx(1 / 15)            # the smallest real gap
     assert list(gap[2:]) == [0.0, 0.0, 0.0]           # WR, TE, QB: never taken
 
@@ -1113,7 +1116,7 @@ def test_pos_gap_is_zero_for_a_position_this_team_has_never_taken():
 def test_observations_carry_the_picking_teams_own_pick_history(tmp_path):
     """`recent` is the whole ROOM's last few picks and `roster` is a count
     with no timing in it. Neither can answer "how long has THIS manager left
-    running back alone", which is what `pos_gap` reads."""
+    running back alone", which is what `rounds_since_pos` reads."""
     obs = build_observations(_seed(tmp_path))
 
     assert obs[0].last_pick_at_pos == {}               # nobody has picked yet
@@ -1194,7 +1197,7 @@ def test_feature_names_end_with_the_task_3_columns_in_the_briefed_order():
     from scoring.draft_model import (COLD_START_PRIOR, FEATURE_NAMES,
                                      UNMEASURED_FEATURES)
     assert UNMEASURED_FEATURES == [
-        "pos_count", "first_at_pos", "pos_gap", "first_at_pos_round",
+        "held_at_pos", "first_at_pos", "rounds_since_pos", "first_at_pos_round",
         "usage", "efficiency", "played_share", "peak_gap"]
     assert FEATURE_NAMES[-len(UNMEASURED_FEATURES):] == UNMEASURED_FEATURES
     assert len(COLD_START_PRIOR) == len(FEATURE_NAMES) == 23

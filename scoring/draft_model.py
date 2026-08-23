@@ -197,8 +197,9 @@ class PickObservation(NamedTuple):
     # that position, before this one. `roster` says how many they hold and
     # `recent` says what the whole room just took; neither can answer "how
     # long has this manager left running back alone", which is what
-    # `pos_gap` is. Stored as an overall pick number rather than a round so
-    # `build_observations` stays free of `settings` -- `feature_matrix`
+    # `rounds_since_pos` is. Stored as an overall pick number rather than
+    # a round so `build_observations` stays free of `settings` --
+    # `feature_matrix`
     # already derives the round from `overall_pick` and `settings.teams`,
     # and deriving it in one place is what keeps the two agreeing.
     #
@@ -352,7 +353,7 @@ _NEW_FEATURES = ["age", "no_track_record", "hype", "trend"]
 # `need` was already this shape and stays: these generalize it rather than
 # replace it. `need` is binary and clips at the starter count, so it cannot
 # tell a manager's second running back from his fifth.
-_ROSTER_SHAPE_FEATURES = ["pos_count", "first_at_pos", "pos_gap",
+_ROSTER_SHAPE_FEATURES = ["held_at_pos", "first_at_pos", "rounds_since_pos",
                           "first_at_pos_round"]
 
 # The stat profile, re-enabled for re-measurement. See `_ATTRIBUTE_DEFAULTS`.
@@ -399,17 +400,18 @@ EARLY_ROUNDS = 3
 # slice, so a manager whose strongest deviation was on a new feature got bars
 # for weaker ones instead. `_PHRASES` above had the identical bug.
 #
-# KNOWN WART, left deliberately rather than fixed here: the filter is a name
-# prefix, and `pos_count`/`pos_gap` start with `pos_` without being position
-# dummies, so they are excluded from the card too. They are excluded for the
-# wrong reason -- both summarize honestly on their own, unlike a dummy that
-# only means anything relative to the other four. It is not fixed in this
-# commit because `tests/test_api.py` asserts `shown` against its own copy of
-# `not f.startswith("pos_")`, so the predicate has to change in both places
-# at once. When Task 4 decides whether these two ship, rewrite this as a
-# membership test against `_POSITION_DUMMIES` and update that assertion with
-# it. Until then the only cost is two bars the rail never offers, on two
-# coefficients that are still 0.0 in the prior.
+# THE `pos_` PREFIX IS RESERVED FOR THE POSITION DUMMIES, and this predicate
+# is why. A `pos_`-prefixed name is excluded from the card because a dummy
+# only means anything relative to the other four, so it cannot be shown one
+# bar at a time -- the prefix is load-bearing, not decorative.
+#
+# `tests/test_api.py` asserts `/api/managers`'s `shown` against its own copy
+# of this same predicate. Widening it here to let a non-dummy through would
+# drift the two apart, which is exactly the staleness the DraftRail.tsx note
+# above describes happening once already. So a new feature that describes the
+# ROSTER rather than being a position dummy must be NAMED so it does not
+# collide: `held_at_pos` and `rounds_since_pos` were drafted as `pos_count`
+# and `pos_gap` and renamed for this reason. Do the same for the next one.
 SUMMARY_FEATURES = [f for f in FEATURE_NAMES if not f.startswith("pos_")]
 
 # Divisor that puts `hype` on roughly the same scale as the other columns,
@@ -441,13 +443,14 @@ HYPE_SCALE = 50.0
 #
 # The roster-shape columns are handled per column:
 #
-# - `pos_count` is a raw count. It is bounded by the rounds already played
+# - `held_at_pos` is a raw count. It is bounded by the rounds already played
 #   and in practice reaches about 5 on the deepest position of a 16-round
 #   roster, so it sits inside the band above unscaled.
 # - `first_at_pos` is a 0/1 dummy like the five position dummies.
-# - `pos_gap` is the ONLY one that needed a divisor. Measured in rounds it
-#   spans 0-15 -- an order of magnitude wider than a dummy and wider than
-#   anything above -- so it is divided by `settings.rounds` to land in 0-1.
+# - `rounds_since_pos` is the ONLY one that needed a divisor. Measured in
+#   rounds it spans 0-15 -- an order of magnitude wider than a dummy and
+#   wider than anything above -- so it is divided by `settings.rounds` to
+#   land in 0-1.
 # - `first_at_pos_round` is divided by `settings.rounds` for the same reason,
 #   which is also what the brief specifies.
 #
@@ -471,18 +474,125 @@ def _log_rank_features(market_rank, pick_no):
     return np.maximum(0.0, delta), np.maximum(0.0, -delta)
 
 
-def _centre_within_position(values, positions):
+class PositionGroups(NamedTuple):
+    """`positions` reduced to integer group codes, computed once per call.
+
+    `labels` are the distinct positions; `codes[i]` is candidate i's index
+    into them, or -1 for a candidate with no position at all.
+    """
+    labels: np.ndarray
+    codes: np.ndarray
+
+
+def position_groups(positions) -> PositionGroups:
+    """Group `positions` once so several within-position columns can share it.
+
+    This is a hot-path structure. `draft_sim._live_features` runs inside every
+    rollout step and now centres five columns (`age` plus the four
+    stat-profile ones) on top of the roster-shape block. Grouped per column
+    with a boolean mask per position, those eight new columns cost +87us on
+    a 158us call over a 250-candidate pool -- the function more than doubled.
+    Grouping ONCE here and reducing with `bincount` instead, they cost +4.8us
+    on 98.2us (1.05x); at 60 candidates, +11.9us on 71.5us (1.20x). Nothing
+    was approximated to get there: the numbers are identical either way.
+
+    `pd.factorize`, not `np.unique(return_inverse=True)`: 3x faster on the
+    object-dtype arrays a pool actually carries, and it TOLERATES a missing
+    position (code -1) where `np.unique` raises comparing a float NaN against
+    a string. Not sorted, which nothing here needs.
+
+    Derived from `positions` itself rather than from a fixed vocabulary, so a
+    position the vocabulary does not know about still gets its own group
+    instead of silently falling into the zeros.
+    """
+    codes, labels = pd.factorize(np.asarray(positions))
+    return PositionGroups(np.asarray(labels), codes)
+
+
+def _by_group(groups: PositionGroups, per_label, default: float = 0.0):
+    """One value per label, scattered back out to one value per candidate.
+
+    The `default` bucket is prepended and the codes shifted by one, so a
+    candidate with no position (code -1) lands on it instead of silently
+    wrapping around to the last label.
+    """
+    table = np.concatenate(([default], np.asarray(per_label, dtype=float)))
+    return table[groups.codes + 1]
+
+
+def _centre_within_position(values, positions, groups=None):
     """Age relative to typical for the position, so the coefficient reads as
     'younger than his peers' rather than tracking that tight ends last
-    longer than running backs. Unknown ages are neutral, not young."""
-    out = np.zeros(len(values), dtype=float)
+    longer than running backs. Unknown ages are neutral, not young.
+
+    `groups` is an optional pre-built `position_groups(positions)`; passing
+    it is purely a performance hoist and cannot change the result.
+
+    Two `bincount`s rather than a gather per position group: same answer,
+    a fixed handful of O(n) passes instead of one per group, and measured
+    5.6x faster on a 250-candidate pool. A candidate with a non-finite value
+    or no position contributes to no mean and comes out at 0.0, which is the
+    same neutral the masked version produced.
+    """
     values = np.asarray(values, dtype=float)
-    for pos in set(positions):
-        mask = positions == pos
-        known = mask & np.isfinite(values)
-        if known.any():
-            out[known] = values[known] - values[known].mean()
-    return out
+    if groups is None:
+        groups = position_groups(positions)
+    codes = groups.codes
+    known = np.isfinite(values) & (codes >= 0)
+    n_labels = len(groups.labels)
+    sums = np.bincount(codes[known], weights=values[known], minlength=n_labels)
+    counts = np.bincount(codes[known], minlength=n_labels)
+    # `maximum(counts, 1)` only guards a division by zero for a group with no
+    # finite value at all; every row in such a group is excluded by `known`
+    # below, so the 0.0 mean it produces is never actually subtracted.
+    means = _by_group(groups, sums / np.maximum(counts, 1))
+    return np.where(known, values - means, 0.0)
+
+
+def roster_shape_features(positions, roster, last_pick_at_pos, round_no,
+                          teams, rounds, groups=None) -> tuple:
+    """The four `_ROSTER_SHAPE_FEATURES` columns, in `FEATURE_NAMES` order.
+
+    ONE IMPLEMENTATION, TWO CALLERS, AND THAT IS THE WHOLE POINT.
+    `feature_matrix` is what the model is FITTED on; `draft_sim._live_features`
+    is what it is SERVED from. If those two disagree about what a column
+    means, the coefficient learned for `held_at_pos` gets applied at draft
+    time to a number that is not `held_at_pos`, and every prediction the live
+    room makes is computed from a feature vector the fit never saw. That
+    failure is silent -- the shapes still line up and nothing raises -- so it
+    is designed out here rather than policed by a test alone.
+    `tests/test_draft_sim.py` still asserts the two agree end to end.
+
+    Both callers arrive with the same four things and nothing else is
+    needed: the candidates' positions, the picking team's position counts,
+    the pick number of that team's last pick at each position, and where in
+    the draft we are.
+
+    Looked up once per POSITION and gathered out to the candidates, not
+    computed per candidate: `_live_features` runs inside every rollout step,
+    and `_legal_mask`'s docstring records what a per-element comprehension
+    costs there. At most six dict lookups plus two O(n) gathers.
+
+    Returns `(held, first_at_pos, rounds_since, first_at_pos_round)`.
+    """
+    if groups is None:
+        groups = position_groups(positions)
+    held = _by_group(groups, [float(roster.get(pos, 0))
+                              for pos in groups.labels])
+    # Same `(pick - 1) // teams + 1` the caller derived `round_no` with, so
+    # there is one definition of "round" rather than two.
+    rounds_since = _by_group(groups, [
+        0.0 if last_pick_at_pos.get(pos) is None
+        else (round_no - ((last_pick_at_pos[pos] - 1) // teams + 1)) / rounds
+        for pos in groups.labels])
+    # `first_at_pos` is a nonlinear transform of `held_at_pos`, not a linear
+    # one, so the pair is identifiable and the fit is well posed -- but the
+    # two ARE entangled and will trade coefficient mass, and so will
+    # `rounds_since_pos`, which is 0.0 on exactly the candidates where
+    # `first_at_pos` is 1.0. Read no one of the three alone; `ablation`'s
+    # per-feature `delta_top1` is what settles which of them earn a place.
+    first_at_pos = (held == 0.0).astype(float)
+    return held, first_at_pos, rounds_since, first_at_pos * (round_no / rounds)
 
 
 def feature_matrix(obs: PickObservation, settings) -> np.ndarray:
@@ -513,7 +623,12 @@ def feature_matrix(obs: PickObservation, settings) -> np.ndarray:
     run = np.array([recent.count(p) / RUN_WINDOW for p in positions])
     columns.append(run)
 
-    columns.append(_centre_within_position(pool["age"].to_numpy(), positions))
+    # One grouping pass for every within-position column below (`age` plus
+    # the four stat-profile ones) and for the roster-shape block.
+    groups = position_groups(positions)
+
+    columns.append(_centre_within_position(pool["age"].to_numpy(), positions,
+                                           groups))
     columns.append(pool["no_track_record"].to_numpy().astype(float))
     hype = pool["hype"].to_numpy(dtype=float)
     columns.append(np.nan_to_num(hype, nan=0.0) / HYPE_SCALE)
@@ -522,41 +637,22 @@ def feature_matrix(obs: PickObservation, settings) -> np.ndarray:
     # --- `_ROSTER_SHAPE_FEATURES`: what this team already holds, crossed
     # with the candidate's own position so the column varies inside the
     # choice set. See that constant for why a column that does not vary is
-    # not a weak feature but no feature at all.
+    # not a weak feature but no feature at all, and `roster_shape_features`
+    # for why the arithmetic lives there rather than here.
     #
-    # `held` is what `obs.roster` says about the candidate's position
-    # specifically, so two candidates at different positions read different
-    # values off the same roster -- that indexing IS the interaction.
-    held = np.array([float(obs.roster.get(p, 0)) for p in positions])
-    columns.append(held)                                        # pos_count
-    # `pos_count == 0` rather than `need == 0`: `need` clips at the starter
-    # count, so it cannot separate "has none" from "has one of two".
-    first_at_pos = (held == 0.0).astype(float)
-    columns.append(first_at_pos)                                # first_at_pos
-
-    # Rounds since this team last took the candidate's position, 0.0 when
-    # they never have. `obs.last_pick_at_pos` stores overall pick numbers, so
-    # the round comes from the same `(pick - 1) // teams + 1` arithmetic used
-    # for `round_no` above -- one definition of "round", not two.
+    # `roster` is indexed BY the candidate's own position, so two candidates
+    # at different positions read different values off the same roster --
+    # that indexing IS the interaction.
     #
-    # 0.0 therefore means "never", and in this data it cannot mean anything
-    # else: every team picks exactly once per round in a snake, so their
-    # previous pick at any position is at least one full round back and a
-    # real gap is never smaller than 1/rounds. A format that gave one team
-    # two picks in a round would collide the two readings; none of the
-    # drafts fitted here does.
-    rounds = max(settings.rounds, 1)
-    last_at = obs.last_pick_at_pos
-    columns.append(np.array([                                   # pos_gap
-        0.0 if p not in last_at
-        else (round_no - ((last_at[p] - 1) // teams + 1)) / rounds
-        for p in positions]))
-
-    # "Has none of this position, and it is getting late." The round on its
-    # own is constant across the choice set and cancels; multiplied by
-    # `first_at_pos` it is a claim about this candidate. Same construction as
-    # `qb_early`/`te_early`, with a continuous round instead of a threshold.
-    columns.append(first_at_pos * (round_no / rounds))     # first_at_pos_round
+    # `rounds_since_pos` is 0.0 when this team has never taken the position,
+    # and in this data that cannot mean anything else: every team picks
+    # exactly once per round in a snake, so their previous pick at a position
+    # is at least a full round back and the smallest real value is 1/rounds.
+    # A format giving one team two picks in a round would collide the two
+    # readings; none of the drafts fitted here does.
+    columns.extend(roster_shape_features(
+        positions, obs.roster, obs.last_pick_at_pos, round_no, teams,
+        max(settings.rounds, 1), groups))
 
     # --- `_STAT_PROFILE_FEATURES`: what the candidate has actually done.
     # Centred within position for the same reason `age` is -- so a
@@ -568,7 +664,7 @@ def feature_matrix(obs: PickObservation, settings) -> np.ndarray:
     # `_ATTRIBUTE_DEFAULTS`), so "no history" reads the same either way.
     for name in _STAT_PROFILE_FEATURES:
         columns.append(_centre_within_position(
-            pool[name].to_numpy(dtype=float), positions))
+            pool[name].to_numpy(dtype=float), positions, groups))
 
     return np.column_stack(columns) if n else np.zeros((0, len(FEATURE_NAMES)))
 
@@ -753,17 +849,17 @@ _PHRASES = {
     # to league average". Every entry of FEATURE_NAMES is named here; keep
     # it that way.
     #
-    # Signs, since three of these are easy to read backwards. `pos_count` is
+    # Signs, since three of these are easy to read backwards. `held_at_pos` is
     # how many of that position the team already holds, so positive means
     # "wants more of what he has". `first_at_pos` is 1 when he has NONE, so
-    # positive means "goes to an empty position first". `pos_gap` is rounds
-    # since he last took that position, so positive means the wait itself
-    # pulls him back to it.
-    "pos_count": ("doubles down on positions he already has",
+    # positive means "goes to an empty position first".
+    # `rounds_since_pos` is rounds since he last took that position, so
+    # positive means the wait itself pulls him back to it.
+    "held_at_pos": ("doubles down on positions he already has",
                   "spreads picks across positions"),
     "first_at_pos": ("goes to an empty position first",
                      "keeps stacking positions he has started"),
-    "pos_gap": ("comes back to positions he has left alone",
+    "rounds_since_pos": ("comes back to positions he has left alone",
                 "drafts a position in bursts"),
     "first_at_pos_round": ("leaves empty positions until late",
                            "fills every position early"),
@@ -910,9 +1006,9 @@ COLD_START_PRIOR = np.array([
     # columns existed, since a zero coefficient contributes nothing to any
     # score. Task 4's `fit_prior` replaces them with values fitted on the
     # mock corpus, and only if that fit wins on top-1.
-    0.0,          # pos_count
+    0.0,          # held_at_pos
     0.0,          # first_at_pos
-    0.0,          # pos_gap
+    0.0,          # rounds_since_pos
     0.0,          # first_at_pos_round
     0.0,          # usage
     0.0,          # efficiency

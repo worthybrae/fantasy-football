@@ -34,7 +34,8 @@ from scoring.config import CURRENT_SEASON, RECENCY_WEIGHTS
 from scoring.draft_model import (COLD_START_PRIOR, EARLY_ROUNDS, FEATURE_NAMES,
                                  FFC_BLEND_WEIGHT, HYPE_SCALE, RUN_WINDOW,
                                  _ATTRIBUTE_DEFAULTS, _centre_within_position,
-                                 _log_rank_features)
+                                 _log_rank_features, _STAT_PROFILE_FEATURES,
+                                 position_groups, roster_shape_features)
 from scoring.player_history import assert_no_column_collision, attributes_as_of
 
 FLEX_POSITIONS = ("RB", "WR", "TE")
@@ -174,6 +175,18 @@ _AGE = FEATURE_NAMES.index("age")
 _NO_TRACK_RECORD = FEATURE_NAMES.index("no_track_record")
 _HYPE = FEATURE_NAMES.index("hype")
 _TREND = FEATURE_NAMES.index("trend")
+_HELD_AT_POS = FEATURE_NAMES.index("held_at_pos")
+_FIRST_AT_POS = FEATURE_NAMES.index("first_at_pos")
+_ROUNDS_SINCE_POS = FEATURE_NAMES.index("rounds_since_pos")
+_FIRST_AT_POS_ROUND = FEATURE_NAMES.index("first_at_pos_round")
+# (SimPool field name, column index) for the stat profile, derived from
+# draft_model's own list rather than hand-written. A column added there with
+# no matching `SimPool` field raises AttributeError the first time
+# `_live_features` runs, which is the loud failure -- the quiet one is a
+# hand-kept list that stops matching and serves a zero where the fit saw a
+# number.
+_STAT_PROFILE_INDEX = tuple((name, FEATURE_NAMES.index(name))
+                            for name in _STAT_PROFILE_FEATURES)
 
 
 class SimPool(NamedTuple):
@@ -206,6 +219,21 @@ class SimPool(NamedTuple):
     no_track_record: np.ndarray
     hype: np.ndarray
     trend: np.ndarray
+    # Task 3: the stat profile, the other half of what `feature_matrix` reads
+    # off a fitting pool. Named exactly as in `_STAT_PROFILE_FEATURES` --
+    # `_live_features` looks them up by that name (see `_STAT_PROFILE_INDEX`),
+    # so a rename on one side is an AttributeError rather than a wrong column.
+    #
+    # Defaulted to None, meaning "no value known", which `_live_features`
+    # expands to an all-NaN column and `_centre_within_position` then reads as
+    # neutral 0.0 -- exactly what a pool whose `attributes_as_of` join found
+    # nothing already produces (see `_ATTRIBUTE_DEFAULTS`). The default exists
+    # for hand-built fixtures only: `build_pool`, the one production
+    # constructor, always populates all four, and a test asserts it does.
+    usage: np.ndarray = None
+    efficiency: np.ndarray = None
+    played_share: np.ndarray = None
+    peak_gap: np.ndarray = None
 
 
 def snake_slots(teams: int, rounds: int) -> list:
@@ -434,13 +462,37 @@ def build_pool(conn, board: pd.DataFrame, settings) -> SimPool:
         age=ranked["age"].to_numpy(dtype=float),
         no_track_record=ranked["no_track_record"].to_numpy(dtype=bool),
         hype=ranked["hype"].to_numpy(dtype=float),
-        trend=ranked["trend"].to_numpy(dtype=float))
+        trend=ranked["trend"].to_numpy(dtype=float),
+        # The stat profile, filled from the same `attributes_as_of` merge
+        # above. `_ATTRIBUTE_DEFAULTS` already put NaN on every row the join
+        # missed, so an unknown player reaches `_live_features` in the same
+        # state he reaches `feature_matrix` in.
+        **{name: ranked[name].to_numpy(dtype=float)
+           for name in _STAT_PROFILE_FEATURES})
 
 
-def _live_features(pool, available, overall_pick, roster, recent, settings):
+def _live_features(pool, available, overall_pick, roster, recent, settings,
+                   last_pick_at_pos=None):
     """Feature matrix for the currently available players, mirroring
     draft_model.feature_matrix exactly -- the fitted coefficients only mean
-    anything against the same feature definitions they were fitted on."""
+    anything against the same feature definitions they were fitted on.
+
+    This function is what the model is SERVED from; `feature_matrix` is what
+    it is FITTED on. Where the two could drift they now call one shared
+    implementation (`draft_model.roster_shape_features`,
+    `_centre_within_position`) rather than each writing the arithmetic out,
+    and `tests/test_draft_sim.py` asserts the two agree end to end anyway.
+    A disagreement here is silent: the shapes still line up, nothing raises,
+    and every live prediction is simply computed from a vector the fit never
+    saw.
+
+    `last_pick_at_pos` is `{position: overall_pick}` for THIS team's most
+    recent pick at each position, the same thing
+    `draft_model.PickObservation.last_pick_at_pos` carries. None means the
+    team has taken nothing yet, matching that field's own default. Both
+    production callers (`_run_draft`, `survival`) thread the real thing;
+    `_seed_rosters` reconstructs it for a resumed draft.
+    """
     positions = pool.position[available]
     ranks = pool.market_rank[available]
     teams = max(settings.teams, 1)
@@ -473,10 +525,31 @@ def _live_features(pool, available, overall_pick, roster, recent, settings):
         if run_share:
             X[mask, _RUN] = run_share
 
-    X[:, _AGE] = _centre_within_position(pool.age[available], positions)
+    # One grouping pass shared by `age`, the four stat-profile columns and
+    # the roster-shape block below. Regrouping per column instead costs 87us
+    # of a 158us call on a 250-candidate pool, on a function that runs once
+    # per pick per rollout. See `draft_model.position_groups`.
+    groups = position_groups(positions)
+
+    X[:, _AGE] = _centre_within_position(pool.age[available], positions, groups)
     X[:, _NO_TRACK_RECORD] = pool.no_track_record[available].astype(float)
     X[:, _HYPE] = np.nan_to_num(pool.hype[available], nan=0.0) / HYPE_SCALE
     X[:, _TREND] = pool.trend[available]
+
+    # The roster-shape block, from the SAME function `feature_matrix` calls.
+    (X[:, _HELD_AT_POS], X[:, _FIRST_AT_POS], X[:, _ROUNDS_SINCE_POS],
+     X[:, _FIRST_AT_POS_ROUND]) = roster_shape_features(
+        positions, roster, last_pick_at_pos or {}, round_no, teams,
+        max(settings.rounds, 1), groups)
+
+    # The stat profile. `values is None` is a fixture-only path (see
+    # `SimPool`); an all-NaN column centres to 0.0, which is the same neutral
+    # a missed attribute join already produces on both sides.
+    for name, col in _STAT_PROFILE_INDEX:
+        values = getattr(pool, name)
+        X[:, col] = _centre_within_position(
+            np.full(n, np.nan) if values is None else values[available],
+            positions, groups)
     return X
 
 
@@ -942,9 +1015,20 @@ def _seed_rosters(pool, settings, taken_order):
     from, so a mid-draft run starts with every team holding what it actually
     took: `need` and the roster caps see real counts, and my own earlier
     picks are part of the roster the search is valuing.
+
+    `last_pick` is the third piece of that state: `{position: overall_pick}`
+    for each team's most recent pick at each position, which is what
+    `rounds_since_pos` reads. `counts` says how many and carries no timing,
+    so it cannot answer it. A resumed draft that rebuilt counts but not this
+    would tell every opponent they have never taken a running back, one pick
+    after they took one.
+
+    A None entry (a pick whose player has since left the pool) advances the
+    snake but updates nothing, because its position is unknowable -- the same
+    treatment `counts` and `recent` already give it.
     """
     slots = snake_slots(settings.teams, settings.rounds)
-    rosters = {slot: {"counts": {}, "indices": []}
+    rosters = {slot: {"counts": {}, "indices": [], "last_pick": {}}
                for slot in range(1, settings.teams + 1)}
     recent = []
     for offset, idx in enumerate(taken_order or []):
@@ -957,6 +1041,7 @@ def _seed_rosters(pool, settings, taken_order):
         pos = pool.position[idx]
         rosters[slot]["counts"][pos] = rosters[slot]["counts"].get(pos, 0) + 1
         rosters[slot]["indices"].append(int(idx))
+        rosters[slot]["last_pick"][pos] = offset + 1        # 1-based pick no
         recent.insert(0, pos)
     return rosters, recent[:RUN_WINDOW]
 
@@ -965,7 +1050,7 @@ def _run_draft(pool, settings, slot_managers, my_slot, taken, betas, rng,
                forced=None, taken_order=None, *, record=None) -> dict:
     """Simulate the remainder of one snake draft and return every slot's
     roster, as `{slot: {"counts": {position: n, ...}, "indices": [pool
-    index, ...]}}`.
+    index, ...], "last_pick": {position: overall_pick, ...}}}`.
 
     Resume contract: `taken` marks exactly the players drafted so far in
     THIS draft -- the number of picks already made, used as an index into the
@@ -1070,7 +1155,7 @@ def _run_draft(pool, settings, slot_managers, my_slot, taken, betas, rng,
                 choice = int(available[0])      # no legal player exists at all
             else:
                 X = _live_features(pool, legal, overall_pick, roster["counts"],
-                                   recent, settings)
+                                   recent, settings, roster["last_pick"])
                 scores = X @ beta
                 # `scores.max()` is one of `scores` itself, so it always
                 # contributes exp(0) == 1 -- weights.sum() is always >= 1,
@@ -1081,6 +1166,7 @@ def _run_draft(pool, settings, slot_managers, my_slot, taken, betas, rng,
         pos = pool.position[choice]
         rosters[slot]["counts"][pos] = rosters[slot]["counts"].get(pos, 0) + 1
         rosters[slot]["indices"].append(choice)
+        rosters[slot]["last_pick"][pos] = overall_pick
         if record is not None:
             record.append((overall_pick, int(choice)))
         recent.insert(0, pos)
@@ -1587,6 +1673,13 @@ def survival(pool, settings, slot_managers, my_slot, taken, betas,
         gone = taken.copy()
         seeded, seeded_recent = _seed_rosters(pool, settings, taken_order)
         rosters = {slot: state["counts"] for slot, state in seeded.items()}
+        # Carried beside `rosters` rather than folded into it because this
+        # loop indexes `rosters[slot]` as the bare counts dict throughout
+        # (caps, `_must_fill_mask`). Same information `_run_draft` keeps
+        # under `roster["last_pick"]`, and it has to be here too or the two
+        # disagree about the same opponents -- `survival` IS what "will he
+        # still be there" is counted from.
+        last_picks = {slot: state["last_pick"] for slot, state in seeded.items()}
         recent = list(seeded_recent)
         for offset in range(start, min(target - 1, len(slots))):
             slot = slots[offset]
@@ -1612,7 +1705,7 @@ def survival(pool, settings, slot_managers, my_slot, taken, betas,
                 # follow the market instead of drafting at random.
                 beta = COLD_START_PRIOR
             X = _live_features(pool, available, offset + 1, rosters[slot],
-                               recent, settings)
+                               recent, settings, last_picks[slot])
             scores = X @ beta
             for j, idx in enumerate(available):
                 pos = pool.position[idx]
@@ -1644,6 +1737,7 @@ def survival(pool, settings, slot_managers, my_slot, taken, betas,
             gone[choice] = True
             pos = pool.position[choice]
             rosters[slot][pos] = rosters[slot].get(pos, 0) + 1
+            last_picks[slot][pos] = offset + 1
             recent.insert(0, pos)
         counts += ~gone
 
