@@ -4498,12 +4498,16 @@ button.roster-row:focus-visible {
   display: none;
 }
 
-/* Shorter than the 68px the season panels share: that slot has to clear a
-   stack of seventeen circles and this one holds a bar. A week at the
-   30-point ceiling (weeks.ts) fills it. */
+/* Taller than the 68px the season panels share, and deliberately the
+   biggest picture in the popup. This is the one chart that answers "what
+   did his season actually look like" -- eighteen columns wide, so every
+   pixel of height is a point of separation between a 24-point week and an
+   11-point one. At 42px those two weeks were four pixels apart and the
+   chart was a decoration over the log rather than a thing to read.
+   A week at the 30-point ceiling (weeks.ts) fills it. */
 .pp-pop-weeks .ctip-col-slot {
   width: 100%;
-  height: 42px;
+  height: 76px;
 }
 
 /* One step down from the season panels' labels: these are eighteen columns
@@ -4935,7 +4939,7 @@ button.roster-row:focus-visible {
   align-items: center;
   justify-content: center;
   width: 22px;
-  height: 44px;
+  height: 78px;
   padding: 0;
   border: 1px solid var(--border);
   border-radius: var(--radius);
