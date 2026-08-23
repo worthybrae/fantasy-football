@@ -187,18 +187,25 @@ gets written up as one.
 ### 1.5 The pulse
 
 Every row in the available list pulses red, with intensity scaled by
-`1 - survive_pct`. No threshold to tune: a player certain to survive does not
-visibly move, a player certain to be gone pulses hard, and everything between
-is a ramp.
+`1 - survive_pct`. Nothing to tune in the ramp itself: a player certain to
+survive does not visibly move, a player certain to be gone pulses hard, and
+everything between is a ramp. The one threshold is a floor, and it is a cost
+control rather than a design choice -- see the constraint below.
 
 `survive_pct` is already on `LiveCandidate` and already rendered. The change
 is to bind it to a CSS custom property on the `<tr>` and animate from that.
 
 Three constraints:
 
-- **Animate `opacity` and `box-shadow` only, never `background-color`.** This
-  is a two-hundred-row table; only compositor-friendly properties are
-  affordable.
+- **Animate `opacity` and `box-shadow` only, never `background-color` or
+  anything that reflows.** Note that `box-shadow` is NOT compositor-friendly:
+  it is a paint property, so unlike `opacity` and `transform` every frame of
+  it re-rasterizes the row on the main thread. It is used here anyway because
+  an inset shadow is the only way to tint a `<tr>` without touching
+  `background-color`, but the cost is real -- which is why rows whose
+  intensity is below a small floor (~0.02, i.e. already invisible) must get
+  no animation at all rather than an invisible one. This is a two-hundred-row
+  table with no virtualization, and most of it sits at that floor.
 - **Honor `prefers-reduced-motion`.** The fallback is the static tint, which
   carries the same information without moving.
 - **`survive_pct` of `null` gets no pulse at all.** Null means there is no

@@ -553,6 +553,25 @@ function pulseIntensity(survivePct: number | null): number | null {
   return danger * danger
 }
 
+// Below this intensity a row gets NO animation, not a faint one.
+//
+// The keyframes scale `--fail` by `--pulse * 20%` and `--pulse * 65%`, so at
+// an intensity of 0.02 both stops land under 1.5% opacity -- and at 0 (a
+// player at `survive_pct: 100`) both evaluate to `transparent`, an animation
+// between two identical invisible values. That is not free. `box-shadow` is
+// a PAINT property: unlike `opacity` and `transform` it cannot be handed to
+// the compositor, so every frame of it re-rasterizes the row on the main
+// thread. This table renders ~250 rows with no virtualization, and the
+// bottom of it -- the players nobody is about to take -- is exactly where
+// the zero-intensity rows are, so leaving them animating meant paying full
+// paint cost for most of the table to show nothing.
+//
+// 0.02 is the squared-danger of survive_pct ~86%, which is already inside
+// the band pulseIntensity's own comment calls "visually still". Nothing that
+// was legible stops being drawn; what stops is animating what was already
+// invisible.
+const PULSE_FLOOR = 0.02
+
 // The ranked available pool: search + position filter above a table that
 // opens in the server's own `gain_now` order (`#`) and can be re-sorted by
 // any column from its header.
@@ -607,11 +626,16 @@ const AvailableRow = memo(function AvailableRow({
   // logic just below reads as one rule rather than two branches that have
   // to agree with each other.
   const pulse = isTaken ? null : pulseIntensity(c.survive_pct)
+  // ONE derived answer for both the class and the custom property below.
+  // They have to agree -- a `--pulse` with no class to read it is wasted
+  // work, a class with no `--pulse` animates against an undefined value --
+  // and two separate conditions are two things that can drift apart.
+  const animated = pulse !== null && pulse >= PULSE_FLOOR
   return (
               <tr key={c.player_id} data-pid={c.player_id}
                   className={isTaken
                     ? 'avail-row-taken'
-                    : pulse === null ? undefined : 'avail-row-pulse'}
+                    : animated ? 'avail-row-pulse' : undefined}
                   // `--pulse` drives the ONE `@keyframes avail-pulse` rule in
                   // App.css -- set once per row here rather than generating a
                   // distinct animation per row there, which is what keeps
@@ -620,7 +644,7 @@ const AvailableRow = memo(function AvailableRow({
                   // pulse -- an inert custom property with no `.avail-row-
                   // pulse` class to read it would just be wasted work on
                   // every one of those rows.
-                  style={pulse === null ? undefined : ({ '--pulse': pulse } as CSSProperties)}
+                  style={animated ? ({ '--pulse': pulse } as CSSProperties) : undefined}
                   aria-hidden={isTaken || undefined}>
                 <td className="avail-col-rank mono">{c.rank}</td>
                 <td className="avail-col-pos">{posBadge(c.position)}</td>
