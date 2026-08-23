@@ -379,12 +379,10 @@ function PopCards({ profile, onSelectPlayer }: {
       <div className="pp-pop-row">
         <UsageLine seasons={profile.seasons} position={header.position}
                    projected={profile.summary?.proj_usage} />
-        {/* Null for every defense by construction (see LineQualityData): the
-            o-line is a fact about the eleven who leave the field when this
-            unit comes on. */}
-        {profile.oline && <LineQuality oline={profile.oline} />}
-        {/* Beside Blocking, because both are facts about the offence around
-            him rather than about him. */}
+        {/* Beside Usage, and alone with it: three cards in this row meant
+            none of them had the width it needed -- Usage ellipsised "Target
+            %" and Vegas wrapped its unit over four lines. Two wide cards
+            fit; three did not. */}
         <VegasCard vegas={profile.vegas} />
       </div>
       {/* Last row, and the only one that looks backwards: everything above
@@ -396,6 +394,12 @@ function PopCards({ profile, onSelectPlayer }: {
           for him either way now: the payload's own neighbours when it has
           them, the room's ranked board when it has not.) */}
       <div className="pp-pop-row">
+        {/* Null for every defense by construction (see LineQualityData): the
+            o-line is a fact about the eleven who leave the field when this
+            unit comes on. Down here rather than beside Usage because it is
+            the narrowest card in the popup -- a rank and two ratios -- and
+            it was taking width from two cards that needed it. */}
+        {profile.oline && <LineQuality oline={profile.oline} />}
         <ComparableSeasons
           mode={profile.similar.mode}
           players={profile.similar.players}

@@ -55,7 +55,7 @@ export default function VegasCard({ vegas }: { vegas: Vegas | null }) {
         <span className="mono pp-pop-vegas-figure">{vegas.implied}</span>
         {/* The unit, spelled out. "26.8" beside a rank could be read as
             anything; this is the team's points, not his. */}
-        <span className="pp-pop-vegas-unit">implied team points a game</span>
+        <span className="pp-pop-vegas-unit">implied team pts / game</span>
       </div>
       <div className="pp-pop-strip">
         {Array.from({ length: weeks }, (_, i) => i + 1).map((week) => {
@@ -74,7 +74,7 @@ export default function VegasCard({ vegas }: { vegas: Vegas | null }) {
         })}
       </div>
       <div className="pp-pop-vegas-foot mono">
-        {vegas.priced} of {weeks} weeks priced
+        {vegas.priced}/{weeks} weeks priced
       </div>
       </>
       )}

@@ -430,12 +430,12 @@ def career_summary(seasons: list[dict]) -> dict:
 # What each market is called on the card. Short, because the card has room
 # for a label and a price and nothing else.
 _FUTURES_LABELS = {
-    "rush_yards": "Rushing leader",
-    "rec_yards": "Receiving leader",
-    "pass_yards": "Passing leader",
+    "rush_yards": "Rush leader",
+    "rec_yards": "Rec leader",
+    "pass_yards": "Pass leader",
     "mvp": "MVP",
-    "opoy": "Offensive POY",
-    "oroy": "Offensive rookie",
+    "opoy": "OPOY",
+    "oroy": "Off rookie",
 }
 
 

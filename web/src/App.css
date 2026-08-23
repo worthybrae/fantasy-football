@@ -4342,11 +4342,13 @@ button.roster-row:focus-visible {
   flex: 1.35 1 0;
 }
 
-/* Usage shares its row with one card now that "Near you" is gone, and it is
-   the one with four labels and four columns to fit -- "Target %" was being
-   ellipsised to "Ta..." while the space sat to its right. */
+/* Usage is the widest thing in its row -- four labels and up to five columns
+   -- but not by as much as it was: Vegas joined the row and was squeezed into
+   a single share, where its unit wrapped over four lines and its market
+   labels ellipsised to "R..." and "O". Its row is two cards now, so this
+   share buys real width rather than a slightly larger slice of a crowd. */
 .pp-pop-card.is-widest {
-  flex: 2.2 1 0;
+  flex: 1.6 1 0;
 }
 
 /* The hover panel's own head, a step smaller: these sit side by side in a
@@ -4644,7 +4646,8 @@ button.roster-row:focus-visible {
 .pp-pop-vegas-head {
   display: flex;
   align-items: baseline;
-  gap: var(--space-2);
+  gap: 5px;
+  flex-wrap: wrap;
 }
 
 .pp-pop-vegas-figure {
@@ -4654,7 +4657,7 @@ button.roster-row:focus-visible {
 }
 
 .pp-pop-vegas-unit {
-  font-size: 10px;
+  font-size: 9.5px;
   line-height: 1.3;
   color: var(--text-3);
 }
@@ -4674,6 +4677,7 @@ button.roster-row:focus-visible {
 
 .pp-pop-vegas-foot {
   font-size: 9px;
+  white-space: nowrap;
   color: var(--text-3);
 }
 
