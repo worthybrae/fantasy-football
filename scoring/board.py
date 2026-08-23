@@ -93,6 +93,13 @@ _BOARD_COLUMNS = [
     # of those are load-bearing.
     "consistency_cv",
     "consistency_pct",
+    # nflverse's photo url for this player, or null. Carried on the board
+    # rather than fetched per view because the rail that draws it (the room's
+    # pick ticker) already has the board and nothing else it needs; null for
+    # every defense, for anyone nflverse has no biography for, and for a
+    # database refreshed before `pipeline/sources.fetch_players` took the
+    # column -- the rail draws no image rather than a broken one.
+    "headshot",
     # How much this league's scoring rules re-price ESPN's PPR-shaped season
     # projection for this player: 1.0 in a PPR league, ~0.83 for a
     # high-reception WR in half-PPR, ~0.67 in standard. On the board rather
@@ -1264,6 +1271,18 @@ def build_board(conn, weights: dict | None = None,
     # means something in the world; the EDGE is its order restated over the
     # players this board actually holds.
     uni["edge"] = uni["market_rank"].rank(method="first") - uni["rank"]
+
+    # Joined last, on the id the board already keys on. Left merge and a
+    # column guard, because a `players` table without the column (or without
+    # `gsis_id`) is a board with no photos, not an exception.
+    people = read_table(conn, "players")
+    if {"gsis_id", "headshot"}.issubset(people.columns):
+        faces = (people[["gsis_id", "headshot"]].dropna(subset=["gsis_id"])
+                 .drop_duplicates("gsis_id")
+                 .rename(columns={"gsis_id": "player_id"}))
+        uni = uni.merge(faces, on="player_id", how="left")
+    else:
+        uni["headshot"] = None
 
     drafted_ids = set(drafted["player_id"]) if not drafted.empty else set()
     uni["drafted"] = uni["player_id"].isin(drafted_ids)

@@ -478,6 +478,9 @@ export async function setAutodraft(on: boolean): Promise<{ autodraft: boolean; c
 export interface BoardPlayer {
   player_id: string
   name: string
+  /** nflverse's photo url, or null -- a defense, a player it has no
+   *  biography for, or a database refreshed before the column existed. */
+  headshot?: string | null
   position: string
   team: string | null
   bye: number | null

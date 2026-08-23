@@ -1097,6 +1097,10 @@ def _board_cell(player_id, pick_no, teams: int, slots: list, by_id: dict) -> dic
             "proj_ppg": round(espn_proj / 17, 1) if espn_proj else None,
             # >0 = fell past ADP (a steal), <0 = reach; null with no ADP.
             "value": None if market_rank is None else float(overall) - market_rank,
+            # The rail under the room draws a face beside each landed pick.
+            # Null for a defense, for anyone nflverse has no photo of, and on
+            # any database refreshed before the column existed.
+            "headshot": _str_or_none(row.get("headshot")),
         }
     return {"overall": overall, "round": rnd, "slot": slot, "player": player}
 

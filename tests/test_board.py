@@ -111,6 +111,12 @@ def test_board_column_contract(tmp_path):
                 # the whole weekly universe on purpose -- see `consistency`.
                 "consistency_cv",
                 "consistency_pct",
+                # nflverse's photo url, carried on the board because the rail
+                # that draws it (the room's pick ticker) already has the
+                # board and nothing else it would need. Null for every
+                # defense and on any database refreshed before
+                # `pipeline/sources.fetch_players` took the column.
+                "headshot",
                 # The scoring-format work adds proj_scale: how much this
                 # league's rules re-price ESPN's PPR-only season projection
                 # for this player (1.0 in a PPR league). It is on the board,

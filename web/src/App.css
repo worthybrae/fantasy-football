@@ -662,7 +662,10 @@ td:first-child {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  height: 34px;
+  /* Taller than the 34px it was, because it carries a face now -- and
+     because at 34px the rail read as a status line rather than as the last
+     few picks of the draft, which is what it is. */
+  height: 52px;
   padding: 0 var(--space-4);
   background: var(--bg-1);
   border-top: 1px solid var(--border);
@@ -678,10 +681,12 @@ td:first-child {
   color: var(--text-3);
 }
 
-/* Newest at the left. The list is capped at eight in PickTicker.tsx, so
-   this never scrolls in practice -- `overflow: hidden` is the guard for the
-   narrow viewport where eight entries genuinely do not fit, and dropping
-   the oldest off the right edge is the correct casualty there. */
+/* Newest at the left, and the rest reachable. This used to clip at the right
+   edge, so on a narrow room the older picks were simply gone; now the rail
+   scrolls to them. Still nothing MOVES on its own -- the objection to a
+   marquee was motion under a pick clock, not access -- so this scrolls only
+   when a reader asks it to. `overscroll-behavior` keeps the end of the rail
+   from carrying on into the page behind it. */
 .pick-ticker-list {
   display: flex;
   align-items: center;
@@ -689,8 +694,32 @@ td:first-child {
   margin: 0;
   padding: 0;
   min-width: 0;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
   list-style: none;
+  /* No visible bar. On a 52px rail a scrollbar is not a hint, it is a second
+     horizontal line sitting on top of the picks -- and it lands over the
+     names because the track is the full width of the strip. The rail still
+     scrolls by wheel, trackpad, touch and keyboard; only the furniture is
+     gone. */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.pick-ticker-list::-webkit-scrollbar {
+  display: none;
+}
+
+/* The face on a landed pick. Round and small: it is there to be recognised
+   at a glance from across the room, not read. */
+.pick-ticker-face {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--bg-2);
 }
 
 .pick-ticker-item {

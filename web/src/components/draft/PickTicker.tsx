@@ -8,11 +8,13 @@ function posBadge(position: string | undefined): ReactNode {
   return <span className={`pos-badge pos-badge-${position.toLowerCase()}`}>{position}</span>
 }
 
-// How many landed picks the strip carries. Eight is what fits on one row at
-// the widths this room is used at without the names truncating to initials;
-// anything older is a scroll up into the snake board, which is the view that
-// exists for draft history.
-const TICKER_LENGTH = 8
+// How many landed picks the strip carries. Eight was what fit on one row
+// without the names truncating; the rail scrolls now, so the cap is a
+// reading limit rather than a width one. Twenty-four is three rounds of an
+// eight-team league -- far enough back to answer "who went while I was
+// reading this profile" without turning the rail into the draft history the
+// snake board above already is.
+const TICKER_LENGTH = 24
 
 interface PickTickerProps {
   board: LiveBoard | null
@@ -72,6 +74,13 @@ export default function PickTicker({ board, onOpenPlayer }: PickTickerProps) {
                     onClick={() => onOpenPlayer(cell.player)}
                     aria-label={label}
                   >
+                    {cell.player.headshot && (
+                      // `alt=""` -- the name is right beside it and the
+                      // button already carries the whole pick as its label,
+                      // so a described image would be the third telling.
+                      <img className="pick-ticker-face" src={cell.player.headshot}
+                           alt="" width={30} height={30} loading="lazy" />
+                    )}
                     <span className="pick-ticker-no mono">{cell.overall}</span>
                     {posBadge(cell.player.position)}
                     <span className="pick-ticker-name">{cell.player.name}</span>
@@ -79,6 +88,13 @@ export default function PickTicker({ board, onOpenPlayer }: PickTickerProps) {
                   </button>
                 ) : (
                   <span className="pick-ticker-pick" aria-label={label}>
+                    {cell.player.headshot && (
+                      // `alt=""` -- the name is right beside it and the
+                      // button already carries the whole pick as its label,
+                      // so a described image would be the third telling.
+                      <img className="pick-ticker-face" src={cell.player.headshot}
+                           alt="" width={30} height={30} loading="lazy" />
+                    )}
                     <span className="pick-ticker-no mono">{cell.overall}</span>
                     {posBadge(cell.player.position)}
                     <span className="pick-ticker-name">{cell.player.name}</span>
