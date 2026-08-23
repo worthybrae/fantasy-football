@@ -693,33 +693,91 @@ td:first-child {
 /* The seconds between opening the room and the board being ready. Centred
    and quiet: it replaces a table, so it should not read as an error banner
    sitting where the table will be. */
+/* Startup, and the only screen in this app that is allowed to be mostly
+   empty. It centres in the whole main column rather than sitting as a line
+   at the top of it, because at this moment the column has nothing else in
+   it -- a six-pixel dot against a full-height void read as a page that had
+   failed to load rather than one that was working. */
 .draft-board-building {
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: var(--space-2);
+  gap: var(--space-4);
+  height: 100%;
+  min-height: 300px;
   padding: var(--space-8) var(--space-4);
+  text-align: center;
+}
+
+/* The bars are a board being ranked, not a spinner: they descend in width
+   the way a ranked list does, and they fill from the left in order, top
+   first. It is the one animation in the room and it only ever runs while
+   the room is empty -- nothing here moves under a pick clock. */
+.draft-board-building-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  width: min(260px, 70%);
+}
+
+.draft-board-building-row {
+  position: relative;
+  height: 11px;
+  border-radius: 3px;
+  background: var(--bg-2);
+  overflow: hidden;
+}
+
+/* The room's own position hues, so the thing assembling itself is visibly a
+   DRAFT board and not a progress bar. Same four tokens the board, the rail
+   and every position badge use -- a fifth colour invented for a loading
+   screen would be the only one in the app that meant nothing. */
+.draft-board-building-row.is-qb { --hue: var(--pos-qb); }
+.draft-board-building-row.is-rb { --hue: var(--pos-rb); }
+.draft-board-building-row.is-wr { --hue: var(--pos-wr); }
+.draft-board-building-row.is-te { --hue: var(--pos-te); }
+
+/* Scaled from the left rather than animating `width`: a transform is
+   composited, and a seven-bar loop that relayouts twice a second under a
+   fetch is the wrong thing to spend a frame on. */
+.draft-board-building-fill {
+  position: absolute;
+  inset: 0;
+  transform-origin: left center;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--hue, var(--accent)),
+              color-mix(in srgb, var(--hue, var(--accent)) 35%, transparent));
+  animation: draft-board-fill 1.9s ease-in-out infinite;
+}
+
+@keyframes draft-board-fill {
+  0% { transform: scaleX(0); opacity: 0.4; }
+  45% { transform: scaleX(1); opacity: 1; }
+  75% { transform: scaleX(1); opacity: 1; }
+  100% { transform: scaleX(1); opacity: 0.4; }
+}
+
+.draft-board-building-title {
+  color: var(--text-1);
+  font-size: var(--text-xl);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.draft-board-building-note {
+  margin-top: calc(var(--space-2) * -1);
   color: var(--text-3);
   font-size: var(--text-sm);
 }
 
-/* The one moving thing in this room, and only while nothing else is on
-   screen to move under. */
-.draft-board-building-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent);
-  animation: draft-board-pulse 1.1s ease-in-out infinite;
-}
-
-@keyframes draft-board-pulse {
-  0%, 100% { opacity: 0.25; }
-  50% { opacity: 1; }
-}
-
+/* Asked for stillness, given stillness: the bars stay filled, which is the
+   frame the loop spends most of its time on anyway. */
 @media (prefers-reduced-motion: reduce) {
-  .draft-board-building-dot { animation: none; opacity: 0.7; }
+  .draft-board-building-fill {
+    animation: none;
+    opacity: 0.75;
+  }
 }
 
 .pick-ticker-label {

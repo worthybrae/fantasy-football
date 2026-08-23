@@ -139,6 +139,22 @@ function orderForDisplay(slots: RosterSlot[]): RosterSlot[] {
   return [...slots].sort((a, b) => displayRank(a.slot) - displayRank(b.slot))
 }
 
+// The startup screen's board: a width and a position for each bar.
+//
+// Descending, because what is being built IS a ranking -- a stack of equal
+// bars is a progress bar wearing seven coats, and this is the one shape that
+// says the room is putting players in an order rather than merely loading
+// something.
+//
+// Coloured in the room's own position hues, in roughly the mix the top of a
+// board actually has: backs and receivers, a tight end, a quarterback well
+// down. It costs nothing and it is the difference between a loading screen
+// that could belong to any app and one that is unmistakably this board.
+const BUILDING_ROWS: [number, string][] = [
+  [100, 'rb'], [93, 'wr'], [86, 'rb'], [79, 'wr'],
+  [72, 'te'], [65, 'qb'], [58, 'wr'],
+]
+
 const SCORING_LABEL: Record<'ppr' | 'half' | 'std', string> = {
   ppr: 'PPR', half: 'Half PPR', std: 'Standard',
 }
@@ -871,8 +887,28 @@ export default function DraftRoom() {
               because by then ids are the most the room can honestly show. */}
           {playersLoading && Object.keys(players).length === 0 ? (
             <div className="draft-board-building" role="status">
-              <span className="draft-board-building-dot" aria-hidden="true" />
-              Building your board — ranking every player against your roster
+              {/* Seven bars, filling in order. Decoration, and marked as
+                  such: the sentence under it is the whole message, and a
+                  screen reader that read seven empty spans first would be
+                  worse off than one that read nothing. */}
+              <div className="draft-board-building-stack" aria-hidden="true">
+                {BUILDING_ROWS.map(([width, pos], i) => (
+                  <span
+                    className={`draft-board-building-row is-${pos}`}
+                    key={width}
+                    style={{ width: `${width}%` }}
+                  >
+                    <span
+                      className="draft-board-building-fill"
+                      style={{ animationDelay: `${i * 0.11}s` }}
+                    />
+                  </span>
+                ))}
+              </div>
+              <div className="draft-board-building-title">Building your board</div>
+              <div className="draft-board-building-note">
+                Ranking every player against your roster
+              </div>
             </div>
           ) : tab === 'available'
             ? (
