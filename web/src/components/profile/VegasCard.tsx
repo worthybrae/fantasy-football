@@ -13,23 +13,14 @@ import { ordinal } from './payload'
 // Detroit's 27.8 points go to one back -- a card that let a reader take it for
 // a player projection would be worse than no card.
 //
-// The bars are the weeks a line is actually posted for. Books price the front
-// of a season and a scattering beyond it, so an unpriced week draws the same
-// baseline mark every other chart in this popup uses for "nothing here yet" --
-// never a zero-height bar, which would read as a game nobody expects points
-// in.
-
-// The band the bars are drawn against. Implied totals live between about 14
-// and 33 in a normal season; anchoring to a fixed band rather than to this
-// team's own range means two players' cards can be compared, which is the
-// whole point of a number with a rank next to it.
-const FLOOR = 14
-const CEILING = 33
-
-function height(implied: number): number {
-  const share = (implied - FLOOR) / (CEILING - FLOOR)
-  return Math.max(6, Math.min(1, share) * 100)
-}
+// THERE IS NO WEEK STRIP ANY MORE. This card used to draw one bar per week
+// of the season under the total -- eighteen of them, most greyed out because
+// books price the front of a year and a scattering beyond it. It cost 33
+// vertical pixels, which is exactly what made this card taller than the
+// Market card it shares a row with, and it was answering a question the
+// Schedule card two rows up already answers better: which weeks are hard.
+// What survives is the provenance -- how many weeks the average is over --
+// which is the only thing the strip said that nothing else does.
 
 // How many of his own markets the card shows. Three is what fits under the
 // week bars, and they arrive shortest-price first, so the three shown are the
@@ -42,8 +33,6 @@ export default function VegasCard({ vegas }: { vegas: Vegas | null }) {
   const hasTeam = vegas && vegas.implied !== null && vegas.weeks.length > 0
   if (!vegas || (!hasTeam && futures.length === 0)) return null
 
-  const byWeek = new Map(vegas.weeks.map((w) => [w.week, w]))
-  const weeks = vegas.weeks_total ?? 18
   const ranked = hasTeam && vegas.rank !== null && vegas.teams !== null
     && vegas.teams > 1
   // Better is fuller, the way every other bar in this popup runs: the best
@@ -76,24 +65,11 @@ export default function VegasCard({ vegas }: { vegas: Vegas | null }) {
           </span>
         </div>
       )}
-      <div className="pp-pop-strip">
-        {Array.from({ length: weeks }, (_, i) => i + 1).map((week) => {
-          const game = byWeek.get(week)
-          if (!game || game.implied === null) {
-            return <div className="ctip-col-none" key={week} title={`wk ${week} · no line yet`} />
-          }
-          return (
-            <div
-              className="pp-pop-vegas-bar"
-              key={week}
-              style={{ height: `${height(game.implied)}%` }}
-              title={`wk ${week} ${game.home ? 'vs ' : 'at '}${game.opponent ?? '—'} · ${game.implied} implied`}
-            />
-          )
-        })}
-      </div>
+      {/* What the average is over, and what the percentages below it are.
+          Both are provenance rather than findings, which is why they share
+          one 9px line instead of costing two. */}
       <div className="pp-pop-vegas-foot mono">
-        {vegas.priced}/{weeks} weeks priced
+        avg of {vegas.priced} priced weeks{futures.length > 0 && ' · book prices'}
       </div>
       </>
       )}
@@ -111,41 +87,38 @@ export default function VegasCard({ vegas }: { vegas: Vegas | null }) {
               <div
                 className="pp-pop-futures-row"
                 key={f.market}
-                // The price itself is still here for anyone who reads odds,
-                // it is just no longer the thing the row is made of.
-                title={f.american ? `${f.american} at the book` : undefined}
+                // Everything the row no longer prints, kept where a reader
+                // who wants it can still find it: the price itself, and
+                // where he sits in the field.
+                title={`${f.american ? `${f.american} · ` : ''}`
+                  + `${ordinal(f.place)} of ${f.field} priced`}
               >
-                <div className="pp-pop-futures-line">
-                  <span className="pp-pop-futures-label">{f.label}</span>
-                  {/* The chance, in the one unit everybody already reads.
-                      "+700" is a price; this is what the price MEANS.
-                      Under one per cent says so rather than rounding up to
-                      1%: +20000 is a lottery ticket and printing it as the
-                      same number as +10000 would flatter both. */}
-                  <span className="mono pp-pop-futures-pct">
-                    {pct === null ? '—'
-                      : pct < 1 ? '<1%' : `${Math.round(pct)}%`}
-                  </span>
-                  <span className="mono pp-pop-futures-place">
-                    {ordinal(f.place)} of {f.field}
-                  </span>
-                </div>
+                <span className="pp-pop-futures-label">{f.label}</span>
                 <span className="pp-pop-futures-track">
                   <span
                     className="pp-pop-futures-fill"
                     style={{ width: `${Math.min(100, share)}%` }}
                   />
                 </span>
+                {/* The chance, in the one unit everybody already reads.
+                    "+700" is a price; this is what the price MEANS. Under
+                    one per cent says so rather than rounding up to 1%:
+                    +20000 is a lottery ticket and printing it as the same
+                    number as +10000 would flatter both. */}
+                <span className="mono pp-pop-futures-pct">
+                  {pct === null ? '—'
+                    : pct < 1 ? '<1%' : `${Math.round(pct)}%`}
+                </span>
               </div>
             )
           })}
           {/* Said once, quietly, and not negotiable: these are book prices,
-              so the field's percentages add to well over a hundred. A card
+              so a field's percentages add to well over a hundred. A card
               that printed them as probabilities without saying so would be
-              overstating every player on it. */}
-          <div className="pp-pop-futures-note">
-            book prices · bar is his share of the favourite&rsquo;s
-          </div>
+              overstating every player on it. It rides on the weeks-priced
+              foot above wherever there is one, and only costs its own line
+              on a card that has no team lines to carry it. */}
+          {!hasTeam && <div className="pp-pop-futures-note">book prices</div>}
         </div>
       )}
     </PopCard>

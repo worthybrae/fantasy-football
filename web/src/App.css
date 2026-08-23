@@ -4765,19 +4765,6 @@ button.roster-row:focus-visible {
   background: color-mix(in srgb, var(--accent) 70%, transparent);
 }
 
-/* One bar a week, against a FIXED band (see VegasCard) rather than this
-   team's own range, so two players' cards can be compared. Accent rather than
-   the five-step ramp: the ramp grades a player against his position, and this
-   is a market price on a team -- borrowing it would imply a grade nobody
-   computed. */
-.pp-pop-vegas-bar {
-  flex: 1 1 0;
-  align-self: flex-end;
-  min-height: 4px;
-  border-radius: 1px;
-  background: color-mix(in srgb, var(--accent) 55%, transparent);
-}
-
 .pp-pop-vegas-foot {
   font-size: 9px;
   white-space: nowrap;
@@ -4790,15 +4777,15 @@ button.roster-row:focus-visible {
 .pp-pop-futures {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 3px;
   padding-top: var(--space-2);
   border-top: 1px solid var(--border);
 }
 
-/* Block, not flex: the row's two halves stack, and a flex row here would sit
-   the bar beside the line it belongs under and squeeze it to nothing. */
 .pp-pop-futures-row {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
 }
 
 .pp-pop-futures-label {
@@ -4811,36 +4798,21 @@ button.roster-row:focus-visible {
   color: var(--text-2);
 }
 
-/* One market is two lines: what it is and what it is worth on top, the bar
-   under it. Inline would have cost the label its width on a card that
-   already truncates "Most receiving yards" -- and the bar is the half a
-   reader is meant to catch without reading. */
-.pp-pop-futures-line {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-2);
-}
-
 .pp-pop-futures-pct {
-  flex: 0 0 auto;
+  flex: 0 0 26px;
+  text-align: right;
   font-size: 11px;
   color: var(--accent);
 }
 
-.pp-pop-futures-place {
-  flex: 0 0 auto;
-  font-size: 9px;
-  color: var(--text-3);
-}
-
-/* His chance against the field's best chance. `min-width` on the fill so a
-   3% longshot still draws something -- a bar that rounds to nothing reads
-   as a market that has not priced him, which is a different fact and one
-   this card says with an em dash. */
+/* His chance against the field's best chance, on the row rather than under
+   it: a market is one line, and three of them cost three. `min-width` on the
+   fill so a 1% longshot still draws something -- a bar that rounds to
+   nothing reads as a market that has not priced him, which is a different
+   fact and one this card says with an em dash. */
 .pp-pop-futures-track {
-  display: block;
+  flex: 0 0 62px;
   height: 4px;
-  margin-top: 3px;
   border-radius: 2px;
   background: var(--bg-2);
   overflow: hidden;
