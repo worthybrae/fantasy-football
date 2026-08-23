@@ -30,7 +30,10 @@ from pipeline.espn_live import picks_from_events
 from scoring import league
 from scoring.draft_sim import SimPool, _roster_cap, snake_slots
 
-TRACE = Path("data/draft_room_trace.jsonl")
+# Resolved from this file rather than the working directory: pytest can be
+# invoked from anywhere, and a relative path would skip the whole trace
+# suite silently rather than fail.
+TRACE = Path(__file__).resolve().parents[1] / "data" / "draft_room_trace.jsonl"
 
 # What the capture holds, counted from the file itself once and pinned here
 # so a change in the parsing silently producing different numbers fails the
