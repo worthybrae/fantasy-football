@@ -368,14 +368,33 @@ _ROSTER_SHAPE_FEATURES = ["held_at_pos", "first_at_pos", "rounds_since_pos",
 # and its position mix by round bucket (early RB 55.6% / WR 36.4% / TE 6.9% /
 # QB 1.1%; late WR 22.3% / RB 18.3% / DST 16.8% / K 16.7% / QB 15.2% /
 # TE 10.8%) is a different distribution from the one the rejection was
-# measured on. Task 4's `fit_prior` decides whether they ship, on the same
-# rule and against that corpus; a positive coefficient here today means
-# nothing except "not yet measured".
+# measured on.
+#
+# THE ANSWER, from `make fit-prior` on 2026-08-23, n=3,267: they split.
+# `usage` is the single most valuable of Task 3's eight columns
+# (delta_top1 +0.0077, 25 picks) and ships in the cold-start prior.
+# `efficiency`, `played_share` and `peak_gap` are cut -- the same three the
+# 2026-08-11 finding lost on, now rejected on four times the sample as well.
+# All four stay in `FEATURE_NAMES`: a cut feature is one whose PRIOR
+# coefficient is 0.0, not a column removed from the matrix, and the per-manager
+# fit is still free to find something in it. See
+# docs/superpowers/findings/2026-08-23-mock-corpus-features.md.
 _STAT_PROFILE_FEATURES = ["usage", "efficiency", "played_share", "peak_gap"]
 
-# Everything added since the last measurement, in one list, so the thing that
-# has to be measured is enumerable rather than remembered. `ablation` takes it
-# as `candidates`; `COLD_START_PRIOR` pads a 0.0 for each.
+# Everything added since the last measurement of THIS LEAGUE's fit, in one
+# list, so the thing that has to be measured is enumerable rather than
+# remembered. `ablation` takes it as `candidates`.
+#
+# THE NAME IS STILL ACCURATE, AND IT IS WORTH SAYING WHY. `make fit-prior`
+# measured all eight on the mock corpus on 2026-08-23 and cut five of them,
+# so `COLD_START_PRIOR` now carries three fitted values and five zeros that
+# mean MEASURED AND REJECTED
+# (docs/superpowers/findings/2026-08-23-mock-corpus-features.md). That is a
+# result about 26 rooms of strangers drafting an 8-team PPR mock. It is NOT a
+# result about the eight managers in this league, whose per-manager fits come
+# from `fit_all` against `draft_picks` and still fit all 23 coefficients with
+# no evidence at all about these eight. `ablation()`'s default is still
+# `_NEW_FEATURES` for that reason; pass this list to change it.
 UNMEASURED_FEATURES = _ROSTER_SHAPE_FEATURES + _STAT_PROFILE_FEATURES
 
 # The 15 features every backtest number on record was measured against.
@@ -590,8 +609,16 @@ def roster_shape_features(positions, roster, last_pick_at_pos, round_no,
     # one, so the pair is identifiable and the fit is well posed -- but the
     # two ARE entangled and will trade coefficient mass, and so will
     # `rounds_since_pos`, which is 0.0 on exactly the candidates where
-    # `first_at_pos` is 1.0. Read no one of the three alone; `ablation`'s
-    # per-feature `delta_top1` is what settles which of them earn a place.
+    # `first_at_pos` is 1.0. Read no one of the three alone.
+    #
+    # `delta_top1` settled it on the mock corpus (2026-08-23, n=3,267) and cut
+    # two of the three: `held_at_pos` (the count) survives, `first_at_pos`
+    # (the flag) and `rounds_since_pos` (the wait) do not, and what survives of
+    # "this position is empty" is `first_at_pos_round` -- the flag crossed
+    # with how far through the draft it is, the only one of them that says
+    # WHEN an empty slot starts to matter. All four columns stay here: a cut
+    # feature is one whose cold-start coefficient is 0.0, not a column removed
+    # from the matrix.
     first_at_pos = (held == 0.0).astype(float)
     return held, first_at_pos, rounds_since, first_at_pos * (round_no / rounds)
 
@@ -1330,8 +1357,11 @@ def ablation(conn, settings=None, candidates=None) -> pd.DataFrame:
     `make fit-managers`, each row costs a full leave-one-season-out backtest
     with a lambda search per manager, and tripling that on every fit to
     re-answer a question this league's 696 picks cannot settle is the wrong
-    trade. `UNMEASURED_FEATURES` is measured where the evidence is -- Task 4
-    passes it here against the mock corpus, which is four times the sample.
+    trade. `UNMEASURED_FEATURES` is measured where the evidence is:
+    `pipeline/fit_prior.py` passes it to its own corpus-shaped equivalent of
+    this function against 26 mock drafts, which is four times the sample.
+    Passing it HERE measures those eight against this league's own history,
+    which is a different and still-unanswered question.
     """
     candidates = list(_NEW_FEATURES if candidates is None else candidates)
     observations = build_observations(conn)

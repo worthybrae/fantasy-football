@@ -2,7 +2,7 @@
 draft corpus.
 
 WHY THIS EXISTS. The per-manager pick model's cold-start prior
-(`scoring.draft_model.COLD_START_PRIOR`) is fitted on one league's own
+(`scoring.draft_model.COLD_START_PRIOR`) was fitted on one league's own
 imported history -- 696 picks, all from the same eight people. `data/leagues/`
 already holds 45 completed ESPN mock drafts, each an 8-team room of total
 strangers, worth roughly 5,760 more picks of "how does the market draft"
@@ -10,6 +10,13 @@ signal that has never reached `pipeline.draft_log`'s corpus. This module is
 the one-time harvest -- and, because `draft_log.record` is idempotent by
 `draft_id`, the safe-to-rerun harvest -- that turns those dormant files into
 corpus rows a later refit can read.
+
+THAT REFIT HAS NOW HAPPENED. `pipeline/fit_prior.py` (`make fit-prior`) fitted
+a new prior on 26 of these drafts and it beat the incumbent on held-out top-1
+by 3.98pp, so `scoring/mock_prior.py` holds coefficients fitted on the rows
+this module writes. Every draft added here is evidence the next refit reads;
+the numbers, and what they do not establish, are in
+docs/superpowers/findings/2026-08-23-mock-corpus-features.md.
 
 WHERE THE FILES COME FROM AND WHAT THEY DO NOT CARRY. Each
 `data/leagues/<id>.duckdb` is a per-league database (see `pipeline.db`'s

@@ -1040,13 +1040,33 @@ def test_zero_coefficients_on_the_new_columns_reproduce_the_old_model():
                                _softmax(X[:, :n_old] @ old))
 
 
-def test_cold_start_prior_pads_the_new_columns_with_zero():
-    """A 0.0 is "not yet measured", and it is also what keeps a cold-start
-    league behaving exactly as it did before these columns existed."""
-    from scoring.draft_model import (COLD_START_PRIOR, FEATURE_NAMES,
-                                     UNMEASURED_FEATURES)
-    for name in UNMEASURED_FEATURES:
+def test_a_cut_feature_has_exactly_no_say_in_the_cold_start_prior():
+    """A 0.0 in the prior is load-bearing, and what it MEANS changed on
+    2026-08-23.
+
+    Before `make fit-prior` first ran, all eight `UNMEASURED_FEATURES` carried
+    0.0 and it meant NOT YET MEASURED -- the only value that admits ignorance
+    while leaving a cold-start league behaving exactly as it did before those
+    columns existed. `pipeline/fit_prior.py` then measured them on the mock
+    corpus and cut five of them on `delta_top1`, so those five carry 0.0
+    meaning MEASURED AND REJECTED, and the three that earned a place carry
+    fitted values.
+
+    The invariant that survives both states, and the one worth pinning, is
+    that a CUT feature contributes nothing: it was not in the fit, so its
+    coefficient must be exactly zero rather than merely small. `features_cut`
+    is the generated module's own record of which those are, so this test
+    tracks a refit instead of having to be rewritten by one.
+    """
+    from scoring import mock_prior
+    from scoring.draft_model import COLD_START_PRIOR, FEATURE_NAMES
+
+    cut = mock_prior.PROVENANCE["features_cut"]
+    assert set(cut) <= set(FEATURE_NAMES), (
+        "features_cut names a column FEATURE_NAMES does not have")
+    for name in cut:
         assert COLD_START_PRIOR[FEATURE_NAMES.index(name)] == 0.0
+    assert np.isfinite(COLD_START_PRIOR).all()
 
 
 def test_held_at_pos_is_what_this_team_holds_at_the_candidates_position():

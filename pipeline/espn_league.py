@@ -74,7 +74,9 @@ def _is_real_pick(pick: dict) -> bool:
     that season's kickers were recorded. Those gaps are the defenses. Downstream
     that taught the manager model that a defense is never chosen and drove
     `scoring.draft_model.COLD_START_PRIOR`'s `pos_DST` to -11.14, an event the
-    fit could not have seen.
+    fit could not have seen. That prior has since been refitted on real mock
+    drafts (`make fit-prior`) and reads +0.21; the per-manager fits on this
+    deployment's own league still carry the damage until it is re-imported.
 
     So this is a whitelist, not a threshold: a real pick names a real player
     id, or one of the 32 D/ST ids. Everything else -- -1, 0, null, or any

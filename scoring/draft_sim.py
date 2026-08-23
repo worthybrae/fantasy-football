@@ -677,9 +677,12 @@ def _must_fill_mask(pool, indices, counts, settings, turns_left: int):
     when a slot stops being deferrable, so deleting this side would
     desynchronise the ranking from the simulator.
 
-    WHAT WENT WRONG WITHOUT IT, on the fit as it stands today.
-    `COLD_START_PRIOR`'s `pos_DST` is -11.14, and every per-manager fit on
-    this deployment's own database shrinks to that same value. Measured on the
+    WHAT WENT WRONG WITHOUT IT, measured on the fit that stood until
+    2026-08-23. `COLD_START_PRIOR`'s `pos_DST` was -11.14, and every
+    per-manager fit on this deployment's own database shrinks to that same
+    value. (The cold-start half of that has since been refitted on the mock
+    corpus and now reads +0.21 -- see the end of this docstring for what that
+    changes and what it does not.) Measured on the
     real 249-player pool (8 teams, 15 rounds), `_run_draft` run out to all 120
     picks, 8 seeds, with the real fitted betas and again with cold-start:
     EXACTLY ONE defense was drafted per simulated draft, every time at pick
@@ -709,15 +712,22 @@ def _must_fill_mask(pool, indices, counts, settings, turns_left: int):
     ridge allowed -- a correct fit to data in which the event is
     unobservable, not a measurement of how anybody drafts.
 
-    THAT IMPORT BUG IS FIXED (9b90610); the coefficient is not, because
-    nobody has re-imported and re-fitted. So the failure described above is
-    still live on today's database, and it is expected to disappear once
-    `make espn-import && make fit-managers` is run: on reconstructed defense
-    picks the pooled `pos_DST` moved -9.77 -> +2.81, a sign flip that is
-    robust even though its magnitude is not (see `COLD_START_PRIOR`'s comment
-    for both biases). WHEN THAT HAPPENS THIS MASK BECOMES INERT RATHER THAN
-    WRONG -- opponents will start taking defenses on their own, and a
-    constraint that binds no earlier than pick 106 will simply stop being
+    THAT IMPORT BUG IS FIXED (9b90610), AND HALF THE COEFFICIENT NOW IS TOO.
+    `make fit-prior` refitted the cold-start prior on 26 real ESPN mock
+    drafts, where 207 defenses actually get drafted, and `pos_DST` came out
+    at +0.21 -- the predicted sign flip, at a magnitude an order below the
+    +2.81 a reconstruction had guessed
+    (docs/superpowers/findings/2026-08-23-mock-corpus-features.md). So a
+    COLD-START league's opponents now take defenses on their own and the
+    failure above is no longer live for them.
+
+    IT IS STILL LIVE FOR THIS DEPLOYMENT'S OWN LEAGUE, whose per-manager fits
+    come from `make fit-managers` against `draft_picks` and have not been
+    re-imported or re-fitted. That needs `make espn-import && make
+    fit-managers`.
+
+    WHERE THE COEFFICIENT IS FIXED THIS MASK BECOMES INERT RATHER THAN WRONG
+    -- a constraint that binds no earlier than pick 106 simply stops being
     reached. Do not read its inertness as a reason to delete it: the roster
     floor at the top of this docstring is why it exists, and that never
     depended on the coefficient.
