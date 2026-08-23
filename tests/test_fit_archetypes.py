@@ -255,3 +255,140 @@ def test_no_write_against_draft_log_anywhere_in_the_module():
                       "DELETE FROM", "INSERT INTO", "UPDATE DRAFT_LOG",
                       "ALTER TABLE", "ENSURE_SCHEMA("):
         assert statement not in source, f"{statement} in fit_archetypes.py"
+
+
+# ------------------------------------------------------ the run, end to end
+
+@pytest.fixture
+def human_corpus(tmp_path):
+    """Three drafts of entirely known-human picks, and an empty league.
+
+    `tests/test_score_ladder.py`'s fixture, imported rather than rebuilt: this
+    module runs the same replay over the same corpus shape, and two hand-built
+    fixtures that drifted apart would make the two files' numbers
+    incomparable for no reason.
+    """
+    from tests.test_score_ladder import human_corpus as _fixture
+    return _fixture.__wrapped__(tmp_path)
+
+
+def _fake_reports(best_k, bar_top1, mixture_top1):
+    """A sweep result with a decision already baked into it.
+
+    The sweep itself takes over an hour on the real corpus and is measured by
+    the tests above on synthetic design matrices. What these two tests are for
+    is the DECISION and the WRITE, which are the parts that touch the file
+    system and which a real sweep would only exercise by accident depending on
+    what the data happened to say.
+    """
+    drafts = [f"mock:human{i}" for i in range(3)]
+    def report(top1, per_pick):
+        return {"top1": top1, "top5": 0.9, "logloss": 2.0, "n": 36,
+                "hits1": int(top1 * 36), "hits5": 32, "ll": -72.0,
+                "by_draft": {d: top1 for d in drafts},
+                "by_draft_n": {d: 12 for d in drafts},
+                "by_bucket": {"early": [4, 10, 12]},
+                "heldout_ll": per_pick * 36, "heldout_per_pick": per_pick,
+                "heldout_by_draft": {d: per_pick for d in drafts},
+                "pi_by_fold": {d: [1.0] for d in drafts}}
+    reports = {1: report(bar_top1, -2.5)}
+    if best_k > 1:
+        reports[best_k] = report(mixture_top1, -2.0)
+        reports[best_k]["pi_by_fold"] = {
+            d: [1.0 / best_k] * best_k for d in drafts}
+    return reports
+
+
+def _run(human_corpus, monkeypatch, tmp_path, reports, bars=(0.28, 0.30)):
+    """`main` over a real corpus, with the two slow parts stubbed.
+
+    The rungs below and the sweep are both leave-one-draft-out backtests and
+    both are measured on their own elsewhere. Stubbing them is what makes the
+    DECISION testable at all: on this fixture the real rungs score 1.0000 top-1
+    (the picks are perfectly predictable by construction), so nothing could
+    ever beat them and the winning branch would be unreachable.
+
+    `bars` is (rung 3, rung 4) in the order `main` measures them, so the
+    default also asserts the mixture is put on the feature set that WON its own
+    rung rather than on whichever was measured first.
+    """
+    corpus_path, league_path = human_corpus
+    target = tmp_path / "archetypes.py"
+    calls = iter(bars)
+
+    def fake_rung(*args, **kwargs):
+        top1 = next(calls)
+        drafts = [f"mock:human{i}" for i in range(3)]
+        return {"top1": top1, "top5": 0.8, "logloss": 2.4, "n": 36,
+                "by_draft": {d: top1 for d in drafts},
+                "by_draft_n": {d: 12 for d in drafts},
+                "by_bucket": {"early": [4, 10, 12]}}
+
+    monkeypatch.setattr(fa, "ARCHETYPES_MODULE", target)
+    monkeypatch.setattr(fa.fp, "leave_one_draft_out", fake_rung)
+    monkeypatch.setattr(fa, "sweep", lambda *a, **k: reports)
+    code = fa.main(["--corpus", corpus_path, "--league-db", league_path])
+    return code, target
+
+
+def test_a_sweep_that_chooses_one_class_writes_nothing(human_corpus,
+                                                       monkeypatch, tmp_path):
+    """K=1 IS the pooled fit, so there is no mixture to ship.
+
+    Writing an artifact for it would ship a rename: K coefficient vectors where
+    K is one, a weight vector of [1.0], and a serving path that has to carry
+    all of that to reproduce what a single vector already does. The exit code
+    is 1 for the same reason a losing rung's is -- a run that changed nothing
+    should not look like a run that shipped.
+    """
+    code, target = _run(human_corpus, monkeypatch, tmp_path,
+                        _fake_reports(1, 0.30, 0.30))
+    assert code == 1
+    assert not target.exists()
+
+
+def test_a_mixture_that_does_not_beat_the_rung_below_writes_nothing(
+        human_corpus, monkeypatch, tmp_path):
+    """The ladder's rule, and the only rule. A K chosen by held-out likelihood
+    still has to predict better than the rung below on top-1, because that is
+    what every rung under it was judged by."""
+    code, target = _run(human_corpus, monkeypatch, tmp_path,
+                        _fake_reports(2, 0.30, 0.30))
+    assert code == 1
+    assert not target.exists()
+
+
+def test_a_winning_mixture_writes_an_artifact_that_reads_itself(
+        human_corpus, monkeypatch, tmp_path):
+    """The write path, all the way to importable Python.
+
+    The generated module is the whole product of this rung, and it is generated
+    exactly once per winning run -- so the run that produces it is a bad place
+    to discover that a template placeholder was misspelled.
+    """
+    code, target = _run(human_corpus, monkeypatch, tmp_path,
+                        _fake_reports(2, 0.30, 0.99))
+    assert code == 0
+    assert target.exists()
+
+    namespace = {}
+    exec(compile(target.read_text(), str(target), "exec"), namespace)
+    assert namespace["BETAS"].shape == (2, len(namespace["FEATURES"]))
+    assert namespace["WEIGHTS"].sum() == pytest.approx(1.0)
+    assert namespace["POOLED"].shape == (len(namespace["FEATURES"]),)
+    assert namespace["DRAFT_IDS"] == ["mock:human0", "mock:human1",
+                                      "mock:human2"]
+    provenance = namespace["PROVENANCE"]
+    assert provenance["k"] == 2
+    assert provenance["folds"] == "leave-one-draft-out"
+    assert provenance["population"].startswith("autodrafted IS FALSE")
+    assert provenance["delta_top1"] > 0
+    # The sweep travels with the coefficients rather than living only in a
+    # findings document: a reader of this file is reading the winner and has
+    # to be able to see what it beat.
+    assert set(provenance["k_sweep_heldout_per_pick"]) == {1, 2}
+    # The higher of the two rungs below, and the feature set that went with
+    # it: 29 columns, not rung 3's 23.
+    assert provenance["bar_top1"] == pytest.approx(0.30)
+    assert provenance["feature_set"] == "all"
+    assert len(provenance["features_fitted"]) == len(FEATURE_NAMES)
