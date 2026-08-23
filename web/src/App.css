@@ -2167,6 +2167,20 @@ button.roster-row:focus-visible {
 
 /* Even rounds tinted across their whole width (label + empty cells), so the
    rounds read as alternating bands and the snake's reversal is visible. */
+/* The overall pick number in a slot nobody has taken yet. Dim enough to sit
+   under the board rather than on it -- until it is one of yours, where it is
+   the number the whole rail is planned around. */
+.board-cell-pick {
+  font-size: 10px;
+  color: var(--text-3);
+  opacity: 0.55;
+}
+
+.board-cell-mine .board-cell-pick {
+  color: var(--accent);
+  opacity: 0.75;
+}
+
 .board-row-even.board-round-label,
 .board-cell-empty.board-row-even {
   background: color-mix(in srgb, var(--bg-2) 40%, transparent);

@@ -125,6 +125,23 @@ export default function DraftBoardGrid({ board, onOpenPlayer }: DraftBoardGridPr
   // (round, slot), not something derived by walking the snake ourselves.
   const clockRound = on_the_clock !== null ? Math.ceil((picks_made + 1) / teams) : null
 
+  // An empty cell has no pick number from the server -- nothing has happened
+  // there yet -- so the only way to label one is to walk the snake, which is
+  // the derivation this component otherwise refuses to do. It does it here
+  // under a guard rather than on faith: the numbers are the standard snake
+  // (odd rounds left to right, even rounds back), which is the same rule the
+  // round arrows beside them already draw, and every FILLED cell is checked
+  // against it. One disagreement -- a third-round reversal, or any variant
+  // this league runs -- and no empty cell gets a number at all. A board that
+  // labels a pick wrong is worse than one that labels nothing: these are the
+  // numbers someone plans two rounds ahead on.
+  const overallAt = (round: number, colIndex: number) =>
+    (round - 1) * teams + (round % 2 === 1 ? colIndex + 1 : teams - colIndex)
+  const snakeHolds = cells.every((c) => {
+    const colIndex = columns.findIndex((col) => col.slot === c.slot)
+    return colIndex < 0 || overallAt(c.round, colIndex) === c.overall
+  })
+
   function showPopover(cell: BoardCell, e: MouseEvent<HTMLButtonElement> | FocusEvent<HTMLButtonElement>) {
     setHover({ cell, rect: e.currentTarget.getBoundingClientRect() })
   }
@@ -164,10 +181,11 @@ export default function DraftBoardGrid({ board, onOpenPlayer }: DraftBoardGridPr
               <span className="board-round-n mono">{round}</span>
               <span className="board-snake-dir" aria-hidden="true">{leftToRight ? '→' : '←'}</span>
             </div>
-            {columns.map((col) => {
+            {columns.map((col, colIndex) => {
               const cell = byCell.get(`${round}-${col.slot}`)
               if (!cell) {
                 const isClock = clockRound === round && on_the_clock === col.slot
+                const overall = snakeHolds ? overallAt(round, colIndex) : null
                 return (
                   <div
                     key={col.slot}
@@ -177,7 +195,14 @@ export default function DraftBoardGrid({ board, onOpenPlayer }: DraftBoardGridPr
                       isClock ? 'board-cell-clock' : '',
                       rowClass.trim(),
                     ].filter(Boolean).join(' ')}
-                  />
+                  >
+                    {overall !== null && (
+                      // Quiet: an empty cell is a slot, and the number is
+                      // there to be counted to rather than read. Brighter in
+                      // your own column, which is the only one anybody counts.
+                      <span className="board-cell-pick mono">{overall}</span>
+                    )}
+                  </div>
                 )
               }
               const pickInRound = cell.overall - (cell.round - 1) * teams
