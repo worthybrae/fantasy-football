@@ -82,10 +82,32 @@ The `seat_*` features are the history encoder. Given finding 2 they are
 expected to contribute modestly; they are included because the effect is
 nonzero and because the neural scorer can use them in interaction.
 
-### 4. The scorer
+### 3b. The decomposition the data revealed -- this reshapes section 4
 
-Keep the conditional logit. Replace the linear score `x . beta` with a
-two-hidden-layer MLP (32 units, tanh) applied identically to every candidate,
+Asked against ESPN's board, 23.1% of human picks are the top name overall.
+Asked a different way, **53.0% are the top name AT THEIR POSITION**, 72.9%
+are top-2 and 82.6% top-3 -- and late rounds hold at 48.1%, where the overall
+number collapses to 20%. The "unpredictable reach tail" is mostly people
+choosing a position and taking the best player there.
+
+So the choice factorizes:
+
+    P(player) = P(position | roster, round, run, scarcity, seat history)
+              x P(player | position, ESPN list, stack, homer, bye, injury, news)
+
+The second factor is at 53% with a trivial rule. A crude held-out lookup on
+(round, roster shape) alone predicts the position 46% of the time. Arithmetic:
+0.65 x 0.58 = 0.38; 0.78 x 0.64 = 0.50. Mid-30s to 40 is a concrete target;
+50 requires a position model near 80% and is the stretch goal.
+
+### 4. The scorer: a nested logit with positions as nests
+
+Positions are the nests. Two scorers: a POSITION scorer over the six nests,
+fed the roster/round/run/scarcity/seat-history features, and a WITHIN-POSITION
+scorer over the players in the chosen nest, fed the list/player features.
+The nested-logit likelihood ties them through the standard inclusive-value
+term, so the whole thing is still one softmax over the available set and
+still fits the existing machinery. Each scorer is a two-hidden-layer MLP (32 units, tanh) applied identically to every candidate,
 softmax over the available set. Roughly 2k parameters. This supplies the
 interactions a main-effects model cannot express -- a reach costs differently
 when a team is desperate at a position than when it is deep there.
