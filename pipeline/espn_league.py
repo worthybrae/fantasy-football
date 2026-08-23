@@ -6,6 +6,7 @@ client and the season walk live further down.
 """
 import json
 import re
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -153,6 +154,12 @@ BASE = "https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl"
 VIEWS = "view=mDraftDetail&view=mTeam&view=mSettings"
 LOGIN_URL = "https://www.espn.com/login"
 STATE_PATH = "data/espn_state.json"
+
+# How long the visible login window waits for a human, and how often it
+# checks. Five minutes is the old wait_for_function timeout, kept: Disney SSO
+# with 2FA on a phone genuinely takes minutes.
+LOGIN_TIMEOUT_SECONDS = 300.0
+LOGIN_POLL_MS = 500
 
 
 def parse_league_id(url_or_id: str) -> str:
@@ -381,10 +388,30 @@ class EspnClient:
         context = browser.new_context()
         page = context.new_page()
         page.goto(LOGIN_URL)
-        # espn_s2 is only set once the SSO flow completes.
-        page.wait_for_function(
-            "() => document.cookie.includes('espn_s2') || "
-            "document.cookie.includes('SWID')", timeout=300_000)
+        # Poll the context's own cookie jar, and require BOTH cookies.
+        #
+        # The obvious `page.wait_for_function` on `document.cookie` is wrong
+        # twice over. `espn_s2` is HttpOnly, so it never appears in
+        # `document.cookie` at all and waiting for it there waits forever.
+        # And `SWID` is set on page load, before anyone has signed in, so an
+        # `||` between the two returns instantly and saves an anonymous
+        # session -- which then fails later, at the socket, as "the saved
+        # ESPN login has expired", pointing at the wrong thing entirely.
+        #
+        # `context.cookies()` reads the real jar, HttpOnly included, so it
+        # can see the one cookie that actually proves the SSO flow finished.
+        deadline = time.monotonic() + LOGIN_TIMEOUT_SECONDS
+        while True:
+            names = {c["name"] for c in context.cookies()}
+            if {"espn_s2", "SWID"} <= names:
+                break
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    "Timed out waiting for an ESPN sign-in "
+                    f"({LOGIN_TIMEOUT_SECONDS:.0f}s). The browser window "
+                    "never reached a signed-in session -- cookies seen: "
+                    f"{sorted(names) or 'none'}.")
+            page.wait_for_timeout(LOGIN_POLL_MS)
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         context.storage_state(path=str(self.state_path))
         context.close()
