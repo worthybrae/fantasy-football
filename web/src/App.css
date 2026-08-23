@@ -66,43 +66,51 @@ td:first-child {
 
 /* -- position badges -- */
 
+/* A tag, not a lozenge. The 10px radius made a pill of a two-letter word,
+   which at this size reads as a button you cannot press.
+   `min-width` is the load-bearing part: RB, WR, QB, TE and DST are two and
+   three characters, so a shrink-to-fit badge started the player's name at a
+   different x on every row and the eye had to find the column again each
+   time. One width, one column, names aligned down the table. */
 .pos-badge {
   display: inline-block;
-  padding: 1px 7px;
-  border-radius: 10px;
+  min-width: 30px;
+  padding: 2px 6px;
+  border-radius: 3px;
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   font-weight: 700;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.08em;
+  text-align: center;
 }
 
 .pos-badge-qb {
-  background: color-mix(in srgb, var(--pos-qb) 16%, transparent);
+  background: color-mix(in srgb, var(--pos-qb) 18%, transparent);
   color: var(--pos-qb);
 }
 
 .pos-badge-rb {
-  background: color-mix(in srgb, var(--pos-rb) 16%, transparent);
+  background: color-mix(in srgb, var(--pos-rb) 18%, transparent);
   color: var(--pos-rb);
 }
 
 .pos-badge-wr {
-  background: color-mix(in srgb, var(--pos-wr) 16%, transparent);
+  background: color-mix(in srgb, var(--pos-wr) 18%, transparent);
   color: var(--pos-wr);
 }
 
 .pos-badge-te {
-  background: color-mix(in srgb, var(--pos-te) 16%, transparent);
+  background: color-mix(in srgb, var(--pos-te) 18%, transparent);
   color: var(--pos-te);
 }
 
 .pos-badge-k {
-  background: color-mix(in srgb, var(--pos-k) 16%, transparent);
+  background: color-mix(in srgb, var(--pos-k) 18%, transparent);
   color: var(--pos-k);
 }
 
 .pos-badge-dst {
-  background: color-mix(in srgb, var(--pos-dst) 16%, transparent);
+  background: color-mix(in srgb, var(--pos-dst) 18%, transparent);
   color: var(--pos-dst);
 }
 
@@ -767,7 +775,15 @@ td:first-child {
 
 /* The freshest pick, and your own picks. Both are static tints rather than
    a flash, for the same reason the strip does not scroll. */
-.pick-ticker-item.is-newest .pick-ticker-name {
+.pick-ticker-item.is-newest /* Sits at the end of the entry, after the two stacked lines it comments on.
+   `margin-left: auto` so it hugs the right edge whatever the name did. */
+.pick-ticker-adp {
+  flex-shrink: 0;
+  margin-left: auto;
+  padding-left: var(--space-2);
+}
+
+.pick-ticker-name {
   color: var(--text-1);
 }
 

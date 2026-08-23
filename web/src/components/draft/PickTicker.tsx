@@ -1,6 +1,27 @@
 import type { ReactNode } from 'react'
 import type { BoardCell, BoardPlayer, LiveBoard } from '../../api'
 
+// How far past his ADP a pick landed: >0 he FELL that many slots (a steal),
+// <0 he went that many early (a reach). Same number, same words and the same
+// two colours the snake board's cells already use for it -- `value` is
+// computed once in api/live.py and both views read it, so the rail and the
+// grid cannot disagree about whether a pick was a bargain.
+//
+// Nothing at all when there is no ADP to compare against, or when a pick
+// landed exactly on it: a bare "0" is a fact about arithmetic rather than
+// about the draft.
+function adpDelta(value: number | null | undefined): ReactNode {
+  if (value === null || value === undefined || Math.round(value) === 0) return null
+  const steal = value > 0
+  return (
+    <span className={`pick-ticker-adp board-cell-adp ${steal ? 'is-steal' : 'is-reach'}`}
+          title={steal ? `Fell ${Math.round(value)} picks past his ADP`
+            : `Taken ${Math.abs(Math.round(value))} picks early`}>
+      {steal ? `+${Math.round(value)}` : Math.round(value)}
+    </span>
+  )
+}
+
 // duplicated from DraftBoardGrid.tsx / RosterPanel.tsx (unexported in both):
 // a four-line pure function isn't worth a shared module between four views.
 function posBadge(position: string | undefined): ReactNode {
@@ -92,6 +113,7 @@ export default function PickTicker({ board, onOpenPlayer }: PickTickerProps) {
                       <span className="pick-ticker-name">{cell.player.name}</span>
                       <span className="pick-ticker-team">{team}</span>
                     </span>
+                    {adpDelta(cell.player.value)}
                   </button>
                 ) : (
                   <span className="pick-ticker-pick" aria-label={label}>
@@ -113,6 +135,7 @@ export default function PickTicker({ board, onOpenPlayer }: PickTickerProps) {
                       <span className="pick-ticker-name">{cell.player.name}</span>
                       <span className="pick-ticker-team">{team}</span>
                     </span>
+                    {adpDelta(cell.player.value)}
                   </span>
                 )}
               </li>
