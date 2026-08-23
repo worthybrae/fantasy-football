@@ -289,6 +289,30 @@ def _is_autodrafted(value) -> bool:
     return (not pd.isna(value)) and bool(value)
 
 
+def fit_keeps_pick(autodrafted) -> bool:
+    """THE FIT'S rule: keep a pick unless `autodrafted` is a recorded True.
+
+    The predicate form of `_is_autodrafted`, named so that it can be passed
+    somewhere and so that it reads as one of a PAIR. Its counterpart is
+    `pipeline.score_ladder.is_human_pick`, which is deliberately stricter --
+    it keeps only `autodrafted IS FALSE`, because for a MEASUREMENT an unknown
+    label is not a human label.
+
+    The two rules answer two different questions and must never be
+    interchanged:
+
+      * fit: "is there any reason to believe a machine made this pick?" NULL
+        is not such a reason, and dropping every NULL would throw away
+        essentially the whole corpus, so NULL is fitted on. See the module
+        docstring's standing ruling.
+      * eval: "do I KNOW a person made this pick?" NULL is not knowledge.
+
+    Both are exported rather than inlined so a reader of either can find the
+    other, and so a test can assert that swapping them changes the answer.
+    """
+    return not _is_autodrafted(autodrafted)
+
+
 class CorpusObservations:
     """The fittable picks, their design matrices, and what was left out.
 
@@ -296,19 +320,30 @@ class CorpusObservations:
     in `dropped` has to travel with the observations it was dropped from --
     a report that says "3,162 picks" without saying what the other 38 were is
     the silent-drop failure this whole module is written against.
+
+    `drop_label` names the bucket that the pick rule's rejects land in. It is
+    a parameter and not the literal "autodrafted" because two different rules
+    reject two different sets of picks (see `fit_keeps_pick`), and a human-only
+    evaluation reporting its 4,654 exclusions under the heading "autodrafted"
+    would be reporting a number that is not what the word says -- most of those
+    picks are NULL, which is unknown, not autodrafted.
     """
 
-    def __init__(self):
+    def __init__(self, drop_label: str = "autodrafted"):
         self.observations = []
         self.draft_ids = []          # one draft_id per observation
         self.settings = {}           # draft_id -> LeagueSettings
-        self.dropped = {"my_slot": 0, "autodrafted": 0, "not_in_pool": 0,
+        self.drop_label = drop_label
+        self.dropped = {"my_slot": 0, drop_label: 0, "not_in_pool": 0,
                         "already_taken": 0}
         self.picks_seen = 0
 
 
 def build_corpus_observations(corpus, league_conn, draft_ids: list,
-                              season: int | None = None) -> CorpusObservations:
+                              season: int | None = None,
+                              keep_pick=None,
+                              drop_label: str = "autodrafted"
+                              ) -> CorpusObservations:
     """Replay each draft into one `PickObservation` per fittable pick.
 
     THE POOL SNAPSHOT IS WHY NO REPLAY OF THE BOARD IS NEEDED. `draft_log`
@@ -330,8 +365,21 @@ def build_corpus_observations(corpus, league_conn, draft_ids: list,
     rides along only as a label. Nothing here fits a per-seat model: the
     cold-start prior is pooled by definition, since a league with no history
     has nothing to tell its opponents apart with.
+
+    `keep_pick` is the ONE thing about which picks survive that a caller may
+    change, and it defaults to `fit_keeps_pick` so this module's own behavior
+    is exactly what it always was. It exists because the human-only evaluation
+    harness (`pipeline.score_ladder`) needs the same replay -- the same board
+    subtraction, the same roster bookkeeping, the same choice sets -- over a
+    STRICTER set of picks. Copying this loop to change one `elif` would leave
+    two replays to keep in step, and the day they disagreed the two numbers
+    being compared would no longer be measured on the same reconstruction of
+    the draft. Everything else about the replay, including the fact that a
+    dropped pick still takes its player off the board, is identical by
+    construction because it is the same code.
     """
-    out = CorpusObservations()
+    keep_pick = fit_keeps_pick if keep_pick is None else keep_pick
+    out = CorpusObservations(drop_label=drop_label)
     if not draft_ids:
         return out
 
@@ -388,8 +436,8 @@ def build_corpus_observations(corpus, league_conn, draft_ids: list,
                 out.dropped["already_taken"] += 1
             elif my_slot is not None and slot == my_slot:
                 out.dropped["my_slot"] += 1
-            elif _is_autodrafted(pick["autodrafted"]):
-                out.dropped["autodrafted"] += 1
+            elif not keep_pick(pick["autodrafted"]):
+                out.dropped[out.drop_label] += 1
             else:
                 where = np.flatnonzero(available)
                 out.observations.append(PickObservation(
@@ -475,6 +523,14 @@ def score(beta, X_list, chosen, groups=None, buckets=None) -> dict:
     picks understates the real uncertainty. `buckets`, when given, returns
     raw [top-1 hits, top-5 hits, n] per round bucket; raw counts rather than
     rates because the caller adds folds together.
+
+    `by_draft_n` rides along beside `by_draft` for the same reason the raw
+    hit counts ride along beside the rates: a caller that wants the overall
+    top-1 over SOME of the drafts (the ladder restricts to the drafts the
+    shipped prior was never fitted on) has to weight each draft's rate by how
+    many picks it actually contributed. Re-deriving those weights from
+    anything but the scorer's own count would be a second definition of "how
+    big is this draft" for two numbers that must agree.
     """
     beta = np.asarray(beta, dtype=float)
     hits1 = hits5 = 0
@@ -508,12 +564,13 @@ def score(beta, X_list, chosen, groups=None, buckets=None) -> dict:
               "hits1": hits1, "hits5": hits5, "ll": ll}
     if groups is not None:
         report["by_draft"] = {g: h / t for g, (h, t) in per_group.items()}
+        report["by_draft_n"] = {g: t for g, (h, t) in per_group.items()}
     if buckets is not None:
         report["by_bucket"] = per_bucket
     return report
 
 
-def adp_baseline(boards, chosen) -> dict:
+def adp_baseline(boards, chosen, groups=None) -> dict:
     """What the market alone predicts, as the floor any model has to clear.
 
     Identical in construction to `draft_model.backtest`'s baseline: a softmax
@@ -522,18 +579,44 @@ def adp_baseline(boards, chosen) -> dict:
     uniform distribution is not a baseline -- it would give the board's #1 and
     its #250 the same probability, so "beats the market" would be true by
     construction.
+
+    top-5 is reported here for the same reason `score` reports it: the ladder
+    prints one column per metric for every rung, and a baseline row with a
+    hole in it invites reading the baseline as if it only had a top-1. It is
+    the obvious definition -- the chosen player was among the board's five
+    cheapest available -- and it needs no probabilities at all.
+
+    `groups`, when given, returns the per-draft top-1 and per-draft pick
+    count, which is what makes this row eligible for the SAME clustered and
+    paired standard errors every other rung is judged with. A baseline whose
+    uncertainty is computed a different way is not comparable to the thing it
+    is a baseline for.
     """
-    hits1 = 0
+    hits1 = hits5 = 0
     ll = 0.0
-    for board, k in zip(boards, chosen):
+    per_group = {}
+    for i, (board, k) in enumerate(zip(boards, chosen)):
+        # Two argsorts: the first orders the candidates by market rank, the
+        # second inverts that ordering into "what place is this candidate in".
+        # Ties break by pool position, exactly as `draft_model.backtest` does.
         rankpos = np.argsort(np.argsort(board))
-        hits1 += int(rankpos[k] == 0)
+        hit1 = int(rankpos[k] == 0)
+        hits1 += hit1
+        hits5 += int(rankpos[k] < 5)
         probs = _softmax(-ADP_BASELINE_TEMPERATURE * rankpos)
         ll += np.log(max(probs[k], 1e-12))
+        if groups is not None:
+            tally = per_group.setdefault(groups[i], [0, 0])
+            tally[0] += hit1
+            tally[1] += 1
     n = len(chosen)
     if not n:
-        return {"top1": 0.0, "logloss": float("inf")}
-    return {"top1": hits1 / n, "logloss": -ll / n}
+        return {"top1": 0.0, "top5": 0.0, "logloss": float("inf"), "n": 0}
+    report = {"top1": hits1 / n, "top5": hits5 / n, "logloss": -ll / n, "n": n}
+    if groups is not None:
+        report["by_draft"] = {g: h / t for g, (h, t) in per_group.items()}
+        report["by_draft_n"] = {g: t for g, (h, t) in per_group.items()}
+    return report
 
 
 def _sliced(X_list, keep_idx):
@@ -571,7 +654,7 @@ def leave_one_draft_out(X_list, chosen, groups, boards=None, keep_idx=None,
     order = sorted(set(groups))
     hits1 = hits5 = scored = 0
     ll = 0.0
-    per_draft, per_bucket = {}, {}
+    per_draft, per_draft_n, per_bucket = {}, {}, {}
     for holdout in order:
         train = [i for i, g in enumerate(groups) if g != holdout]
         test = [i for i, g in enumerate(groups) if g == holdout]
@@ -586,15 +669,17 @@ def leave_one_draft_out(X_list, chosen, groups, boards=None, keep_idx=None,
         ll += fold["ll"]
         scored += fold["n"]
         per_draft[holdout] = fold["top1"]
+        per_draft_n[holdout] = fold["n"]
         for bucket, tally in fold.get("by_bucket", {}).items():
             running = per_bucket.setdefault(bucket, [0, 0, 0])
             for j in range(3):
                 running[j] += tally[j]
     if not scored:
         return {"top1": 0.0, "top5": 0.0, "logloss": float("inf"), "n": 0,
-                "by_draft": {}}
+                "by_draft": {}, "by_draft_n": {}}
     report = {"top1": hits1 / scored, "top5": hits5 / scored,
-              "logloss": -ll / scored, "n": scored, "by_draft": per_draft}
+              "logloss": -ll / scored, "n": scored, "by_draft": per_draft,
+              "by_draft_n": per_draft_n}
     if buckets is not None:
         report["by_bucket"] = per_bucket
     if boards is not None:
