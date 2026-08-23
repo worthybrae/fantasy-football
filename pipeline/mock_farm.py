@@ -67,6 +67,7 @@ finish, exception, or Ctrl-C alike -- so a crash does not leave a process
 holding a connection to a room it is no longer playing.
 """
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -605,6 +606,286 @@ def build_record(timeline, tool, settings, league_id, season, my_slot,
 
 
 # ---------------------------------------------------------------------------
+# Live progress: what a draft publishes while it is still being played.
+# ---------------------------------------------------------------------------
+#
+# WHY A FILE PER ROOM AND NOT THE CORPUS. `record_draft` writes when a draft
+# FINISHES, so for the thirty to forty minutes one is being played it exists
+# nowhere but this process's own memory -- and the web API is a separate
+# process (uvicorn), which cannot see that. The obvious fix, recording to the
+# corpus after every pick, is the one thing that must not happen here: DuckDB
+# is single-writer, three concurrent farm sessions x 128 picks is ~380
+# acquisitions of that one write lock per cycle, each of them rewriting all
+# 128 pick rows (`dl.record` is delete-then-insert by design), contending with
+# each other AND with the page's own reads. The corpus is also the one file in
+# this repo that cannot be rebuilt if it is damaged -- see
+# `pipeline.draft_log`'s module docstring -- which makes it the last place in
+# the project to put a hot write path.
+#
+# So live progress is published exactly the way a room claim is: one small
+# file per league in a directory, no daemon, nothing to clean up if the whole
+# machine dies. Two things differ from `pipeline.farm_claims`, both
+# deliberately:
+#
+#   - THE WRITE IS A TMP FILE PLUS `os.replace`, not an exclusive create. A
+#     claim is written once and never touched again; this is rewritten after
+#     every pick, and a reader that caught a rewrite half-done would draw a
+#     truncated board. `os.replace` is atomic on every filesystem this runs
+#     on, so a reader sees either the previous pick's file or this one's and
+#     never a mixture -- which also means the "a claim is empty for an instant
+#     after it is made" race that farm_claims documents at length simply does
+#     not arise here, and an unreadable file really is a corrupt one.
+#   - THE PID AND TIMESTAMP LIVE INSIDE THE JSON rather than being the whole
+#     of the file, because there is a payload to carry as well.
+#
+# STALENESS IS THE SAME PROBLEM AND TAKES THE SAME ANSWER. A farm killed
+# mid-draft leaves its file behind, and a page that kept serving it would show
+# a draft as "live" that stopped moving days ago -- worse than showing nothing,
+# because nothing about it looks wrong. A file whose pid is gone, or whose
+# stamp is older than the TTL, is retired on the next read, which is
+# `farm_claims._is_stale`'s rule against `farm_claims`'s own clock.
+
+# Env-overridable for the same two reasons FARM_CLAIM_DIR is: a test must
+# never write the directory a real farm is publishing into, and a second
+# instance may want its own.
+LIVE_DIR = os.environ.get("FARM_LIVE_DIR", "data/farm-live")
+
+# The claim's own constants rather than two numbers that could drift apart. A
+# live file and a claim have exactly the same lifetime -- both are created
+# before the first pick of a room and both are removed in the same `finally`
+# in `farm` -- so a live file that has aged out while its claim has not (or
+# the reverse) would only ever be a bug.
+LIVE_TTL_SECONDS = claims.CLAIM_TTL_SECONDS
+LIVE_GRACE_SECONDS = claims.CLAIM_GRACE_SECONDS
+
+
+def _live_dir() -> Path:
+    path = Path(LIVE_DIR)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def live_path(league_id) -> Path:
+    """Where one room's live file lives. Named by league id, exactly as a
+    claim is, so the two can be read against each other by eye."""
+    return _live_dir() / f"{league_id}.json"
+
+
+def iso_utc(when) -> str | None:
+    """A datetime as the API serves it: UTC, no microseconds, `Z`.
+
+    Normalised here rather than left to `isoformat()` so every timestamp the
+    page ever receives has one shape. NOT what `draft_id` is computed from --
+    that takes the datetime itself (see `live_payload`), because
+    `dl.draft_id_for` hashes `started_at.isoformat()` and a draft whose id
+    changed when it was recorded would appear on the page twice.
+    """
+    if when is None:
+        return None
+    if getattr(when, "tzinfo", None) is not None:
+        when = when.astimezone(timezone.utc)
+    return when.replace(microsecond=0, tzinfo=None).isoformat() + "Z"
+
+
+def seat_owners(timeline, slots, teams: int, owners: dict | None) -> list:
+    """Per-seat `had_owner`, as far as the picks so far can say.
+
+    `owners` is keyed by ESPN team id and the page draws slots, so the two
+    have to be joined through the picks themselves -- the same derivation
+    `slot_team_map` makes at record time, with two differences that matter
+    while a draft is still running:
+
+      - A seat that has not picked yet has no known team, so its answer is
+        None (unknown), not False. In round one that is most of the room for
+        the first minute, and calling those seats "computer" would label a
+        board of real people as an empty room.
+      - A collision (two teams drafting at one slot) is taken first-wins
+        rather than raised on. `slot_team_map` refuses to record such a draft
+        and that is the right call for the corpus; a live view that threw
+        would take the whole page down over one seat's label.
+    """
+    team_by_slot: dict = {}
+    for frame in timeline:
+        if frame.team_id is None or frame.pick_no > len(slots):
+            continue
+        team_by_slot.setdefault(slots[frame.pick_no - 1], frame.team_id)
+    seats = []
+    for slot in range(1, int(teams) + 1):
+        team = team_by_slot.get(slot)
+        had_owner = (None if owners is None or team is None
+                     else owners.get(team))
+        seats.append({
+            "slot": slot,
+            "had_owner": None if had_owner is None else bool(had_owner)})
+    return seats
+
+
+def live_payload(timeline, tool, league_id, season, teams, rounds, my_slot,
+                 started_at, owners: dict | None = None,
+                 my_team_id: int | None = None) -> dict:
+    """This draft as it stands right now, in enough detail to draw the board
+    without the corpus.
+
+    EVERYTHING THE PAGE NEEDS AND NOTHING IT DOES NOT. The player pool is
+    deliberately absent: it is 250 rows that do not change during a draft, and
+    the API resolves every name, rank and headshot out of the board it already
+    holds (`data/nfl.duckdb`) by player_id anyway. What only this process
+    knows is the room -- its shape, which seat is ours, which seats hold
+    people, and the picks in order -- so that is what is written.
+
+    `draft_id` IS THE ID THE CORPUS WILL USE, computed from the same
+    (league_id, season, started_at) `build_record` passes to
+    `dl.draft_id_for`, and passed the `started_at` DATETIME rather than its
+    printed form so the two hashes cannot differ. That is what lets a draft
+    keep its identity when it stops being live and becomes a corpus row: the
+    page's link survives the transition instead of 404ing at the finish line.
+    Note this is NOT the content hash `pipeline.mock_backfill` computes -- a
+    hash of the picks would change on every pick, which is exactly what an id
+    must not do while a draft is still filling in.
+
+    A pick whose player the crosswalk cannot resolve carries `player_id:
+    null` and keeps its place, the same way `taken_order_from` keeps one: a
+    pick nobody can name still happened, and dropping it would slide every
+    later pick onto the wrong seat.
+    """
+    slots = snake_slots(int(teams), int(rounds))
+    picks = []
+    for frame in timeline:
+        if frame.pick_no > len(slots):
+            break
+        player_id = (tool.crosswalk.get(frame.espn_id)
+                     if frame.espn_id is not None else None)
+        picks.append({
+            "pick_no": int(frame.pick_no),
+            "slot": int(slots[frame.pick_no - 1]),
+            "player_id": None if player_id is None else str(player_id),
+            "autodrafted": (None if frame.autodrafted is None
+                            else bool(frame.autodrafted)),
+        })
+    return {
+        "league_id": str(league_id),
+        "draft_id": dl.draft_id_for(dl.SOURCE_MOCK, league_id, season,
+                                    started_at),
+        "season": int(season),
+        "teams": int(teams),
+        "rounds": int(rounds),
+        "my_slot": None if my_slot is None else int(my_slot),
+        "started_at": iso_utc(started_at),
+        "human_seats": human_seats(owners, my_team_id),
+        "seats": seat_owners(timeline, slots, int(teams), owners),
+        "picks": picks,
+    }
+
+
+def write_live(payload: dict, now: float | None = None) -> Path:
+    """Publish one room's progress, atomically.
+
+    Written beside the target and renamed over it. The rename is the whole
+    mechanism: a reader that opens the file mid-write would otherwise get a
+    JSON document cut off at whatever byte the writer had reached, and this
+    file is rewritten after every one of 128 picks. The tmp name carries the
+    pid so two writers could not share it -- one claim per room means two
+    cannot happen, but surviving it costs nothing.
+
+    `pid` and `written_at` are stamped here rather than by the caller: they
+    describe the WRITE, not the draft, and a payload built in one process and
+    written by another would otherwise claim the wrong owner.
+    """
+    now = time.time() if now is None else now
+    directory = _live_dir()
+    name = str(payload["league_id"])
+    tmp = directory / f".{name}.{os.getpid()}.tmp"
+    body = dict(payload, pid=os.getpid(), written_at=float(now))
+    with open(tmp, "w") as fh:
+        json.dump(body, fh, default=str)
+    path = directory / f"{name}.json"
+    os.replace(tmp, path)
+    return path
+
+
+def read_live(path) -> dict | None:
+    """One live file's payload, or None if it will not read as one."""
+    try:
+        with open(path) as fh:
+            payload = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _live_is_stale(path: Path, payload: dict | None, now: float) -> bool:
+    """Whether this file is a phantom rather than a draft in progress.
+
+    Same two retirements as `farm_claims._is_stale` and for the same reasons:
+    the pid it names is gone (a farm killed mid-draft), or its stamp is older
+    than the TTL (the backstop for a pid recycled onto some unrelated process
+    on a machine that has been up for weeks). A file that will not parse is
+    aged off its mtime instead of being trusted or swept immediately -- the
+    atomic rename means that should never happen, so the one case left is a
+    genuinely corrupt or hand-edited file, and giving it the grace period
+    costs a minute and cannot delete a draft that is merely being written.
+    """
+    pid = payload.get("pid") if payload else None
+    stamp = payload.get("written_at") if payload else None
+    if not isinstance(pid, int) or not isinstance(stamp, (int, float)):
+        try:
+            age = now - path.stat().st_mtime
+        except OSError:
+            return False                # gone already; nothing to retire
+        return age > LIVE_GRACE_SECONDS
+    if now - float(stamp) > LIVE_TTL_SECONDS:
+        return True
+    # The same signal-0 check `farm_claims` makes, called rather than copied
+    # so the two modules cannot come to disagree about what "alive" means.
+    return not claims._alive(pid)
+
+
+def live_drafts(now: float | None = None) -> list:
+    """Every draft a live farm process is currently playing, stale ones swept.
+
+    The sweep happens on READ, exactly as `farm_claims.claimed` does it: the
+    process that would have cleaned up is by definition the one that died, so
+    the only code guaranteed to run afterwards is somebody else's read.
+    """
+    now = time.time() if now is None else now
+    out = []
+    for path in sorted(_live_dir().glob("*.json")):
+        if not path.is_file():
+            continue
+        payload = read_live(path)
+        if _live_is_stale(path, payload, now):
+            try:
+                path.unlink()
+            except OSError:
+                pass                    # another reader swept it first
+            continue
+        if payload is not None:
+            out.append(payload)
+    return out
+
+
+def clear_live(league_id) -> None:
+    """Stop advertising this room as live, if the file is still ours.
+
+    The ownership check is `farm_claims.release`'s, for its reason: a process
+    that stalled long enough for its file to age past the TTL can have had the
+    room swept and re-entered by another farm, and an unconditional unlink
+    would then delete THAT process's live board. Never raises -- a page that
+    keeps showing one phantom draft is not worth ending a night's farming
+    over, and the staleness sweep retires it either way.
+    """
+    path = live_path(league_id)
+    payload = read_live(path)
+    pid = payload.get("pid") if payload else None
+    if isinstance(pid, int) and pid != os.getpid():
+        return
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # The live half: joining a room and playing it.
 # ---------------------------------------------------------------------------
 
@@ -966,6 +1247,13 @@ def play_draft(conn, corpus_path, cookies, room, rng,
         my_slot = slot_from_pick_order(settings, team_id)
         timeline = []
         picks_seen = -1
+        # The pick count the live file was last written at, kept apart from
+        # `picks_seen` because the two answer different questions: that one
+        # is the idle timer's "has this room moved", read before the start
+        # and idle checks below, and this one is "has the page been told",
+        # which is only decidable after `my_slot` has been resolved.
+        published = -1
+        live_published_warning = False
         last_progress = time.monotonic()
         start_deadline = time.monotonic() + START_TIMEOUT_SECONDS
         last_autodraft_nudge = 0.0
@@ -999,6 +1287,37 @@ def play_draft(conn, corpus_path, cookies, room, rng,
                     out(f"  pickOrder said slot {my_slot}, the socket says "
                         f"{from_socket} -- trusting the socket")
                 my_slot = from_socket
+
+            # PUBLISH WHAT THE PAGE READS. Only when the pick count actually
+            # moved: this loop wakes four times a second and a room on a slow
+            # clock would otherwise rewrite the same board a hundred times
+            # between picks. Written HERE rather than beside the `picks_seen`
+            # bookkeeping above because `my_slot` is the field that decides
+            # which column of the published board is ours, and a payload
+            # written a few lines earlier would carry the previous pick's
+            # answer -- which, on the first pick of the draft, is None.
+            #
+            # The zeroth write matters as much as the rest: `published`
+            # starts at -1, so a room that has joined but not started yet
+            # publishes an empty board immediately and appears on the page as
+            # a draft about to happen rather than as nothing at all.
+            if n != published:
+                published = n
+                try:
+                    write_live(live_payload(
+                        timeline, tool, league_id, season, teams, rounds,
+                        my_slot, started_at, owners=owners,
+                        my_team_id=team_id))
+                except Exception as exc:        # noqa: BLE001 -- a board the
+                    # page cannot draw is not a reason to stop drafting. The
+                    # draft is recorded from this process's own memory at the
+                    # end regardless, so nothing here is on the path that
+                    # matters. Said ONCE rather than once per pick: an
+                    # unwritable directory would otherwise fill an overnight
+                    # log with 128 copies of one line.
+                    if not live_published_warning:
+                        live_published_warning = True
+                        out(f"  could not publish live progress: {exc}")
 
             # ESPN flips a team onto autodraft the moment it misses a pick,
             # and never flips it back on its own. Left alone, one missed
@@ -1254,6 +1573,18 @@ def farm(n: int, season: int = CURRENT_SEASON, seed: int = 0,
                 # have played, and the TTL that would eventually retire it is
                 # ninety minutes long.
                 claims.release(league_id)
+                # The live file goes with the claim, in the same breath and
+                # for the same reason: by this line the draft has either been
+                # recorded to the corpus or abandoned, and either way this
+                # process is no longer in the room, so anything still
+                # advertising it as live is a phantom. Here rather than after
+                # `record_draft` inside `play_draft` deliberately -- a draft
+                # that crashed, timed out, or was refused for a bad shape
+                # never reaches that line, and those are exactly the runs that
+                # would otherwise leave a board on the page that never moves
+                # again. The staleness sweep is the backstop for a process
+                # that dies before it gets here at all, not the primary path.
+                clear_live(league_id)
             status = result["status"]
             counts["by_status"][status] = counts["by_status"].get(status, 0) + 1
             if status == "recorded":

@@ -16,6 +16,8 @@ farm runs, driven from two fixtures instead of ESPN:
     epsilon-greedy coin are pinned rather than sampled.
 """
 import json
+import os
+import time
 from pathlib import Path
 
 import numpy as np
@@ -58,6 +60,21 @@ TRACE_OWNERS = {1: True, 2: True, 3: True, 4: False,
 # in the state machine fails here rather than passing quietly.
 TRACE_AUTO_WITH_OWNERS = 94
 TRACE_HUMAN_WITH_OWNERS = 34
+
+
+@pytest.fixture(autouse=True)
+def _isolated_live_dir(tmp_path, monkeypatch):
+    """Never the real `data/farm-live`.
+
+    Autouse and file-wide, for the same reason `_stub_farm_deps` redirects the
+    claim directory: `play_draft` now publishes a live file after every pick
+    and `farm` deletes one in its `finally`, so several tests here that were
+    written long before either existed would otherwise write into -- and sweep
+    -- the directory a farm process on this machine may be publishing a real
+    draft through, making that draft vanish off the page mid-round.
+    """
+    monkeypatch.setattr(mf, "LIVE_DIR", str(tmp_path / "farm-live"))
+    return tmp_path / "farm-live"
 
 
 def _trace_listener() -> DraftListener:
@@ -756,6 +773,11 @@ def _stub_farm_deps(monkeypatch, rooms, tmp_path):
     # otherwise a test would see the claims of the farm process the owner may
     # have running against the real `data/farm-claims`.
     monkeypatch.setattr(mf.claims, "CLAIM_DIR", str(tmp_path / "claims"))
+    # Same reasoning one line up, for the live files `farm`'s `finally` now
+    # deletes alongside the claim. (`_isolated_live_dir` already covers this
+    # file-wide; repeated here so a reader of this helper sees both halves of
+    # the on-disk state a loop test touches.)
+    monkeypatch.setattr(mf, "LIVE_DIR", str(tmp_path / "farm-live"))
     monkeypatch.setattr(mf, "load_cookies",
                         lambda: {"SWID": "{X}", "espn_s2": "s2"})
     monkeypatch.setattr(mf, "http_fetch", lambda cookies: (lambda url: "[]"))
@@ -1204,3 +1226,325 @@ def test_a_failed_pick_still_sleeps_before_the_loop_polls_again(monkeypatch):
     assert picks["n"] == len(slept) == 5
     assert all(s == mf.LOOP_POLL_SECONDS for s in slept)
     assert session.stopped
+
+
+# ---------------------------------------------------------------------------
+# Live progress: what the farm publishes while a draft is still running.
+# ---------------------------------------------------------------------------
+#
+# The corpus only learns about a draft when it FINISHES, and the web API is a
+# separate process, so for the forty minutes a room is being played these
+# files are the only evidence outside this process that it exists at all.
+# Everything below drives the real module against a real directory
+# (`_isolated_live_dir`), with the clock passed in rather than mocked --
+# `write_live`, `live_drafts` and `_live_is_stale` all take `now`, which is
+# what makes a ninety-minute TTL testable in a millisecond.
+
+
+def _live_timeline(n: int, teams: int = TRACE_TEAMS):
+    """`n` picks of a snake, one per seat in order, as the socket reports it.
+
+    ESPN team ids are 10 + slot rather than the slot itself, because `owners`
+    is keyed by team id and the published seats by slot: an implementation
+    that confused the two would pass against equal numbers.
+    """
+    slots = snake_slots(teams, TRACE_ROUNDS)
+    return [mf.PickFrame(i, 10 + slots[i - 1], 900 + i, False)
+            for i in range(1, n + 1)]
+
+
+def _live_tool(n: int = 8) -> mf.Tool:
+    """A Tool that can name the players `_live_timeline` picks. Only
+    `crosswalk` is read by `live_payload`; the rest is scaffolding."""
+    return mf.Tool(board=None, pool=None, pool_df=None,
+                   crosswalk={900 + i: f"p{i}" for i in range(1, n + 1)},
+                   espn_by_index=[], index_by_player={}, sendable=None)
+
+
+def _live_owners(teams: int = TRACE_TEAMS) -> dict:
+    return {10 + slot: human for slot, human in TRACE_OWNERS.items()}
+
+
+def test_the_live_file_names_the_same_draft_the_corpus_will():
+    """THE WHOLE POINT OF NOT USING THE CONTENT HASH. `mock_backfill` ids a
+    draft by hashing its picks, which changes on every pick; this one is
+    (league, season, started_at), which does not. So a page open on a live
+    board keeps its draft when the last pick lands and the corpus row appears
+    -- if these two ever disagreed, every finished draft would 404 the link
+    that was watching it."""
+    from datetime import datetime, timezone
+    started = datetime(2026, 8, 23, 10, 4, tzinfo=timezone.utc)
+    timeline = mf.draft_timeline(_trace_listener().events, TRACE_OWNERS)
+    tool = _tool_for(timeline)
+
+    live = mf.live_payload(timeline, tool, "1084102871", 2026, TRACE_TEAMS,
+                           TRACE_ROUNDS, 5, started, owners=TRACE_OWNERS)
+    record, _dropped = mf.build_record(
+        timeline, tool, _mock_settings(), league_id="1084102871", season=2026,
+        my_slot=5, started_at=started, teams=TRACE_TEAMS, rounds=TRACE_ROUNDS,
+        owners=TRACE_OWNERS)
+
+    assert live["draft_id"] == record.resolved_id()
+    assert live["started_at"] == "2026-08-23T10:04:00Z"
+
+
+def test_the_live_file_carries_every_pick_so_far_at_its_own_slot():
+    timeline = _live_timeline(9)
+    payload = mf.live_payload(timeline, _live_tool(9), "111", 2026,
+                              TRACE_TEAMS, TRACE_ROUNDS, 3, None,
+                              owners=_live_owners(), my_team_id=13)
+
+    slots = snake_slots(TRACE_TEAMS, TRACE_ROUNDS)
+    assert [p["pick_no"] for p in payload["picks"]] == list(range(1, 10))
+    assert [p["slot"] for p in payload["picks"]] == slots[:9]
+    assert [p["player_id"] for p in payload["picks"]] == [
+        f"p{i}" for i in range(1, 10)]
+    assert payload["teams"] == TRACE_TEAMS and payload["rounds"] == TRACE_ROUNDS
+    assert payload["my_slot"] == 3
+    # Our own seat is not counted, exactly as the corpus head counts it.
+    assert payload["human_seats"] == mf.human_seats(_live_owners(), 13)
+
+
+def test_a_seat_nobody_has_drafted_from_yet_is_unknown_not_empty():
+    """`owners` is keyed by ESPN team id and the page draws slots, so the two
+    are joined through the picks themselves -- which means in round one most
+    of the room has no answer yet. Calling those seats "no owner" would paint
+    a room full of people as ESPN's own padding."""
+    payload = mf.live_payload(_live_timeline(3), _live_tool(3), "111", 2026,
+                              TRACE_TEAMS, TRACE_ROUNDS, None, None,
+                              owners=_live_owners())
+    seats = {s["slot"]: s["had_owner"] for s in payload["seats"]}
+    assert len(seats) == TRACE_TEAMS
+    assert [seats[i] for i in (1, 2, 3)] == [TRACE_OWNERS[1], TRACE_OWNERS[2],
+                                             TRACE_OWNERS[3]]
+    assert all(seats[i] is None for i in range(4, TRACE_TEAMS + 1))
+
+
+def test_a_draft_with_no_owner_census_publishes_nulls_rather_than_guesses():
+    """The mTeam read failing is a real failure mode `play_draft` says out
+    loud. It means unknown, and unknown is not False."""
+    payload = mf.live_payload(_live_timeline(8), _live_tool(8), "111", 2026,
+                              TRACE_TEAMS, TRACE_ROUNDS, 1, None, owners=None)
+    assert all(s["had_owner"] is None for s in payload["seats"])
+    assert payload["human_seats"] is None
+
+
+def test_an_unresolvable_pick_keeps_its_place_in_the_numbering():
+    """A pick the crosswalk cannot name still CONSUMED a turn. Dropping it
+    would slide every later pick onto the wrong seat -- the same rule
+    `taken_order_from` follows for the same reason."""
+    timeline = [mf.PickFrame(1, 11, 901, False),
+                mf.PickFrame(2, 12, None, False),
+                mf.PickFrame(3, 13, 903, True)]
+    payload = mf.live_payload(timeline, _live_tool(3), "111", 2026,
+                              TRACE_TEAMS, TRACE_ROUNDS, 1, None, owners=None)
+    assert [p["pick_no"] for p in payload["picks"]] == [1, 2, 3]
+    assert [p["player_id"] for p in payload["picks"]] == ["p1", None, "p3"]
+    assert [p["autodrafted"] for p in payload["picks"]] == [False, False, True]
+
+
+def test_the_file_is_replaced_whole_and_leaves_no_debris(_isolated_live_dir):
+    """The rename is the whole mechanism: this file is rewritten after every
+    one of 128 picks, and a reader that caught one half-done would draw a
+    truncated board."""
+    first = mf.live_payload(_live_timeline(1), _live_tool(), "111", 2026,
+                            TRACE_TEAMS, TRACE_ROUNDS, 1, None, owners=None)
+    mf.write_live(first)
+    second = mf.live_payload(_live_timeline(5), _live_tool(), "111", 2026,
+                             TRACE_TEAMS, TRACE_ROUNDS, 1, None, owners=None)
+    mf.write_live(second)
+
+    assert [p.name for p in sorted(_isolated_live_dir.iterdir())] == \
+        ["111.json"]
+    drafts = mf.live_drafts()
+    assert len(drafts) == 1 and len(drafts[0]["picks"]) == 5
+    assert drafts[0]["pid"] == os.getpid()
+
+
+def test_a_live_file_whose_farm_is_dead_is_swept(_isolated_live_dir):
+    """A farm killed mid-draft leaves its file behind, and a page that kept
+    serving it would show a draft as live that stopped moving days ago --
+    worse than showing nothing, because nothing about it looks wrong."""
+    dead = 4_000_000
+    if _pid_exists(dead):
+        pytest.skip("pid 4000000 is in use on this machine")
+    _isolated_live_dir.mkdir(parents=True, exist_ok=True)
+    path = _isolated_live_dir / "111.json"
+    path.write_text(json.dumps({"league_id": "111", "draft_id": "mock:x",
+                                "pid": dead, "written_at": time.time()}))
+    assert mf.live_drafts() == []
+    assert not path.exists()
+
+
+def test_a_live_file_older_than_the_ttl_is_swept_even_if_the_pid_is_alive():
+    """The backstop for a pid recycled onto some unrelated process, which is
+    rare but not impossible on a machine that has been up for weeks -- the
+    same TTL, and the same reason for it, as a room claim."""
+    now = time.time()
+    payload = mf.live_payload(_live_timeline(1), _live_tool(), "111", 2026,
+                              TRACE_TEAMS, TRACE_ROUNDS, 1, None, owners=None)
+    mf.write_live(payload, now=now - mf.LIVE_TTL_SECONDS - 1)
+    assert mf.live_drafts(now=now) == []
+    mf.write_live(payload, now=now - mf.LIVE_TTL_SECONDS + 60)
+    assert len(mf.live_drafts(now=now)) == 1
+
+
+def test_a_file_that_will_not_parse_retires_only_after_the_grace(
+        _isolated_live_dir):
+    """`os.replace` means a reader can never catch a half-written file, so an
+    unreadable one is genuinely corrupt rather than mid-write -- but it is
+    still aged off its mtime rather than swept on sight, because "unreadable
+    therefore delete" is a rule that only ever gets more dangerous."""
+    _isolated_live_dir.mkdir(parents=True, exist_ok=True)
+    corrupt = _isolated_live_dir / "111.json"
+    corrupt.write_text("not json at all")
+    assert mf.live_drafts() == [] and corrupt.exists()
+
+    old = time.time() - mf.LIVE_GRACE_SECONDS - 1
+    os.utime(corrupt, (old, old))
+    assert mf.live_drafts() == []
+    assert not corrupt.exists()
+
+
+def test_clearing_a_live_file_that_is_not_ours_does_nothing(
+        _isolated_live_dir):
+    """A process that stalled past the TTL can have had its room swept and
+    re-entered by another farm. An unconditional unlink on the way out would
+    then delete THAT process's live board."""
+    _isolated_live_dir.mkdir(parents=True, exist_ok=True)
+    other = os.getppid()
+    assert other != os.getpid()
+    path = _isolated_live_dir / "111.json"
+    path.write_text(json.dumps({"league_id": "111", "pid": other,
+                                "written_at": time.time()}))
+    mf.clear_live("111")
+    assert path.exists()
+
+    mf.write_live(mf.live_payload(_live_timeline(1), _live_tool(), "111",
+                                  2026, TRACE_TEAMS, TRACE_ROUNDS, 1, None))
+    mf.clear_live("111")
+    assert not path.exists()
+    assert mf.live_drafts() == []
+
+
+def test_clearing_a_room_we_never_published_is_harmless():
+    mf.clear_live("999")                 # no file, no exception
+    assert mf.live_drafts() == []
+
+
+def _pid_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def test_the_play_loop_publishes_once_per_pick_and_only_then(
+        monkeypatch, _isolated_live_dir):
+    """THE INTEGRATION THAT MATTERS: the loop wakes four times a second, and
+    a room on a slow clock must not rewrite the same board a hundred times
+    between picks. One write per pick, plus the one at zero picks that puts a
+    room on the page before it has started.
+
+    Also pins WHERE in the loop the write happens. `my_slot` is resolved from
+    the socket a few lines above it, and a payload written before that
+    resolution would carry the previous pick's answer -- None, on the pick
+    that first identifies our seat.
+    """
+    import types
+
+    from pipeline.espn_live import parse_frame
+
+    settings = _mock_settings()
+    listener = _FakeListener(42)
+    listener.on_the_clock = None         # never our turn: no pick is attempted
+    session = _FakeSession(listener)
+    # `play_draft` prints the pool size on the way in, so unlike the payload
+    # tests above this Tool needs a pool-shaped stand-in as well as a
+    # crosswalk.
+    tool = _live_tool(4)
+    tool.pool = types.SimpleNamespace(player_id=[f"p{i}" for i in range(1, 5)])
+    tool.sendable = np.ones(4, dtype=bool)
+
+    monkeypatch.setattr(lobby, "http_poster", lambda cookies: None)
+    monkeypatch.setattr(lobby, "join",
+                        lambda post, league_id, swid, season: 42)
+    monkeypatch.setattr(mf, "http_fetch", lambda cookies: (lambda url: ""))
+    monkeypatch.setattr(mf, "fetch_league_settings",
+                        lambda fetch, league_id, season: {"raw": True})
+    monkeypatch.setattr(mf.league, "from_espn", lambda raw: settings)
+    census = {**_live_owners(), 42: True}   # our own seat always has an owner
+    monkeypatch.setattr(mf, "fetch_team_owners",
+                        lambda fetch, league_id, season: census)
+    monkeypatch.setattr(mf, "build_tool", lambda conn, s: tool)
+    monkeypatch.setattr(mf, "DraftListener", lambda crosswalk: listener)
+    monkeypatch.setattr(mf, "_wait_until_available", lambda room, out: None)
+    monkeypatch.setattr(mf, "_connect_session", lambda *a, **k: session)
+
+    published = []
+    real_write = mf.write_live
+    monkeypatch.setattr(mf, "write_live",
+                        lambda payload, now=None: (published.append(payload),
+                                                   real_write(payload, now))[1])
+
+    # One SELECTED frame per poll. The third is OUR team, which is the first
+    # moment the socket can name our slot (slot 3 of the snake).
+    teams_by_pick = [11, 12, 42, 14]
+
+    def counted_sleep(seconds):
+        i = len(listener.events)
+        if i < len(teams_by_pick):
+            listener.events.append(
+                parse_frame(f"SELECTED {teams_by_pick[i]} {901 + i}"))
+        else:
+            session.error = RuntimeError("socket gave up")
+
+    monkeypatch.setattr(mf.time, "sleep", counted_sleep)
+
+    result = mf.play_draft(None, None, {"SWID": FAKE_SWID, "espn_s2": "s2"},
+                           _live_room(leagueId=71), np.random.default_rng(0),
+                           season=2026, out=lambda *a: None)
+
+    assert result["status"] == "incomplete" and result["picks"] == 4
+    # Five writes: the empty board, then one per pick. Not one per poll.
+    assert [len(p["picks"]) for p in published] == [0, 1, 2, 3, 4]
+    assert [p["my_slot"] for p in published] == [None, None, None, 3, 3]
+    assert published[-1]["league_id"] == "71"
+    assert [p["slot"] for p in published[-1]["picks"]] == [1, 2, 3, 4]
+    assert [p["player_id"] for p in published[-1]["picks"]] == [
+        "p1", "p2", "p3", "p4"]
+    # Still on disk: deleting it is `farm`'s job, in the same `finally` that
+    # releases the room claim, not `play_draft`'s.
+    assert (_isolated_live_dir / "71.json").exists()
+
+
+def test_the_live_file_goes_when_the_room_claim_does(monkeypatch, tmp_path):
+    """Both are removed in the same `finally`, on every path out -- a
+    recorded draft, an abandoned room, a crash, a Ctrl-C. A crash between the
+    last pick and here is exactly when the page must not keep showing a board
+    that never moves again."""
+    _stub_farm_deps(monkeypatch, [_live_room(leagueId=81, teamsJoined=6),
+                                  _live_room(leagueId=82, teamsJoined=1)],
+                    tmp_path)
+
+    def fake_play(conn, corpus_path, cookies, room, rng, season=2026,
+                  out=print):
+        mf.write_live(mf.live_payload(_live_timeline(4), _live_tool(4),
+                                      room["leagueId"], 2026, TRACE_TEAMS,
+                                      TRACE_ROUNDS, 1, None))
+        assert mf.live_drafts()          # published while the room is played
+        if room["leagueId"] == 81:
+            raise RuntimeError("ESPN said no")
+        return {"status": "recorded", "picks": 128, "league_id": 82}
+
+    monkeypatch.setattr(mf, "play_draft", fake_play)
+    counts = mf.farm(1, corpus_path=str(tmp_path / "c.duckdb"),
+                     out=lambda *a: None)
+
+    # The crashed room and the recorded one, both cleaned up the same way.
+    assert counts["by_status"] == {"crashed": 1, "recorded": 1}
+    assert mf.live_drafts() == []
+    assert mf.claims.claimed() == set()
