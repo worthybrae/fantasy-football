@@ -150,3 +150,64 @@ def test_ensure_schema_adds_autodrafted_without_losing_existing_rows(tmp_path):
     assert len(row) == 1, "the pre-existing row must survive the ALTER"
     assert row["player_id"].iloc[0] == "p1"
     assert pd.isna(row["autodrafted"].iloc[0])
+
+
+def test_a_failed_insert_leaves_the_previously_recorded_draft_intact(corpus):
+    """The delete and the insert are one transaction, and this is why.
+
+    `record` replaces a draft by deleting all three of its tables and
+    inserting the new copy. Between those two steps the corpus holds nothing
+    for that draft -- and the corpus is the one thing in this project that
+    cannot be rebuilt from a source that still exists. The failure is not
+    hypothetical: re-running `make mock-backfill` over an already-recorded
+    file after a board change that makes the merge emit two rows for one
+    pick_no gets the delete, and then the primary key rejects the insert.
+    Unwrapped, that turns a re-record into a deletion.
+
+    A duplicate `(draft_id, pick_no)` is exactly what is used here, because
+    it is the real reachable case rather than an injected fault.
+    """
+    good = dl.DraftRecord(source=dl.SOURCE_MOCK, league_id="7", season=2026,
+                          started_at="t", picks=_picks(4),
+                          pool=pd.DataFrame({"player_id": ["p0"],
+                                             "position": ["RB"],
+                                             "team": ["DET"],
+                                             "adp_rank": [1.0],
+                                             "proj_points": [250.0]}))
+    draft_id = dl.record(corpus, good)
+
+    broken = _picks(4)
+    broken.loc[1, "pick_no"] = 1          # two picks claiming pick 1
+    with pytest.raises(Exception):
+        dl.record(corpus, dl.DraftRecord(
+            source=dl.SOURCE_MOCK, league_id="7", season=2026,
+            started_at="t", picks=broken))
+
+    # Everything the first record wrote is still there, in all three tables.
+    stored = corpus.execute(
+        "SELECT pick_no FROM draft_log_pick WHERE draft_id = ? "
+        "ORDER BY pick_no", [draft_id]).df()
+    assert list(stored["pick_no"]) == [1, 2, 3, 4]
+    assert corpus.execute("SELECT count(*) FROM draft_log WHERE draft_id = ?",
+                          [draft_id]).fetchone()[0] == 1
+    assert corpus.execute(
+        "SELECT count(*) FROM draft_log_pool WHERE draft_id = ?",
+        [draft_id]).fetchone()[0] == 1
+
+
+def test_a_rolled_back_record_leaves_the_connection_usable(corpus):
+    """The rollback has to end the transaction, not just abandon it: the farm
+    records one draft every forty minutes on a long-lived connection, and a
+    process left inside a failed transaction would lose every draft after the
+    first bad one rather than just that one."""
+    broken = _picks(4)
+    broken.loc[1, "pick_no"] = 1
+    with pytest.raises(Exception):
+        dl.record(corpus, dl.DraftRecord(source=dl.SOURCE_MOCK, season=2026,
+                                         started_at="a", picks=broken))
+
+    draft_id = dl.record(corpus, dl.DraftRecord(
+        source=dl.SOURCE_MOCK, season=2026, started_at="b", picks=_picks(4)))
+    assert len(dl.picks(corpus)) == 4
+    assert corpus.execute("SELECT count(*) FROM draft_log WHERE draft_id = ?",
+                          [draft_id]).fetchone()[0] == 1

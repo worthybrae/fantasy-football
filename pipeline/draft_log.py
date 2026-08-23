@@ -164,11 +164,26 @@ def record(conn, draft: DraftRecord) -> str:
     accumulate duplicate copies of the same picks. Delete-then-insert, so a
     draft that was recorded mid-way and is now complete ends up with the full
     pick list rather than a merge of two partial ones.
+
+    ALL OF IT IN ONE TRANSACTION, which matters more here than anywhere else
+    in this project. Every other table is rebuilt wholesale from a source
+    that still exists; a draft is the one thing that cannot be re-derived
+    (see the module docstring). So a delete that lands and an insert that
+    then fails would not be a failed write, it would be the only copy of a
+    draft destroyed by a re-record -- and that is reachable without anything
+    exotic: `make mock-backfill` re-run over an already-recorded file after a
+    board change that makes `_picks_frame`'s merge emit a duplicate
+    `(draft_id, pick_no)` gets the delete, then the primary key rejects the
+    insert. Wrapped, the failure costs the re-record and leaves what was
+    already written exactly as it was. Same idiom as
+    `espn_live.replace_drafted`, for the same reason.
+
+    `ensure_schema` stays OUTSIDE the transaction: it is idempotent DDL that
+    is either already true or wanted regardless of whether this particular
+    draft writes.
     """
     ensure_schema(conn)
     draft_id = draft.resolved_id()
-    for table in ("draft_log_pick", "draft_log_pool", "draft_log"):
-        conn.execute(f"DELETE FROM {table} WHERE draft_id = ?", [draft_id])
 
     head = pd.DataFrame([{
         "draft_id": draft_id, "source": draft.source,
@@ -177,14 +192,22 @@ def record(conn, draft: DraftRecord) -> str:
         "teams": draft.teams, "rounds": draft.rounds, "my_slot": draft.my_slot,
         "scoring_json": draft.scoring_json,
         "settings_json": draft.settings_json}], columns=_DRAFT_COLUMNS)
-    conn.execute("INSERT INTO draft_log SELECT * FROM head")
-
     picks = _shape(draft.picks, _PICK_COLUMNS, draft_id)
-    if not picks.empty:
-        conn.execute("INSERT INTO draft_log_pick SELECT * FROM picks")
     pool = _shape(draft.pool, _POOL_COLUMNS, draft_id)
-    if not pool.empty:
-        conn.execute("INSERT INTO draft_log_pool SELECT * FROM pool")
+
+    try:
+        conn.execute("BEGIN TRANSACTION")
+        for table in ("draft_log_pick", "draft_log_pool", "draft_log"):
+            conn.execute(f"DELETE FROM {table} WHERE draft_id = ?", [draft_id])
+        conn.execute("INSERT INTO draft_log SELECT * FROM head")
+        if not picks.empty:
+            conn.execute("INSERT INTO draft_log_pick SELECT * FROM picks")
+        if not pool.empty:
+            conn.execute("INSERT INTO draft_log_pool SELECT * FROM pool")
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
     return draft_id
 
 
