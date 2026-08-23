@@ -262,13 +262,20 @@ def _pool(rows):
     """`norm, position, adp_rank` from `rows`, plus neutral defaults for the
     Task 4 columns `feature_matrix` now always reads (`market_rank` mirrors
     `adp_rank`, same fallback `_enrich_pool` uses with no ESPN data; the rest
-    match `_ATTRIBUTE_DEFAULTS` -- unknown, not a claim)."""
+    match `_ATTRIBUTE_DEFAULTS` -- unknown, not a claim).
+
+    The Task 3 stat-profile columns are here for the same reason and with
+    the same NaN: `feature_matrix` reads them unconditionally, exactly as it
+    reads `age`, and a pool built by `_enrich_pool` always carries them.
+    """
     df = pd.DataFrame(rows, columns=["norm", "position", "adp_rank"])
     df["market_rank"] = df["adp_rank"]
     df["hype"] = np.nan
     df["age"] = np.nan
     df["no_track_record"] = True
     df["trend"] = 0.0
+    for col in ("usage", "efficiency", "played_share", "peak_gap"):
+        df[col] = np.nan
     return df
 
 @pytest.mark.parametrize("pick,early", [(8, True), (24, True), (25, False)])
@@ -533,7 +540,10 @@ def test_fit_all_separates_managers_with_opposite_tastes(monkeypatch):
             "norm": [f"p{i}" for i in range(n)], "position": positions,
             "adp_rank": ranks, "market_rank": ranks,
             "hype": np.full(n, np.nan), "age": np.full(n, np.nan),
-            "no_track_record": np.full(n, True), "trend": np.zeros(n)})
+            "no_track_record": np.full(n, True), "trend": np.zeros(n),
+            "usage": np.full(n, np.nan), "efficiency": np.full(n, np.nan),
+            "played_share": np.full(n, np.nan),
+            "peak_gap": np.full(n, np.nan)})
 
     observations = []
     for season in seasons:
@@ -602,7 +612,10 @@ def test_adp_baseline_is_scored_on_market_rank_not_pool_order(monkeypatch):
             "adp_rank": np.arange(1.0, n + 1.0),          # pool sort order
             "market_rank": np.arange(float(n), 0.0, -1.0),   # reversed
             "hype": np.zeros(n), "age": np.full(n, np.nan),
-            "no_track_record": np.full(n, True), "trend": np.zeros(n)})
+            "no_track_record": np.full(n, True), "trend": np.zeros(n),
+            "usage": np.full(n, np.nan), "efficiency": np.full(n, np.nan),
+            "played_share": np.full(n, np.nan),
+            "peak_gap": np.full(n, np.nan)})
 
     observations = [
         PickObservation(season=season, overall_pick=1, manager="m",
@@ -778,7 +791,11 @@ def test_market_rank_matches_the_scale_build_pool_ranks_on(tmp_path):
 def test_pool_carries_player_attributes_with_neutral_defaults(tmp_path):
     obs = build_observations(_seed_with_espn(tmp_path))
     pool = obs[0].pool
-    for col in ("market_rank", "hype", "age", "no_track_record", "trend"):
+    for col in ("market_rank", "hype", "age", "no_track_record", "trend",
+                # The stat profile. Carried and unread for a year; Task 3
+                # made `feature_matrix` read them, so a pool that stops
+                # carrying them is now a KeyError rather than a dead column.
+                "usage", "efficiency", "played_share", "peak_gap"):
         assert col in pool.columns
     # No `weekly` table at all, so nobody has a track record.
     assert pool["no_track_record"].all()
@@ -843,7 +860,12 @@ def test_log_rank_makes_the_top_of_the_board_matter_more():
             "norm": [f"p{r}" for r in ranks], "position": ["RB"] * len(ranks),
             "adp_rank": ranks, "market_rank": ranks, "hype": [0.0] * len(ranks),
             "age": [np.nan] * len(ranks),
-            "no_track_record": [True] * len(ranks), "trend": [0.0] * len(ranks)})
+            "no_track_record": [True] * len(ranks),
+            "trend": [0.0] * len(ranks),
+            "usage": [np.nan] * len(ranks),
+            "efficiency": [np.nan] * len(ranks),
+            "played_share": [np.nan] * len(ranks),
+            "peak_gap": [np.nan] * len(ranks)})
         obs = PickObservation(season=2025, overall_pick=pick, manager="m",
                               chosen=0, pool=pool, roster={}, recent=[])
         return feature_matrix(obs, league.default_settings())[:, ri]
@@ -855,19 +877,30 @@ def test_log_rank_makes_the_top_of_the_board_matter_more():
 
 def test_new_features_are_present_and_neutral_without_history():
     import numpy as np
-    from scoring.draft_model import feature_matrix, FEATURE_NAMES, PickObservation
+    from scoring.draft_model import (feature_matrix, FEATURE_NAMES,
+                                     LEGACY_FEATURE_NAMES, PickObservation)
     from scoring import league
-    assert FEATURE_NAMES[-4:] == ["age", "no_track_record", "hype", "trend"]
+    # These four used to be the tail of FEATURE_NAMES. Task 3 appended eight
+    # more behind them, so what is pinned now is their place in the 15-column
+    # prefix every backtest number on record was measured against -- which is
+    # the property that actually mattered, since `backtest(features=...)` and
+    # `fit_subset` slice by index.
+    assert LEGACY_FEATURE_NAMES[-4:] == ["age", "no_track_record", "hype",
+                                         "trend"]
+    assert FEATURE_NAMES[:len(LEGACY_FEATURE_NAMES)] == LEGACY_FEATURE_NAMES
     pool = pd.DataFrame({
         "norm": ["a", "b"], "position": ["RB", "WR"], "adp_rank": [1.0, 2.0],
         "market_rank": [1.0, 2.0], "hype": [np.nan, np.nan],
         "age": [np.nan, np.nan],
-        "no_track_record": [True, True], "trend": [0.0, 0.0]})
+        "no_track_record": [True, True], "trend": [0.0, 0.0],
+        "usage": [np.nan, np.nan], "efficiency": [np.nan, np.nan],
+        "played_share": [np.nan, np.nan], "peak_gap": [np.nan, np.nan]})
     obs = PickObservation(season=2025, overall_pick=1, manager="m", chosen=0,
                           pool=pool, roster={}, recent=[])
     X = feature_matrix(obs, league.default_settings())
     assert X.shape == (2, len(FEATURE_NAMES))
-    for name in ("age", "hype", "trend"):
+    for name in ("age", "hype", "trend",
+                 "usage", "efficiency", "played_share", "peak_gap"):
         assert (X[:, FEATURE_NAMES.index(name)] == 0.0).all()
     assert (X[:, FEATURE_NAMES.index("no_track_record")] == 1.0).all()
     assert np.isfinite(X).all()
@@ -881,13 +914,299 @@ def test_age_is_centred_within_position():
         "norm": ["a", "b", "c"], "position": ["RB", "RB", "WR"],
         "adp_rank": [1.0, 2.0, 3.0], "market_rank": [1.0, 2.0, 3.0],
         "hype": [0.0, 0.0, 0.0], "age": [24.0, 28.0, 30.0],
-        "no_track_record": [False, False, False], "trend": [0.0, 0.0, 0.0]})
+        "no_track_record": [False, False, False], "trend": [0.0, 0.0, 0.0],
+        "usage": [np.nan] * 3, "efficiency": [np.nan] * 3,
+        "played_share": [np.nan] * 3, "peak_gap": [np.nan] * 3})
     obs = PickObservation(season=2025, overall_pick=1, manager="m", chosen=0,
                           pool=pool, roster={}, recent=[])
     age = feature_matrix(obs, league.default_settings())[:, FEATURE_NAMES.index("age")]
     assert age[0] == pytest.approx(-2.0)   # RB mean 26
     assert age[1] == pytest.approx(2.0)
     assert age[2] == pytest.approx(0.0)    # lone WR is its own mean
+
+
+# --- Task 3 columns: what the picking team has built, and what the player
+# has actually done. Every one of them is an interaction with the candidate,
+# for the reason the first test here pins down. ------------------------------
+
+def _shape_pool():
+    """A five-player, four-position pool carrying real stat values.
+
+    Two RBs so `_centre_within_position` has a group to centre within; the
+    single WR/TE/QB are each their own mean and centre to exactly 0.0, which
+    is the same neutral an unknown value gets.
+    """
+    pool = _pool([("rb1", "RB", 1.0), ("rb2", "RB", 2.0), ("wr1", "WR", 3.0),
+                  ("te1", "TE", 4.0), ("qb1", "QB", 5.0)])
+    pool["usage"] = [18.0, 9.0, 14.0, 5.0, 38.0]
+    pool["efficiency"] = [0.85, 0.60, 1.10, 0.95, 0.42]
+    pool["played_share"] = [1.0, 0.65, 0.90, 0.80, 1.0]
+    pool["peak_gap"] = [1.5, 6.0, 0.5, 2.0, 3.0]
+    return pool
+
+
+def _shape_obs(overall_pick=41, roster=None, last_pick_at_pos=None):
+    """One choice set with a team history behind it.
+
+    Default league is 8 teams / 15 rounds, so overall pick 41 is round 6, and
+    the team last took an RB at pick 25 (round 4) and a WR at 33 (round 5).
+    """
+    return PickObservation(
+        season=2026, overall_pick=overall_pick, manager="m", chosen=0,
+        pool=_shape_pool(),
+        roster={"RB": 2, "WR": 1} if roster is None else roster,
+        recent=[],
+        last_pick_at_pos=({"RB": 25, "WR": 33} if last_pick_at_pos is None
+                          else last_pick_at_pos))
+
+
+def test_a_column_constant_across_a_choice_set_cannot_change_the_likelihood():
+    """THE property every feature in this model has to respect.
+
+    This is a conditional logit: the softmax runs over the candidates inside
+    ONE choice set, so adding the same number to every candidate's score
+    divides straight back out of the normalizer. A feature column holding one
+    value for the whole set therefore contributes exactly nothing to the
+    likelihood -- algebraically, at any coefficient, not "weakly" or "in
+    practice". That is why "it is round 6" and "this team holds three RBs"
+    cannot enter the model on their own and every Task 3 column enters as an
+    interaction with the candidate instead.
+
+    Nothing else in this suite protects it, and it is precisely the property
+    a well-meaning future edit ("just add the round, it clearly matters")
+    breaks while every other test stays green.
+    """
+    import numpy as np
+    from scoring.draft_model import feature_matrix, log_likelihood
+
+    obs = _shape_obs()
+    X = feature_matrix(obs, _settings())
+    beta = np.random.default_rng(7).normal(size=X.shape[1])
+    base = log_likelihood(beta, [X], [2])
+
+    # A constant column, at three different values and three different
+    # coefficients, including a large one. All of them vanish.
+    for value, coef in ((1.0, 3.0), (-4.25, -0.5), (100.0, 12.0)):
+        appended = np.column_stack([X, np.full(len(X), value)])
+        assert log_likelihood(np.append(beta, coef), [appended],
+                              [2]) == pytest.approx(base)
+
+    # ...and the test can fail: a column that DOES vary moves the number, so
+    # the three assertions above are about cancellation and not about a
+    # log_likelihood that ignores extra columns.
+    varying = np.column_stack([X, np.arange(float(len(X)))])
+    assert log_likelihood(np.append(beta, 1.0), [varying],
+                          [2]) != pytest.approx(base)
+
+
+def test_every_task_3_column_varies_inside_a_real_choice_set():
+    """The other half of the constraint above: a column that does not vary is
+    not a weak feature, it is no feature at all. Each of the eight is checked
+    against a choice set with a team history and a real stat profile behind
+    it, so "this one is always 0.0 in practice" cannot pass unnoticed."""
+    import numpy as np
+    from scoring.draft_model import (UNMEASURED_FEATURES, FEATURE_NAMES,
+                                     feature_matrix)
+
+    X = feature_matrix(_shape_obs(), _settings())
+    for name in UNMEASURED_FEATURES:
+        column = X[:, FEATURE_NAMES.index(name)]
+        assert len(np.unique(column)) > 1, f"{name} is constant: {column}"
+
+
+def test_zero_coefficients_on_the_new_columns_reproduce_the_old_model():
+    """Appending columns must not disturb what was already measured.
+
+    Every backtest number on record was fitted over the 15 columns of
+    `LEGACY_FEATURE_NAMES`. They keep their indices (Task 3 appends, never
+    inserts), so a beta whose new entries are 0.0 scores a choice set
+    identically to the 15-feature model it came from -- which is what makes
+    those numbers still reproducible with `backtest(features=...)`.
+    """
+    import numpy as np
+    from scoring.draft_model import (FEATURE_NAMES, LEGACY_FEATURE_NAMES,
+                                     _softmax, feature_matrix, log_likelihood)
+
+    n_old = len(LEGACY_FEATURE_NAMES)
+    assert FEATURE_NAMES[:n_old] == LEGACY_FEATURE_NAMES
+
+    X = feature_matrix(_shape_obs(), _settings())
+    old = np.random.default_rng(3).normal(size=n_old)
+    padded = np.concatenate([old, np.zeros(len(FEATURE_NAMES) - n_old)])
+
+    assert log_likelihood(padded, [X], [1]) == pytest.approx(
+        log_likelihood(old, [X[:, :n_old]], [1]))
+    np.testing.assert_allclose(_softmax(X @ padded),
+                               _softmax(X[:, :n_old] @ old))
+
+
+def test_cold_start_prior_pads_the_new_columns_with_zero():
+    """A 0.0 is "not yet measured", and it is also what keeps a cold-start
+    league behaving exactly as it did before these columns existed."""
+    from scoring.draft_model import (COLD_START_PRIOR, FEATURE_NAMES,
+                                     UNMEASURED_FEATURES)
+    for name in UNMEASURED_FEATURES:
+        assert COLD_START_PRIOR[FEATURE_NAMES.index(name)] == 0.0
+
+
+def test_pos_count_is_what_this_team_holds_at_the_candidates_position():
+    """`need` clips at the starter count; this does not, which is the point
+    -- it can tell a manager's third running back from his fifth."""
+    from scoring.draft_model import FEATURE_NAMES, feature_matrix
+
+    obs = _shape_obs(roster={"RB": 3, "WR": 1})
+    counts = feature_matrix(obs, _settings())[:, FEATURE_NAMES.index("pos_count")]
+    # Pool order is rb1, rb2, wr1, te1, qb1.
+    assert list(counts) == [3.0, 3.0, 1.0, 0.0, 0.0]
+
+
+def test_first_at_pos_marks_a_position_the_team_has_none_of():
+    from scoring.draft_model import FEATURE_NAMES, feature_matrix
+
+    obs = _shape_obs(roster={"RB": 2, "WR": 1})
+    first = feature_matrix(obs, _settings())[:, FEATURE_NAMES.index("first_at_pos")]
+    assert list(first) == [0.0, 0.0, 0.0, 1.0, 1.0]     # TE and QB are empty
+
+
+def test_first_at_pos_round_is_the_empty_position_flag_times_the_round():
+    """A round number alone is constant across the choice set and cancels
+    (see the cancellation test above). Multiplied by `first_at_pos` it says
+    something about THIS candidate: "an empty position, and it is late"."""
+    from scoring.draft_model import FEATURE_NAMES, feature_matrix
+
+    settings = _settings()                       # 8 teams, 15 rounds
+    idx = FEATURE_NAMES.index("first_at_pos_round")
+
+    early = feature_matrix(_shape_obs(overall_pick=1), settings)[:, idx]
+    late = feature_matrix(_shape_obs(overall_pick=97), settings)[:, idx]
+
+    assert list(early) == [0.0, 0.0, 0.0] + [pytest.approx(1 / 15)] * 2
+    assert list(late) == [0.0, 0.0, 0.0] + [pytest.approx(13 / 15)] * 2
+    # Divided by `settings.rounds`, so it stays on the other columns' scale
+    # rather than reaching 13 while a position dummy reaches 1.
+    assert (late <= 1.0).all()
+
+
+def test_pos_gap_counts_rounds_since_this_team_last_took_the_position():
+    from scoring.draft_model import FEATURE_NAMES, feature_matrix
+
+    # Pick 41 is round 6; RB last taken at pick 25 (round 4), WR at 33
+    # (round 5). So RB is two rounds ago and WR one.
+    gap = feature_matrix(_shape_obs(), _settings())[:, FEATURE_NAMES.index("pos_gap")]
+    assert gap[0] == pytest.approx(2 / 15)
+    assert gap[1] == pytest.approx(2 / 15)
+    assert gap[2] == pytest.approx(1 / 15)
+
+
+def test_pos_gap_is_zero_for_a_position_this_team_has_never_taken():
+    """0.0 means "never", and it cannot collide with a real gap: a team picks
+    once per round, so their previous pick at a position is at least a full
+    round back and the smallest real value is 1/rounds."""
+    from scoring.draft_model import FEATURE_NAMES, feature_matrix
+
+    obs = _shape_obs(last_pick_at_pos={"RB": 40})     # pick 40 is round 5
+    gap = feature_matrix(obs, _settings())[:, FEATURE_NAMES.index("pos_gap")]
+    assert gap[0] == pytest.approx(1 / 15)            # the smallest real gap
+    assert list(gap[2:]) == [0.0, 0.0, 0.0]           # WR, TE, QB: never taken
+
+
+def test_observations_carry_the_picking_teams_own_pick_history(tmp_path):
+    """`recent` is the whole ROOM's last few picks and `roster` is a count
+    with no timing in it. Neither can answer "how long has THIS manager left
+    running back alone", which is what `pos_gap` reads."""
+    obs = build_observations(_seed(tmp_path))
+
+    assert obs[0].last_pick_at_pos == {}               # nobody has picked yet
+    third = obs[2]                                     # dan's second pick
+    assert third.manager == "dan"
+    assert third.last_pick_at_pos == {"WR": 2}
+    # The room took an RB at pick 1, and `recent` shows it -- but that was
+    # worthy's pick, so it must not appear in dan's own history.
+    assert third.recent == ["WR", "RB"]
+    assert "RB" not in third.last_pick_at_pos
+
+
+def test_a_pick_with_no_adp_row_still_counts_toward_the_teams_history(tmp_path):
+    """Same rule `roster` and `recent` already follow: an unmatched pick
+    produces no observation, but it still consumed that team's turn. Leaving
+    it out would report a manager as having never taken a WR immediately
+    after he took one."""
+    conn = get_conn(str(tmp_path / "ghost.duckdb"))
+    write_table(conn, "draft_picks", pd.DataFrame([
+        {"season": 2025, "overall_pick": 1, "round": 1, "round_pick": 1,
+         "team_id": 1, "espn_player_id": 11, "player_name": "Player A",
+         "position": "RB", "nfl_team": "DET", "keeper": False},
+        {"season": 2025, "overall_pick": 2, "round": 1, "round_pick": 2,
+         "team_id": 1, "espn_player_id": 12, "player_name": "Ghost",
+         "position": "WR", "nfl_team": "GB", "keeper": False},
+        {"season": 2025, "overall_pick": 3, "round": 2, "round_pick": 1,
+         "team_id": 1, "espn_player_id": 13, "player_name": "Player B",
+         "position": "RB", "nfl_team": "CHI", "keeper": False},
+    ]))
+    write_table(conn, "draft_teams", pd.DataFrame([
+        {"season": 2025, "team_id": 1, "manager": "solo", "slot": 1},
+    ]))
+    write_table(conn, "historic_adp", pd.DataFrame([
+        {"season": 2025, "adp_name": "Player A", "position": "RB", "adp_rank": 1},
+        {"season": 2025, "adp_name": "Player B", "position": "RB", "adp_rank": 2},
+        {"season": 2025, "adp_name": "Player C", "position": "WR", "adp_rank": 3},
+    ]))
+
+    obs = build_observations(conn)
+    assert [o.overall_pick for o in obs] == [1, 3]     # "Ghost" is dropped
+    assert obs[1].last_pick_at_pos == {"RB": 1, "WR": 2}
+
+
+def test_stat_profile_columns_are_centred_within_position():
+    """Same treatment `age` gets, for the same reason: a coefficient should
+    read as a preference between comparable players, not re-learn that
+    quarterbacks throw and kickers do not -- the position dummies already
+    say that."""
+    from scoring.draft_model import FEATURE_NAMES, feature_matrix
+
+    X = feature_matrix(_shape_obs(), _settings())
+    usage = X[:, FEATURE_NAMES.index("usage")]
+    assert usage[0] == pytest.approx(4.5)      # RBs are 18 and 9, mean 13.5
+    assert usage[1] == pytest.approx(-4.5)
+    assert usage[2] == pytest.approx(0.0)      # lone WR is its own mean
+    # The QB's raw 38 is the largest number in the column and centres to 0.0,
+    # which is the whole point: it is not evidence that this manager likes
+    # high-volume players, only that quarterbacks throw a lot.
+    assert usage[4] == pytest.approx(0.0)
+
+
+def test_stat_profile_columns_are_neutral_when_the_join_found_nothing():
+    """`_ATTRIBUTE_DEFAULTS` fills these with NaN when the attribute join
+    misses, and `_centre_within_position` leaves a non-finite value at 0.0.
+    An unknown player therefore reads as "no claim", not as "zero usage"."""
+    import numpy as np
+    from scoring.draft_model import FEATURE_NAMES, feature_matrix
+
+    pool = _shape_pool()
+    pool["usage"] = np.nan
+    obs = _shape_obs()._replace(pool=pool)
+    X = feature_matrix(obs, _settings())
+    assert (X[:, FEATURE_NAMES.index("usage")] == 0.0).all()
+    assert np.isfinite(X).all()
+
+
+def test_feature_names_end_with_the_task_3_columns_in_the_briefed_order():
+    from scoring.draft_model import (COLD_START_PRIOR, FEATURE_NAMES,
+                                     UNMEASURED_FEATURES)
+    assert UNMEASURED_FEATURES == [
+        "pos_count", "first_at_pos", "pos_gap", "first_at_pos_round",
+        "usage", "efficiency", "played_share", "peak_gap"]
+    assert FEATURE_NAMES[-len(UNMEASURED_FEATURES):] == UNMEASURED_FEATURES
+    assert len(COLD_START_PRIOR) == len(FEATURE_NAMES) == 23
+
+
+def test_every_feature_has_a_phrase_so_describe_never_skips_one():
+    """`describe` takes the top-3 |deviation| features and drops any name it
+    has no phrase for WITHOUT looking further down the list, so an unnamed
+    feature turns a manager's strongest, most measurable deviation into
+    "drafts close to league average"."""
+    from scoring.draft_model import FEATURE_NAMES, _PHRASES
+    assert set(_PHRASES) == set(FEATURE_NAMES)
 
 
 def test_positional_bias_measures_how_early_a_league_takes_a_position(tmp_path):

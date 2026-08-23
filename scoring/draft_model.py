@@ -35,12 +35,23 @@ FFC_BLEND_WEIGHT = 0.25
 
 _ATTRIBUTE_DEFAULTS = {"age": np.nan, "no_track_record": True,
                        "prod_rank": np.nan, "trend": 0.0,
-                       # Carried on the pool but read by no feature. These
-                       # are the stat-profile columns from the measurement
-                       # in docs/superpowers/findings/2026-08-11-stat-profile
-                       # -vs-position-dummies.md; they stay filled so a
-                       # re-measurement on a seventh season is a change to
+                       # The stat-profile columns. They were carried on the
+                       # pool and read by no feature for a year, precisely so
+                       # that re-measuring them would be a change to
                        # FEATURE_NAMES rather than a rebuild of the join.
+                       # That is what has now happened -- see
+                       # _STAT_PROFILE_FEATURES below.
+                       #
+                       # The 2026-08-11 finding
+                       # (docs/superpowers/findings/2026-08-11-stat-profile
+                       # -vs-position-dummies.md) MEASURED THEM AND REJECTED
+                       # THEM, and nothing here contradicts it: at n=696
+                       # picks they cost top-1 accuracy against the position
+                       # dummies, and that remains the answer for that
+                       # sample. They are back in the matrix because the
+                       # corpus is no longer n=696 -- see
+                       # _STAT_PROFILE_FEATURES for the sample that licenses
+                       # re-opening the question and for who decides it.
                        "usage": np.nan, "efficiency": np.nan,
                        "played_share": np.nan, "peak_gap": np.nan}
 
@@ -182,6 +193,21 @@ class PickObservation(NamedTuple):
     pool: pd.DataFrame
     roster: dict
     recent: list
+    # position -> `overall_pick` of the PICKING TEAM's most recent pick at
+    # that position, before this one. `roster` says how many they hold and
+    # `recent` says what the whole room just took; neither can answer "how
+    # long has this manager left running back alone", which is what
+    # `pos_gap` is. Stored as an overall pick number rather than a round so
+    # `build_observations` stays free of `settings` -- `feature_matrix`
+    # already derives the round from `overall_pick` and `settings.teams`,
+    # and deriving it in one place is what keeps the two agreeing.
+    #
+    # Defaulted so every existing construction site (and every test fixture)
+    # keeps working and reads as "this team has taken nothing yet", which is
+    # the neutral answer rather than a wrong one. The shared default dict is
+    # never mutated: `build_observations` copies before storing and
+    # `feature_matrix` only reads.
+    last_pick_at_pos: dict = {}
 
 
 def build_observations(conn) -> list:
@@ -223,6 +249,12 @@ def build_observations(conn) -> list:
         pool = _enrich_pool(conn, pool, season, cheatsheet)
         available = pool.copy()
         rosters, recent = {}, []
+        # manager -> {position: overall_pick of their last pick there}. One
+        # extra dict of at most six entries per manager, updated in O(1) per
+        # pick and shallow-copied onto the observation exactly like `roster`
+        # already is -- `build_observations` is ~10s against the owner's own
+        # league and this must not be what makes it eleven.
+        last_pick_at = {}
         for _, pick in season_picks.sort_values("overall_pick").iterrows():
             key = pick["key"]
             match = (available.index[available["key"] == key]
@@ -234,7 +266,8 @@ def build_observations(conn) -> list:
                     season=int(season), overall_pick=int(pick["overall_pick"]),
                     manager=pick["manager"], chosen=chosen, pool=reset,
                     roster=dict(rosters.get(pick["manager"], {})),
-                    recent=list(recent[:RUN_WINDOW])))
+                    recent=list(recent[:RUN_WINDOW]),
+                    last_pick_at_pos=dict(last_pick_at.get(pick["manager"], {}))))
                 # Belt and braces: the pool is deduped above so `match`
                 # should never carry more than one label, but drop only the
                 # first to guarantee the pool never shrinks by more than one
@@ -247,6 +280,8 @@ def build_observations(conn) -> list:
             rosters.setdefault(pick["manager"], {})
             rosters[pick["manager"]][pick["position"]] = (
                 rosters[pick["manager"]].get(pick["position"], 0) + 1)
+            last_pick_at.setdefault(pick["manager"], {})[pick["position"]] = (
+                int(pick["overall_pick"]))
             recent.insert(0, pick["position"])
     return out
 
@@ -295,10 +330,62 @@ _POSITION_DUMMIES = ["RB", "WR", "TE", "K", "DST"]
 #
 # Both are the first things to re-measure when a seventh season lands.
 _NEW_FEATURES = ["age", "no_track_record", "hype", "trend"]
-FEATURE_NAMES = (["reach", "fall"]
-                 + [f"pos_{p}" for p in _POSITION_DUMMIES]
-                 + ["qb_early", "te_early", "need", "run"]
-                 + _NEW_FEATURES)
+
+# What the PICKING TEAM has already built, always crossed with the candidate.
+#
+# THE CONSTRAINT THAT SHAPES ALL FOUR, stated here because it is the one a
+# well-meaning edit breaks: this is a conditional logit. The softmax runs over
+# the candidates inside ONE choice set, so a column holding the same value for
+# every candidate in that set cancels out of the likelihood exactly -- not
+# approximately, not weakly, but algebraically, because a constant added to
+# every score divides straight back out of the softmax. "It is round 6" and
+# "this team already holds three running backs" are facts about the PICK.
+# Neither can enter the model on its own, however predictive it sounds.
+#
+# Each therefore enters as an interaction with the candidate under
+# consideration. Not "the team holds three RBs" but "this candidate is an RB
+# and the team already holds three". `qb_early`/`te_early` above are the same
+# pattern -- a round fact multiplied by a position dummy -- and these follow
+# their shape. `tests/test_draft_model.py` asserts the cancellation property
+# directly against `log_likelihood`, because nothing else in the suite does.
+#
+# `need` was already this shape and stays: these generalize it rather than
+# replace it. `need` is binary and clips at the starter count, so it cannot
+# tell a manager's second running back from his fifth.
+_ROSTER_SHAPE_FEATURES = ["pos_count", "first_at_pos", "pos_gap",
+                          "first_at_pos_round"]
+
+# The stat profile, re-enabled for re-measurement. See `_ATTRIBUTE_DEFAULTS`.
+#
+# These four were measured against the position dummies on 2026-08-11 at
+# n=696 picks and REJECTED on `delta_top1`, the decision metric stated below.
+# That finding stands and is not being re-litigated by argument: it is being
+# re-measured on a sample it explicitly licenses re-measurement against. The
+# mock corpus is 23 drafts / 2,944 picks -- four times the evidence, and
+# eight strangers per draft rather than the same eight managers six times --
+# and its position mix by round bucket (early RB 55.6% / WR 36.4% / TE 6.9% /
+# QB 1.1%; late WR 22.3% / RB 18.3% / DST 16.8% / K 16.7% / QB 15.2% /
+# TE 10.8%) is a different distribution from the one the rejection was
+# measured on. Task 4's `fit_prior` decides whether they ship, on the same
+# rule and against that corpus; a positive coefficient here today means
+# nothing except "not yet measured".
+_STAT_PROFILE_FEATURES = ["usage", "efficiency", "played_share", "peak_gap"]
+
+# Everything added since the last measurement, in one list, so the thing that
+# has to be measured is enumerable rather than remembered. `ablation` takes it
+# as `candidates`; `COLD_START_PRIOR` pads a 0.0 for each.
+UNMEASURED_FEATURES = _ROSTER_SHAPE_FEATURES + _STAT_PROFILE_FEATURES
+
+# The 15 features every backtest number on record was measured against.
+# Appending to FEATURE_NAMES rather than inserting is not cosmetic: `backtest`
+# and `fit_subset` slice the design matrix by INDEX, so the old columns have
+# to keep the indices they had for a `features=` mask to mean the same thing
+# it did before. A test pins this prefix for exactly that reason.
+LEGACY_FEATURE_NAMES = (["reach", "fall"]
+                        + [f"pos_{p}" for p in _POSITION_DUMMIES]
+                        + ["qb_early", "te_early", "need", "run"]
+                        + _NEW_FEATURES)
+FEATURE_NAMES = LEGACY_FEATURE_NAMES + UNMEASURED_FEATURES
 EARLY_ROUNDS = 3
 
 # Coefficients the rail's three-bar manager card may show. Everything except
@@ -311,6 +398,18 @@ EARLY_ROUNDS = 3
 # `age`/`hype`/`trend`/`no_track_record`: the filter runs before the top-3
 # slice, so a manager whose strongest deviation was on a new feature got bars
 # for weaker ones instead. `_PHRASES` above had the identical bug.
+#
+# KNOWN WART, left deliberately rather than fixed here: the filter is a name
+# prefix, and `pos_count`/`pos_gap` start with `pos_` without being position
+# dummies, so they are excluded from the card too. They are excluded for the
+# wrong reason -- both summarize honestly on their own, unlike a dummy that
+# only means anything relative to the other four. It is not fixed in this
+# commit because `tests/test_api.py` asserts `shown` against its own copy of
+# `not f.startswith("pos_")`, so the predicate has to change in both places
+# at once. When Task 4 decides whether these two ship, rewrite this as a
+# membership test against `_POSITION_DUMMIES` and update that assertion with
+# it. Until then the only cost is two bars the rail never offers, on two
+# coefficients that are still 0.0 in the prior.
 SUMMARY_FEATURES = [f for f in FEATURE_NAMES if not f.startswith("pos_")]
 
 # Divisor that puts `hype` on roughly the same scale as the other columns,
@@ -318,6 +417,43 @@ SUMMARY_FEATURES = [f for f in FEATURE_NAMES if not f.startswith("pos_")]
 # it just rescales the coefficient -- but keeping the columns comparable
 # makes the ridge penalty treat them even-handedly.
 HYPE_SCALE = 50.0
+
+# WHAT SCALE THE COLUMNS ADDED IN TASK 3 SIT ON, and what was done about it.
+#
+# Ridge penalizes every coefficient by the same lambda, so a column on a
+# wildly different scale is effectively regularized differently: a feature
+# measured in rounds needs a coefficient ten times smaller than one measured
+# in dummies to say the same thing, and the penalty charges it for that.
+# HYPE_SCALE exists for exactly this reason. So each new column was checked
+# against the band the shipped ones already occupy rather than assumed into
+# it. Standard deviation after `_centre_within_position`, measured over
+# `attributes_as_of` for 2025 and 2026 (QB/RB/WR/TE, n=1,598 and 1,721):
+#
+#     age  4.44 / 4.67      <- shipped, unscaled, the widest incumbent
+#     trend  1.95 / 1.85    <- shipped, unscaled
+#     usage  5.56 / 5.41    peak_gap  3.88 / 4.01
+#     efficiency  0.79 / 0.73    played_share  0.31 / 0.31
+#
+# So all four stat-profile columns land inside the band `age` and `trend`
+# already define, and they are passed through unscaled. Dividing them would
+# have put them on a DIFFERENT scale from the centred column they are most
+# directly comparable against, which is the opposite of the goal.
+#
+# The roster-shape columns are handled per column:
+#
+# - `pos_count` is a raw count. It is bounded by the rounds already played
+#   and in practice reaches about 5 on the deepest position of a 16-round
+#   roster, so it sits inside the band above unscaled.
+# - `first_at_pos` is a 0/1 dummy like the five position dummies.
+# - `pos_gap` is the ONLY one that needed a divisor. Measured in rounds it
+#   spans 0-15 -- an order of magnitude wider than a dummy and wider than
+#   anything above -- so it is divided by `settings.rounds` to land in 0-1.
+# - `first_at_pos_round` is divided by `settings.rounds` for the same reason,
+#   which is also what the brief specifies.
+#
+# Dividing by `settings.rounds` rather than by a constant keeps the column
+# meaning "how far through the draft", which is the same quantity in a
+# 15-round league and a 16-round one. A flat divisor would not be.
 
 
 def _log_rank_features(market_rank, pick_no):
@@ -382,6 +518,57 @@ def feature_matrix(obs: PickObservation, settings) -> np.ndarray:
     hype = pool["hype"].to_numpy(dtype=float)
     columns.append(np.nan_to_num(hype, nan=0.0) / HYPE_SCALE)
     columns.append(pool["trend"].to_numpy(dtype=float))
+
+    # --- `_ROSTER_SHAPE_FEATURES`: what this team already holds, crossed
+    # with the candidate's own position so the column varies inside the
+    # choice set. See that constant for why a column that does not vary is
+    # not a weak feature but no feature at all.
+    #
+    # `held` is what `obs.roster` says about the candidate's position
+    # specifically, so two candidates at different positions read different
+    # values off the same roster -- that indexing IS the interaction.
+    held = np.array([float(obs.roster.get(p, 0)) for p in positions])
+    columns.append(held)                                        # pos_count
+    # `pos_count == 0` rather than `need == 0`: `need` clips at the starter
+    # count, so it cannot separate "has none" from "has one of two".
+    first_at_pos = (held == 0.0).astype(float)
+    columns.append(first_at_pos)                                # first_at_pos
+
+    # Rounds since this team last took the candidate's position, 0.0 when
+    # they never have. `obs.last_pick_at_pos` stores overall pick numbers, so
+    # the round comes from the same `(pick - 1) // teams + 1` arithmetic used
+    # for `round_no` above -- one definition of "round", not two.
+    #
+    # 0.0 therefore means "never", and in this data it cannot mean anything
+    # else: every team picks exactly once per round in a snake, so their
+    # previous pick at any position is at least one full round back and a
+    # real gap is never smaller than 1/rounds. A format that gave one team
+    # two picks in a round would collide the two readings; none of the
+    # drafts fitted here does.
+    rounds = max(settings.rounds, 1)
+    last_at = obs.last_pick_at_pos
+    columns.append(np.array([                                   # pos_gap
+        0.0 if p not in last_at
+        else (round_no - ((last_at[p] - 1) // teams + 1)) / rounds
+        for p in positions]))
+
+    # "Has none of this position, and it is getting late." The round on its
+    # own is constant across the choice set and cancels; multiplied by
+    # `first_at_pos` it is a claim about this candidate. Same construction as
+    # `qb_early`/`te_early`, with a continuous round instead of a threshold.
+    columns.append(first_at_pos * (round_no / rounds))     # first_at_pos_round
+
+    # --- `_STAT_PROFILE_FEATURES`: what the candidate has actually done.
+    # Centred within position for the same reason `age` is -- so a
+    # coefficient reads as a preference between comparable players rather
+    # than re-learning that running backs carry the ball and receivers do
+    # not, which the position dummies already say. Unknown stays neutral:
+    # `_centre_within_position` leaves a non-finite value at 0.0, which is
+    # also what a pool whose attribute join found nothing produces (see
+    # `_ATTRIBUTE_DEFAULTS`), so "no history" reads the same either way.
+    for name in _STAT_PROFILE_FEATURES:
+        columns.append(_centre_within_position(
+            pool[name].to_numpy(dtype=float), positions))
 
     return np.column_stack(columns) if n else np.zeros((0, len(FEATURE_NAMES)))
 
@@ -560,6 +747,34 @@ _PHRASES = {
     "no_track_record": ("bets on unproven players", "avoids unproven players"),
     "hype": ("chases hype over production", "fades hype, trusts production"),
     "trend": ("targets players trending up", "sticks with steady production"),
+    # Task 3 columns, named here on the same rule: `describe` drops a
+    # top-3 feature it has no phrase for WITHOUT looking further down the
+    # list, so an unnamed feature turns a real deviation into "drafts close
+    # to league average". Every entry of FEATURE_NAMES is named here; keep
+    # it that way.
+    #
+    # Signs, since three of these are easy to read backwards. `pos_count` is
+    # how many of that position the team already holds, so positive means
+    # "wants more of what he has". `first_at_pos` is 1 when he has NONE, so
+    # positive means "goes to an empty position first". `pos_gap` is rounds
+    # since he last took that position, so positive means the wait itself
+    # pulls him back to it.
+    "pos_count": ("doubles down on positions he already has",
+                  "spreads picks across positions"),
+    "first_at_pos": ("goes to an empty position first",
+                     "keeps stacking positions he has started"),
+    "pos_gap": ("comes back to positions he has left alone",
+                "drafts a position in bursts"),
+    "first_at_pos_round": ("leaves empty positions until late",
+                           "fills every position early"),
+    "usage": ("targets high-volume players", "takes low-volume specialists"),
+    "efficiency": ("targets efficient scorers", "takes volume over efficiency"),
+    "played_share": ("targets players who stay on the field",
+                     "tolerates injury risk"),
+    # peak_gap is best career PPG minus last season's PPG, so positive means
+    # the player has fallen furthest from his own peak.
+    "peak_gap": ("bets on bounce-backs from a career peak",
+                 "takes players at their current level"),
 }
 
 
@@ -688,6 +903,21 @@ COLD_START_PRIOR = np.array([
     -0.331173,    # no_track_record
     -0.063443,    # hype
     -0.003743,    # trend
+    # `UNMEASURED_FEATURES`, padded to keep the length assertion below
+    # honest. A 0.0 here is not a fitted finding of "no effect" -- it is the
+    # only value that says NOT YET MEASURED without pretending otherwise,
+    # and it makes a cold-start league behave exactly as it did before these
+    # columns existed, since a zero coefficient contributes nothing to any
+    # score. Task 4's `fit_prior` replaces them with values fitted on the
+    # mock corpus, and only if that fit wins on top-1.
+    0.0,          # pos_count
+    0.0,          # first_at_pos
+    0.0,          # pos_gap
+    0.0,          # first_at_pos_round
+    0.0,          # usage
+    0.0,          # efficiency
+    0.0,          # played_share
+    0.0,          # peak_gap
 ])
 assert len(COLD_START_PRIOR) == len(FEATURE_NAMES), (
     "COLD_START_PRIOR must have one weight per feature; a feature was added to "
@@ -1046,7 +1276,7 @@ def backtest(conn, settings=None, features=None, observations=None) -> dict:
     return report
 
 
-def ablation(conn, settings=None) -> pd.DataFrame:
+def ablation(conn, settings=None, candidates=None) -> pd.DataFrame:
     """Each new feature's contribution, measured rather than argued.
 
     At roughly 105 picks per manager a feature that does not pay for itself
@@ -1057,12 +1287,22 @@ def ablation(conn, settings=None) -> pd.DataFrame:
     call below (see that function's docstring) rather than the six
     independent history replays a literal one-`backtest`-call-per-row
     reading would cost.
+
+    `candidates` is which features to drop one at a time, defaulting to
+    `_NEW_FEATURES`. The default is deliberately NOT `FEATURE_NAMES` and not
+    `_NEW_FEATURES + UNMEASURED_FEATURES`: this runs inside every
+    `make fit-managers`, each row costs a full leave-one-season-out backtest
+    with a lambda search per manager, and tripling that on every fit to
+    re-answer a question this league's 696 picks cannot settle is the wrong
+    trade. `UNMEASURED_FEATURES` is measured where the evidence is -- Task 4
+    passes it here against the mock corpus, which is four times the sample.
     """
+    candidates = list(_NEW_FEATURES if candidates is None else candidates)
     observations = build_observations(conn)
     full = backtest(conn, settings, observations=observations)
     rows = [{"dropped": "none", "top1": full["top1"], "top5": full["top5"],
              "delta_top1": 0.0, "delta_top5": 0.0}]
-    for feature in _NEW_FEATURES:
+    for feature in candidates:
         keep = [f for f in FEATURE_NAMES if f != feature]
         cut = backtest(conn, settings, features=keep, observations=observations)
         # Both deltas, always. Reporting delta_top1 and leaving top5 as a raw
