@@ -216,12 +216,13 @@ regardless — the tests are all offline.
 
 **6a. Lobby client.** `pipeline/espn_mock_lobby.py`:
 
-- `list_mock_leagues(fetch)` — open rooms, filtered to not `full` and
-  `draftAvailableDate` in the future. The exact list endpoint is NOT yet
-  known; the lobby bundle fetches by `subType: "MOCKDRAFT_LOBBY"`. Discover
-  it by probing the documented ESPN v3 league endpoints with the saved
-  cookies, and if it cannot be found, raise a clear error naming what was
-  tried. Do not fabricate an endpoint that returns nothing.
+- `list_mock_leagues(fetch)` — the endpoint is CONFIRMED and probed live;
+  see `espn-lobby-intel.md` in this plan's workspace for the URL, the full
+  field list, and measured supply.
+- **Farm 8-person PPR snake rooms only**, ranked by `teamsJoined` descending
+  then `experienceType` then soonest start. The complete filter and the
+  reasoning are in `espn-lobby-intel.md` under ROOM SELECTION POLICY. This is
+  an explicit instruction from the owner, not a default to revisit.
 - `join(fetch, league_id, swid)` — `POST .../leagues/{id}/invites?memberId={swid}`,
   returning the assigned `team_id`.
 
