@@ -773,6 +773,14 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
     from api.mocks import register_mock_routes
     register_mock_routes(app, conn)
 
+    # Imported here for the same reason as the two routers above: this is
+    # the seam where the app is assembled. Unlike those two, `api.lobby`
+    # reads nothing from `conn` or the corpus at all -- it proxies ESPN's
+    # own public mock-lobby directory, cached in its own module -- so it
+    # takes no arguments beyond `app`.
+    from api.lobby import register_lobby_routes
+    register_lobby_routes(app)
+
     return app
 
 app = create_app()

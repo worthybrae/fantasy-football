@@ -6,6 +6,7 @@ import { BOOKMARKLET } from '../lib/bookmarklet'
 import { Logo } from '../components/Logo'
 import ConnectScreen from '../components/ConnectScreen'
 import ReadinessStrip from '../components/ReadinessStrip'
+import LobbyStrip from '../components/LobbyStrip'
 // This page's own stylesheet, not App.css: see the header comment in it for
 // why, and for why every class below is `lp-` prefixed.
 import '../landing.css'
@@ -396,6 +397,9 @@ export default function Landing() {
             <button className="lp-cta" onClick={toSetup}>Try it in a mock draft</button>
             <span className="lp-cta-note">free, no account</span>
           </div>
+          {/* Renders nothing until ESPN's own lobby answers, and nothing at
+              all if it can't -- see LobbyStrip's module comment. */}
+          <LobbyStrip />
         </div>
 
         {/* Not a screenshot and not an illustration: a board this tool

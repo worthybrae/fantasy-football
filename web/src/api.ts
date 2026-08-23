@@ -842,6 +842,40 @@ export async function fetchLandingPreview(limit = 12): Promise<{ pool: number; p
   return res.json()
 }
 
+// -- the live mock-draft lobby (proof, next to the CTA) --
+//
+// ESPN's own public mock-draft lobby, proxied and cached by api/lobby.py
+// (~60s TTL server-side; see that module's docstring for why a cache sits
+// in front of it at all). No cookies flow on either leg of this call.
+
+/** One upcoming, joinable room. `league_size`/`scoring` are `null` only if
+ *  ESPN ever omits the field this server reads them from -- ordinary
+ *  optional-chaining territory for LobbyStrip, not a sign of a bad row. */
+export interface LobbyRoom {
+  league_size: number | null
+  scoring: string | null
+  teams_joined: number
+  starts_in_seconds: number | null
+}
+
+export interface LobbySummary {
+  /** False whenever ESPN couldn't be read or answered with something this
+   *  server didn't recognise -- every other field is a placeholder in that
+   *  case. LobbyStrip renders nothing at all when this is false; see its
+   *  own module comment for why that's a hard requirement. */
+  available: boolean
+  total_open: number
+  joinable: number
+  /** Soonest-starting joinable rooms first, already capped server-side. */
+  upcoming: LobbyRoom[]
+}
+
+export async function fetchLobby(): Promise<LobbySummary> {
+  const res = await fetch('/api/lobby')
+  if (!res.ok) throw new Error(`Failed to load the mock lobby (${res.status})`)
+  return res.json()
+}
+
 // -- the mock draft farm (/mocks) --
 
 // One room the farm has joined: still playing (`live`) or finished

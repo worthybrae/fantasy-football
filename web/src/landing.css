@@ -770,3 +770,87 @@
   outline: 2px solid var(--accent-border);
   outline-offset: 2px;
 }
+
+/* -- the live lobby strip: ESPN's own numbers, next to the CTA ---------- */
+/* See components/LobbyStrip.tsx. Sits inside `.lp-hero-copy` (max-width
+   620px), directly under the CTA row, so it reads as the CTA's own receipt
+   rather than a separate section -- small type, no border of its own,
+   nothing competing with the headline above it. */
+
+.lp-lobby {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.lp-lobby-headline {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: var(--text-base);
+  color: var(--text-3);
+}
+
+.lp-lobby-headline strong {
+  color: var(--text-2);
+  font-weight: 600;
+}
+
+/* Same --ok/pulse vocabulary the mock-draft list's own LIVE pill uses
+   (.mocks-pill-dot in App.css) -- a dot that says "this number is being
+   watched right now," not just reported once. */
+.lp-lobby-dot {
+  align-self: center;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+  animation: lp-lobby-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes lp-lobby-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+/* The word "right now" and the numbers themselves already carry the point;
+   the pulse is the part that can be dropped without losing any of it. */
+@media (prefers-reduced-motion: reduce) {
+  .lp-lobby-dot {
+    animation: none;
+  }
+}
+
+.lp-lobby-rooms {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.lp-lobby-room {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+.lp-lobby-room-fmt {
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lp-lobby-room-joined {
+  white-space: nowrap;
+}
+
+.lp-lobby-room-time {
+  min-width: 3.5em;
+  text-align: right;
+  color: var(--text-2);
+}
