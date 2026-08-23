@@ -21,6 +21,7 @@ from scipy.optimize import minimize
 
 from pipeline.db import read_table, write_table
 from scoring import league as league_mod
+from scoring import mock_prior
 from scoring.board import _ADP_POSITION_ALIASES, _norm_name, adp_match_key
 from scoring.player_history import assert_no_column_collision, attributes_as_of
 
@@ -925,99 +926,38 @@ def select_lambda(X_list, chosen_list, seasons, prior, grid=None,
 # A brand-new user's league has zero picks on record, so `fit_all` has nothing
 # to fit and used to return {} -- no opponents, no simulation, the tool simply
 # did not work for anyone but the one league baked into the database. This is
-# the coefficient vector to fall back on instead.
+# the coefficient vector to fall back on instead. Every mock draft is this
+# case too, permanently: eight strangers, no history, so this vector is not a
+# fallback there but the whole model.
 #
-# It is not invented. These are the pooled (league-average) coefficients fitted
-# from six real seasons of an actual PPR league, frozen here with their
-# provenance. They already encode "draft roughly to the market": `reach` -8.1
-# penalises taking a player the board ranks well below the pick, `fall` +3.8
-# rewards taking a value that has slid, and `qb_early` +1.5 captures a
-# structural fact every league shares (quarterbacks go earlier than their raw
-# value). An unknown league's opponents drafting like the average of a real,
-# observed one is a defensible default and a measured one -- this same pooled
-# fit scores top-1 0.25 against real drafts.
-#
-# `pos_DST` -11.14 IS NOT EVIDENCE ABOUT ANYBODY'S BEHAVIOR, AND IT PREDATES
-# THE BUG FIX THAT WOULD CHANGE IT. This comment used to read the number as
-# "nobody drafts a defense in round two". It never could have meant that: the
-# fit behind it ran on a `draft_picks` table holding 712 rows across six
-# seasons with NOT ONE DST among them -- the positions present were
-# WR/RB/TE/QB/K only, and every season was missing exactly eight picks (2020
-# [60, 68, 72, 90, 102, 113, 126, 127]; 2025 [98, 99, 100, 104, 106, 107, 108,
-# 112]; and so on) while all eight of that season's kickers were recorded.
-# Those eight gaps were the eight defenses. So the fit saw a defense in every
-# choice set, saw one chosen zero times, and drove this coefficient as
-# negative as the ridge allowed. It is a correct fit to data in which the
-# event is unobservable, which is a different thing from a measurement.
-#
-# THE IMPORT BUG BEHIND THAT IS FIXED. `pipeline/espn_league._is_real_pick`
-# tested `playerId > 0` to drop ESPN's -1 padding, but ESPN's D/ST ids are
-# negative BY DESIGN -- -(16000 + proTeamId) -- so the predicate discarded
-# every defense ever drafted. 9b90610 replaced the threshold with a whitelist.
-# A re-import of the same six seasons should therefore land 760 picks rather
-# than 712: five sixteen-round drafts plus a fifteen-round 2025, with the 48
-# missing defenses restored. That figure is INFERRED from the gap structure,
-# not measured -- nobody has re-imported, which needs an ESPN login.
-#
-# THE COEFFICIENT BELOW HAS NOT BEEN RE-FITTED AND IS LEFT EXACTLY AS FITTED.
-# Editing it by hand would launder a guess as a measurement. What a re-fit
-# would probably do is flip its sign: run on RECONSTRUCTED defense picks --
-# the eight known gaps per season, identities assigned from that season's own
-# `historic_adp` -- the pooled `pos_DST` moved -9.77 -> +2.81. Read the SIGN
-# FLIP as robust and the MAGNITUDE as not: assigning by ADP makes every
-# reconstructed pick look like perfect value, and 2022's ADP table carried
-# only six defenses, so 46 rows went in rather than 48. The honest summary is
-# that this number is about to become wrong in a knowable direction, and the
-# correction is `make espn-import` then `make fit-managers`, not an edit here.
-#
-# Until that is run, this coefficient still decides the end of a simulated
-# draft: with this prior driving every unresolved opponent, 7 of 8 simulated
-# teams finished a full 120-pick draft with an empty DST starter slot and
-# `gain_now` for every defense was exactly 0.0000 at every pick. That is
-# corrected in the simulator, ON TOP of the fit and clearly separated from it
-# -- see `scoring/draft_sim._must_fill_mask`, which imposes the roster floor
-# the coefficients cannot express, exactly as `_roster_cap` imposes the
-# ceiling. That mask is a roster rule, not a patch for this number, and it
-# stays whatever a re-fit turns this number into.
+# THE NUMBERS THEMSELVES LIVE IN `scoring/mock_prior.py`, WHICH IS GENERATED.
+# What stays here is what the vector is FOR, which does not change when the
+# numbers do; the provenance of a particular set of numbers moves with them.
+# `pipeline/fit_prior.py` (`make fit-prior`) rewrites that module, and only
+# when a refit beats the incumbent on held-out top-1 -- the same rule stated
+# above `_NEW_FEATURES`, enforced there by a person reading a table and here
+# by a program that will not write the file otherwise. Editing a coefficient
+# in that file by hand launders a guess as a measurement; refit instead.
 #
 # As a league accrues its own history, `fit_all` shrinks each manager off this
 # prior via `select_lambda`, so the market default is the anchor that a real
 # fit moves away from rather than a value that has to be unlearned.
-COLD_START_PRIOR = np.array([
-    -8.088053,    # reach
-    +3.801103,    # fall
-    +0.641107,    # pos_RB
-    +0.341051,    # pos_WR
-    +0.896758,    # pos_TE
-    +3.417835,    # pos_K
-    -11.141479,   # pos_DST
-    +1.482160,    # qb_early
-    +0.324423,    # te_early
-    +2.246026,    # need
-    +0.595798,    # run
-    +0.050222,    # age
-    -0.331173,    # no_track_record
-    -0.063443,    # hype
-    -0.003743,    # trend
-    # `UNMEASURED_FEATURES`, padded to keep the length assertion below
-    # honest. A 0.0 here is not a fitted finding of "no effect" -- it is the
-    # only value that says NOT YET MEASURED without pretending otherwise,
-    # and it makes a cold-start league behave exactly as it did before these
-    # columns existed, since a zero coefficient contributes nothing to any
-    # score. Task 4's `fit_prior` replaces them with values fitted on the
-    # mock corpus, and only if that fit wins on top-1.
-    0.0,          # held_at_pos
-    0.0,          # first_at_pos
-    0.0,          # rounds_since_pos
-    0.0,          # first_at_pos_round
-    0.0,          # usage
-    0.0,          # efficiency
-    0.0,          # played_share
-    0.0,          # peak_gap
-])
+COLD_START_PRIOR = mock_prior.PRIOR
+
+# Two assertions, because they catch two different failures and the cheap one
+# cannot see the expensive one. Length catches a feature added to
+# FEATURE_NAMES without regenerating the prior. Order catches the silent
+# version of the same thing: a vector fitted with the columns in one order
+# and applied with them in another still has the right length and is wrong on
+# every pick. `mock_prior.FEATURES` is written by the generator from
+# FEATURE_NAMES, so agreeing is the normal case and disagreeing means the
+# generated file is stale.
 assert len(COLD_START_PRIOR) == len(FEATURE_NAMES), (
     "COLD_START_PRIOR must have one weight per feature; a feature was added to "
-    "FEATURE_NAMES without extending the prior")
+    "FEATURE_NAMES without extending the prior -- run `make fit-prior`")
+assert list(mock_prior.FEATURES) == FEATURE_NAMES, (
+    "scoring/mock_prior.py was fitted against a different feature order than "
+    "FEATURE_NAMES holds now; regenerate it with `make fit-prior`")
 
 
 def cold_start_fits() -> dict:

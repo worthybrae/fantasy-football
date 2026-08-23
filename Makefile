@@ -2,7 +2,7 @@
 # One-time setup: make setup && make refresh
 # Draft night:    make up   (then open http://localhost:5173)
 
-.PHONY: setup refresh api web up test build espn-import fit-managers sim mock-backfill farm-mocks corpus-report
+.PHONY: setup refresh api web up test build espn-import fit-managers fit-prior sim mock-backfill farm-mocks corpus-report
 
 setup: ## create venv, install python + web deps
 	python3 -m venv .venv
@@ -29,6 +29,18 @@ farm-mocks: ## play live ESPN mock drafts and record them: make farm-mocks N=5 [
 
 corpus-report: ## describe the mock draft corpus: humans vs ESPN autodraft, by round bucket and position -- read-only
 	.venv/bin/python -m pipeline.mock_backfill --report
+
+fit-prior: ## refit the cold-start prior on the mock draft corpus; writes scoring/mock_prior.py ONLY if it beats the incumbent on top-1
+	# Read-only against the corpus and the league database. There is no
+	# --force: a losing refit prints its numbers, writes nothing, and exits
+	# non-zero. Shipping one anyway means editing the rule in fit_prior.main,
+	# which is a diff somebody can review.
+	#
+	# LEAGUE_DB overrides which database `attributes_as_of` reads `weekly` and
+	# `players` from. Needed when the API is running, because DuckDB will not
+	# open data/nfl.duckdb read-only while another process holds it read-write
+	# -- any data/leagues/*.duckdb carries the same universal tables.
+	.venv/bin/python -m pipeline.fit_prior $(if $(LEAGUE_DB),--league-db $(LEAGUE_DB),)
 
 fit-managers: ## fit per-manager pick models from imported draft history (REDUCED=1 also measures reduced personal models -- slow)
 	# filter-out, not a bare $(if): $(if) tests emptiness, so REDUCED=0 would
