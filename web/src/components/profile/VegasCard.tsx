@@ -1,6 +1,6 @@
 import type { Vegas } from './payload'
 import PopCard from './PopCard'
-import { ordinal } from './payload'
+import { fmtSigned, ordinal } from './payload'
 
 // What the betting market prices this player's offence at, and what it
 // prices him at.
@@ -62,29 +62,25 @@ export default function VegasCard({ vegas, position }: {
     place === null ? '—' : `${position}${place}`
 
   const ranked = hasTeam && vegas.rank !== null && vegas.teams !== null
-    && vegas.teams > 1
-  // Better is fuller, the way every other bar in this popup runs: the best
-  // offence in the league fills the track and the worst empties it. A rank
-  // printed on its own is a number a reader has to place; a rank drawn
-  // against its own field places itself.
-  const standing = ranked
-    ? ((vegas.teams! - vegas.rank!) / (vegas.teams! - 1)) * 100 : 0
 
   return (
     <PopCard title="Vegas" className="is-widest">
       {hasTeam && (
       <>
       {ranked && (
-        // The rank, and now the card's opening line rather than a note under
-        // a number: of everything Vegas says about a player's offence it is
-        // the one fact that needs no explaining and survives being the only
-        // thing a reader takes away.
-        <div className="pp-pop-vegas-rank">
-          <span className="mono pp-pop-vegas-rank-place">{ordinal(vegas.rank!)}</span>
-          <span className="pp-pop-vegas-rank-of">of {vegas.teams} offences</span>
-          <span className="pp-pop-vegas-rank-track">
-            <span className="pp-pop-vegas-rank-fill" style={{ width: `${standing}%` }} />
-          </span>
+        // The rank, in the O-line card's own lead treatment -- `pp-pop-lead`
+        // is that card's, not a copy of it -- because the two cards make the
+        // same kind of statement: one number, out of the same thirty-two
+        // teams, that a reader places instantly. A popup that wrote "13th of
+        // 32" two different ways on two cards would be asking to be read
+        // twice.
+        //
+        // The track that used to sit beside it goes with the second
+        // spelling. A bar drawn against thirty-two teams was a second
+        // rendering of a number already in plain words.
+        <div className="pp-pop-lead">
+          <span className="mono pp-pop-lead-value">{ordinal(vegas.rank!)}</span>
+          <span className="mono pp-pop-lead-of">of {vegas.teams} offences</span>
         </div>
       )}
       {/* Where the rank comes from, and what the percentages below it are.
@@ -105,7 +101,7 @@ export default function VegasCard({ vegas, position }: {
             <span />
             <span>chance</span>
             <span>vegas</span>
-            <span>adp</span>
+            <span>vs adp</span>
           </div>
           {futures.slice(0, SHOWN_MARKETS).map((f) => {
             const pct = f.implied_pct
@@ -143,13 +139,20 @@ export default function VegasCard({ vegas, position }: {
                   {pct === null ? '—'
                     : pct < 1 ? '<1%' : `${Math.round(pct)}%`}
                 </span>
-                {/* Where the book ranks him among his own position in this
-                    market, and where a draft room does. Same players, same
-                    position, two opinions -- so the numbers subtract, which
-                    is the only reason to print two of them. */}
+                {/* Where the book ranks him among his own position, and how
+                    far the draft room is from that. The subtraction is the
+                    point, so the card does it: printing both ranks made a
+                    reader carry two numbers per row and take the difference
+                    himself, four rows running.
+
+                    Signed the way a drafter reads it. Negative means rooms
+                    take him EARLIER than the book ranks him, so Jalen Hurts
+                    -- QB15 for MVP and QB5 by ADP -- reads -10: drafted ten
+                    places ahead of what the book believes. */}
                 <span className="mono pp-pop-futures-rank">{byPos(f.pos_place)}</span>
                 <span className={`mono pp-pop-futures-rank ${gapTone(f.pos_place, f.pos_adp_place)}`}>
-                  {byPos(f.pos_adp_place)}
+                  {f.pos_place === null || f.pos_adp_place === null
+                    ? '—' : fmtSigned(f.pos_adp_place - f.pos_place)}
                 </span>
               </div>
             )

@@ -4702,51 +4702,6 @@ button.roster-row:focus-visible {
 .delta-tone.is-up { color: var(--ok); }
 .delta-tone.is-down { color: var(--fail); }
 
-/* The rank, at the size the card's most quotable fact deserves. It used to
-   live in the header note beside the word "Vegas", in 9px grey, where it was
-   the smallest thing on a card whose whole subject it is. */
-.pp-pop-vegas-rank {
-  display: flex;
-  align-items: baseline;
-  gap: 5px;
-  margin-top: 3px;
-}
-
-.pp-pop-vegas-rank-place {
-  font-size: 15px;
-  line-height: 1;
-  color: var(--accent);
-}
-
-.pp-pop-vegas-rank-of {
-  flex: 0 0 auto;
-  font-size: 9.5px;
-  color: var(--text-3);
-}
-
-/* Fuller is better, like every other bar in this popup: the league's best
-   offence fills the track, the worst empties it. Accent rather than the
-   five-step ramp, for the same reason the week bars are accent -- the ramp
-   grades a player against his position and this is a market price on a
-   team. */
-.pp-pop-vegas-rank-track {
-  flex: 1 1 0;
-  align-self: center;
-  height: 4px;
-  min-width: 40px;
-  border-radius: 2px;
-  background: var(--bg-2);
-  overflow: hidden;
-}
-
-.pp-pop-vegas-rank-fill {
-  display: block;
-  min-width: 2px;
-  height: 100%;
-  border-radius: inherit;
-  background: color-mix(in srgb, var(--accent) 70%, transparent);
-}
-
 .pp-pop-vegas-foot {
   font-size: 9px;
   white-space: nowrap;
