@@ -52,7 +52,7 @@ export default function ComparableSeasons({
   return (
     // Wider than an even half: this card holds four columns and a sentence
     // of a heading, and News beside it holds two headlines that wrap.
-    <PopCard title="Comparable seasons" note={verdict(cohort, targetAge)} className="is-wide">
+    <PopCard title="Comparable seasons" note={verdict(cohort, targetAge)} className="is-widest">
       <div className="pp-pop-comps">
         {/* Outside the list, as the game log's head is: it names the columns
             rather than being one of the seasons in them. */}

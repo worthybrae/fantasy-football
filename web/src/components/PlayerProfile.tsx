@@ -179,36 +179,50 @@ function PopFigures({ header, profile }: {
   // Null for the thin state (header, no payload yet) and for a player with
   // no season played to move from -- see perGameDelta.
   const delta = profile === null ? null : perGameDelta(profile.seasons, projPpg)
+  // Where last season actually finished him among his own position, which is
+  // what the projected place is a move FROM. `pos_finish` rather than
+  // `pos_rank_ppg` because `proj_pos_finish` ranks on season points too --
+  // comparing a per-game place against a total-points one would print a move
+  // nobody made.
+  const played = profile === null ? [] : playedSeasons(profile.seasons)
+  const lastFinish = played.length ? played[0].pos_finish : null
+  // Rank runs backwards, so the subtraction is the other way round from the
+  // points one: a projection of WR7 against a WR10 season is three places
+  // BETTER, and the arrow has to say up.
+  const rankMove = lastFinish === null || header.proj_pos_finish === null
+    ? null : lastFinish - header.proj_pos_finish
   const figures: {
-    label: string; value: string; accent?: boolean; tone?: string
+    label: string; value: string; accent?: boolean
+    delta?: { label: string; tone: string }
   }[] = [
     // Per game, not for the season, for the reason the board's own Proj/G
     // column gives: 313 is a number nobody has a feel for and 18.4 is a
     // Sunday. Same divisor as that column (SEASON_GAMES), so the two cannot
     // disagree about what "per game" means.
+    //
+    // The move against last season's average rides with it: a projection is
+    // a claim, and how far it is from what he actually did is the part of
+    // the claim worth checking. Nothing when it rounds to nothing -- "+0.0"
+    // is a delta that says the number beside it already stands.
     {
       label: 'Proj/G',
-      value: header.proj_points === null
-        ? '—' : (header.proj_points / SEASON_GAMES).toFixed(1),
+      value: projPpg === null ? '—' : projPpg.toFixed(1),
       accent: true,
+      delta: delta === null || delta.zero
+        ? undefined : { label: delta.label, tone: delta.tone },
     },
     // The same projection as a PLACE among his own position -- WR7 -- which
-    // is the unit a drafter thinks in. Both figures come off the board's
-    // ESPN projection, so this row is one source saying one thing twice: how
-    // much, and where that puts him.
+    // is the unit a drafter thinks in, with the places he moved since last
+    // season beside it. An arrow rather than a sign: on a rank, "+3" reads
+    // as a bigger number and a bigger number is worse.
     {
       label: 'Proj rank',
       value: header.proj_pos_finish === null
         ? '—' : `${header.position}${header.proj_pos_finish}`,
-    },
-    // What the projection is SAYING, against what he actually averaged last
-    // season: a level and a direction, which is the pair the two figures
-    // beside it cannot give on their own. Green up, red down, the same tone
-    // the Per game panel's own note wears further down the popup.
-    {
-      label: 'vs last yr',
-      value: delta === null ? '—' : delta.label,
-      tone: delta?.tone,
+      delta: rankMove === null || rankMove === 0 ? undefined : {
+        label: `${rankMove > 0 ? '\u25b2' : '\u25bc'}${Math.abs(rankMove)}`,
+        tone: rankMove > 0 ? 'is-up' : 'is-down',
+      },
     },
   ]
   return (
@@ -216,9 +230,15 @@ function PopFigures({ header, profile }: {
       {figures.map((f) => (
         <div key={f.label} className="pp-pop-figure">
           <span className="pp-pop-figure-label">{f.label}</span>
-          <span className={`mono pp-pop-figure-value${f.accent ? ' is-accent' : ''}${
-            f.tone ? ` delta-tone ${f.tone}` : ''}`}>
-            {f.value}
+          <span className="pp-pop-figure-line">
+            <span className={`mono pp-pop-figure-value${f.accent ? ' is-accent' : ''}`}>
+              {f.value}
+            </span>
+            {f.delta && (
+              <span className={`mono pp-pop-figure-delta delta-tone ${f.delta.tone}`}>
+                {f.delta.label}
+              </span>
+            )}
           </span>
         </div>
       ))}
@@ -410,11 +430,12 @@ function PopCards({ profile, onSelectPlayer }: {
       {/* The two market cards, on their own line. One is what the betting
           market prices his offence at, the other what the fantasy market
           prices him at -- both are outside opinions, and reading them next
-          to each other is the comparison worth making. Vegas takes the
-          larger share: it carries a figure, eighteen weeks and three prices
-          where the other carries four rows. */}
+          to each other is the comparison worth making.
+          Smallest first here, and only here: it puts the row's seam on the
+          opposite side to the rows above and below, so the three big cards
+          -- Usage, Vegas, Comparable seasons -- are the same width without
+          the popup becoming one unbroken column of identical edges. */}
       <div className="pp-pop-row">
-        <VegasCard vegas={profile.vegas} />
         <MarketRow
           rank={header.rank}
           marketRank={header.market_rank}
@@ -429,6 +450,7 @@ function PopCards({ profile, onSelectPlayer }: {
           // asked it. Sparse.dc.html draws it exactly here.
           impliedPoints={hasHistory(profile) ? null : profile.outlook.implied_points}
         />
+        <VegasCard vegas={profile.vegas} />
       </div>
       {/* Last row, and the only one that looks backwards: everything above
           it is this player now, and these are the seasons that already went
