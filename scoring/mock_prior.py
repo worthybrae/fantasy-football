@@ -28,15 +28,15 @@ leave-one-season-out is degenerate here):
 top-1 is the decision metric and it is the one this had to win on. The other
 two are recorded because they were measured, not because they decided.
 
-Of the eight features Task 3 added, 3 earned a place on delta_top1 and
-5 did not. The cut ones carry 0.0 here, which means MEASURED AND
-REJECTED on this corpus -- a different fact from the 0.0 they carried before,
-which meant not yet measured.
+Of the 8 features this fit measured for the first time, 3 earned a place
+on delta_top1 and 5 did not. The cut ones carry 0.0 here, which means
+MEASURED AND REJECTED on this corpus -- a different fact from the 0.0 they
+carried before, which meant not yet measured.
 
     kept: held_at_pos, first_at_pos_round, usage
     cut:  first_at_pos, rounds_since_pos, efficiency, played_share, peak_gap
 
-The numbers and what they do not establish:
+The numbers and what they do not establish, written up beside this fit:
 docs/superpowers/findings/2026-08-23-mock-corpus-features.md
 """
 import numpy as np

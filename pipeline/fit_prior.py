@@ -91,6 +91,15 @@ from scoring.player_history import (assert_no_column_collision,
 # "would have written" message on a loss, and the tests all name the same file.
 PRIOR_MODULE = Path(__file__).resolve().parent.parent / "scoring" / "mock_prior.py"
 
+# Where the write-up of a fit lives, by convention: findings are date-prefixed
+# and this project has one document per measured question. The DATE IS FILLED
+# IN FROM THE RUN, not hardcoded -- `make fit-prior` rewrites mock_prior.py
+# with new coefficients every time a refit wins, and a pointer baked in at
+# the time this line was written would send the reader of those new numbers
+# to the write-up of a different fit on a different corpus. The generated
+# module has to name the analysis of the numbers it is actually carrying.
+FINDINGS_TEMPLATE = "docs/superpowers/findings/{date}-mock-corpus-features.md"
+
 # `_ATTRIBUTE_DEFAULTS` above is imported, not repeated: it is the neutral
 # value for every attribute a player's history does not supply, and
 # `_enrich_pool` and `build_pool` already fill a missed join from it. A fourth
@@ -809,16 +818,16 @@ Both rows score the same picks.
 top-1 is the decision metric and it is the one this had to win on. The other
 two are recorded because they were measured, not because they decided.
 
-Of the eight features Task 3 added, {len(keep) - len(LEGACY_FEATURE_NAMES)} earned a place on delta_top1 and
-{len(cut)} did not. The cut ones carry 0.0 here, which means MEASURED AND
-REJECTED on this corpus -- a different fact from the 0.0 they carried before,
-which meant not yet measured.
+Of the {len(UNMEASURED_FEATURES)} features this fit measured for the first time, {len(keep) - len(LEGACY_FEATURE_NAMES)} earned a place
+on delta_top1 and {len(cut)} did not. The cut ones carry 0.0 here, which means
+MEASURED AND REJECTED on this corpus -- a different fact from the 0.0 they
+carried before, which meant not yet measured.
 
     kept: {', '.join(f for f in keep if f in UNMEASURED_FEATURES) or '(none)'}
     cut:  {', '.join(cut) or '(none)'}
 
-The numbers and what they do not establish:
-docs/superpowers/findings/2026-08-23-mock-corpus-features.md
+The numbers and what they do not establish, written up beside this fit:
+{FINDINGS_TEMPLATE.format(date=_now())}
 """.strip("\n")
 
 
