@@ -70,10 +70,11 @@ LOG.TE = LOG.WR
 // The log is the same weeks in words. Newest first, because form is what
 // someone opening this mid-draft is reading for, and only weeks he PLAYED
 // get a row: a missed week is already above as a baseline mark, and a row
-// saying nothing happened would cost a reader a line to learn nothing. How
-// many rows are visible is CSS's (`.pp-pop-log-body` caps it at six and
-// scrolls the rest) -- the component hands over the whole season, so the
-// scroll reaches week 1.
+// saying nothing happened would cost a reader a line to learn nothing. Every
+// one of those weeks is on screen -- the card used to show six and scroll
+// the rest, which hid two thirds of a season behind a gesture nothing
+// announced, and the week that explains a season is rarely one of the last
+// six.
 export default function WeekByWeek({ games, seasons, position }: {
   games: GameRow[]
   seasons: SeasonRow[]

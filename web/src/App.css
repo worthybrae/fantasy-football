@@ -4276,8 +4276,9 @@ button.roster-row:focus-visible {
 }
 
 .pp-pop-log {
-  /* The row height is stated once, here, because the body's cap below is
-     exactly six of them. */
+  /* The row height is stated once, here: every row in the log is this tall,
+     which is what makes eighteen of them read as a table rather than a list
+     of differently-sized lines. */
   --pp-log-row: 21px;
   display: flex;
   flex-direction: column;
@@ -4304,24 +4305,24 @@ button.roster-row:focus-visible {
   color: var(--text-3);
 }
 
-/* Six games, and the rest of the season scrolling behind them: six is the
-   most this card can show without the popup growing past a screen, and by
-   the sixth row back a game is history rather than form. `overscroll-
-   behavior` so hitting the end of the log does not carry on into the popup
-   it sits in. */
+/* The whole season, no inner scroller. This was capped at six rows with the
+   rest scrolling behind them, which kept the popup short at the price of
+   hiding two thirds of the log behind a gesture nothing announced -- and the
+   card is read to find the week that explains the season, which is rarely
+   one of the last six. The popup itself scrolls (`.player-overlay-panel`),
+   so the rows extend the one scroller the reader already has instead of
+   nesting a second inside it. */
 .pp-pop-log-body {
-  max-height: calc(var(--pp-log-row) * 6);
-  overflow-y: auto;
-  overscroll-behavior: contain;
+  overflow: visible;
 }
 
 .pp-pop-log-row {
   display: flex;
   align-items: baseline;
   gap: var(--space-2);
-  /* Fixed rather than left to the type in it, so the cap above is exactly
-     six rows: a row that grew half a pixel with its own font would leave a
-     seventh one peeking under the fold. */
+  /* Fixed rather than left to the type in it. The cap this once served is
+     gone, but uniform rows are what let the eye run down a column of
+     eighteen games without the spacing arguing with the numbers. */
   height: var(--pp-log-row);
   padding: 3px 0;
   border-top: 1px solid var(--border);
