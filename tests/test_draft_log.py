@@ -4,6 +4,7 @@ A mock draft that is not written down when it happens is gone -- there is no
 source to re-derive it from, unlike every other table in this project. So the
 tests here are mostly about not losing things.
 """
+import duckdb
 import pandas as pd
 import pytest
 
@@ -119,3 +120,33 @@ def test_the_pool_snapshot_is_stored_once_per_draft(corpus):
     got = corpus.execute("SELECT * FROM draft_log_pool").df()
     assert len(got) == 2
     assert set(got["player_id"]) == {"p0", "p1"}
+
+
+def test_ensure_schema_adds_autodrafted_without_losing_existing_rows(tmp_path):
+    """`autodrafted` was added after `draft_log_pick` first shipped. A
+    corpus file written before that column existed must gain it in place --
+    the mock backfill (pipeline.mock_backfill) and every earlier recorder
+    both write NULL for it, and a corpus that lost its rows getting there
+    would be exactly the failure this module's docstring says never to
+    risk."""
+    path = str(tmp_path / "old_corpus.duckdb")
+    conn = duckdb.connect(path)
+    # The DDL ensure_schema ran before `autodrafted` existed, reproduced by
+    # hand rather than imported, so this test still means the same thing
+    # after that DDL gains the column.
+    conn.execute("""CREATE TABLE draft_log_pick (
+        draft_id VARCHAR, pick_no INTEGER, round INTEGER, slot INTEGER,
+        owner_key VARCHAR, is_anonymous BOOLEAN, player_id VARCHAR,
+        position VARCHAR, adp_rank DOUBLE, proj_points DOUBLE,
+        PRIMARY KEY (draft_id, pick_no))""")
+    conn.execute("INSERT INTO draft_log_pick VALUES "
+                 "('d1', 1, 1, 1, 'anon:d1:1', true, 'p1', 'RB', 1.0, 200.0)")
+
+    dl.ensure_schema(conn)
+
+    cols = {r[1] for r in conn.execute("PRAGMA table_info('draft_log_pick')").fetchall()}
+    assert "autodrafted" in cols
+    row = conn.execute("SELECT * FROM draft_log_pick").df()
+    assert len(row) == 1, "the pre-existing row must survive the ALTER"
+    assert row["player_id"].iloc[0] == "p1"
+    assert pd.isna(row["autodrafted"].iloc[0])

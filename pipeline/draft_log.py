@@ -63,7 +63,7 @@ _DRAFT_COLUMNS = ["draft_id", "source", "league_id", "season", "recorded_at",
                   "teams", "rounds", "my_slot", "scoring_json", "settings_json"]
 _PICK_COLUMNS = ["draft_id", "pick_no", "round", "slot", "owner_key",
                  "is_anonymous", "player_id", "position", "adp_rank",
-                 "proj_points"]
+                 "proj_points", "autodrafted"]
 _POOL_COLUMNS = ["draft_id", "player_id", "position", "team", "adp_rank",
                  "proj_points"]
 
@@ -100,6 +100,16 @@ def ensure_schema(conn) -> None:
         draft_id VARCHAR, player_id VARCHAR, position VARCHAR, team VARCHAR,
         adp_rank DOUBLE, proj_points DOUBLE,
         PRIMARY KEY (draft_id, player_id))""")
+    # Added after the tables above went live, so an existing corpus file
+    # reaches this as an ALTER rather than a CREATE. Whether ESPN's own
+    # engine made the pick for that seat rather than a person -- known for a
+    # live-recorded draft, unrecoverable for one backfilled from a `drafted`
+    # table that carries no such flag (see pipeline.mock_backfill), so NULL
+    # is the honest answer there rather than a guessed default. IF NOT
+    # EXISTS makes this idempotent across every future ensure_schema call,
+    # the same as the CREATE TABLEs above.
+    conn.execute(
+        "ALTER TABLE draft_log_pick ADD COLUMN IF NOT EXISTS autodrafted BOOLEAN")
 
 
 def draft_id_for(source: str, league_id, season, started_at=None) -> str:

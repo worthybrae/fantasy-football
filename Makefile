@@ -2,7 +2,7 @@
 # One-time setup: make setup && make refresh
 # Draft night:    make up   (then open http://localhost:5173)
 
-.PHONY: setup refresh api web up test build espn-import fit-managers sim
+.PHONY: setup refresh api web up test build espn-import fit-managers sim mock-backfill
 
 setup: ## create venv, install python + web deps
 	python3 -m venv .venv
@@ -17,6 +17,9 @@ espn-import: ## import ESPN draft history: make espn-import LEAGUE=<url-or-id>
 
 draft-corpus: ## fold draft history into the cross-league corpus: make draft-corpus LEAGUE=<id>
 	.venv/bin/python -m pipeline.draft_log "$(LEAGUE)"
+
+mock-backfill: ## harvest completed ESPN mock drafts from data/leagues/*.duckdb into the cross-league corpus
+	.venv/bin/python -m pipeline.mock_backfill
 
 fit-managers: ## fit per-manager pick models from imported draft history (REDUCED=1 also measures reduced personal models -- slow)
 	# filter-out, not a bare $(if): $(if) tests emptiness, so REDUCED=0 would
