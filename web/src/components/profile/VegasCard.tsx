@@ -145,14 +145,21 @@ export default function VegasCard({ vegas, position }: {
                     reader carry two numbers per row and take the difference
                     himself, four rows running.
 
-                    Signed the way a drafter reads it. Negative means rooms
-                    take him EARLIER than the book ranks him, so Jalen Hurts
-                    -- QB15 for MVP and QB5 by ADP -- reads -10: drafted ten
-                    places ahead of what the book believes. */}
+                    Vegas MINUS ADP, so the sign reads the way the colour
+                    does: NEGATIVE is the book ranking him better than the
+                    room drafts him, which is green and is what a drafter is
+                    shopping for. POSITIVE is the room ahead of the book --
+                    Jalen Hurts, QB15 for MVP and QB5 by ADP, reads +10 in
+                    red: ten places of draft capital the book does not
+                    believe in.
+
+                    Stated the other way round first, and it was wrong: a
+                    reach came out negative, and a negative number painted
+                    red is a number fighting its own sign. */}
                 <span className="mono pp-pop-futures-rank">{byPos(f.pos_place)}</span>
                 <span className={`mono pp-pop-futures-rank ${gapTone(f.pos_place, f.pos_adp_place)}`}>
                   {f.pos_place === null || f.pos_adp_place === null
-                    ? '—' : fmtSigned(f.pos_adp_place - f.pos_place)}
+                    ? '—' : fmtSigned(f.pos_place - f.pos_adp_place)}
                 </span>
               </div>
             )
