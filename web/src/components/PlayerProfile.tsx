@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import { fetchProfile, type LiveSettings, type Player } from '../api'
 import { Chart, type Col } from './draft/Chart'
 import { startersAt } from './draft/finish'
+import { SEASON_GAMES } from './draft/weeks'
 import {
   finishCols, healthCols, perGameCols, perGameDelta, playedSeasons, ratedSeasons,
   seasonLength, steadyCols, year,
@@ -20,7 +21,7 @@ import ScheduleRanks from './profile/ScheduleRanks'
 import UsageLine from './profile/UsageLine'
 import VegasCard from './profile/VegasCard'
 import WeekByWeek from './profile/WeekByWeek'
-import { fmtRank, fmtSigned, hasHistory, type PlayerStatus, type ProfileHeader, type ProfilePayload } from './profile/payload'
+import { fmtSigned, hasHistory, type PlayerStatus, type ProfileHeader, type ProfilePayload } from './profile/payload'
 
 // Everything the opener already knew about this player, so the profile can
 // paint on the frame it opens instead of behind a skeleton.
@@ -166,26 +167,57 @@ function draftName(name: string, position: string): string {
 // carries a different set per source -- a live candidate has no board rank
 // on it at all -- and a strip that swapped its columns when the request
 // landed would move the reader's eye off the number it was already on.
-function PopFigures({ header }: { header: ProfileHeader }): ReactNode {
-  const figures = [
-    // First and in accent: the only one of the four this app computes rather
-    // than reports, and the one the other three are read against.
-    { label: 'Your board', value: String(header.rank), accent: true },
-    { label: 'ADP', value: fmtRank(header.market_rank) },
+function PopFigures({ header, profile }: {
+  header: ProfileHeader
+  profile: ProfilePayload | null
+}): ReactNode {
+  // The projection this header row carries, per game -- the number both
+  // figures below are read off, so the pair cannot disagree with each other
+  // the way two separately-sourced projections would.
+  const projPpg = header.proj_points === null
+    ? null : header.proj_points / SEASON_GAMES
+  // Null for the thin state (header, no payload yet) and for a player with
+  // no season played to move from -- see perGameDelta.
+  const delta = profile === null ? null : perGameDelta(profile.seasons, projPpg)
+  const figures: {
+    label: string; value: string; accent?: boolean; tone?: string
+  }[] = [
+    // Per game, not for the season, for the reason the board's own Proj/G
+    // column gives: 313 is a number nobody has a feel for and 18.4 is a
+    // Sunday. Same divisor as that column (SEASON_GAMES), so the two cannot
+    // disagree about what "per game" means.
     {
-      label: 'Tier',
-      value: header.tier === null || header.tier === undefined ? '—' : String(header.tier),
+      label: 'Proj/G',
+      value: header.proj_points === null
+        ? '—' : (header.proj_points / SEASON_GAMES).toFixed(1),
+      accent: true,
     },
-    // Whole points: a value over replacement is a season total, and its
-    // decimals are noise beside three ranks.
-    { label: 'VOR', value: header.vor === null ? '—' : String(Math.round(header.vor)) },
+    // The same projection as a PLACE among his own position -- WR7 -- which
+    // is the unit a drafter thinks in. Both figures come off the board's
+    // ESPN projection, so this row is one source saying one thing twice: how
+    // much, and where that puts him.
+    {
+      label: 'Proj rank',
+      value: header.proj_pos_finish === null
+        ? '—' : `${header.position}${header.proj_pos_finish}`,
+    },
+    // What the projection is SAYING, against what he actually averaged last
+    // season: a level and a direction, which is the pair the two figures
+    // beside it cannot give on their own. Green up, red down, the same tone
+    // the Per game panel's own note wears further down the popup.
+    {
+      label: 'vs last yr',
+      value: delta === null ? '—' : delta.label,
+      tone: delta?.tone,
+    },
   ]
   return (
     <div className="pp-pop-figures">
       {figures.map((f) => (
         <div key={f.label} className="pp-pop-figure">
           <span className="pp-pop-figure-label">{f.label}</span>
-          <span className={`mono pp-pop-figure-value${f.accent ? ' is-accent' : ''}`}>
+          <span className={`mono pp-pop-figure-value${f.accent ? ' is-accent' : ''}${
+            f.tone ? ` delta-tone ${f.tone}` : ''}`}>
             {f.value}
           </span>
         </div>
@@ -358,16 +390,38 @@ function PopCards({ profile, onSelectPlayer }: {
     <>
       <div className="pp-pop-row">
         <ScheduleRanks weeks={profile.schedule} sosPct={profile.outlook.sos_pct} />
+        {/* The wider of the two now: it lists a room, and a name cut short
+            is a name you cannot recognise. */}
         <DepthChartCard
           team={header.team}
           position={header.position}
           groups={profile.depth_chart}
         />
+      </div>
+      <div className="pp-pop-row">
+        <UsageLine seasons={profile.seasons} position={header.position}
+                   projected={profile.summary?.proj_usage} />
+        {/* Beside Usage: both are the shape of his role, one as rates and one
+            as the line in front of him. Null for every defense by
+            construction (see LineQualityData) -- the o-line is a fact about
+            the eleven who leave the field when that unit comes on. */}
+        {profile.oline && <LineQuality oline={profile.oline} />}
+      </div>
+      {/* The two market cards, on their own line. One is what the betting
+          market prices his offence at, the other what the fantasy market
+          prices him at -- both are outside opinions, and reading them next
+          to each other is the comparison worth making. Vegas takes the
+          larger share: it carries a figure, eighteen weeks and three prices
+          where the other carries four rows. */}
+      <div className="pp-pop-row">
+        <VegasCard vegas={profile.vegas} />
         <MarketRow
           rank={header.rank}
           marketRank={header.market_rank}
           marketSpread={header.market_spread}
           sources={header.market_sources}
+          position={header.position}
+          posRanks={header.market_pos}
           // Only for the thin state, where the whole popup carries one
           // forward-looking number and this is it -- for everyone else the
           // Per game panel and the week chart are already that, and a fifth
@@ -375,15 +429,6 @@ function PopCards({ profile, onSelectPlayer }: {
           // asked it. Sparse.dc.html draws it exactly here.
           impliedPoints={hasHistory(profile) ? null : profile.outlook.implied_points}
         />
-      </div>
-      <div className="pp-pop-row">
-        <UsageLine seasons={profile.seasons} position={header.position}
-                   projected={profile.summary?.proj_usage} />
-        {/* Beside Usage, and alone with it: three cards in this row meant
-            none of them had the width it needed -- Usage ellipsised "Target
-            %" and Vegas wrapped its unit over four lines. Two wide cards
-            fit; three did not. */}
-        <VegasCard vegas={profile.vegas} />
       </div>
       {/* Last row, and the only one that looks backwards: everything above
           it is this player now, and these are the seasons that already went
@@ -399,7 +444,6 @@ function PopCards({ profile, onSelectPlayer }: {
             unit comes on. Down here rather than beside Usage because it is
             the narrowest card in the popup -- a rank and two ratios -- and
             it was taking width from two cards that needed it. */}
-        {profile.oline && <LineQuality oline={profile.oline} />}
         <ComparableSeasons
           mode={profile.similar.mode}
           players={profile.similar.players}
@@ -578,7 +622,7 @@ export default function PlayerProfile({
               )}
             </p>
           </div>
-          {header && <PopFigures header={header} />}
+          {header && <PopFigures header={header} profile={profile} />}
           {onToggleDrafted && header && (
             <button type="button" className="drawer-draft-btn" onClick={handleToggleDraftedClick}>
               {header.drafted ? 'Undo draft' : 'Mark drafted'}

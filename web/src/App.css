@@ -4761,7 +4761,7 @@ button.roster-row:focus-visible {
 .pp-pop-seasons-head,
 .pp-pop-seasons-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) repeat(3, 34px);
+  grid-template-columns: minmax(0, 1fr) repeat(5, 32px);
   gap: var(--space-1);
   align-items: baseline;
 }
@@ -4771,7 +4771,7 @@ button.roster-row:focus-visible {
    the Per game and Finish panels put in front of their own projections. */
 .pp-pop-seasons-head.has-proj,
 .pp-pop-seasons-row.has-proj {
-  grid-template-columns: minmax(0, 1fr) repeat(3, 34px) 40px;
+  grid-template-columns: minmax(0, 1fr) repeat(5, 32px) 38px;
 }
 
 .pp-pop-seasons-proj {

@@ -58,9 +58,10 @@ export default function ScheduleRanks({ weeks, sosPct }: {
     : undefined
 
   return (
-    // Wider than its third of the row: "6th softest of 32" is the whole
-    // point of the card and does not survive being wrapped or cut.
-    <PopCard title="Schedule" note={note} className="is-wide">
+    // Back to an even share. It was widened for its note, but eighteen bars
+    // are a shape rather than a reading and they hold up narrow -- and the
+    // card beside it now lists a whole position room, which does not.
+    <PopCard title="Schedule" note={note}>
       <div className="pp-pop-strip">
         {weeks.map((w) => {
           const opponent = w.opponent === null

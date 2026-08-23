@@ -521,6 +521,56 @@ def _with_futures(vegas: dict | None, futures: list[dict]) -> dict | None:
     return {**vegas, "futures": futures}
 
 
+def _market_pos_ranks(board: pd.DataFrame, player_id: str) -> dict:
+    """Each market number as a place among his own position.
+
+    "Consensus 19" is a fact about 250 players; "WR7" is the one a drafter
+    actually uses, because a roster is filled by position and the gap between
+    WR7 and WR8 is a decision where the gap between 19 and 20 is not.
+
+    Ranked over THIS board, which is the draftable pool -- the same population
+    every other rank on the card counts in, so board and consensus places are
+    read against the same denominator.
+
+    Sources live two ways on a board row: `rank`, `market_rank`, `ffc_rank` and
+    `espn_ppr_rank` are columns, and the rest sit inside `market_sources` as a
+    dict per row. Both are expanded here rather than only the easy half: a card
+    that showed a position for two sources and a bare number for three would
+    read as though the other three were a different kind of thing.
+    """
+    if board is None or board.empty or "position" not in board.columns:
+        return {}
+    cols = {"board": "rank", "consensus": "market_rank",
+            "ffc": "ffc_rank", "espn": "espn_ppr_rank"}
+    frame = pd.DataFrame({"player_id": board["player_id"],
+                          "position": board["position"]})
+    for key, col in cols.items():
+        if col in board.columns:
+            frame[key] = pd.to_numeric(board[col], errors="coerce")
+    if "market_sources" in board.columns:
+        for key in ("fp", "mfl", "cbs"):
+            frame[key] = [
+                (src or {}).get(key) if isinstance(src, dict) else None
+                for src in board["market_sources"]]
+            frame[key] = pd.to_numeric(frame[key], errors="coerce")
+
+    mine = frame[frame["player_id"] == player_id]
+    if mine.empty:
+        return {}
+    out = {}
+    for key in [k for k in frame.columns if k not in ("player_id", "position")]:
+        value = mine.iloc[0][key]
+        if pd.isna(value):
+            continue
+        # `method="min"`, so two players a source ranks identically share the
+        # better place -- the rule every other rank in this project uses.
+        place = (frame.groupby("position")[key].rank(ascending=True, method="min")
+                 [mine.index[0]])
+        if not pd.isna(place):
+            out[key] = int(place)
+    return out
+
+
 def _vegas(schedules: pd.DataFrame, team: str | None,
            season: int) -> dict | None:
     """What the market prices this player's offence at, week by week.
@@ -1475,6 +1525,9 @@ def build_profile(conn, player_id: str, weights: dict | None = None,
         return None
     row = match.iloc[0]
     header = row.to_dict()
+    # Each market number as a place among his own position -- see
+    # `_market_pos_ranks` for why a drafter needs WR7 and not 19.
+    header["market_pos"] = _market_pos_ranks(board, player_id)
     factors_out = {k: header[k] for k in
                    ("production", "durability", "role", "environment", "schedule")}
     # The projection as a PLACE, next to the places his played seasons took.

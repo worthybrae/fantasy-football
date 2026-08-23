@@ -190,6 +190,10 @@ export interface LineQualityData {
  *  `proj_scale`, `espn_id`, `ffc_rank` and the five raw factors, none of
  *  which this card reads). */
 export interface ProfileHeader extends Player {
+  /** Each market number as a place among his own position, keyed `board`,
+   *  `consensus`, `ffc`, `espn`, `fp`, `mfl`, `cbs`. Ranked over the
+   *  draftable board, so every place counts the same population. */
+  market_pos?: Record<string, number | undefined>
   proj_points: number | null
   /** Where the projection places him among his own position, best first --
    *  the same shape `pos_finish` gives a season he has played, so the Finish

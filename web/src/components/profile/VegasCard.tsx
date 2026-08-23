@@ -48,7 +48,7 @@ export default function VegasCard({ vegas }: { vegas: Vegas | null }) {
     ? `${ordinal(vegas.rank)} of ${vegas.teams}` : undefined
 
   return (
-    <PopCard title="Vegas" note={note}>
+    <PopCard title="Vegas" note={note} className="is-widest">
       {hasTeam && (
       <>
       <div className="pp-pop-vegas-head">

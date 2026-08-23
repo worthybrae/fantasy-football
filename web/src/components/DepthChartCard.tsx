@@ -2,12 +2,12 @@ import type { DepthChartGroup } from '../api'
 import PopCard from './profile/PopCard'
 import { depthGroup } from './profile/payload'
 
-// The card used to print the whole offence, four position groups at once. A
-// manager holding a pick does not need to know who Detroit's third tight end
-// is; he needs to know who is standing between this player and the ball. So
-// this is HIS room only -- the group he is charted in, from the top -- and
-// the rest of the offence is a click away on those players' own cards.
-const ROWS = 3
+// HIS room, whole. Still not the four position groups this once printed -- a
+// manager holding a pick does not need Detroit's third tight end -- but no
+// longer the top three either: the men behind him are the ones who take his
+// carries when a coach changes his mind, and a room cut off at three said
+// nothing about how deep it goes. The rest of the offence stays a click away
+// on those players' own cards.
 
 export default function DepthChartCard({ team, position, groups }: {
   team: string
@@ -17,7 +17,7 @@ export default function DepthChartCard({ team, position, groups }: {
   const mine = depthGroup(groups, position)
   if (mine === null) return null
 
-  const top = mine.players.slice(0, ROWS)
+  const top = mine.players
   // He is the reason the card is open, so he is always on it: a fourth-string
   // back cut off under a list of the three men ahead of him would be the one
   // fact the card exists to show, missing.
@@ -25,7 +25,7 @@ export default function DepthChartCard({ team, position, groups }: {
   const rows = me && !top.includes(me) ? [...top, me] : top
 
   return (
-    <PopCard title="Room" note={team}>
+    <PopCard title="Room" note={team} className="is-wide">
       {/* An ordered list because a depth chart IS an order -- the whole
           card is who stands where in the room. */}
       <ol className="pp-pop-list">

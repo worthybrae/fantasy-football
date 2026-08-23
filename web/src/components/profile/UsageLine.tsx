@@ -14,10 +14,11 @@ import type { ProjectedUsage, SeasonPercentiles, SeasonRow } from './payload'
 // his offence he was, which is the half that survives a coaching change and
 // the half a projection is really a bet on.
 //
-// Three seasons, not the five the panels above draw: a row of five numbers
-// at this width stops being readable, and usage older than three years is
-// describing a different team.
-const SHOWN = 3
+// Five, matching the season panels above it. Three was a width limit from
+// when this card shared a row with two others -- it has its own row now, and
+// a fifth column costs 34px against the whole popup. Older usage is a
+// different team, but seeing WHEN it changed is the reason to look.
+const SHOWN = 5
 
 // Per-game rates by position, off `scoring/profile.py::_SUMMARY_STATS` -- the
 // keys are that list's, not one invented here. Two per position, because the
