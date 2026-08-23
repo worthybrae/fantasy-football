@@ -169,6 +169,11 @@ export default function DraftRoom() {
   const [planFetchError, setPlanFetchError] = useState<string | null>(null)
   const [planLoading, setPlanLoading] = useState(false)
   const [players, setPlayers] = useState<Record<string, Player>>({})
+  // Whether the join table is still ON ITS WAY, as opposed to having arrived
+  // empty. The two look identical from `players` alone and must not be drawn
+  // the same: a room that has not fetched names yet should say so, and a room
+  // whose fetch FAILED is better off degrading to ids than showing nothing.
+  const [playersLoading, setPlayersLoading] = useState(true)
   // Which of the two main-column views is showing. The toggle for it lives
   // in the top bar (see the header below); the auto-switch that jumps back
   // to Available the moment you come on the clock is in the poll.
@@ -260,7 +265,12 @@ export default function DraftRoom() {
       })
       .catch(() => {
         // Candidates still render by player_id; the join table just stays
-        // empty and names fall back to that id.
+        // empty and names fall back to that id. That fallback is for THIS
+        // case -- a fetch that failed -- and not for the seconds before it
+        // lands, which is what `playersLoading` separates out below.
+      })
+      .finally(() => {
+        if (!cancelled) setPlayersLoading(false)
       })
     return () => {
       cancelled = true
@@ -893,6 +903,24 @@ export default function DraftRoom() {
               // mock, not an oversight -- do not "fix" this back to
               // match the mock's own ordering.
               <>
+                {/* The board takes a few seconds to build, and the live poll
+                    answers immediately -- so the room used to open on a table
+                    of candidates joined against nothing: raw gsis ids where
+                    the names go, an em dash in every column, and a Draft
+                    button beside each one. It read as a broken room rather
+                    than a loading one, which on draft night is the difference
+                    between waiting and reconnecting.
+                    Only while the fetch is genuinely in flight: a failed one
+                    falls through to the table below and its id fallback,
+                    because by then ids are the most the room can honestly
+                    show. */}
+                {playersLoading && Object.keys(players).length === 0 ? (
+                  <div className="draft-board-building" role="status">
+                    <span className="draft-board-building-dot" aria-hidden="true" />
+                    Building your board — ranking every player against your roster
+                  </div>
+                ) : (
+                <>
                 <TopThree
                   candidates={state?.candidates ?? []}
                   players={players}
@@ -912,6 +940,8 @@ export default function DraftRoom() {
                   draftedIds={draftedIds}
                   settings={state?.settings}
                 />
+                </>
+                )}
               </>
             )
             : tab === 'board'
