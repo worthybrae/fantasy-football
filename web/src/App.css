@@ -761,6 +761,39 @@ td:first-child {
   object-fit: cover;
   background: var(--bg-2);
 }
+/* Where one round ended and the next began. The rail runs newest-first, so
+   these count down as you scroll back -- and they are what turns a list of
+   picks into a draft you can navigate ("third round" is a place, pick 61 is
+   a number you have to work out). A rule and a label rather than a gap: a
+   gap alone reads as a rendering accident at this density. */
+.pick-ticker-round {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+  padding: 0 var(--space-2) 0 var(--space-3);
+  border-left: 1px solid var(--border);
+}
+
+.pick-ticker-round > span {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--text-3);
+  /* Vertical, so a marker costs a few pixels of the strip's width rather
+     than a whole entry's worth. */
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+}
+
+/* The marker already carries a rule, so the entry after it does not need a
+   second one. */
+.pick-ticker-round + .pick-ticker-item {
+  padding-left: var(--space-2);
+  border-left: 0;
+}
+
 
 .pick-ticker-item {
   flex-shrink: 0;
