@@ -108,6 +108,21 @@ export interface PlayerFuture {
   /** Where his price sits in that market's field, shortest first. */
   place: number
   field: number
+  /** Where ADP puts him in the SAME field, and how much of that field a
+   *  draft room ranks at all. The two places subtract: a back the book makes
+   *  4th likeliest to lead the league in rushing while rooms draft him 11th
+   *  of the same players is a disagreement neither number shows alone. Null
+   *  when nobody drafts him. */
+  adp_place: number | null
+  adp_field: number
+  /** The same two ranks over his OWN POSITION inside that field, which is
+   *  the pair the card prints: every market here is open to the league, so a
+   *  back sits behind thirty quarterbacks for MVP and ahead of all of them
+   *  by ADP, and comparing those two would dress a structural fact as a
+   *  disagreement. Null where the field prices too few of his position. */
+  pos_place: number | null
+  pos_adp_place: number | null
+  pos_field: number
 }
 
 export interface Vegas {

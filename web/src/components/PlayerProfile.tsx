@@ -450,7 +450,7 @@ function PopCards({ profile, onSelectPlayer }: {
           // asked it. Sparse.dc.html draws it exactly here.
           impliedPoints={hasHistory(profile) ? null : profile.outlook.implied_points}
         />
-        <VegasCard vegas={profile.vegas} />
+        <VegasCard vegas={profile.vegas} position={header.position} />
       </div>
       {/* Last row, and the only one that looks backwards: everything above
           it is this player now, and these are the seasons that already went

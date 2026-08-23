@@ -439,6 +439,11 @@ _FUTURES_LABELS = {
 }
 
 
+# How many of a player's own position a market has to price before the card
+# will rank him inside it. Three: two is a coin toss dressed as a ranking.
+_POS_FIELD_MIN = 3
+
+
 def _player_futures(conn, player_id: str, name: str, position: str,
                     season: int) -> list[dict]:
     """This player's season-long betting markets, with his place in each field.
@@ -479,6 +484,32 @@ def _player_futures(conn, player_id: str, name: str, position: str,
 
     futures = futures.copy()
     futures["espn_id"] = pd.to_numeric(futures["espn_id"], errors="coerce")
+
+    # Every field's players, priced a second way: by where a draft room takes
+    # them. ESPN's own ADP, joined on the same athlete id the futures carry,
+    # so no name folding is involved anywhere in this comparison.
+    #
+    # This is the whole point of the pair of ranks the card prints. A field
+    # is one set of players; ranking it by the book's price and ranking it by
+    # ADP are two opinions about the SAME set, so the two numbers subtract.
+    # A back the books make 4th likeliest to lead the league in rushing while
+    # rooms draft him 11th of that same field is a disagreement worth seeing,
+    # and neither number alone shows it.
+    adp = read_table(conn, "espn_adp")
+    adp_by_id = pd.Series(dtype=float)
+    pos_by_id = pd.Series(dtype=object)
+    if not adp.empty and {"espn_id", "espn_adp"}.issubset(adp.columns):
+        marks = adp[["espn_id", "espn_adp"]].copy()
+        marks["espn_id"] = pd.to_numeric(marks["espn_id"], errors="coerce")
+        marks["espn_adp"] = pd.to_numeric(marks["espn_adp"], errors="coerce")
+        marks = marks.dropna().drop_duplicates("espn_id")
+        adp_by_id = marks.set_index("espn_id")["espn_adp"]
+    if not adp.empty and {"espn_id", "position"}.issubset(adp.columns):
+        who = adp[["espn_id", "position"]].copy()
+        who["espn_id"] = pd.to_numeric(who["espn_id"], errors="coerce")
+        who = who.dropna().drop_duplicates("espn_id")
+        pos_by_id = who.set_index("espn_id")["position"]
+
     out = []
     for market, field in futures.groupby("market"):
         mine = field[field["espn_id"] == espn_id]
@@ -489,6 +520,35 @@ def _player_futures(conn, player_id: str, name: str, position: str,
         # and reads as larger).
         order = field.sort_values("implied_pct", ascending=False).reset_index(drop=True)
         place = int(order.index[order["espn_id"] == espn_id][0]) + 1
+
+        my_row = field.index[field["espn_id"] == espn_id][0]
+
+        # The same field by ADP, over only the players a room actually
+        # drafts. Anyone unranked is dropped rather than sent to the back:
+        # sitting an undrafted player last would make everybody above him
+        # look better than the draft board really says they are.
+        drafted = field["espn_id"].map(adp_by_id).dropna().sort_values()
+        adp_place = (int(list(drafted.index).index(my_row)) + 1
+                     if my_row in drafted.index else None)
+
+        # AND THE PAIR THE CARD ACTUALLY PRINTS: the same two rankings, but
+        # over his own position only.
+        #
+        # Whole-field ranks compare things that are not comparable. Every one
+        # of these markets is open to the league, so a back sits behind
+        # thirty quarterbacks in MVP and ahead of every one of them in ADP,
+        # and the card would paint that structural fact as a disagreement
+        # worth acting on. Among BACKS, both numbers are answering the same
+        # question and the gap between them means something.
+        same = field[field["espn_id"].map(pos_by_id) == position]
+        pos_place = pos_adp_place = None
+        pos_field = int(len(same))
+        if pos_field >= _POS_FIELD_MIN and my_row in same.index:
+            by_price = same.sort_values("implied_pct", ascending=False)
+            pos_place = int(list(by_price.index).index(my_row)) + 1
+            pos_drafted = same["espn_id"].map(adp_by_id).dropna().sort_values()
+            pos_adp_place = (int(list(pos_drafted.index).index(my_row)) + 1
+                             if my_row in pos_drafted.index else None)
         out.append({
             "market": str(market),
             "label": _FUTURES_LABELS.get(str(market), str(market)),
@@ -502,6 +562,16 @@ def _player_futures(conn, player_id: str, name: str, position: str,
             "top_pct": _round_or_none(order.iloc[0].get("implied_pct"), 1),
             "place": place,
             "field": int(len(field)),
+            # Where the same field puts him by ADP, and how many of it a room
+            # drafts at all. Null when nobody drafts HIM -- a longshot on a
+            # book's board who is not on anybody else's.
+            "adp_place": adp_place,
+            "adp_field": int(len(drafted)),
+            # The same two, among his own position. Null where the field
+            # holds too few of his position to rank him against.
+            "pos_place": pos_place,
+            "pos_adp_place": pos_adp_place,
+            "pos_field": pos_field,
         })
     # Shortest price first, so the market that likes him most leads.
     out.sort(key=lambda f: -(f["implied_pct"] or 0))

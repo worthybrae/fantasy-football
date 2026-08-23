@@ -22,6 +22,23 @@ import { ordinal } from './payload'
 // What survives is the provenance -- how many weeks the average is over --
 // which is the only thing the strip said that nothing else does.
 
+// How far the two ranks have to part before the row says so in colour.
+// Three places: inside that, two rankings over a field of sixty are simply
+// agreeing, and painting every row would make the card look like an argument
+// nobody is having.
+//
+// Green means the BOOKS rank him higher than the draft room does, which is
+// the direction a drafter is shopping in -- the same sense the board's own
+// edge carries, where a player the room is late on is the one worth taking.
+const RANK_GAP = 3
+
+function gapTone(place: number | null, adpPlace: number | null): string {
+  if (place === null || adpPlace === null) return ''
+  if (adpPlace - place >= RANK_GAP) return 'delta-tone is-up'
+  if (place - adpPlace >= RANK_GAP) return 'delta-tone is-down'
+  return ''
+}
+
 // How many of his own markets the card shows. Four, which is what the card
 // has room for now that the implied total and the week strip are gone -- it
 // renders a shade under the Market card it shares a row with, and an empty
@@ -30,11 +47,19 @@ import { ordinal } from './payload'
 // most for.
 const SHOWN_MARKETS = 4
 
-export default function VegasCard({ vegas }: { vegas: Vegas | null }) {
+export default function VegasCard({ vegas, position }: {
+  vegas: Vegas | null
+  position: string
+}) {
   const futures = vegas?.futures ?? []
   // Nothing priced about his offence AND nothing priced about him: no card.
   const hasTeam = vegas && vegas.implied !== null && vegas.weeks.length > 0
   if (!vegas || (!hasTeam && futures.length === 0)) return null
+
+  // "RB4", the way the Market card writes a positional rank, or an em dash
+  // where the field prices too few of his position to place him in.
+  const byPos = (place: number | null) =>
+    place === null ? '—' : `${position}${place}`
 
   const ranked = hasTeam && vegas.rank !== null && vegas.teams !== null
     && vegas.teams > 1
@@ -72,6 +97,16 @@ export default function VegasCard({ vegas }: { vegas: Vegas | null }) {
       )}
       {futures.length > 0 && (
         <div className="pp-pop-futures">
+          {/* The columns, named. Two ranks side by side need saying which is
+              which, and nine-pixel headings cost one line to save a reader
+              guessing at every row. */}
+          <div className="pp-pop-futures-head">
+            <span />
+            <span />
+            <span>chance</span>
+            <span>vegas</span>
+            <span>adp</span>
+          </div>
           {futures.slice(0, SHOWN_MARKETS).map((f) => {
             const pct = f.implied_pct
             // The favourite's own price is the top of the track. A market
@@ -84,11 +119,13 @@ export default function VegasCard({ vegas }: { vegas: Vegas | null }) {
               <div
                 className="pp-pop-futures-row"
                 key={f.market}
-                // Everything the row no longer prints, kept where a reader
-                // who wants it can still find it: the price itself, and
-                // where he sits in the field.
+                // The one thing the row does not print, kept where a reader
+                // who wants it can still find it: the price itself, and the
+                // sizes of the two fields the ranks are out of.
                 title={`${f.american ? `${f.american} · ` : ''}`
-                  + `${ordinal(f.place)} of ${f.field} priced`}
+                  + `${ordinal(f.place)} of ${f.field} priced`
+                  + (f.adp_place === null ? ''
+                    : ` · ${ordinal(f.adp_place)} of ${f.adp_field} by adp`)}
               >
                 <span className="pp-pop-futures-label">{f.label}</span>
                 <span className="pp-pop-futures-track">
@@ -105,6 +142,14 @@ export default function VegasCard({ vegas }: { vegas: Vegas | null }) {
                 <span className="mono pp-pop-futures-pct">
                   {pct === null ? '—'
                     : pct < 1 ? '<1%' : `${Math.round(pct)}%`}
+                </span>
+                {/* Where the book ranks him among his own position in this
+                    market, and where a draft room does. Same players, same
+                    position, two opinions -- so the numbers subtract, which
+                    is the only reason to print two of them. */}
+                <span className="mono pp-pop-futures-rank">{byPos(f.pos_place)}</span>
+                <span className={`mono pp-pop-futures-rank ${gapTone(f.pos_place, f.pos_adp_place)}`}>
+                  {byPos(f.pos_adp_place)}
                 </span>
               </div>
             )
