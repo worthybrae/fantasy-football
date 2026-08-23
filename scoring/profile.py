@@ -427,6 +427,67 @@ def career_summary(seasons: list[dict]) -> dict:
     return {"w_ppg": round(w_ppg, 1), "w_stats": stats}
 
 
+def _vegas(schedules: pd.DataFrame, team: str | None,
+           season: int) -> dict | None:
+    """What the market prices this player's offence at, week by week.
+
+    An implied team total is the half of a betting line that is about scoring:
+    (total + spread) / 2 for the home side, (total - spread) / 2 for the away
+    one -- the same arithmetic `factors.environment_factor` already runs for
+    the board's `environment` percentile, so this card and that factor cannot
+    disagree about whose offence the market likes.
+
+    A TEAM total, not a player prop. Nothing here says how many of Detroit's
+    27.8 points go to one back, and the card's own label has to say so.
+
+    Only the weeks a line is actually posted for. Books price the front of a
+    season and a scattering beyond it -- about seven of seventeen at the
+    moment -- and the rest are absent rather than zero, because "no line yet"
+    and "a low-scoring game" are opposite claims.
+    """
+    if schedules is None or schedules.empty or not team:
+        return None
+    sc = schedules
+    if "season" in sc.columns:
+        sc = sc[sc["season"] == season]
+    if sc.empty or not {"total_line", "spread_line"}.issubset(sc.columns):
+        return None
+    priced = sc.dropna(subset=["total_line", "spread_line"])
+    weeks = []
+    for _, g in priced.iterrows():
+        for side, other, sign in (("home_team", "away_team", 1),
+                                  ("away_team", "home_team", -1)):
+            if g.get(side) != team:
+                continue
+            weeks.append({
+                "week": _int_or_none(g.get("week")),
+                "opponent": None if pd.isna(g.get(other)) else str(g.get(other)),
+                "home": side == "home_team",
+                "implied": _round_or_none(
+                    (g["total_line"] + sign * g["spread_line"]) / 2, 1),
+            })
+    if not weeks:
+        return None
+    weeks.sort(key=lambda w: (w["week"] is None, w["week"]))
+
+    # Ranked over every team the market has priced at all, so the denominator
+    # is the one the number came from rather than a hopeful 32.
+    env = factors.environment_factor(sc)
+    rank = None
+    if not env.empty and (env["team"] == team).any():
+        order = env.sort_values("env_raw", ascending=False).reset_index(drop=True)
+        rank = int(order.index[order["team"] == team][0]) + 1
+    mine = env[env["team"] == team]
+    return {
+        "implied": _round_or_none(mine.iloc[0]["env_raw"], 1) if not mine.empty else None,
+        "rank": rank,
+        "teams": int(len(env)) if not env.empty else None,
+        "priced": len(weeks),
+        "weeks_total": int(sc["week"].nunique()) if "week" in sc.columns else None,
+        "weeks": weeks,
+    }
+
+
 def _espn_projected_usage(conn, player_id: str, name: str, position: str,
                           season: int) -> dict | None:
     """ESPN's projected stat line for the season being drafted, per game.
@@ -1505,6 +1566,9 @@ def build_profile(conn, player_id: str, weights: dict | None = None,
         "seasons": seasons,
         "game_log": logs,
         "outlook": outlook_out,
+        # What the market prices his offence at, week by week. Team totals,
+        # not player props -- see `_vegas`.
+        "vegas": _vegas(schedules, header.get("team"), frames.draft_season),
         "depth_chart": team_depth_chart(depth, header["team"], player_id),
         "schedule": weekly_difficulty(schedules, prior, header["team"],
                                       header["position"], rules),

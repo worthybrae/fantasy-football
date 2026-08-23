@@ -4620,6 +4620,45 @@ button.roster-row:focus-visible {
 .delta-tone.is-up { color: var(--ok); }
 .delta-tone.is-down { color: var(--fail); }
 
+/* The implied total, and the unit it is in. The number is the card's answer
+   and the words beside it are the guard against reading it as his own
+   projection. */
+.pp-pop-vegas-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.pp-pop-vegas-figure {
+  font-size: 19px;
+  line-height: 1;
+  color: var(--text-1);
+}
+
+.pp-pop-vegas-unit {
+  font-size: 10px;
+  line-height: 1.3;
+  color: var(--text-3);
+}
+
+/* One bar a week, against a FIXED band (see VegasCard) rather than this
+   team's own range, so two players' cards can be compared. Accent rather than
+   the five-step ramp: the ramp grades a player against his position, and this
+   is a market price on a team -- borrowing it would imply a grade nobody
+   computed. */
+.pp-pop-vegas-bar {
+  flex: 1 1 0;
+  align-self: flex-end;
+  min-height: 4px;
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.pp-pop-vegas-foot {
+  font-size: 9px;
+  color: var(--text-3);
+}
+
 /* A usage number, tinted by where it places among the same position that
    season. A wash rather than a solid fill: twelve saturated boxes in one
    small card would shout over the panels above, and the number has to stay

@@ -83,6 +83,21 @@ export interface GameRow extends GameLogRow {
   target_pct: number | null
 }
 
+/** What the betting market prices this player's offence at.
+ *
+ *  `implied` is the team's average implied total over the weeks a line is
+ *  posted for, `rank` its place among the teams the market has priced, and
+ *  `weeks` one entry per priced game. A TEAM total, never a player prop. */
+export interface Vegas {
+  implied: number | null
+  rank: number | null
+  teams: number | null
+  priced: number
+  weeks_total: number | null
+  weeks: { week: number | null; opponent: string | null; home: boolean;
+           implied: number | null }[]
+}
+
 /** One schedule week plus the league rank the owner asked for.
  *  DIRECTION, because it inverts the intuition: rank 1 is the SOFTEST
  *  defence -- the one that gave up the most to this position last season --
@@ -225,6 +240,7 @@ export type ProfilePayload =
     game_log: GameRow[]
     schedule: ScheduleRankWeek[]
     bio: Bio
+    vegas: Vegas | null
     cohort: Cohort | null
     oline: LineQualityData | null
     // OPTIONAL, and read as such everywhere: `news` and `status` are being

@@ -18,6 +18,7 @@ import MarketRow from './profile/MarketRow'
 import MissingData from './profile/MissingData'
 import ScheduleRanks from './profile/ScheduleRanks'
 import UsageLine from './profile/UsageLine'
+import VegasCard from './profile/VegasCard'
 import WeekByWeek from './profile/WeekByWeek'
 import { fmtRank, fmtSigned, hasHistory, type PlayerStatus, type ProfileHeader, type ProfilePayload } from './profile/payload'
 
@@ -382,6 +383,9 @@ function PopCards({ profile, onSelectPlayer }: {
             o-line is a fact about the eleven who leave the field when this
             unit comes on. */}
         {profile.oline && <LineQuality oline={profile.oline} />}
+        {/* Beside Blocking, because both are facts about the offence around
+            him rather than about him. */}
+        <VegasCard vegas={profile.vegas} />
       </div>
       {/* Last row, and the only one that looks backwards: everything above
           it is this player now, and these are the seasons that already went
