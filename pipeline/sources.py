@@ -45,10 +45,14 @@ def fetch_snap_counts(years):
     return nfl.import_snap_counts(years)
 
 def fetch_players(_=None):
-    # Static bio data; birth_date drives age-matched stat twins.
+    # Static bio data; birth_date drives age-matched stat twins. `headshot` is
+    # nflverse's own NFL.com CDN url -- the profile popup's one image, taken
+    # from the source this project already reads rather than hotlinked off a
+    # site nothing else here depends on. Null for anyone it has no photo of,
+    # which the card renders as no image rather than a broken one.
     df = nfl.import_players()
-    return df[["gsis_id", "display_name", "birth_date", "rookie_season"]].dropna(
-        subset=["gsis_id"])
+    return df[["gsis_id", "display_name", "birth_date", "rookie_season",
+               "headshot"]].dropna(subset=["gsis_id"])
 
 def fetch_depth_charts(season):
     return nfl.import_depth_charts([season])

@@ -19,6 +19,12 @@ import type { GameRow, SeasonRow } from './payload'
 // receiver's targets. K and DST have no entry -- `GameStats` carries the
 // skill columns only -- so they keep the sentence, which is the whole of
 // what the payload can say about their week.
+//
+// Touchdowns are NOT a column for the skill positions, on purpose: six
+// points each, they are already the loudest part of the PPR figure on the
+// right, and the row has room for nine columns rather than ten. What is not
+// anywhere else is how much of the offence he was that week -- the shares
+// below, which a season average flattens into one number.
 type LogColumn = { head: string; cell: (g: GameRow) => string }
 
 const LOG: Record<string, LogColumn[]> = {
@@ -34,14 +40,23 @@ const LOG: Record<string, LogColumn[]> = {
     { head: 'Ru', cell: (g) => String(g.stats.rush_yards) },
     { head: 'Rec', cell: (g) => String(g.stats.receptions) },
     { head: 'Re', cell: (g) => String(g.stats.rec_yards) },
-    { head: 'TD', cell: (g) => String(g.stats.rush_tds + g.stats.rec_tds) },
+    { head: 'Snap', cell: (g) => share(g.snap_pct) },
+    { head: 'Tgt%', cell: (g) => share(g.target_pct) },
   ],
   WR: [
     { head: 'Tgt', cell: (g) => String(g.stats.targets) },
     { head: 'Rec', cell: (g) => String(g.stats.receptions) },
     { head: 'Yds', cell: (g) => String(g.stats.rec_yards + g.stats.rush_yards) },
-    { head: 'TD', cell: (g) => String(g.stats.rec_tds + g.stats.rush_tds) },
+    { head: 'Snap', cell: (g) => share(g.snap_pct) },
+    { head: 'Tgt%', cell: (g) => share(g.target_pct) },
   ],
+}
+
+/** A share as whole per cent, or an em dash where there is none -- a week
+ *  the snap or target table cannot answer for is a gap, and a 0% would read
+ *  as a player who was on the field for nothing. */
+function share(value: number | null): string {
+  return value === null || value === undefined ? '\u2014' : `${Math.round(value * 100)}%`
 }
 LOG.TE = LOG.WR
 

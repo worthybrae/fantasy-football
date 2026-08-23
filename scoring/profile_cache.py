@@ -236,6 +236,12 @@ class ProfileFrames:
     comp_pool: pd.DataFrame
     pfr_to_gsis: pd.DataFrame
     line_quality: pd.DataFrame
+    # Team targets per (season, week, team). Tiny -- about one row per team
+    # per week -- and the denominator a per-game target share needs. The
+    # season figure the card already carries averages a role away: a receiver
+    # who saw a fifth of the targets in September and a tenth in December
+    # reads the same as one who was steady all year.
+    team_week_targets: pd.DataFrame
     draft_season: int
     # `snap_counts`' column names, carried rather than re-queried: the
     # per-game snap read has to know whether `game_type` exists before it can
@@ -296,6 +302,7 @@ class ProfileFrames:
             # for: a consumer that annotates a cached frame in place poisons
             # every later click, and no future edit should have to remember
             # which frames are safe to write to.
+            team_week_targets=self.team_week_targets.copy(),
             season_ranks=self.season_ranks.copy(),
             comp_pool=self.comp_pool.copy(),
             pfr_to_gsis=self.pfr_to_gsis.copy(),
@@ -462,6 +469,23 @@ def season_rank_frame(weekly: pd.DataFrame, feats: pd.DataFrame,
         q[col] = (source.groupby([q["season"], q["position"]])
                   .rank(pct=True, ascending=True))
     return q[_SEASON_RANK_COLUMNS]
+
+
+def _team_week_targets(weekly: pd.DataFrame) -> pd.DataFrame:
+    """Team targets per (season, week, team) -- a per-game target share's
+    denominator.
+
+    Built here for the same reason every other frame is: it is a whole-league
+    aggregate with no per-player component, and recomputing it on each profile
+    click would walk 174k weekly rows to divide seventeen numbers.
+    """
+    cols = {"season", "week", "recent_team", "targets"}
+    if weekly.empty or not cols.issubset(weekly.columns):
+        return pd.DataFrame(columns=["season", "week", "recent_team", "team_targets"])
+    t = weekly[["season", "week", "recent_team", "targets"]].copy()
+    t["targets"] = pd.to_numeric(t["targets"], errors="coerce").fillna(0)
+    return (t.groupby(["season", "week", "recent_team"], as_index=False)["targets"]
+            .sum().rename(columns={"targets": "team_targets"}))
 
 
 def comparable_pool(feats: pd.DataFrame, players: pd.DataFrame) -> pd.DataFrame:
@@ -645,6 +669,7 @@ def _build(conn, rules: dict | None) -> ProfileFrames:
         comp_pool=comparable_pool(feats, players),
         pfr_to_gsis=_pfr_crosswalk(conn, snaps),
         line_quality=_line_quality(conn, CURRENT_SEASON, snaps),
+        team_week_targets=_team_week_targets(weekly),
         draft_season=CURRENT_SEASON,
         snap_columns=frozenset(snaps.columns),
         news_columns=frozenset(_table_columns(conn, "player_news")),

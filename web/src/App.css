@@ -3926,6 +3926,19 @@ button.roster-row:focus-visible {
    (the `.ctip-*` rules above) rather than through a second set of bar rules,
    so these declarations size the cards around that picture and decide
    nothing about the picture itself. */
+/* The player's photo, beside his name. Round, because these are headshots
+   on a transparent-ish background and a square crops them badly; sized to
+   the two lines of the identity block so the header keeps its height whether
+   the photo is there or not. */
+.pp-pop-face {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--bg-2);
+}
+
 
 .pp-pop-head {
   display: flex;

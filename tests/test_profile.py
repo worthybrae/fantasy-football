@@ -1648,8 +1648,12 @@ def test_a_defense_reaches_none_of_the_new_code_and_raises_in_none_of_it(tmp_pat
     p = build_profile(conn, dst_id, None, settings)
     json.dumps(p, allow_nan=False)          # nothing unserialisable slipped in
     assert p["cohort"] is None and p["oline"] is None
+    # `headshot` is None here for the same reason every other key is: nflverse
+    # has no biography for a defense, so there is no photo either. Pinned to
+    # the whole dict on purpose -- a key appearing here means the new code DID
+    # reach a defense, which is what this test exists to catch.
     assert p["bio"] == {"season": 2026, "birth_date": None, "rookie_season": None,
-                        "age": None, "nfl_season": None}
+                        "age": None, "nfl_season": None, "headshot": None}
     assert p["seasons"] == [] and p["game_log"] == [] and p["schedule"] == []
 
 

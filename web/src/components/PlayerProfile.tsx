@@ -546,6 +546,23 @@ export default function PlayerProfile({
       )}
       {ident && (
         <div className="pp-pop-head">
+          {/* The photo, when the payload has one. Absent for every defense,
+              for a player nflverse has no biography for, and for a database
+              refreshed before the column existed -- so it is rendered only
+              when it is really there rather than behind a placeholder, which
+              would put a grey box beside a third of the board. `alt=""`
+              because the name is right beside it: a screen reader that reads
+              both says his name twice. */}
+          {profile?.bio?.headshot && (
+            <img
+              className="pp-pop-face"
+              src={profile.bio.headshot}
+              alt=""
+              width={44}
+              height={44}
+              loading="lazy"
+            />
+          )}
           <div className="pp-pop-ident">
             {/* Name first, chip second: the artboard reads it as a sentence,
                 and the position is the qualifier on the name rather than a

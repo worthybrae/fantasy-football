@@ -700,6 +700,25 @@ def comparable_cohort(pool: pd.DataFrame, feats: pd.DataFrame, player_id: str,
     }
 
 
+def _target_share_by_game(mine: pd.DataFrame,
+                          team_week: pd.DataFrame) -> dict:
+    """(season, week) -> share of his team's targets that game.
+
+    None where the team total is zero or missing rather than 0.0: a game the
+    denominator cannot be built for is a gap, and a zero would read as a
+    receiver nobody threw to.
+    """
+    need = {"season", "week", "recent_team", "targets"}
+    if mine.empty or not need.issubset(mine.columns) or team_week.empty:
+        return {}
+    m = mine[["season", "week", "recent_team", "targets"]].copy()
+    m["targets"] = pd.to_numeric(m["targets"], errors="coerce")
+    m = m.merge(team_week, on=["season", "week", "recent_team"], how="left")
+    share = m["targets"] / m["team_targets"].where(m["team_targets"] > 0)
+    return {(int(r.season), int(r.week)): v
+            for r, v in zip(m.itertuples(), share) if pd.notna(v)}
+
+
 def snap_share_by_game(conn, crosswalk: pd.DataFrame, snap_columns,
                        player_id: str) -> dict:
     """(season, week) -> offensive snap share, for every regular-season game.
@@ -1363,6 +1382,21 @@ def build_profile(conn, player_id: str, weights: dict | None = None,
     # so that function keeps its "one player's weekly rows plus three
     # league-wide aggregates" shape and does not grow a `players` argument.
     bio = player_bio(frames.players, player_id, frames.draft_season)
+    # nflverse's own photo url, null until a `make refresh` has run against a
+    # players table that carries the column -- the card renders no image
+    # rather than a broken one, so an unrefreshed database is not a regression.
+    #
+    # Both column names are checked, not just `headshot`: a `players` table
+    # can be missing `gsis_id` too (every fixture that seeds one without it,
+    # and any database older than that column), and indexing on a column that
+    # is not there raises where the whole point of this line is to degrade to
+    # None.
+    bio["headshot"] = None
+    people = frames.players
+    if {"gsis_id", "headshot"}.issubset(people.columns):
+        row = people[people["gsis_id"] == player_id]
+        if not row.empty and pd.notna(row["headshot"].iloc[0]):
+            bio["headshot"] = row["headshot"].iloc[0]
     for s in seasons:
         s["age"] = (_age_in_season(bio["birth_date"], s["season"])
                     if bio["birth_date"] else None)
@@ -1378,6 +1412,19 @@ def build_profile(conn, player_id: str, weights: dict | None = None,
     for g in logs:
         g["snap_pct"] = (None if g["dnp"] else
                          _round_or_none(snaps_by_game.get((g["season"], g["week"])), 3))
+
+    # Per-game target share, on the same rows and for the same reason. The
+    # season figure averages a role away: a receiver who saw a fifth of the
+    # targets in September and a tenth in December reads the same as one who
+    # was steady all year, and which of those he is decides the pick.
+    #
+    # Off THIS player's own weekly rows and the league-wide team totals -- so
+    # the week he was traded divides his targets by the team he actually
+    # played for, which is the team his own row names.
+    targets_by_game = _target_share_by_game(wk_mine, frames.team_week_targets)
+    for g in logs:
+        g["target_pct"] = (None if g["dnp"] else
+                           _round_or_none(targets_by_game.get((g["season"], g["week"])), 3))
 
     payload = {
         "header": header,

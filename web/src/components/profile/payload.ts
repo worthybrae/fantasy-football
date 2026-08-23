@@ -58,10 +58,14 @@ export interface SeasonRow extends SeasonSummary {
   cv_pos_median: number | null
 }
 
-/** One game-log row plus its own offensive snap share (null on a DNP: he
- *  took no snaps because he did not play, which is not a share of zero). */
+/** One game-log row plus the two shares that say how much of the offence he
+ *  was that week. Both null on a DNP -- he took no snaps and saw no targets
+ *  because he did not play, which is not a share of zero -- and
+ *  `target_pct` is null too where the team's total for that week cannot be
+ *  built at all. */
 export interface GameRow extends GameLogRow {
   snap_pct: number | null
+  target_pct: number | null
 }
 
 /** One schedule week plus the league rank the owner asked for.
@@ -77,6 +81,10 @@ export interface ScheduleRankWeek extends ScheduleWeek {
  *  player the `players` table has no row for: every defense, and any rookie
  *  nflverse has no biography for yet. */
 export interface Bio {
+  /** nflverse's photo url, or null -- for a defense, a player it has no
+   *  biography for, or a database that predates the column. The card draws
+   *  no image rather than a broken one. */
+  headshot?: string | null
   season: number
   birth_date: string | null
   rookie_season: number | null
