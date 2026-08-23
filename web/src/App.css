@@ -802,6 +802,32 @@ td:first-child {
 .pick-ticker-adp.is-steal { color: var(--ok); }
 .pick-ticker-adp.is-reach { color: var(--fail); }
 
+/* The word for a move worth naming, in the corner rather than in the line.
+   The line is already four things long, and a flag outside the reading order
+   is one an eye takes in without stopping to parse it. */
+.pick-ticker-flag {
+  position: absolute;
+  top: 3px;
+  right: 8px;
+  padding: 0 4px;
+  border-radius: 2px;
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.pick-ticker-flag.is-steal {
+  background: color-mix(in srgb, var(--ok) 22%, transparent);
+  color: var(--ok);
+}
+
+.pick-ticker-flag.is-reach {
+  background: color-mix(in srgb, var(--fail) 22%, transparent);
+  color: var(--fail);
+}
+
 .pick-ticker-name {
   color: var(--text-1);
 }
@@ -815,6 +841,8 @@ td:first-child {
 }
 
 .pick-ticker-pick {
+  /* The corner flag positions against this. */
+  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;

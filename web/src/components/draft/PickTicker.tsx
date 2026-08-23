@@ -1,43 +1,51 @@
 import type { ReactNode } from 'react'
 import type { BoardCell, BoardPlayer, LiveBoard } from '../../api'
 
-// The one number in this strip worth raising a voice about.
+// Where the pick landed against the market: >0 he FELL that many slots, <0
+// somebody jumped him. `value` is computed once in api/live.py, so the rail
+// and the snake board's cells cannot disagree about whether a pick was a
+// bargain.
 //
-// `value` is where the pick landed against the market: >0 he FELL that many
-// slots, <0 somebody jumped him. Computed once in api/live.py, so the rail and
-// the snake board's cells cannot disagree about whether a pick was a bargain.
-//
-// UNDER TEN SLOTS IT DRAWS NOTHING. Most picks land about where the market
-// said, and a strip that marks every one of them is a strip that marks
-// nothing -- six entries of coloured numbers read as an alarm rather than as
-// news, which is exactly what it did. Ten either way is the move you would
-// say out loud at a real table.
-//
-// Past sixty the magnitude has stopped meaning anything -- a rookie
-// quarterback whose consensus rank is near 500 comes back as -215 -- so it
-// clamps and the arrow carries it. One number like that in the row otherwise
-// sets the width and the volume of every entry beside it.
+// ALWAYS drawn -- direction, size, colour -- because "about where the market
+// said" is itself worth seeing on every pick. Nothing only when there is no
+// ADP to compare against, or when a pick landed exactly on it: a bare zero is
+// a fact about arithmetic rather than about the draft.
 const CRAZY_SLOTS = 10
-const CLAMP_SLOTS = 60
 
 function adpDelta(value: number | null | undefined): ReactNode {
   if (value === null || value === undefined) return null
   const slots = Math.round(value)
-  if (Math.abs(slots) < CRAZY_SLOTS) return null
+  if (slots === 0) return null
   const steal = slots > 0
-  const size = Math.abs(slots)
-  const shown = size <= CLAMP_SLOTS ? String(size) : `${CLAMP_SLOTS}+`
   return (
     <span
       className={`pick-ticker-adp ${steal ? 'is-steal' : 'is-reach'}`}
-      title={steal ? `Fell ${shown} picks past his ADP`
-        : `Taken ${shown} picks before his ADP`}
+      title={steal ? `Fell ${Math.abs(slots)} picks past his ADP`
+        : `Taken ${Math.abs(slots)} picks before his ADP`}
     >
-      {/* The glyph is the direction and the number is the size, in that
-          order, because at the edge of an eye reading a ranked list the
-          direction is the whole message. */}
+      {/* Direction then size: at the edge of an eye reading a ranked list,
+          which way is the message and how far is the detail. */}
       <span aria-hidden="true">{steal ? '\u25b2' : '\u25bc'}</span>
-      {shown}
+      {Math.abs(slots)}
+    </span>
+  )
+}
+
+// More than ten slots either way is the move someone would say out loud at a
+// real table, and it gets the word for it in the corner of the entry. The
+// number below still says how far; this says it was worth noticing at all.
+//
+// The corner, rather than in the line, because the line is already four
+// things long -- and a flag that sits outside the reading order is one a
+// reader can take in without stopping to parse it.
+function crazyFlag(value: number | null | undefined): ReactNode {
+  if (value === null || value === undefined) return null
+  const slots = Math.round(value)
+  if (Math.abs(slots) <= CRAZY_SLOTS) return null
+  const steal = slots > 0
+  return (
+    <span className={`pick-ticker-flag ${steal ? 'is-steal' : 'is-reach'}`}>
+      {steal ? 'Steal' : 'Reach'}
     </span>
   )
 }
@@ -127,6 +135,7 @@ export default function PickTicker({ board, onOpenPlayer }: PickTickerProps) {
                         qualifies it -- which pick, which position, whose
                         team, and how far off the market it landed -- sits on
                         a quieter second line underneath. */}
+                    {crazyFlag(cell.player.value)}
                     <span className="pick-ticker-who">
                       <span className="pick-ticker-name">{cell.player.name}</span>
                       <span className="pick-ticker-detail">
@@ -151,6 +160,7 @@ export default function PickTicker({ board, onOpenPlayer }: PickTickerProps) {
                         qualifies it -- which pick, which position, whose
                         team, and how far off the market it landed -- sits on
                         a quieter second line underneath. */}
+                    {crazyFlag(cell.player.value)}
                     <span className="pick-ticker-who">
                       <span className="pick-ticker-name">{cell.player.name}</span>
                       <span className="pick-ticker-detail">
