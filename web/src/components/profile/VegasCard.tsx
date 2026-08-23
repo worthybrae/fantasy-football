@@ -44,11 +44,17 @@ export default function VegasCard({ vegas }: { vegas: Vegas | null }) {
 
   const byWeek = new Map(vegas.weeks.map((w) => [w.week, w]))
   const weeks = vegas.weeks_total ?? 18
-  const note = hasTeam && vegas.rank !== null && vegas.teams !== null
-    ? `${ordinal(vegas.rank)} of ${vegas.teams}` : undefined
+  const ranked = hasTeam && vegas.rank !== null && vegas.teams !== null
+    && vegas.teams > 1
+  // Better is fuller, the way every other bar in this popup runs: the best
+  // offence in the league fills the track and the worst empties it. A rank
+  // printed on its own is a number a reader has to place; a rank drawn
+  // against its own field places itself.
+  const standing = ranked
+    ? ((vegas.teams! - vegas.rank!) / (vegas.teams! - 1)) * 100 : 0
 
   return (
-    <PopCard title="Vegas" note={note} className="is-widest">
+    <PopCard title="Vegas" className="is-widest">
       {hasTeam && (
       <>
       <div className="pp-pop-vegas-head">
@@ -57,6 +63,19 @@ export default function VegasCard({ vegas }: { vegas: Vegas | null }) {
             anything; this is the team's points, not his. */}
         <span className="pp-pop-vegas-unit">implied team pts / game</span>
       </div>
+      {ranked && (
+        // The rank, promoted out of the card's header note and given the
+        // size the number deserves: of everything on this card it is the one
+        // fact that needs no explaining and survives being the only thing a
+        // reader takes away.
+        <div className="pp-pop-vegas-rank">
+          <span className="mono pp-pop-vegas-rank-place">{ordinal(vegas.rank!)}</span>
+          <span className="pp-pop-vegas-rank-of">of {vegas.teams} offences</span>
+          <span className="pp-pop-vegas-rank-track">
+            <span className="pp-pop-vegas-rank-fill" style={{ width: `${standing}%` }} />
+          </span>
+        </div>
+      )}
       <div className="pp-pop-strip">
         {Array.from({ length: weeks }, (_, i) => i + 1).map((week) => {
           const game = byWeek.get(week)
@@ -80,18 +99,53 @@ export default function VegasCard({ vegas }: { vegas: Vegas | null }) {
       )}
       {futures.length > 0 && (
         <div className="pp-pop-futures">
-          {futures.slice(0, SHOWN_MARKETS).map((f) => (
-            <div className="pp-pop-futures-row" key={f.market}>
-              <span className="pp-pop-futures-label">{f.label}</span>
-              {/* The price, then what it is worth knowing about the price:
-                  "+700" means nothing to most readers, "4th of 61" means he
-                  is near the front of a big field. */}
-              <span className="mono pp-pop-futures-price">{f.american}</span>
-              <span className="mono pp-pop-futures-place">
-                {ordinal(f.place)} of {f.field}
-              </span>
-            </div>
-          ))}
+          {futures.slice(0, SHOWN_MARKETS).map((f) => {
+            const pct = f.implied_pct
+            // The favourite's own price is the top of the track. A market
+            // where the leader sits at 18% and one where the leader sits at
+            // 45% are different fields, and a bar drawn to a flat 100% would
+            // make the same 14% look identical in both.
+            const top = Math.max(f.top_pct ?? 0, pct ?? 0)
+            const share = pct === null || !top ? 0 : (pct / top) * 100
+            return (
+              <div
+                className="pp-pop-futures-row"
+                key={f.market}
+                // The price itself is still here for anyone who reads odds,
+                // it is just no longer the thing the row is made of.
+                title={f.american ? `${f.american} at the book` : undefined}
+              >
+                <div className="pp-pop-futures-line">
+                  <span className="pp-pop-futures-label">{f.label}</span>
+                  {/* The chance, in the one unit everybody already reads.
+                      "+700" is a price; this is what the price MEANS.
+                      Under one per cent says so rather than rounding up to
+                      1%: +20000 is a lottery ticket and printing it as the
+                      same number as +10000 would flatter both. */}
+                  <span className="mono pp-pop-futures-pct">
+                    {pct === null ? '—'
+                      : pct < 1 ? '<1%' : `${Math.round(pct)}%`}
+                  </span>
+                  <span className="mono pp-pop-futures-place">
+                    {ordinal(f.place)} of {f.field}
+                  </span>
+                </div>
+                <span className="pp-pop-futures-track">
+                  <span
+                    className="pp-pop-futures-fill"
+                    style={{ width: `${Math.min(100, share)}%` }}
+                  />
+                </span>
+              </div>
+            )
+          })}
+          {/* Said once, quietly, and not negotiable: these are book prices,
+              so the field's percentages add to well over a hundred. A card
+              that printed them as probabilities without saying so would be
+              overstating every player on it. */}
+          <div className="pp-pop-futures-note">
+            book prices · bar is his share of the favourite&rsquo;s
+          </div>
         </div>
       )}
     </PopCard>

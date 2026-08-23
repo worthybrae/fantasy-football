@@ -494,6 +494,12 @@ def _player_futures(conn, player_id: str, name: str, position: str,
             "label": _FUTURES_LABELS.get(str(market), str(market)),
             "american": _str_or_none_price(mine.iloc[0].get("american")),
             "implied_pct": _round_or_none(mine.iloc[0].get("implied_pct"), 1),
+            # What the FAVOURITE in this market is priced at, so a card can
+            # draw one player's chance against the best chance anybody has.
+            # 14% is a different fact in a market whose leader sits at 18%
+            # than in one whose leader sits at 40%, and the place alone --
+            # "4th of 61" -- cannot separate those two.
+            "top_pct": _round_or_none(order.iloc[0].get("implied_pct"), 1),
             "place": place,
             "field": int(len(field)),
         })

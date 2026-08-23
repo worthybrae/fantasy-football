@@ -4720,6 +4720,51 @@ button.roster-row:focus-visible {
   color: var(--text-3);
 }
 
+/* The rank, at the size the card's most quotable fact deserves. It used to
+   live in the header note beside the word "Vegas", in 9px grey, where it was
+   the smallest thing on a card whose whole subject it is. */
+.pp-pop-vegas-rank {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  margin-top: 3px;
+}
+
+.pp-pop-vegas-rank-place {
+  font-size: 15px;
+  line-height: 1;
+  color: var(--accent);
+}
+
+.pp-pop-vegas-rank-of {
+  flex: 0 0 auto;
+  font-size: 9.5px;
+  color: var(--text-3);
+}
+
+/* Fuller is better, like every other bar in this popup: the league's best
+   offence fills the track, the worst empties it. Accent rather than the
+   five-step ramp, for the same reason the week bars are accent -- the ramp
+   grades a player against his position and this is a market price on a
+   team. */
+.pp-pop-vegas-rank-track {
+  flex: 1 1 0;
+  align-self: center;
+  height: 4px;
+  min-width: 40px;
+  border-radius: 2px;
+  background: var(--bg-2);
+  overflow: hidden;
+}
+
+.pp-pop-vegas-rank-fill {
+  display: block;
+  min-width: 2px;
+  height: 100%;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--accent) 70%, transparent);
+}
+
 /* One bar a week, against a FIXED band (see VegasCard) rather than this
    team's own range, so two players' cards can be compared. Accent rather than
    the five-step ramp: the ramp grades a player against his position, and this
@@ -4745,15 +4790,15 @@ button.roster-row:focus-visible {
 .pp-pop-futures {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 6px;
   padding-top: var(--space-2);
   border-top: 1px solid var(--border);
 }
 
+/* Block, not flex: the row's two halves stack, and a flex row here would sit
+   the bar beside the line it belongs under and squeeze it to nothing. */
 .pp-pop-futures-row {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-2);
+  display: block;
 }
 
 .pp-pop-futures-label {
@@ -4766,14 +4811,52 @@ button.roster-row:focus-visible {
   color: var(--text-2);
 }
 
-.pp-pop-futures-price {
+/* One market is two lines: what it is and what it is worth on top, the bar
+   under it. Inline would have cost the label its width on a card that
+   already truncates "Most receiving yards" -- and the bar is the half a
+   reader is meant to catch without reading. */
+.pp-pop-futures-line {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.pp-pop-futures-pct {
   flex: 0 0 auto;
-  font-size: 10px;
+  font-size: 11px;
   color: var(--accent);
 }
 
 .pp-pop-futures-place {
   flex: 0 0 auto;
+  font-size: 9px;
+  color: var(--text-3);
+}
+
+/* His chance against the field's best chance. `min-width` on the fill so a
+   3% longshot still draws something -- a bar that rounds to nothing reads
+   as a market that has not priced him, which is a different fact and one
+   this card says with an em dash. */
+.pp-pop-futures-track {
+  display: block;
+  height: 4px;
+  margin-top: 3px;
+  border-radius: 2px;
+  background: var(--bg-2);
+  overflow: hidden;
+}
+
+.pp-pop-futures-fill {
+  display: block;
+  min-width: 2px;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent),
+              color-mix(in srgb, var(--accent) 45%, transparent));
+}
+
+.pp-pop-futures-note {
+  padding-top: 1px;
   font-size: 9px;
   color: var(--text-3);
 }

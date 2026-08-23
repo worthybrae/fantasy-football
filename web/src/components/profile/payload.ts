@@ -102,6 +102,9 @@ export interface PlayerFuture {
   label: string
   american: string | null
   implied_pct: number | null
+  /** The favourite's implied percentage in the same market -- the top of the
+   *  scale a reader should judge `implied_pct` against. */
+  top_pct: number | null
   /** Where his price sits in that market's field, shortest first. */
   place: number
   field: number
