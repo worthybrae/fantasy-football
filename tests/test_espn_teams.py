@@ -6,7 +6,7 @@ pipeline/draft_socket.py's token test already hold.
 """
 import json
 
-from pipeline.espn_teams import fetch_team_slots
+from pipeline.espn_teams import fetch_team_owners, fetch_team_slots
 
 
 def _league_payload():
@@ -126,3 +126,58 @@ def test_fetch_league_settings_parses_the_roster():
     assert fetch_league_settings(
         lambda url: (_ for _ in ()).throw(ValueError()), "1", 2026) is None
     assert fetch_league_settings(lambda url: "{}", "1", 2026) is None
+
+
+# ---------------------------------------------------------------------------
+# fetch_team_owners: which seats hold a person. Read while the room is LIVE --
+# a mock league 404s the moment its draft ends, so there is no second chance.
+# ---------------------------------------------------------------------------
+
+
+def _mock_room_payload():
+    """A live 8-team mock room's `?view=mTeam` body, in the shape verified
+    against room 451008377: one seat with an owner and seven of ESPN's own
+    computer entries, whose `abbrev` is `TM<n>` and whose `owners` is []."""
+    teams = [{"id": n, "abbrev": f"TM{n}", "owners": []} for n in range(1, 9)]
+    teams[3]["owners"] = ["{8491403C-A53F-4257-8D52-F8AE32CED897}"]
+    return {"teams": teams}
+
+
+def test_a_seat_with_an_owner_is_a_person_and_an_empty_one_is_not():
+    owners = fetch_team_owners(lambda url: json.dumps(_mock_room_payload()),
+                               league_id="451008377", season=2026)
+    assert owners == {1: False, 2: False, 3: False, 4: True,
+                      5: False, 6: False, 7: False, 8: False}
+    # Which is the directory's own `teamsJoined` for that room, independently
+    # measured: 1.
+    assert sum(owners.values()) == 1
+
+
+def test_the_owner_view_is_its_own_url():
+    """Not a slice of the combined mTeam+mSettings view. That one is fetched
+    at join time, minutes before the room opens; this census is taken as the
+    draft starts, and sharing a GET would mean sharing the wrong instant."""
+    seen = {}
+
+    def fetch(url):
+        seen["url"] = url
+        return _mock_room_payload()
+
+    fetch_team_owners(fetch, league_id="451008377", season=2026)
+    assert seen["url"].endswith(
+        "/seasons/2026/segments/0/leagues/451008377?view=mTeam")
+
+
+def test_the_owner_census_is_empty_rather_than_wrong_when_espn_will_not_say():
+    """Best-effort like the rest of this module. {} means "we do not know",
+    which leaves every seat's autodraft state NULL downstream -- the honest
+    answer, and the one the corpus stored before this existed."""
+    def raises(url):
+        raise RuntimeError("404 -- the draft is over")
+
+    assert fetch_team_owners(raises, league_id="9", season=2026) == {}
+    assert fetch_team_owners(lambda url: "not json", "9", 2026) == {}
+    assert fetch_team_owners(lambda url: {}, "9", 2026) == {}
+    # A team row with no id is skipped rather than keyed on None.
+    assert fetch_team_owners(lambda url: {"teams": [{"owners": ["x"]}]},
+                             "9", 2026) == {}

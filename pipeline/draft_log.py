@@ -59,11 +59,18 @@ SOURCE_LIVE = "espn_live"
 SOURCE_HISTORY = "espn_history"
 SOURCE_MOCK = "mock"
 
+# ORDER IS THE STORED COLUMN ORDER, and every column added after a table first
+# shipped goes on the END of its list, because DuckDB's `ALTER TABLE ... ADD
+# COLUMN` appends. `record` still names the columns it writes (see the INSERTs
+# there) so that a frame and a table which have drifted apart fail loudly
+# rather than writing every value one column to the left -- silently, into the
+# one table in this project that cannot be rebuilt.
 _DRAFT_COLUMNS = ["draft_id", "source", "league_id", "season", "recorded_at",
-                  "teams", "rounds", "my_slot", "scoring_json", "settings_json"]
+                  "teams", "rounds", "my_slot", "scoring_json",
+                  "settings_json", "human_seats"]
 _PICK_COLUMNS = ["draft_id", "pick_no", "round", "slot", "owner_key",
                  "is_anonymous", "player_id", "position", "adp_rank",
-                 "proj_points", "autodrafted"]
+                 "proj_points", "autodrafted", "had_owner"]
 _POOL_COLUMNS = ["draft_id", "player_id", "position", "team", "adp_rank",
                  "proj_points"]
 
@@ -110,6 +117,28 @@ def ensure_schema(conn) -> None:
     # the same as the CREATE TABLEs above.
     conn.execute(
         "ALTER TABLE draft_log_pick ADD COLUMN IF NOT EXISTS autodrafted BOOLEAN")
+    # Whether the seat that made this pick had a real ESPN member attached to
+    # it when the draft opened, read from the league's own `?view=mTeam`
+    # while the room was still live (mock leagues 404 once the draft ends, so
+    # there is no later chance to ask). Per-PICK rather than a fourth table
+    # keyed by (draft_id, slot): the fit walks pick rows one at a time and a
+    # per-slot table would buy one normalised column at the cost of another
+    # join in the hot loop and another table in a corpus that cannot be
+    # rebuilt -- and `slot` is already carried per pick for exactly the same
+    # reason. NULL where nobody asked ESPN: every backfilled pick, and every
+    # farmed draft whose mTeam read failed.
+    conn.execute("ALTER TABLE draft_log_pick "
+                 "ADD COLUMN IF NOT EXISTS had_owner BOOLEAN")
+    # How many seats in the room held a real person when the draft opened,
+    # OUR OWN SEAT NOT COUNTED -- the farm's seat always has an owner (we
+    # joined with a member id) and it is a bot, so counting it would make
+    # every room look one person more human than it was. Stored per draft
+    # even though it is derivable from `had_owner`, because the query it
+    # exists for ("fit only on drafts with at least N people in them", "was
+    # the overnight window emptier than the evening one") is a per-draft
+    # filter and should not have to aggregate 128 pick rows to ask.
+    conn.execute(
+        "ALTER TABLE draft_log ADD COLUMN IF NOT EXISTS human_seats INTEGER")
 
 
 def draft_id_for(source: str, league_id, season, started_at=None) -> str:
@@ -142,6 +171,7 @@ class DraftRecord:
     teams: int | None = None
     rounds: int | None = None
     my_slot: int | None = None
+    human_seats: int | None = None
     scoring_json: str | None = None
     settings_json: str | None = None
     started_at: datetime | None = None
@@ -191,7 +221,8 @@ def record(conn, draft: DraftRecord) -> str:
         "season": draft.season, "recorded_at": draft.recorded_at,
         "teams": draft.teams, "rounds": draft.rounds, "my_slot": draft.my_slot,
         "scoring_json": draft.scoring_json,
-        "settings_json": draft.settings_json}], columns=_DRAFT_COLUMNS)
+        "settings_json": draft.settings_json,
+        "human_seats": draft.human_seats}], columns=_DRAFT_COLUMNS)
     picks = _shape(draft.picks, _PICK_COLUMNS, draft_id)
     pool = _shape(draft.pool, _POOL_COLUMNS, draft_id)
 
@@ -199,11 +230,22 @@ def record(conn, draft: DraftRecord) -> str:
         conn.execute("BEGIN TRANSACTION")
         for table in ("draft_log_pick", "draft_log_pool", "draft_log"):
             conn.execute(f"DELETE FROM {table} WHERE draft_id = ?", [draft_id])
-        conn.execute("INSERT INTO draft_log SELECT * FROM head")
+        # BY NAME, not by position. `_shape` builds each frame in the stored
+        # column order, so `SELECT *` worked -- right up until a schema
+        # addition landed while a process holding the OLD module was still
+        # running: its frame is a column short, the table is a column longer,
+        # and a positional insert either errors on the count or, if two
+        # additions ever cancel out, writes the wrong value into every field
+        # after the first difference. Naming them costs one f-string and makes
+        # the mismatch a loud failure of that one write instead.
+        conn.execute(f"INSERT INTO draft_log ({', '.join(_DRAFT_COLUMNS)}) "
+                     "SELECT * FROM head")
         if not picks.empty:
-            conn.execute("INSERT INTO draft_log_pick SELECT * FROM picks")
+            conn.execute(f"INSERT INTO draft_log_pick "
+                         f"({', '.join(_PICK_COLUMNS)}) SELECT * FROM picks")
         if not pool.empty:
-            conn.execute("INSERT INTO draft_log_pool SELECT * FROM pool")
+            conn.execute(f"INSERT INTO draft_log_pool "
+                         f"({', '.join(_POOL_COLUMNS)}) SELECT * FROM pool")
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")

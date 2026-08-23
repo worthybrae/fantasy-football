@@ -154,3 +154,53 @@ def http_fetch():
         response.raise_for_status()
         return response.text
     return fetch
+
+
+# The owner view, deliberately its own URL rather than a slice of
+# `_team_view_url`'s combined mTeam+mSettings body. The combined view is
+# fetched once per room by `fetch_league_settings` at join time, which is
+# minutes before the draft opens; the owner census below is taken at a
+# different moment on purpose (see `fetch_team_owners`), so sharing one GET
+# would mean sharing the wrong instant.
+def _owner_view_url(league_id, season) -> str:
+    return (f"{BASE}/seasons/{season}/segments/0/leagues/{league_id}"
+            "?view=mTeam")
+
+
+def fetch_team_owners(fetch, league_id, season) -> dict:
+    """ESPN team id -> whether a real person is sitting in that seat.
+
+    THE ONE FACT ESPN WILL NOT SELL YOU TWICE. A mock league 404s the moment
+    its draft ends -- verified -- so this is readable only WHILE the room is
+    live, and every caller has to take it then and carry it rather than
+    reaching back for it afterwards.
+
+    A team's `owners` array is the whole signal: non-empty means a member
+    GUID is attached to the seat, empty means the seat is one of the
+    computer entries ESPN pads a thin room out with (`abbrev` like `TM1`).
+    Confirmed against live room 451008377: 8 teams, exactly one with an
+    owner, matching the lobby directory's own `teamsJoined: 1`.
+
+    `fetch(url) -> body` is injected, the same seam as the rest of this
+    module, and the caller must pass an AUTHENTICATED fetch: unlike the
+    public team-name view, a mock room's membership is not served to a
+    stranger.
+
+    Best-effort like its neighbours: {} on any failure at all. An empty map
+    is "we do not know", which downstream leaves every seat's initial
+    autodraft state NULL -- the honest answer, and the one the corpus stored
+    before this existed.
+    """
+    try:
+        body = fetch(_owner_view_url(league_id, season))
+        payload = body if isinstance(body, dict) else json.loads(body)
+        teams = payload.get("teams") or []
+        owners = {}
+        for team in teams:
+            team_id = team.get("id")
+            if team_id is None:
+                continue
+            owners[int(team_id)] = bool(team.get("owners") or [])
+        return owners
+    except Exception:      # noqa: BLE001 -- best-effort; see docstring
+        return {}
