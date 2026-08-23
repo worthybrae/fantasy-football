@@ -26,12 +26,36 @@ mock ran. What IS on disk: 23 of the 45 files hold exactly 128 picks with
 `max(pick_no) == 128`, and 128 = 8 teams x 16 rounds is independently
 confirmed by `data/draft_room_trace.jsonl`, a recording of a real ESPN mock
 that shows 128 SELECTED frames and team ids exactly 1..8 -- ESPN's own mock
-lobby is an 8-team room. So a file is accepted only when its `drafted` table
-is exactly complete at that count; anything else (an abandoned connect, a
-lobby that never filled) is skipped rather than guessed at, and
-`MOCK_TEAMS * MOCK_ROUNDS == 128` is asserted below so this assumption fails
-loudly rather than silently if a differently-shaped draft ever shows up in
-this directory.
+lobby is an 8-team room. So a file is accepted only when its `drafted`
+table's `pick_no` column is EXACTLY the contiguous set `1..MOCK_TEAMS *
+MOCK_ROUNDS`, once each -- not merely `count(*) == max(pick_no) == 128`,
+which a duplicated `pick_no` with a compensating gap elsewhere (two rows at
+50, none at 51) satisfies just as well. Anything that fails that -- an
+abandoned connect, a lobby that never filled, a corrupted table -- is
+skipped rather than guessed at. `MOCK_TEAMS * MOCK_ROUNDS == 128` is
+asserted below at import time, separately, so the two facts this module
+rests on -- the constant and the shape the data files were independently
+confirmed to run -- cannot silently drift apart from each other.
+
+DRAFT IDENTITY IS CONTENT, NOT A TIMESTAMP. An earlier version of this
+module derived `draft_id` from the file's mtime, on the reasoning that two
+mocks played in the same league on different nights must not collide onto
+one id. That broke on real data: several of these files carry a `.wal`
+sidecar with a LATER mtime than the main file (DuckDB replays the WAL on
+open, so a read-only connection already sees the true, complete picks, but
+the main file itself is not yet checkpointed), and the first thing that
+opens such a file read-write and checkpoints it moves the mtime forward for
+a draft that never changed. Since the old id folded that timestamp straight
+into a hash, the very next backfill computed a NEW id for the SAME draft and
+inserted its 128 picks a second time -- silent corpus duplication, exactly
+what `draft_id_for`'s idempotency exists to prevent. `_content_draft_id`
+below fixes this by hashing the picks themselves (sorted by `pick_no`) plus
+the league id: a draft that has not changed produces the same id forever,
+regardless of mtimes, checkpoints, or which machine ran the backfill.
+`_reconcile_stale_ids` is the one-time-turned-permanent cleanup this
+required -- see its own docstring for why it is safe to run on every pass
+even with a second, concurrent process writing real drafts into the same
+corpus.
 
 WHAT THE ROSTER SHAPE ITSELF IS AN ASSUMPTION FOR. A pick count says nothing
 about starters/flex/bench, and that is not recoverable either. `_mock_settings`
@@ -54,8 +78,7 @@ comment on the same column for the live-draft case where it IS known).
 """
 import dataclasses
 import glob
-import os
-from datetime import datetime, timezone
+import hashlib
 from pathlib import Path
 
 import duckdb
@@ -123,6 +146,80 @@ def _has_rows(conn, table: str) -> bool:
     if table not in tables:
         return False
     return conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] > 0
+
+
+def _content_draft_id(league_id: str, drafted: pd.DataFrame) -> str:
+    """A draft's identity, derived from the picks themselves rather than
+    from when a filesystem last touched the file.
+
+    See the module docstring's "DRAFT IDENTITY IS CONTENT, NOT A TIMESTAMP"
+    for why `os.path.getmtime` cannot be trusted for this: a WAL checkpoint
+    alone can move a file's mtime forward for a draft that never changed,
+    which silently duplicated 128 picks on the next run. Hashing the picks
+    instead means a draft that has not changed produces the same id
+    forever, on any machine, checkpointed or not.
+
+    `league_id` is folded in, matching `draft_id_for`'s own reasoning for
+    every other source: without it, two DIFFERENT leagues whose mocks
+    happened to draft the same 128 players in the same order -- a real
+    possibility when every room's bots lean on similar ADP -- would
+    collide onto one id. `pick_no` is sorted first so row order in
+    `drafted` (a SELECT with no guaranteed physical ordering) can never
+    change the digest for the same actual draft.
+
+    Same `{source}:{16 hex}` shape `draft_log.draft_id_for` produces, so
+    nothing that reads a draft_id downstream needs to know this one was
+    built differently.
+    """
+    ordered = drafted.sort_values("pick_no")
+    payload = "|".join(f"{pid}:{pick}" for pid, pick in
+                       zip(ordered["player_id"], ordered["pick_no"]))
+    digest = hashlib.sha1(f"{league_id}|{payload}".encode()).hexdigest()[:16]
+    return f"{dl.SOURCE_MOCK}:{digest}"
+
+
+def _reconcile_stale_ids(corpus, league_id: str, keep_draft_id: str) -> int:
+    """Delete backfilled rows left behind by a since-changed draft_id for
+    this same league file, and report how many were removed.
+
+    RUNS ON EVERY BACKFILL, not as a one-off migration script -- so a corpus
+    holding rows written under a previous, less stable identity scheme (the
+    mtime-derived one `_content_draft_id`'s docstring describes) self-heals
+    the next time `make mock-backfill` touches that same file, and so does
+    any future identity change, without anyone having to remember to run a
+    separate cleanup.
+
+    THE DISCRIMINATOR IS DELIBERATELY NARROW, because this corpus is not
+    this module's alone: a separate, concurrent process farms live mock
+    drafts into the very same `source='mock'` rows, and those are NOT
+    reproducible from anything on disk here -- deleting one loses it
+    permanently. So this never does a blanket delete of `source='mock'`; it
+    deletes only rows matching ALL of:
+      * `source = 'mock'`           -- never another source's history
+      * `my_slot IS NULL`           -- a row THIS module writes never sets a
+        real seat (see the module docstring's "WHAT IS DELIBERATELY LEFT
+        NULL"); a live-farmed row does, by construction, which is exactly
+        what keeps it out of reach of this delete
+      * `league_id = league_id`     -- only the file being re-recorded right
+        now, never another file's history
+      * `draft_id != keep_draft_id` -- never the id this very call just
+        wrote
+    Deleted from all three corpus tables, mirroring `draft_log.record`'s own
+    delete-then-insert -- and, like every writer in this module, never via
+    DROP or CREATE OR REPLACE.
+    """
+    stale = corpus.execute(
+        """SELECT draft_id FROM draft_log
+           WHERE source = ? AND my_slot IS NULL AND league_id = ?
+             AND draft_id != ?""",
+        [dl.SOURCE_MOCK, league_id, keep_draft_id]).df()["draft_id"].tolist()
+    if not stale:
+        return 0
+    placeholders = ",".join(["?"] * len(stale))
+    for table in ("draft_log_pick", "draft_log_pool", "draft_log"):
+        corpus.execute(
+            f"DELETE FROM {table} WHERE draft_id IN ({placeholders})", stale)
+    return len(stale)
 
 
 def _pool_frame(conn, settings) -> pd.DataFrame:
@@ -203,27 +300,28 @@ def _backfill_file(path: str, settings, corpus) -> dict:
             return {"status": "no_rows"}
         drafted = conn.execute(
             "SELECT player_id, pick_no FROM drafted ORDER BY pick_no").df()
-        count, max_pick = len(drafted), int(drafted["pick_no"].max())
-        # Accept only complete drafts -- do not guess at partial ones. See
-        # the module docstring's "THE 8x16 ASSUMPTION" for why 128 and not
-        # some other number.
-        if count != max_pick or max_pick != MOCK_TEAMS * MOCK_ROUNDS:
+        expected_picks = MOCK_TEAMS * MOCK_ROUNDS
+        count = len(drafted)
+        max_pick = int(drafted["pick_no"].max()) if count else 0
+        # Accept only a draft whose pick_no is EXACTLY the contiguous set
+        # 1..expected_picks, once each -- do not guess at anything else. See
+        # the module docstring's "THE 8x16 ASSUMPTION" for why 128, and for
+        # why `count(*) == max(pick_no) == 128` alone is not this check: a
+        # duplicated pick_no with a compensating gap elsewhere satisfies
+        # both those aggregates too. `count == expected_picks` together with
+        # the pick_no SET equalling {1..expected_picks} rules that out --
+        # expected_picks rows collapsing to exactly expected_picks distinct
+        # required values leaves no room for a duplicate anywhere.
+        complete = (count == expected_picks and
+                   set(drafted["pick_no"]) == set(range(1, expected_picks + 1)))
+        if not complete:
             return {"status": "incomplete", "picks": count, "max_pick": max_pick}
-        assert MOCK_TEAMS * MOCK_ROUNDS == max_pick, (
-            f"{path}: a draft with {max_pick} picks passed the completeness "
-            f"check above but does not match the assumed {MOCK_TEAMS}x"
-            f"{MOCK_ROUNDS} shape -- that check and this assumption must "
-            "have drifted apart")
 
         league_id = Path(path).stem
-        # The file's mtime, not `datetime.now()`: two mocks played in the
-        # same league on different nights must not collide onto one
-        # draft_id, and mtime is the only timestamp these files carry at
-        # all -- there is no `league` row with a start time, and `drafted`
-        # itself carries none either.
-        started_at = datetime.fromtimestamp(os.path.getmtime(path), tz=timezone.utc)
-        draft_id = dl.draft_id_for(dl.SOURCE_MOCK, league_id, CURRENT_SEASON,
-                                   started_at)
+        # Content, not the file's mtime -- see the module docstring's
+        # "DRAFT IDENTITY IS CONTENT, NOT A TIMESTAMP" for the duplication
+        # bug mtime caused and why this is the fix.
+        draft_id = _content_draft_id(league_id, drafted)
 
         pool_df = _pool_frame(conn, settings)
         picks_df, dropped = _picks_frame(drafted, draft_id, pool_df)
@@ -231,9 +329,19 @@ def _backfill_file(path: str, settings, corpus) -> dict:
         dl.record(corpus, dl.DraftRecord(
             source=dl.SOURCE_MOCK, league_id=league_id, season=CURRENT_SEASON,
             teams=MOCK_TEAMS, rounds=MOCK_ROUNDS, my_slot=None,
-            settings_json=league.to_json(settings), started_at=started_at,
+            # `settings_json` carries the roster SHAPE (starters/flex/bench);
+            # it does not separately carry `rounds` -- `LeagueSettings.
+            # rounds` is a `@property` derived from that shape, and
+            # `league.to_json`'s `dataclasses.asdict` only serializes
+            # declared fields, so there was never a `rounds` key for it to
+            # drop. That is legibility, not loss: the literal value is
+            # `draft_log.rounds` right here, a real column (alongside
+            # `draft_log.teams`) on the very row this JSON rides along with.
+            settings_json=league.to_json(settings),
             picks=picks_df, pool=pool_df, draft_id=draft_id))
-        return {"status": "recorded", "picks": len(picks_df), "dropped": dropped}
+        stale_removed = _reconcile_stale_ids(corpus, league_id, draft_id)
+        return {"status": "recorded", "picks": len(picks_df), "dropped": dropped,
+               "stale_removed": stale_removed}
     finally:
         conn.close()
 
@@ -249,6 +357,7 @@ def backfill(paths: list, corpus) -> dict:
     counts = {
         "files_scanned": 0, "open_failed": 0, "no_rows": 0, "incomplete": 0,
         "drafts_recorded": 0, "picks_recorded": 0, "picks_dropped": 0,
+        "stale_rows_removed": 0,
     }
     for path in paths:
         counts["files_scanned"] += 1
@@ -260,6 +369,7 @@ def backfill(paths: list, corpus) -> dict:
             counts["drafts_recorded"] += 1
             counts["picks_recorded"] += result["picks"]
             counts["picks_dropped"] += result["dropped"]
+            counts["stale_rows_removed"] += result["stale_removed"]
     return counts
 
 
@@ -271,6 +381,7 @@ def _print_summary(counts: dict) -> None:
     print(f"drafts recorded:               {counts['drafts_recorded']}")
     print(f"picks recorded:                {counts['picks_recorded']}")
     print(f"picks dropped (no pool match): {counts['picks_dropped']}")
+    print(f"stale rows reconciled (old draft_id, same file): {counts['stale_rows_removed']}")
 
 
 def main(argv: list) -> int:

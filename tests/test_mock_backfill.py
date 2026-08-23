@@ -8,6 +8,9 @@ and tests/test_board.py's own `_seed` fixture, which this mirrors) for
 which is the same pipeline the real backfill runs per draft, so a fixture
 that exercised anything less would not be testing the real join.
 """
+import os
+import time
+
 import duckdb
 import pandas as pd
 import pytest
@@ -103,6 +106,55 @@ def test_an_incomplete_mock_draft_is_skipped_and_counted(tmp_path):
     assert len(dl.picks(corpus)) == 0
 
 
+def test_a_duplicate_pick_no_with_a_compensating_gap_is_rejected(tmp_path):
+    """`count(*) == max(pick_no) == 128` is satisfied by a corrupted table
+    with one pick_no duplicated and another missing entirely -- both
+    aggregates still read 128. The real assumption worth checking is that
+    pick_no is exactly the contiguous set 1..128, once each, and this must
+    be rejected rather than accepted on the aggregates alone."""
+    path = tmp_path / "666.duckdb"
+    _seed_mock_league(path, N_PICKS_COMPLETE)
+    conn = get_conn(str(path))
+    # pick_no 51 becomes a second 50 -- count(*) and max(pick_no) are both
+    # still 128, but 51 is now missing and 50 is doubled.
+    conn.execute("UPDATE drafted SET pick_no = 50 WHERE pick_no = 51")
+    conn.close()
+    corpus = dl.corpus_conn(str(tmp_path / "corpus.duckdb"))
+
+    counts = mock_backfill.backfill([str(path)], corpus)
+
+    assert counts["incomplete"] == 1
+    assert counts["drafts_recorded"] == 0
+    assert len(dl.picks(corpus)) == 0
+
+
+def test_a_pick_whose_player_is_not_in_the_pool_is_dropped_and_counted(tmp_path):
+    """A pick whose player_id the pool join can't find must not disappear
+    silently. The module docstring's whole argument for `_picks_frame`
+    counting a drop rather than swallowing it: a silent drop here would
+    look exactly like a smaller corpus rather than like the join failure it
+    actually is."""
+    path = tmp_path / "222.duckdb"
+    _seed_mock_league(path, N_PICKS_COMPLETE)
+    conn = get_conn(str(path))
+    # No `weekly`/`adp` row anywhere ever produces a pool entry for this id,
+    # so the pool join for pick_no 64 must miss.
+    conn.execute(
+        "UPDATE drafted SET player_id = 'nobody_on_the_board' WHERE pick_no = 64")
+    conn.close()
+    corpus = dl.corpus_conn(str(tmp_path / "corpus.duckdb"))
+
+    counts = mock_backfill.backfill([str(path)], corpus)
+
+    assert counts["drafts_recorded"] == 1
+    assert counts["picks_dropped"] == 1
+    assert counts["picks_recorded"] == 127
+
+    got = dl.picks(corpus, source=dl.SOURCE_MOCK)
+    assert len(got) == 127
+    assert "nobody_on_the_board" not in set(got["player_id"])
+
+
 def test_rerunning_the_backfill_produces_no_duplicates(tmp_path):
     """Idempotent by draft_id, same as every other corpus writer -- running
     this twice (as a cron or a re-run after a crash would) must not double
@@ -115,6 +167,99 @@ def test_rerunning_the_backfill_produces_no_duplicates(tmp_path):
     mock_backfill.backfill([str(path)], corpus)
 
     assert len(dl.picks(corpus)) == 128
+
+
+def test_draft_id_is_stable_across_a_checkpoint_that_only_moves_mtime(tmp_path):
+    """The CRITICAL bug this fix round exists for. Several real league files
+    carry a `.wal` sidecar with a LATER mtime than the main file -- DuckDB
+    replays the WAL on open, so a read-only connection already sees the
+    complete picks, but the main file itself is not yet checkpointed. The
+    first thing that opens such a file read-write and checkpoints it moves
+    the main file's mtime forward for a draft that never changed. draft_id
+    must not move with it, or the very next backfill inserts the same 128
+    picks a second time."""
+    path = tmp_path / "333.duckdb"
+    _seed_mock_league(path, N_PICKS_COMPLETE)
+    corpus = dl.corpus_conn(str(tmp_path / "corpus.duckdb"))
+
+    mock_backfill.backfill([str(path)], corpus)
+    first_ids = set(dl.picks(corpus, source=dl.SOURCE_MOCK)["draft_id"])
+
+    # Simulate a checkpoint (or any other reason the filesystem's mtime
+    # moves) without a single pick changing.
+    future = time.time() + 3600
+    os.utime(path, (future, future))
+
+    counts = mock_backfill.backfill([str(path)], corpus)
+    second_ids = set(dl.picks(corpus, source=dl.SOURCE_MOCK)["draft_id"])
+
+    assert first_ids == second_ids, "draft_id must not depend on the file's mtime"
+    assert len(dl.picks(corpus, source=dl.SOURCE_MOCK)) == 128
+    assert counts["stale_rows_removed"] == 0
+
+
+def test_backfill_reconciles_a_stale_id_left_by_an_older_identity_scheme(tmp_path):
+    """Migration path. The corpus already holds this file's 128 picks under
+    a draft_id that does not match what the file's content hashes to now --
+    standing in for a row written by the old, since-removed mtime-derived
+    scheme. The next backfill must recognize the file's real content id,
+    write it, and remove the stale row: 128 picks afterward, not 256."""
+    path = tmp_path / "444.duckdb"
+    _seed_mock_league(path, N_PICKS_COMPLETE)
+    corpus = dl.corpus_conn(str(tmp_path / "corpus.duckdb"))
+    league_id = "444"
+    stale_id = f"{dl.SOURCE_MOCK}:deadbeefdeadbeef"
+    stale_picks = pd.DataFrame({
+        "pick_no": range(1, N_PICKS_COMPLETE + 1),
+        "round": [1] * N_PICKS_COMPLETE, "slot": [1] * N_PICKS_COMPLETE,
+        "owner_key": [dl.anonymous_key(stale_id, 1)] * N_PICKS_COMPLETE,
+        "is_anonymous": [True] * N_PICKS_COMPLETE,
+        "player_id": [f"p{i}" for i in range(N_PICKS_COMPLETE)],
+        "position": ["WR"] * N_PICKS_COMPLETE,
+        "adp_rank": list(range(1, N_PICKS_COMPLETE + 1)),
+        "proj_points": [100.0] * N_PICKS_COMPLETE,
+    })
+    dl.record(corpus, dl.DraftRecord(
+        source=dl.SOURCE_MOCK, league_id=league_id, season=2026, teams=8,
+        rounds=16, my_slot=None, draft_id=stale_id, picks=stale_picks))
+    assert len(dl.picks(corpus, source=dl.SOURCE_MOCK)) == N_PICKS_COMPLETE
+
+    counts = mock_backfill.backfill([str(path)], corpus)
+
+    got = dl.picks(corpus, source=dl.SOURCE_MOCK)
+    assert len(got) == N_PICKS_COMPLETE, "must land at 128, not 256 -- no duplication"
+    assert stale_id not in set(got["draft_id"])
+    assert counts["stale_rows_removed"] == 1
+
+
+def test_backfill_never_touches_a_live_farmed_draft_in_the_same_league(tmp_path):
+    """A concurrent live-mock-farming process can write a real, irreplaceable
+    draft under the same league_id with `my_slot` set for a real seat. The
+    reconciliation this module runs on every pass must never delete it,
+    however different its draft_id is from the one just (re)recorded --
+    `my_slot IS NULL` is what separates a backfilled row from a live one."""
+    path = tmp_path / "555.duckdb"
+    _seed_mock_league(path, N_PICKS_COMPLETE)
+    corpus = dl.corpus_conn(str(tmp_path / "corpus.duckdb"))
+    league_id = "555"
+    live_id = f"{dl.SOURCE_MOCK}:livefarmedlivefa"
+    live_picks = pd.DataFrame({
+        "pick_no": range(1, 5), "round": [1] * 4, "slot": [1, 2, 3, 4],
+        "owner_key": ["espn:555:RealPerson"] * 4,
+        "is_anonymous": [False] * 4,
+        "player_id": ["x1", "x2", "x3", "x4"],
+        "position": ["RB", "WR", "TE", "QB"],
+        "adp_rank": [1.0, 2.0, 3.0, 4.0], "proj_points": [100.0] * 4,
+    })
+    dl.record(corpus, dl.DraftRecord(
+        source=dl.SOURCE_MOCK, league_id=league_id, season=2026, teams=8,
+        rounds=16, my_slot=3, draft_id=live_id, picks=live_picks))
+
+    mock_backfill.backfill([str(path)], corpus)
+
+    got = dl.picks(corpus, source=dl.SOURCE_MOCK)
+    assert live_id in set(got["draft_id"]), "the live-farmed draft must survive"
+    assert len(got[got["draft_id"] == live_id]) == 4
 
 
 def test_a_league_with_no_picks_yet_is_skipped(tmp_path):
