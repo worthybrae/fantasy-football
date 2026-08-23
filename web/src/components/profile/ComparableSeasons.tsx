@@ -12,7 +12,7 @@ import { fmtSigned, type Cohort } from './payload'
 //
 // `stat_twins` only. `value_neighbors` is the payload's fallback for a
 // player with no stat line to match, and those rows are not seasons at all:
-// they are today's board neighbours, which `ValueNeighbors` already draws as
+// they are today's board neighbours, which the popup no longer draws as
 // "Near you". Two neighbour cards on one popup is the bug this guard exists
 // to prevent.
 const COMPS = 4
@@ -86,7 +86,7 @@ export default function ComparableSeasons({
             // not a player anyone can draft in 2026 -- and the payload marks
             // those with a null rank. Opening one would 404 the fetch and
             // wipe the popup that is currently up, so only a twin the board
-            // still knows is a control. Same rule ValueNeighbors follows.
+            // still knows is a control.
             const id = p.rank === null ? null : p.player_id
             if (id === null) return <li className="pp-pop-comp" key={key}>{cells}</li>
             return (

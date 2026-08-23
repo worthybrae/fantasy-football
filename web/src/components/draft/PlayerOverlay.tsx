@@ -1,7 +1,6 @@
 import { useEffect } from 'react'
 import type { LiveSettings } from '../../api'
 import PlayerProfile, { type ProfileSeed } from '../PlayerProfile'
-import type { RankedPlayer } from '../profile/payload'
 
 // What the room hands over to open a profile: the id to fetch, and
 // everything it already knew about that player so the overlay can paint
@@ -33,12 +32,6 @@ interface PlayerOverlayProps {
   // `settings` comment). Passed rather than fetched for the same reason
   // `onTheClock` is: the room already holds it.
   settings?: LiveSettings | null
-  // The room's ranked board, threaded exactly as `settings` is and for the
-  // same reason: the room has it, the popup would otherwise fetch it under a
-  // pick clock. The profile's "Near you" card is a run of picks around his
-  // own, and the payload can only name one for a player it has no stat line
-  // to match (see PlayerProfile's `ranked`).
-  ranked?: RankedPlayer[]
   // Takes the player whose profile this is. The room decides whether there
   // is a pick to make at all and passes nothing when there is not -- see
   // DraftRoom, where this is wired to the same confirm dialog the board's
@@ -74,7 +67,7 @@ interface PlayerOverlayProps {
 // here.
 export default function PlayerOverlay({
   target, onClose, onSelectPlayer, onTheClock = false, settings = null,
-  ranked = [], onDraftPlayer,
+  onDraftPlayer,
 }: PlayerOverlayProps) {
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -163,7 +156,6 @@ export default function PlayerOverlay({
           playerId={target.playerId}
           seed={target.seed}
           settings={settings}
-          ranked={ranked}
           onDraftPlayer={onDraftPlayer}
           embedded
           onClose={onClose}

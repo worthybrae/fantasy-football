@@ -180,7 +180,8 @@ export interface ProfileHeader extends Player {
  *  (`similar.mode === 'value_neighbors'`). For everyone else `similar` is
  *  stat twins, whose `rank` is where those players sit on TODAY's board --
  *  Alvin Kamara at 273 -- and has nothing to do with where this one does.
- *  See ValueNeighbors, which reads this when the payload cannot answer. */
+ *  Read by nothing today: the card that windowed the board around a
+ *  player was removed. Kept because the room still computes it. */
 export type RankedPlayer = Pick<Player, 'player_id' | 'name' | 'rank' | 'market_rank'>
 
 /** One headline. `attribution` is the whole reason this is a record and not

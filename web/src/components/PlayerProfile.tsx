@@ -18,9 +18,8 @@ import MarketRow from './profile/MarketRow'
 import MissingData from './profile/MissingData'
 import ScheduleRanks from './profile/ScheduleRanks'
 import UsageLine from './profile/UsageLine'
-import ValueNeighbors from './profile/ValueNeighbors'
 import WeekByWeek from './profile/WeekByWeek'
-import { fmtRank, fmtSigned, hasHistory, type PlayerStatus, type ProfileHeader, type ProfilePayload, type RankedPlayer } from './profile/payload'
+import { fmtRank, fmtSigned, hasHistory, type PlayerStatus, type ProfileHeader, type ProfilePayload } from './profile/payload'
 
 // Everything the opener already knew about this player, so the profile can
 // paint on the frame it opens instead of behind a skeleton.
@@ -68,13 +67,6 @@ interface PlayerProfileProps {
   // behind it. Optional and defaulted for the same reason `startersAt` has a
   // fallback at all: before a session is connected there is no league to ask.
   settings?: LiveSettings | null
-  // The room's ranked board, straight through from DraftRoom the same way
-  // `settings` is. "Near you" is a run of picks around his own, and the
-  // payload can only supply one for a player it has no stat line to match
-  // (see RankedPlayer, and ValueNeighbors' own comment). Empty by default:
-  // the card then renders only for the players the payload can answer for,
-  // which is exactly how it behaved before this was threaded.
-  ranked?: RankedPlayer[]
   // Takes the player this profile is describing. Present ONLY while the room
   // could actually send that pick -- see DraftRoom, which owns that question
   // -- so the footer can offer the board back instead of a button that would
@@ -357,8 +349,8 @@ function PopPanels({ profile, settings }: {
 // That is why the rows carry no conditions of their own: see
 // `.pp-pop-row:empty` in App.css for the one case that needs handling, a row
 // where every card opted out.
-function PopCards({ profile, ranked, onSelectPlayer }: {
-  profile: ProfilePayload; ranked: RankedPlayer[]; onSelectPlayer: (id: string) => void
+function PopCards({ profile, onSelectPlayer }: {
+  profile: ProfilePayload; onSelectPlayer: (id: string) => void
 }): ReactNode {
   const { header } = profile
   return (
@@ -390,13 +382,6 @@ function PopCards({ profile, ranked, onSelectPlayer }: {
             o-line is a fact about the eleven who leave the field when this
             unit comes on. */}
         {profile.oline && <LineQuality oline={profile.oline} />}
-        <ValueNeighbors
-          mode={profile.similar.mode}
-          players={profile.similar.players}
-          ranked={ranked}
-          me={header}
-          onSelectPlayer={onSelectPlayer}
-        />
       </div>
       {/* Last row, and the only one that looks backwards: everything above
           it is this player now, and these are the seasons that already went
@@ -422,7 +407,7 @@ function PopCards({ profile, ranked, onSelectPlayer }: {
 
 export default function PlayerProfile({
   playerId, onClose, onToggleDrafted, onSelectPlayer, seed = null, settings = null,
-  ranked = [], onDraftPlayer, embedded = false,
+  onDraftPlayer, embedded = false,
 }: PlayerProfileProps) {
   const [profile, setProfile] = useState<ProfilePayload | null>(null)
   const [loading, setLoading] = useState(true)
@@ -618,7 +603,7 @@ export default function PlayerProfile({
           position={profile.header.position}
         />
       )}
-      {profile && <PopCards profile={profile} ranked={ranked} onSelectPlayer={onSelectPlayer} />}
+      {profile && <PopCards profile={profile} onSelectPlayer={onSelectPlayer} />}
 
       {/* The last thing in the popup, and the whole point of it: the profile
           takes the player it is describing. It opens the confirm dialog and

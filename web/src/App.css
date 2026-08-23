@@ -802,31 +802,6 @@ td:first-child {
 .pick-ticker-adp.is-steal { color: var(--ok); }
 .pick-ticker-adp.is-reach { color: var(--fail); }
 
-/* The word for a move worth naming, in the corner rather than in the line.
-   The line is already four things long, and a flag outside the reading order
-   is one an eye takes in without stopping to parse it. */
-.pick-ticker-flag {
-  position: absolute;
-  top: 3px;
-  right: 8px;
-  padding: 0 4px;
-  border-radius: 2px;
-  font-family: var(--font-mono);
-  font-size: 8.5px;
-  font-weight: 700;
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
-}
-
-.pick-ticker-flag.is-steal {
-  background: color-mix(in srgb, var(--ok) 22%, transparent);
-  color: var(--ok);
-}
-
-.pick-ticker-flag.is-reach {
-  background: color-mix(in srgb, var(--fail) 22%, transparent);
-  color: var(--fail);
-}
 
 .pick-ticker-name {
   color: var(--text-1);
@@ -841,8 +816,6 @@ td:first-child {
 }
 
 .pick-ticker-pick {
-  /* The corner flag positions against this. */
-  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -867,9 +840,11 @@ button.pick-ticker-pick:hover {
   background: var(--bg-2);
 }
 
+/* On the name's line now, so it keeps that line's size and sits a shade
+   brighter than the bookkeeping underneath it. */
 .pick-ticker-no {
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-3);
 }
 
@@ -886,12 +861,6 @@ button.pick-ticker-pick:hover {
   align-items: baseline;
   gap: 6px;
   min-width: 0;
-}
-
-/* Only an entry wearing a corner flag reserves room for it, so the ordinary
-   ones are not padded out to fit a word they do not carry. */
-.pick-ticker-pick.has-flag .pick-ticker-nameline {
-  padding-right: 44px;
 }
 
 /* The name over the team, each with the whole entry's width. Side by side
@@ -4321,6 +4290,13 @@ button.roster-row:focus-visible {
    smaller than the cards beside them. */
 .pp-pop-card.is-wide {
   flex: 1.35 1 0;
+}
+
+/* Usage shares its row with one card now that "Near you" is gone, and it is
+   the one with four labels and four columns to fit -- "Target %" was being
+   ellipsised to "Ta..." while the space sat to its right. */
+.pp-pop-card.is-widest {
+  flex: 2.2 1 0;
 }
 
 /* The hover panel's own head, a step smaller: these sit side by side in a

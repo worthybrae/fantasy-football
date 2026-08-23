@@ -125,7 +125,7 @@ export default function UsageLine({ seasons, position, projected }: {
   if (rows.length === 0) return null
 
   return (
-    <PopCard title="Usage" note="by season" className="is-wide">
+    <PopCard title="Usage" note="by season" className="is-widest">
       <div className="pp-pop-seasons">
         <div className={`pp-pop-seasons-head${projected ? ' has-proj' : ''}`}>
           <span />

@@ -562,34 +562,6 @@ export default function DraftRoom() {
     return ids
   }, [board])
 
-  // The join table in board-rank order, for the popup's "Near you" card --
-  // the run of picks around whoever is open (see PlayerProfile's `ranked`).
-  // NOT `state.candidates`, which this room calls the ranked list and which
-  // is a different order for a different question (what to take next, given
-  // this roster and this horizon). The table itself is keyed by id, so the
-  // order /api/players served it in is gone by the time anything reads it;
-  // sorted here, once per board load, rather than inside a popup that
-  // remounts on every comp click.
-  //
-  // Filtered by `draftedIds`, which is the difference between "the picks
-  // around this one" and a list of players. The card names the run you are
-  // choosing among; four rows into round six, an unfiltered board fills it
-  // with names that went in round one. `draftedIds` is the board's own
-  // drafted set, so a row leaves this list the moment its pick lands rather
-  // than a second later when the next ranking finishes.
-  //
-  // It costs the card for a player who is himself off the board -- a roster
-  // player opened from RosterPanel -- because ValueNeighbors windows the
-  // list on his own row and cannot find one that is not there. That is the
-  // right answer for a card whose whole claim is which picks are still
-  // available: there is no run around a player nobody can take.
-  const boardByRank = useMemo(
-    () => Object.values(players)
-      .filter((p) => !draftedIds.has(p.player_id))
-      .sort((a, b) => a.rank - b.rank),
-    [players, draftedIds],
-  )
-
   function handleOpenBoardPlayer(p: BoardPlayer) {
     setOpenPlayer({ playerId: p.player_id, seed: seedFromBoardPlayer(p, players[p.player_id]) })
   }
@@ -890,7 +862,19 @@ export default function DraftRoom() {
 
       <div className="draft-body">
         <div className="draft-main">
-          {tab === 'available'
+          {/* Startup, before the board exists. It covers the WHOLE main
+              column rather than one tab: the board is what every tab is
+              drawn from, so a room that shows a working snake board beside
+              an Available tab still building is telling two stories about
+              the same data. Only while the fetch is genuinely in flight --
+              a failed one falls through to the views and their id fallback,
+              because by then ids are the most the room can honestly show. */}
+          {playersLoading && Object.keys(players).length === 0 ? (
+            <div className="draft-board-building" role="status">
+              <span className="draft-board-building-dot" aria-hidden="true" />
+              Building your board — ranking every player against your roster
+            </div>
+          ) : tab === 'available'
             ? (
               // TopThree ABOVE AvailableList's own filter row/table --
               // the mock draws the filter row first (search+pills, then
@@ -903,25 +887,7 @@ export default function DraftRoom() {
               // mock, not an oversight -- do not "fix" this back to
               // match the mock's own ordering.
               <>
-                {/* The board takes a few seconds to build, and the live poll
-                    answers immediately -- so the room used to open on a table
-                    of candidates joined against nothing: raw gsis ids where
-                    the names go, an em dash in every column, and a Draft
-                    button beside each one. It read as a broken room rather
-                    than a loading one, which on draft night is the difference
-                    between waiting and reconnecting.
-                    Only while the fetch is genuinely in flight: a failed one
-                    falls through to the table below and its id fallback,
-                    because by then ids are the most the room can honestly
-                    show. */}
-                {playersLoading && Object.keys(players).length === 0 ? (
-                  <div className="draft-board-building" role="status">
-                    <span className="draft-board-building-dot" aria-hidden="true" />
-                    Building your board — ranking every player against your roster
-                  </div>
-                ) : (
-                <>
-                <TopThree
+                  <TopThree
                   candidates={state?.candidates ?? []}
                   players={players}
                   onDraft={handleDraftClick}
@@ -940,8 +906,6 @@ export default function DraftRoom() {
                   draftedIds={draftedIds}
                   settings={state?.settings}
                 />
-                </>
-                )}
               </>
             )
             : tab === 'board'
@@ -1031,7 +995,6 @@ export default function DraftRoom() {
           onSelectPlayer={handleSelectPlayer}
           onTheClock={youAreUp}
           settings={state?.settings}
-          ranked={boardByRank}
           // Handed over only while this room could actually send the pick:
           // the player is on the ranked list (`openCandidate`) and it is
           // your turn on a live socket (`isMyTurn`, the same gate the
