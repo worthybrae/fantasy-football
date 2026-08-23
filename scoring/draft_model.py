@@ -22,7 +22,8 @@ from scipy.optimize import minimize
 from pipeline.db import read_table, write_table
 from scoring import league as league_mod
 from scoring import mock_prior
-from scoring.board import _ADP_POSITION_ALIASES, _norm_name, adp_match_key
+from scoring.board import (GAMES, _ADP_POSITION_ALIASES, _norm_name,
+                          adp_match_key)
 from scoring.player_history import assert_no_column_collision, attributes_as_of
 
 RUN_WINDOW = 5
@@ -381,12 +382,65 @@ _ROSTER_SHAPE_FEATURES = ["held_at_pos", "first_at_pos", "rounds_since_pos",
 # docs/superpowers/findings/2026-08-23-mock-corpus-features.md.
 _STAT_PROFILE_FEATURES = ["usage", "efficiency", "played_share", "peak_gap"]
 
+# WHAT THE BOARD ALREADY COMPUTES AND THE MODEL COULD NOT SEE.
+#
+# The shipped prior is roughly "who is next on the board, with small
+# corrections": `reach` carries -11.24 and everything describing the player
+# himself sums to about 1.6. Meanwhile `build_board` computes 35 columns per
+# player and `feature_matrix` reads ten of them. These six are the gap --
+# five facts the board (or the pool, or `settings`) already knows, plus one
+# summary of the pool itself.
+#
+# ALL SIX ARE CANDIDATE-SPECIFIC, which is not a stylistic preference but the
+# entry requirement stated above `_ROSTER_SHAPE_FEATURES`: a column holding
+# one value for every candidate in a choice set divides straight back out of
+# the softmax and contributes exactly nothing. Two of them earn that the hard
+# way -- `last_of_tier` is a fact about the POOL made candidate-specific by
+# asking it of the candidate's own tier, and `slots_left_at_pos` is a fact
+# about the PICKING TEAM indexed by the candidate's own position, the same
+# shape `need` and the `_ROSTER_SHAPE_FEATURES` block already have.
+#
+# `dropoff_at_pos` IS THE SPEC'S `pos_dropoff`, RENAMED, and the rename is
+# not cosmetic. `SUMMARY_FEATURES` below excludes every `pos_`-prefixed name
+# because a position dummy cannot be shown one bar at a time, and
+# `tests/test_api.py` asserts `/api/managers`'s `shown` against its own copy
+# of that predicate. A feature called `pos_dropoff` would be silently dropped
+# from the manager card by a rule written for something else. `held_at_pos`
+# and `rounds_since_pos` were renamed off `pos_count`/`pos_gap` for exactly
+# this reason and the note there says to do the same for the next one; this
+# is the next one. `_at_pos` also matches `slots_left_at_pos` beside it.
+#
+# THE ONE DEFINITION THAT HAD TO BE PINNED DOWN is `dropoff_at_pos`. The
+# tempting version -- his points over the best player expected to SURVIVE to
+# this team's next turn -- is circular: survival comes out of `draft_sim`'s
+# rollouts, which run this model, so the feature would be fitted on the
+# output of the thing being fitted and no backtest of it would mean anything.
+# What ships is pure pool state: his projection minus the projection of the
+# next-best player still AVAILABLE at his position, at that moment. No model
+# output, no rollout, nothing imported from `draft_sim`.
+#
+# EXPECT MOST OF THESE TO LOSE. Five of the eight above lost.  `vor` and
+# `dropoff_at_pos` are both correlated with market rank, and a collinear
+# addition to a model with a -11.24 coefficient on `reach` tends to split a
+# coefficient rather than add signal. They are listed in
+# `UNMEASURED_FEATURES` so `ablation(candidates=...)` decides, on
+# `delta_top1`, by the rule stated above `_NEW_FEATURES`.
+_POOL_SIGNAL_FEATURES = ["dropoff_at_pos", "vor", "durability", "proj_change",
+                         "last_of_tier", "slots_left_at_pos"]
+
+# The FLEX-eligible positions, defined here rather than in `draft_sim` (which
+# now imports this name) because `slots_left_at_pos` needs them on the FITTING
+# side and `draft_sim` importing `draft_model` is the direction the dependency
+# already runs. One definition, two callers, for the same reason
+# `roster_shape_features` has one.
+FLEX_POSITIONS = ("RB", "WR", "TE")
+
 # Everything added since the last measurement of THIS LEAGUE's fit, in one
 # list, so the thing that has to be measured is enumerable rather than
 # remembered. `ablation` takes it as `candidates`.
 #
 # THE NAME IS STILL ACCURATE, AND IT IS WORTH SAYING WHY. `make fit-prior`
-# measured all eight on the mock corpus on 2026-08-23 and cut five of them,
+# measured the first eight on the mock corpus on 2026-08-23 and cut five,
 # so `COLD_START_PRIOR` now carries three fitted values and five zeros that
 # mean MEASURED AND REJECTED
 # (docs/superpowers/findings/2026-08-23-mock-corpus-features.md). That is a
@@ -395,7 +449,16 @@ _STAT_PROFILE_FEATURES = ["usage", "efficiency", "played_share", "peak_gap"]
 # from `fit_all` against `draft_picks` and still fit all 23 coefficients with
 # no evidence at all about these eight. `ablation()`'s default is still
 # `_NEW_FEATURES` for that reason; pass this list to change it.
-UNMEASURED_FEATURES = _ROSTER_SHAPE_FEATURES + _STAT_PROFILE_FEATURES
+#
+# The six `_POOL_SIGNAL_FEATURES` are unmeasured EVERYWHERE -- no corpus fit
+# and no league fit has seen them -- so they carry 0.0 in `COLD_START_PRIOR`
+# and that zero means NOT YET MEASURED rather than MEASURED AND REJECTED.
+# Being on this list is what gets them measured: `pipeline/fit_prior.ablate`
+# takes it as its default `candidates`, so a column appended to
+# `FEATURE_NAMES` and left off this list would ride into the matrix on the
+# next refit without ever being asked to justify itself.
+UNMEASURED_FEATURES = (_ROSTER_SHAPE_FEATURES + _STAT_PROFILE_FEATURES
+                       + _POOL_SIGNAL_FEATURES)
 
 # The 15 features every backtest number on record was measured against.
 # Appending to FEATURE_NAMES rather than inserting is not cosmetic: `backtest`
@@ -623,6 +686,236 @@ def roster_shape_features(positions, roster, last_pick_at_pos, round_no,
     return held, first_at_pos, rounds_since, first_at_pos * (round_no / rounds)
 
 
+# WHAT SCALE THE `_POOL_SIGNAL_FEATURES` COLUMNS SIT ON, measured against the
+# band the note above defines (std 0.31 to 5.56 after centring). Two of the
+# six arrive an order of magnitude outside it and are divided down; the rest
+# already land inside and are passed through, because dividing a column that
+# is already comparable just makes its coefficient less readable.
+#
+# Measured over `data/draft_corpus.duckdb` (60 drafts, 14,654 within-position
+# adjacent pairs) and a `build_board` for the current season (250 rows):
+#
+#     proj_points gap  std 9.53   -> / GAMES = 0.56   <- dropoff_at_pos
+#     vor              std 75.1   -> / GAMES = 4.42
+#     durability       std 19.9   -> (x - 50)/50 = 0.40
+#     proj_change      std 3.98      passed through
+#     last_of_tier     0/1 dummy
+#     slots_left_at_pos  0-4, the same shape as `held_at_pos`
+#
+# GAMES IS THE RIGHT DIVISOR FOR THE FIRST TWO, not an arbitrary constant.
+# `proj_points` and `vor` are both SEASON totals, and dividing either by the
+# games in a season turns it into the per-game quantity the design document
+# actually names ("his projected points per game minus..."). A flat divisor
+# chosen to hit the band would land on the same scale by accident; this one
+# lands there and still means something out loud.
+#
+# `durability` is a within-position PERCENTILE (see
+# `factors.normalize_within_position`), so it averages 50 by construction.
+# Subtracting the midpoint before scaling is what makes 0.0 read as "median
+# durability" -- which matters because 0.0 is also what an unknown player
+# gets, and "unknown" must not be served to the model as "worst in the
+# league". Note this is NOT an availability rate: `draft_sim.roster_value`
+# needs the rate and reads a different quantity for exactly that reason.
+DURABILITY_MIDPOINT = 50.0
+DURABILITY_SCALE = 50.0
+
+# Where `_last_of_tier` parks a candidate whose tier is unknown, and the
+# widest integer tier its counting fast path will bincount over. -1.0 sits
+# below every real tier (they are ranks, so 1 and up) and the bound is far
+# past the ~15 a real board draws, so both exist to make the fast path's
+# assumption checkable rather than to constrain anything real.
+_UNKNOWN_TIER = -1.0
+_MAX_TIER_BUCKETS = 1024
+
+
+def _pool_signal(pool: pd.DataFrame, name: str) -> np.ndarray:
+    """One `_POOL_SIGNAL_FEATURES` input column, or all-NaN if the pool has none.
+
+    UNLIKE every other column `feature_matrix` reads, these five inputs
+    (`proj_points`, `vor`, `durability`, `proj_change`, `tier`) are genuinely
+    absent from one of the three pools this model is fitted on, and that is a
+    fact about the data rather than a fixture convenience:
+
+    - the mock corpus carries `proj_points` on every pool row and joins the
+      other four off the current board (`fit_prior.enrich_pool`);
+    - `draft_sim.build_pool` carries all five, straight off `build_board`;
+    - THIS LEAGUE's own history (`build_observations` -> `_enrich_pool`) has
+      none of them. Its pools are reconstructed from `historic_adp` for
+      seasons 2020-2025, and no preseason board for those seasons exists to
+      join -- rebuilding one today from current data would be hindsight, which
+      is the same objection `_enrich_pool` records against ESPN's API ranks.
+
+    So the honest answer for those seasons is "unknown", and NaN is how this
+    model already spells it: every consumer below reads a non-finite value as
+    the neutral 0.0. A column that is 0.0 for every candidate cancels out of
+    the softmax exactly (see `_ROSTER_SHAPE_FEATURES`), so those six seasons
+    contribute no evidence about these six coefficients rather than six
+    seasons of fabricated evidence.
+    """
+    if name in pool.columns:
+        return pool[name].to_numpy(dtype=float)
+    return np.full(len(pool), np.nan)
+
+
+def _finite_or_neutral(values: np.ndarray) -> np.ndarray:
+    """Every non-finite entry replaced by 0.0, the neutral this model spells
+    "nothing known" with.
+
+    `np.where(isfinite)` rather than `np.nan_to_num`, which is 3x slower here
+    (6.7us against 2.1us on 250 candidates, measured) because it walks the
+    array once per kind of non-finite value. Three of these run on every
+    `_live_features` call, which runs once per pick per rollout.
+
+    +/-inf is not hypothetical: `draft_sim.build_pool` fills an unranked
+    player's `vor` with -inf as a sentinel for its candidate SELECTION, and
+    that value reaching a softmax would make every other candidate's
+    probability zero.
+    """
+    return np.where(np.isfinite(values), values, 0.0)
+
+
+def _next_best_gap(points, groups: PositionGroups) -> np.ndarray:
+    """Each candidate's projection minus the next-best AVAILABLE one at his
+    position -- the drop from him to the man behind him.
+
+    Not "minus the best player expected to survive to my next turn". That
+    definition needs `draft_sim.survival`, which runs rollouts through this
+    very model, so the feature would be a function of the fit being measured
+    and no backtest of it could mean anything. This one is pure pool state:
+    the choice set, the positions in it, and the projections on it.
+
+    The last available player at a position has nobody behind him and gets
+    0.0, which is the same neutral an unknown projection gets -- correctly,
+    since "there is no drop after him" and "the drop is unknown" are both
+    "this column has nothing to say about him".
+
+    ONE lexsort and three O(n) passes, no per-candidate Python. `_live_features`
+    runs inside every rollout step (`_legal_mask`'s docstring records what a
+    comprehension costs there), and a groupby-per-position would be one pass
+    per position on the hot path. A NaN projection sorts to the end of its own
+    group, so it can only zero out its own entry and its immediate
+    predecessor's rather than corrupting the whole group.
+    """
+    points = np.asarray(points, dtype=float)
+    codes = groups.codes
+    n = len(points)
+    if n == 0:
+        return np.zeros(0)
+    # Position groups first, best projection first inside each group.
+    order = np.lexsort((-points, codes))
+    ranked = points[order]
+    ranked_codes = codes[order]
+    gap = np.zeros(n)
+    if n > 1:
+        same_group = ranked_codes[:-1] == ranked_codes[1:]
+        gap[:-1] = np.where(same_group, ranked[:-1] - ranked[1:], 0.0)
+    out = np.empty(n)
+    out[order] = gap
+    # One pass for both exclusions rather than a `nan_to_num` and a `where`.
+    # A non-finite gap is an unknown projection somewhere in the pair, and a
+    # candidate with no position at all (code -1) was grouped with the other
+    # positionless rows by the sort above, which would have him "dropping off"
+    # against players he shares nothing with. Both are neutral.
+    return np.where(np.isfinite(out) & (codes >= 0), out, 0.0)
+
+
+def _last_of_tier(tier) -> np.ndarray:
+    """1.0 for a candidate who is the only one left in his market tier.
+
+    Scarcity as the board already draws it. `build_board`'s `tier` is a
+    global break over the whole board rather than a per-position one, so
+    "the last of tier 4" is a claim about the market's own grouping and not
+    a restatement of `dropoff_at_pos`.
+
+    A candidate whose tier is unknown gets 0.0 -- "not known to be the last
+    one" rather than a guess in either direction -- and unknown tiers are
+    never counted as a tier of their own, which would make two players with
+    no tier look like a pair.
+    """
+    tier = np.asarray(tier, dtype=float)
+    if len(tier) == 0:
+        return np.zeros(0)
+    known = np.isfinite(tier)
+    # Counted over the WHOLE array and masked afterwards, rather than over a
+    # boolean-indexed copy: same answer, one fewer allocation per call on a
+    # function that runs once per pick per rollout. The unknown rows are all
+    # parked on one sentinel and `known` removes them either way, which is
+    # what stops two players with no tier from reading as a pair.
+    parked = np.where(known, tier, _UNKNOWN_TIER)
+    codes = parked.astype(np.intp) + 1
+    if not (codes.min() >= 0 and codes.max() < _MAX_TIER_BUCKETS
+            and np.array_equal(codes - 1.0, parked)):
+        # A tier that is not a small non-negative integer. `build_board` never
+        # produces one -- `tier` is a rank -- so this is the fixture and
+        # future-proofing path, and it is a fallback rather than the default
+        # because the general version is twice the cost: 18.9us against 9.2us
+        # on 250 candidates, measured. Same answer either way; the guard above
+        # is what makes that true rather than assumed.
+        _, codes = np.unique(parked, return_inverse=True)
+    counts = np.bincount(codes)
+    return ((counts[codes] == 1) & known).astype(float)
+
+
+def pool_signal_features(positions, points, vor, durability, proj_change,
+                         tier, roster, starters, flex_slots: int,
+                         groups=None) -> tuple:
+    """The six `_POOL_SIGNAL_FEATURES` columns, in `FEATURE_NAMES` order.
+
+    ONE IMPLEMENTATION, TWO CALLERS, for the reason `roster_shape_features`
+    states at length: `feature_matrix` is what the model is FITTED on and
+    `draft_sim._live_features` is what it is SERVED from, and a disagreement
+    between them applies a fitted coefficient to a different quantity at
+    draft time without anything raising. Every scaling decision -- the
+    `GAMES` divisors, the durability midpoint, what an unknown value becomes
+    -- therefore lives HERE, once, rather than being written out twice and
+    kept in step by hand.
+
+    `points`, `vor`, `durability`, `proj_change` and `tier` are the raw board
+    quantities; non-finite entries are the "unknown" both pools spell with
+    NaN and all of them come out at the neutral 0.0. `vor` additionally
+    tolerates the -inf `draft_sim.build_pool` fills an unranked player with,
+    which is a sentinel for its candidate SELECTION and would otherwise reach
+    the softmax as an infinite score.
+
+    Returns `(dropoff_at_pos, vor, durability, proj_change, last_of_tier,
+    slots_left_at_pos)`.
+    """
+    if groups is None:
+        groups = position_groups(positions)
+
+    dropoff = _next_best_gap(points, groups) / GAMES
+    vor = _finite_or_neutral(np.asarray(vor, dtype=float) / GAMES)
+    durability = _finite_or_neutral(
+        (np.asarray(durability, dtype=float) - DURABILITY_MIDPOINT)
+        / DURABILITY_SCALE)
+    proj_change = _finite_or_neutral(np.asarray(proj_change, dtype=float))
+
+    # How many starting slots at this candidate's position this team still
+    # has to fill, FLEX included. A generalization of `need`, which is binary
+    # and so cannot tell "needs two more receivers" from "needs one" -- and
+    # which ignores the FLEX slots entirely, so a team with both its RB slots
+    # full reads as having no use for a running back at all.
+    #
+    # A FLEX slot is only counted as open once the surplus at the flex
+    # positions has been subtracted: a team holding three RBs against two RB
+    # slots has already spent one of them. Counted across the flex positions
+    # together, because the slot does not belong to any one of them.
+    #
+    # Indexed by the CANDIDATE's own position, which is what makes this a
+    # candidate-specific column rather than a fact about the pick that would
+    # cancel out of the softmax.
+    flex_used = sum(max(0.0, float(roster.get(pos, 0)) - starters.get(pos, 0))
+                    for pos in FLEX_POSITIONS)
+    flex_left = max(0.0, float(flex_slots) - flex_used)
+    slots_left = _by_group(groups, [
+        max(0.0, starters.get(pos, 0) - float(roster.get(pos, 0)))
+        + (flex_left if pos in FLEX_POSITIONS else 0.0)
+        for pos in groups.labels])
+
+    return (dropoff, vor, durability, proj_change, _last_of_tier(tier),
+            slots_left)
+
+
 def feature_matrix(obs: PickObservation, settings) -> np.ndarray:
     pool = obs.pool
     n = len(pool)
@@ -693,6 +986,22 @@ def feature_matrix(obs: PickObservation, settings) -> np.ndarray:
     for name in _STAT_PROFILE_FEATURES:
         columns.append(_centre_within_position(
             pool[name].to_numpy(dtype=float), positions, groups))
+
+    # --- `_POOL_SIGNAL_FEATURES`: what the board computes and what is left on
+    # it. Same arrangement as the roster-shape block above -- the arithmetic,
+    # the scaling and the treatment of an unknown value all live in
+    # `pool_signal_features` so that `draft_sim._live_features` reads them off
+    # the same definition rather than a second one that agrees today.
+    #
+    # `_pool_signal` rather than `pool[name]`: this league's own history has
+    # no preseason board for 2020-2025 to join, so all five inputs are absent
+    # there and NaN -- read as neutral -- is the honest answer. See that
+    # helper.
+    columns.extend(pool_signal_features(
+        positions, _pool_signal(pool, "proj_points"), _pool_signal(pool, "vor"),
+        _pool_signal(pool, "durability"), _pool_signal(pool, "proj_change"),
+        _pool_signal(pool, "tier"), obs.roster, starters, settings.flex_slots,
+        groups))
 
     return np.column_stack(columns) if n else np.zeros((0, len(FEATURE_NAMES)))
 
@@ -899,6 +1208,31 @@ _PHRASES = {
     # the player has fallen furthest from his own peak.
     "peak_gap": ("bets on bounce-backs from a career peak",
                  "takes players at their current level"),
+    # The `_POOL_SIGNAL_FEATURES` columns, on the same rule again: `describe`
+    # drops a top-3 feature it has no phrase for without looking further down
+    # the list, so an unnamed one turns a real deviation into "drafts close to
+    # league average". Every entry of FEATURE_NAMES is named in this table.
+    #
+    # Signs. `dropoff_at_pos` is how far this candidate is above the next man
+    # at his position, so positive means the cliff itself pulls him -- he
+    # takes the last good one rather than the best one left. `durability` is
+    # the board's percentile centred on the median, so positive is "prefers
+    # the ones who stay on the field". `proj_change` is projection minus
+    # recent actual, so positive means backing the forecast over the form.
+    # `slots_left_at_pos` is how many starting slots at his position are still
+    # open, so positive is a stronger form of `need`.
+    "dropoff_at_pos": ("takes the last player before a positional cliff",
+                       "ignores positional cliffs"),
+    "vor": ("drafts on value over replacement", "ignores value over "
+            "replacement"),
+    "durability": ("targets players who stay healthy", "ignores injury "
+                   "history"),
+    "proj_change": ("backs the projection over recent form",
+                    "trusts recent form over the projection"),
+    "last_of_tier": ("takes the last player in a tier",
+                     "lets a tier run out"),
+    "slots_left_at_pos": ("fills the positions he has most slots open at",
+                          "drafts regardless of how many slots are open"),
 }
 
 

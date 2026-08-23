@@ -592,3 +592,72 @@ def test_a_pool_row_with_no_history_reaches_the_matrix_neutral(
     for name in ("usage", "efficiency", "played_share", "peak_gap"):
         assert (X[:, FEATURE_NAMES.index(name)] == 0.0).all()
     assert (X[:, FEATURE_NAMES.index("no_track_record")] == 1.0).all()
+    # Same rule for the board columns the corpus does not store: an empty
+    # league builds no board, so all four are unknown and unknown is 0.0.
+    for name in ("vor", "durability", "proj_change", "last_of_tier"):
+        assert (X[:, FEATURE_NAMES.index(name)] == 0.0).all()
+
+
+def test_the_pool_signals_the_corpus_does_carry_are_built_from_it(
+        corpus_and_league):
+    """`dropoff_at_pos` and `slots_left_at_pos` need no board at all --
+    `proj_points` is stored per pool row and the roster shape comes off
+    `settings_json` -- so they must be live even against a league database
+    with nothing in it. A column that is 0.0 for every candidate cancels out
+    of the softmax exactly, so "present but always neutral" is the same thing
+    as absent and this is what tells the two apart."""
+    corpus_path, league_path = corpus_and_league
+    obs = _observations(corpus_path, league_path)
+    X_list, _, _, _, _ = fp.design(obs)
+
+    X = X_list[0]
+    for name in ("dropoff_at_pos", "slots_left_at_pos"):
+        column = X[:, FEATURE_NAMES.index(name)]
+        assert len(np.unique(column)) > 1, f"{name} is constant: {column}"
+
+
+def test_the_board_columns_land_on_the_right_pool_row(tmp_path):
+    """The corpus stores `adp_rank` and `proj_points` per pool row and
+    nothing else, so `vor`, `durability`, `proj_change` and `tier` are joined
+    from the board on `player_id`. A join that put one player's board row on
+    another's pool row would be invisible in every number downstream -- the
+    same failure `attributes_by_player_id` is guarded against above."""
+    pool = _pool()
+    signals = pd.DataFrame({
+        "player_id": ["p0", "p2"],
+        "vor": [120.0, -30.0], "durability": [88.0, 12.0],
+        "proj_change": [2.5, -1.0], "tier": [1.0, 6.0]})
+    enriched = fp.enrich_pool(pool, pd.DataFrame(), signals)
+
+    by_id = enriched.set_index("player_id")
+    assert by_id.loc["p0", "vor"] == 120.0
+    assert by_id.loc["p2", "durability"] == 12.0
+    # Everyone the board does not carry -- which is every DST, whose corpus
+    # player_id is a synthesized `adp_<team>_defense` no board row has --
+    # stays unknown rather than picking up a neighbour's numbers.
+    assert pd.isna(by_id.loc["p1", "tier"])
+    # And the join must not duplicate or drop a pool row: one pick removes
+    # exactly one of them.
+    assert len(enriched) == len(pool)
+
+
+def test_a_duplicated_board_player_id_is_dropped_rather_than_duplicating_a_row(
+        tmp_path):
+    """`board._add_adp_only_players` can synthesize one `player_id` for two
+    board rows (the same name at two positions in the ADP feed). A duplicate
+    on the right of a left merge DUPLICATES the pool row, which breaks "one
+    pick removes exactly one pool row" far downstream of here."""
+    pool = _pool()
+    signals = pd.DataFrame({
+        "player_id": ["p0", "p0", "p1"],
+        "vor": [120.0, 55.0, 10.0], "durability": [88.0, 40.0, 60.0],
+        "proj_change": [2.5, 0.5, -1.0], "tier": [1.0, 4.0, 2.0]})
+    # The guard lives in `board_signals_by_player_id`, so apply it there and
+    # then join, which is the order production runs in.
+    deduped = signals.drop_duplicates("player_id", keep=False)
+    enriched = fp.enrich_pool(pool, pd.DataFrame(), deduped)
+
+    assert len(enriched) == len(pool)
+    by_id = enriched.set_index("player_id")
+    assert pd.isna(by_id.loc["p0", "vor"])       # both sides of the collision
+    assert by_id.loc["p1", "vor"] == 10.0

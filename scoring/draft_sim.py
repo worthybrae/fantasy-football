@@ -32,13 +32,19 @@ from scoring.board import (FANTASY_POSITIONS, GAMES, POSITION_FLOOR,
                            _norm_name, adp_match_key, projections)
 from scoring.config import CURRENT_SEASON, RECENCY_WEIGHTS
 from scoring.draft_model import (COLD_START_PRIOR, EARLY_ROUNDS, FEATURE_NAMES,
-                                 FFC_BLEND_WEIGHT, HYPE_SCALE, RUN_WINDOW,
-                                 _ATTRIBUTE_DEFAULTS, _centre_within_position,
-                                 _log_rank_features, _STAT_PROFILE_FEATURES,
-                                 position_groups, roster_shape_features)
+                                 FFC_BLEND_WEIGHT, FLEX_POSITIONS, HYPE_SCALE,
+                                 RUN_WINDOW, _ATTRIBUTE_DEFAULTS,
+                                 _centre_within_position, _log_rank_features,
+                                 _STAT_PROFILE_FEATURES, position_groups,
+                                 pool_signal_features, roster_shape_features)
 from scoring.player_history import assert_no_column_collision, attributes_as_of
 
-FLEX_POSITIONS = ("RB", "WR", "TE")
+# Re-exported, not redefined. `slots_left_at_pos` counts the FLEX slots a
+# team has left, and that column is built on the FITTING side too, so the
+# tuple moved to `draft_model` where both callers can read one copy of it.
+# The name stays bound here because `scoring.gain` and the tests import it
+# from this module.
+
 # Availability (0-100) for a player with no weekly history to compute one
 # from: rookies, kickers, and every DST. A realistic full-season availability
 # rate, not the neutral 50 the board uses for a missing *percentile* -- 50
@@ -187,6 +193,12 @@ _FIRST_AT_POS_ROUND = FEATURE_NAMES.index("first_at_pos_round")
 # number.
 _STAT_PROFILE_INDEX = tuple((name, FEATURE_NAMES.index(name))
                             for name in _STAT_PROFILE_FEATURES)
+_DROPOFF_AT_POS = FEATURE_NAMES.index("dropoff_at_pos")
+_VOR = FEATURE_NAMES.index("vor")
+_DURABILITY = FEATURE_NAMES.index("durability")
+_PROJ_CHANGE = FEATURE_NAMES.index("proj_change")
+_LAST_OF_TIER = FEATURE_NAMES.index("last_of_tier")
+_SLOTS_LEFT_AT_POS = FEATURE_NAMES.index("slots_left_at_pos")
 
 
 class SimPool(NamedTuple):
@@ -234,6 +246,27 @@ class SimPool(NamedTuple):
     efficiency: np.ndarray = None
     played_share: np.ndarray = None
     peak_gap: np.ndarray = None
+    # The remaining `_POOL_SIGNAL_FEATURES` inputs, straight off the board.
+    # `vor` and `points` above are the other two; they were already carried
+    # for candidate selection and the lineup value, and reading them here
+    # rather than adding second copies is the point of naming SimPool's
+    # fields after what they are.
+    #
+    # `durability` is the board's WITHIN-POSITION PERCENTILE, which is the
+    # column `availability` above exists to not be -- see that field and
+    # `_availability`. The model reads the percentile (a preference between
+    # comparable players); `roster_value` reads the rate (an expectation
+    # about games). Two different quantities, two fields, named apart so the
+    # two can never be swapped by accident.
+    #
+    # Defaulted to None for hand-built fixtures, exactly like the stat
+    # profile above: `_live_features` expands None to an all-NaN column,
+    # which `pool_signal_features` reads as the neutral 0.0 -- the same
+    # value a pool whose board join found nothing produces. `build_pool`,
+    # the one production constructor, always populates all three.
+    durability: np.ndarray = None
+    proj_change: np.ndarray = None
+    tier: np.ndarray = None
 
 
 def snake_slots(teams: int, rounds: int) -> list:
@@ -292,6 +325,33 @@ def _cheatsheet_ranks(conn, ranked: pd.DataFrame, season: int) -> pd.Series:
     cs = cs.dropna(subset=["key"]).sort_values("cs_rank").drop_duplicates(
         "key", keep="first")
     return ranked["key"].map(cs.set_index("key")["cs_rank"])
+
+
+def _board_signal(ranked: pd.DataFrame, name: str) -> np.ndarray:
+    """One `_POOL_SIGNAL_FEATURES` input off the board, or all-NaN without it.
+
+    `_BOARD_COLUMNS` carries all three, so this only ever falls back for a
+    bare fixture board -- and it falls back to NaN, which
+    `pool_signal_features` reads as the neutral 0.0 on both sides of the
+    fit/serve line. The alternative, substituting some plausible number, would
+    serve the model a value the fit never saw for a player nothing is known
+    about.
+    """
+    if name in ranked.columns:
+        return pd.to_numeric(ranked[name], errors="coerce").to_numpy(dtype=float)
+    return np.full(len(ranked), np.nan)
+
+
+def _sliced_or_unknown(values, available, n) -> np.ndarray:
+    """A SimPool field sliced to the available candidates, or all-NaN.
+
+    Only the fixture path hands None (see `SimPool`); `build_pool` fills every
+    one of these. NaN is the neutral both `feature_matrix` and
+    `pool_signal_features` already read as "nothing known", so a fixture that
+    omits a column produces the same column a real pool produces for a player
+    the board join missed.
+    """
+    return np.full(n, np.nan) if values is None else values[available]
 
 
 def build_pool(conn, board: pd.DataFrame, settings) -> SimPool:
@@ -468,7 +528,16 @@ def build_pool(conn, board: pd.DataFrame, settings) -> SimPool:
         # missed, so an unknown player reaches `_live_features` in the same
         # state he reaches `feature_matrix` in.
         **{name: ranked[name].to_numpy(dtype=float)
-           for name in _STAT_PROFILE_FEATURES})
+           for name in _STAT_PROFILE_FEATURES},
+        # The three board columns the model could not see until Tier 1.
+        # Assigned positionally like everything else here (see the top of
+        # this function for why `.map()` on `player_id` is unsafe), and NOT
+        # re-derived: `durability`, `proj_change` and `tier` are computed by
+        # `build_board` and a second computation of any of them here would be
+        # a copy that drifts.
+        durability=_board_signal(ranked, "durability"),
+        proj_change=_board_signal(ranked, "proj_change"),
+        tier=_board_signal(ranked, "tier"))
 
 
 def _live_features(pool, available, overall_pick, roster, recent, settings,
@@ -480,8 +549,9 @@ def _live_features(pool, available, overall_pick, roster, recent, settings,
     This function is what the model is SERVED from; `feature_matrix` is what
     it is FITTED on. Where the two could drift they now call one shared
     implementation (`draft_model.roster_shape_features`,
-    `_centre_within_position`) rather than each writing the arithmetic out,
-    and `tests/test_draft_sim.py` asserts the two agree end to end anyway.
+    `pool_signal_features`, `_centre_within_position`) rather than each
+    writing the arithmetic out, and `tests/test_draft_sim.py` asserts the two
+    agree end to end anyway.
     A disagreement here is silent: the shapes still line up, nothing raises,
     and every live prediction is simply computed from a vector the fit never
     saw.
@@ -546,10 +616,23 @@ def _live_features(pool, available, overall_pick, roster, recent, settings,
     # `SimPool`); an all-NaN column centres to 0.0, which is the same neutral
     # a missed attribute join already produces on both sides.
     for name, col in _STAT_PROFILE_INDEX:
-        values = getattr(pool, name)
         X[:, col] = _centre_within_position(
-            np.full(n, np.nan) if values is None else values[available],
+            _sliced_or_unknown(getattr(pool, name), available, n),
             positions, groups)
+
+    # The pool-signal block, from the SAME function `feature_matrix` calls.
+    # `dropoff_at_pos` is the only column in the model that summarizes the
+    # rest of the choice set, so it is the one that HAS to be sliced by
+    # `available` rather than read off the whole pool: the drop from a player
+    # to the next man at his position is a different number once the next man
+    # is gone, and that is the whole signal.
+    (X[:, _DROPOFF_AT_POS], X[:, _VOR], X[:, _DURABILITY], X[:, _PROJ_CHANGE],
+     X[:, _LAST_OF_TIER], X[:, _SLOTS_LEFT_AT_POS]) = pool_signal_features(
+        positions, pool.points[available], pool.vor[available],
+        _sliced_or_unknown(pool.durability, available, n),
+        _sliced_or_unknown(pool.proj_change, available, n),
+        _sliced_or_unknown(pool.tier, available, n),
+        roster, settings.starters, settings.flex_slots, groups)
     return X
 
 

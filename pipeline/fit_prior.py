@@ -92,7 +92,7 @@ import pandas as pd
 from pipeline import db as db_mod
 from pipeline import draft_log as dl
 from scoring import league as league_mod
-from scoring.board import adp_match_key
+from scoring.board import adp_match_key, build_board
 from scoring.draft_model import (ADP_BASELINE_TEMPERATURE, COLD_START_PRIOR,
                                  FEATURE_NAMES, LEGACY_FEATURE_NAMES,
                                  PickObservation, RUN_WINDOW,
@@ -233,7 +233,73 @@ def attributes_by_player_id(league_conn, season: int) -> pd.DataFrame:
     return latest.merge(attrs, on="key", how="inner").drop(columns=["key"])
 
 
-def enrich_pool(pool_rows: pd.DataFrame, attrs: pd.DataFrame) -> pd.DataFrame:
+# The board columns the corpus does not store, and which `feature_matrix`
+# needs to build the `_POOL_SIGNAL_FEATURES` block. `draft_log_pool` carries
+# `adp_rank` and `proj_points` per row and nothing else, so these four have to
+# come from somewhere; they come from the board, joined on `player_id`.
+BOARD_SIGNAL_COLUMNS = ["vor", "durability", "proj_change", "tier"]
+
+
+def board_signals_by_player_id(league_conn, settings=None) -> pd.DataFrame:
+    """`build_board`'s pool-signal columns, keyed by `player_id`.
+
+    THE SAME SHAPE AS `attributes_by_player_id` ABOVE and for the same
+    reason -- a corpus pool row identifies a player by `player_id` and by
+    nothing else -- but with none of its re-keying, because the board is
+    already keyed by `player_id`. It is a separate function rather than four
+    more columns on that one because the two read different sources: that one
+    reads `weekly` (finished seasons, no hindsight possible), this one reads
+    the board (this preseason's opinion).
+
+    WHAT THIS JOIN IS AND IS NOT. It is the board as it stands TODAY, not the
+    board as it stood when each mock was drafted. `draft_log_pool` was written
+    from `draft_sim.build_pool`, so the ORDER those drafts were made against
+    is faithfully stored and `market_rank`/`reach`/`fall` are unaffected; what
+    is being back-filled is four columns nobody recorded. Every draft in the
+    corpus is the current season and all four columns are preseason
+    quantities computed from finished seasons -- `vor` off the projection,
+    `durability` and `proj_change` off `weekly` -- so they move with a
+    projection refresh rather than with results, and none of them can see a
+    game that had not been played when the mock was drafted. That is a
+    weaker claim than `attributes_as_of` makes and it is stated rather than
+    assumed: a fit that shows `vor` or `tier` earning its place is worth
+    re-checking once the corpus records them per draft.
+
+    `settings` IS THE DRAFT'S, NOT THE LEAGUE DATABASE'S, and that matters for
+    one of the four. `vor` is value over replacement, and both the projection
+    and the replacement level are priced by the scoring rules and the starter
+    counts -- so a board built with `build_board`'s default (whatever league
+    the `--league-db` file happens to describe) would price the corpus's
+    8-team PPR mocks under someone else's rules. The corpus board was written
+    by `draft_sim.build_pool` against the mock's own settings, so this passes
+    the same thing. `durability` and `tier` move with it too, being a
+    within-position percentile and a break over the board's own order.
+
+    Returns an empty frame with the right columns when the board cannot be
+    built (a league database with no projections behind it), which the merge
+    below then treats as "nothing known" -- the neutral every consumer of
+    these columns already reads a NaN as.
+    """
+    empty = pd.DataFrame(columns=["player_id"] + BOARD_SIGNAL_COLUMNS)
+    board = build_board(league_conn, settings=settings)
+    if board.empty or "player_id" not in board.columns:
+        return empty
+    have = [c for c in BOARD_SIGNAL_COLUMNS if c in board.columns]
+    out = board[["player_id"] + have].copy()
+    for missing in [c for c in BOARD_SIGNAL_COLUMNS if c not in have]:
+        out[missing] = np.nan
+    # `_add_adp_only_players` can synthesize one `player_id` for two board
+    # rows (the same name at two positions in the ADP feed), and a duplicate
+    # on the right of a left merge DUPLICATES the pool row -- which would
+    # break "one pick removes exactly one pool row" downstream. Same guard,
+    # and the same reasoning, as the collision drop in
+    # `attributes_by_player_id`: drop both sides so the pool row falls
+    # through to "unknown" rather than to a guess.
+    return out.drop_duplicates("player_id", keep=False)
+
+
+def enrich_pool(pool_rows: pd.DataFrame, attrs: pd.DataFrame,
+                board_signals: pd.DataFrame = None) -> pd.DataFrame:
     """One draft's stored board, shaped into the pool `feature_matrix` reads.
 
     `market_rank` IS the stored `adp_rank`, renamed and not recomputed. That
@@ -273,6 +339,30 @@ def enrich_pool(pool_rows: pd.DataFrame, attrs: pd.DataFrame) -> pd.DataFrame:
             if col not in ("no_track_record", "prod_rank"):
                 pool[col] = pool[col].fillna(default)
     pool["hype"] = pool["prod_rank"] - pool["market_rank"]
+
+    # The four board columns, left-joined on `player_id`. A player the board
+    # does not carry -- and every DST, whose corpus `player_id` is the
+    # synthesized `adp_<team>_defense` the board has no row for -- keeps NaN,
+    # which `feature_matrix` reads as neutral. Defaulted to None so every
+    # existing caller and fixture keeps working and reads as "no board
+    # available", which is a smaller pool signal rather than a wrong one.
+    if board_signals is None or board_signals.empty:
+        for col in BOARD_SIGNAL_COLUMNS:
+            pool[col] = np.nan
+    else:
+        # A corpus pool that ever RECORDS one of these keeps its own. The
+        # value as it stood when the draft was made beats a back-fill from
+        # today's board, and merging both would have pandas suffix them
+        # `_x`/`_y` -- silently, leaving `feature_matrix` reading neither.
+        # That is the same failure `assert_no_column_collision` exists for,
+        # written here because this merge is keyed on `player_id` rather than
+        # on the attribute key that guard covers.
+        carried = [c for c in BOARD_SIGNAL_COLUMNS if c in pool.columns]
+        pool = pool.merge(board_signals.drop(columns=carried),
+                          on="player_id", how="left")
+        for col in BOARD_SIGNAL_COLUMNS:
+            if col not in pool.columns:
+                pool[col] = np.nan
     return pool
 
 
@@ -403,6 +493,17 @@ def build_corpus_observations(corpus, league_conn, draft_ids: list,
     attrs_by_season = {s: attributes_by_player_id(league_conn, s) for s in seasons}
     fallback_season = season or (seasons[0] if seasons else None)
 
+    # One board for the whole corpus, built once, under the first draft's
+    # roster and scoring rules. `build_board` is ~3s, so building it per draft
+    # would add three seconds per mock to a fit that already replays every
+    # pick -- and every draft in this corpus is the same 8-team PPR mock, so
+    # a per-draft board would be the same board 60 times. A corpus that ever
+    # mixed league SHAPES would need one board per distinct `settings_json`;
+    # the shape is read off a draft rather than assumed so that change is a
+    # cache key rather than a rewrite.
+    board_signals = board_signals_by_player_id(
+        league_conn, _settings_for(heads.iloc[0]) if len(heads) else None)
+
     for draft_id in draft_ids:
         head = heads[heads["draft_id"] == draft_id]
         if head.empty:
@@ -414,7 +515,8 @@ def build_corpus_observations(corpus, league_conn, draft_ids: list,
         out.settings[draft_id] = settings
 
         pool = enrich_pool(pools[pools["draft_id"] == draft_id],
-                           attrs_by_season.get(draft_season, pd.DataFrame()))
+                           attrs_by_season.get(draft_season, pd.DataFrame()),
+                           board_signals)
         row_of = {pid: i for i, pid in enumerate(pool["player_id"])}
         available = np.ones(len(pool), dtype=bool)
 

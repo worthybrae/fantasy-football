@@ -930,11 +930,22 @@ def test_age_is_centred_within_position():
 # for the reason the first test here pins down. ------------------------------
 
 def _shape_pool():
-    """A five-player, four-position pool carrying real stat values.
+    """A five-player, four-position pool carrying real stat and board values.
 
     Two RBs so `_centre_within_position` has a group to centre within; the
     single WR/TE/QB are each their own mean and centre to exactly 0.0, which
     is the same neutral an unknown value gets.
+
+    The board columns are set so every `_POOL_SIGNAL_FEATURES` column has
+    something to say here rather than reading a trivial neutral:
+
+    - `proj_points` gives the two RBs a real drop between them, so
+      `dropoff_at_pos` is not zero everywhere (the lone WR/TE/QB have nobody
+      behind them and correctly read 0.0);
+    - `tier` puts the two RBs together and leaves the other three alone, so
+      `last_of_tier` comes out 0/0/1/1/1 rather than all one value;
+    - `durability` and `proj_change` carry a NaN each, so the "unknown is
+      neutral" path is live on a real choice set and not only in a unit test.
     """
     pool = _pool([("rb1", "RB", 1.0), ("rb2", "RB", 2.0), ("wr1", "WR", 3.0),
                   ("te1", "TE", 4.0), ("qb1", "QB", 5.0)])
@@ -942,6 +953,11 @@ def _shape_pool():
     pool["efficiency"] = [0.85, 0.60, 1.10, 0.95, 0.42]
     pool["played_share"] = [1.0, 0.65, 0.90, 0.80, 1.0]
     pool["peak_gap"] = [1.5, 6.0, 0.5, 2.0, 3.0]
+    pool["proj_points"] = [289.0, 221.0, 264.0, 176.0, 318.0]
+    pool["vor"] = [88.0, 20.0, 63.0, 41.0, -12.0]
+    pool["durability"] = [91.0, 44.0, np.nan, 67.0, 55.0]
+    pool["proj_change"] = [1.4, -3.2, 0.6, np.nan, -0.8]
+    pool["tier"] = [1.0, 1.0, 2.0, 4.0, 6.0]
     return pool
 
 
@@ -999,11 +1015,16 @@ def test_a_column_constant_across_a_choice_set_cannot_change_the_likelihood():
                           [2]) != pytest.approx(base)
 
 
-def test_every_task_3_column_varies_inside_a_real_choice_set():
+def test_every_unmeasured_column_varies_inside_a_real_choice_set():
     """The other half of the constraint above: a column that does not vary is
-    not a weak feature, it is no feature at all. Each of the eight is checked
-    against a choice set with a team history and a real stat profile behind
-    it, so "this one is always 0.0 in practice" cannot pass unnoticed."""
+    not a weak feature, it is no feature at all. Every entry of
+    `UNMEASURED_FEATURES` is checked against a choice set with a team history,
+    a real stat profile and real board columns behind it, so "this one is
+    always 0.0 in practice" cannot pass unnoticed.
+
+    Driven off the list rather than a hand-written set of names, so a feature
+    appended to it is checked without anyone remembering to come back here --
+    which is the failure mode this test exists for."""
     import numpy as np
     from scoring.draft_model import (UNMEASURED_FEATURES, FEATURE_NAMES,
                                      feature_matrix)
@@ -1213,14 +1234,209 @@ def test_stat_profile_columns_are_neutral_when_the_join_found_nothing():
     assert np.isfinite(X).all()
 
 
-def test_feature_names_end_with_the_task_3_columns_in_the_briefed_order():
+def test_feature_names_end_with_the_unmeasured_columns_in_the_briefed_order():
+    """APPENDED, NEVER INSERTED, and the exact order pinned.
+
+    `backtest` and `fit_subset` slice the design matrix by INDEX, and the
+    cold-start prior is a bare vector whose position i is feature i. Both
+    break silently -- right length, right shape, wrong quantity -- if a
+    column is inserted rather than appended, so the whole tail is written out
+    here rather than checked for membership.
+    """
     from scoring.draft_model import (COLD_START_PRIOR, FEATURE_NAMES,
                                      UNMEASURED_FEATURES)
     assert UNMEASURED_FEATURES == [
         "held_at_pos", "first_at_pos", "rounds_since_pos", "first_at_pos_round",
-        "usage", "efficiency", "played_share", "peak_gap"]
+        "usage", "efficiency", "played_share", "peak_gap",
+        "dropoff_at_pos", "vor", "durability", "proj_change", "last_of_tier",
+        "slots_left_at_pos"]
     assert FEATURE_NAMES[-len(UNMEASURED_FEATURES):] == UNMEASURED_FEATURES
-    assert len(COLD_START_PRIOR) == len(FEATURE_NAMES) == 23
+    assert len(COLD_START_PRIOR) == len(FEATURE_NAMES) == 29
+
+
+# --- Tier 1: the six pool signals. What the board already computed, what the
+# pool itself says, and what `settings` says -- none of which the model could
+# see. Each is checked for the property that makes it a feature at all rather
+# than for a number: that it varies across the candidates in one choice set,
+# and that it says what its name says. --------------------------------------
+
+def test_dropoff_is_the_gap_to_the_next_best_available_at_his_position():
+    """`dropoff_at_pos` is his projection minus the next man at his position,
+    in points per game -- and 0.0 for the last one, who has nobody behind
+    him."""
+    from scoring.board import GAMES
+    from scoring.draft_model import FEATURE_NAMES, feature_matrix
+
+    X = feature_matrix(_shape_obs(), _settings())
+    dropoff = X[:, FEATURE_NAMES.index("dropoff_at_pos")]
+    # `_shape_pool` is rb1 289, rb2 221, wr1 264, te1 176, qb1 318.
+    assert dropoff[0] == pytest.approx((289.0 - 221.0) / GAMES)
+    assert dropoff[1] == pytest.approx(0.0)      # the last RB available
+    assert (dropoff[2:] == 0.0).all()            # each alone at his position
+
+
+def test_dropoff_is_read_off_the_pool_as_it_stands_now():
+    """The whole point of the column: the drop from a player to the next man
+    at his position is a DIFFERENT number once that man is gone. A version
+    computed off the full board rather than the choice set would report the
+    same value at every pick of the draft, which is a fact about the board and
+    would cancel out of nothing but would also say nothing about scarcity."""
+    import numpy as np
+    from scoring.board import GAMES
+    from scoring.draft_model import pool_signal_features
+
+    positions = np.array(["RB", "RB", "RB"])
+    points = np.array([300.0, 280.0, 200.0])
+    neutral = np.full(3, np.nan)
+
+    def dropoff(keep):
+        return pool_signal_features(
+            positions[keep], points[keep], neutral[keep], neutral[keep],
+            neutral[keep], neutral[keep], {}, {}, 0)[0]
+
+    everyone = dropoff(np.array([0, 1, 2]))
+    assert everyone[0] == pytest.approx(20.0 / GAMES)
+    assert everyone[1] == pytest.approx(80.0 / GAMES)
+    assert everyone[2] == pytest.approx(0.0)
+
+    # The middle RB is drafted. The gap behind the best one is now 100.
+    without_the_second = dropoff(np.array([0, 2]))
+    assert without_the_second[0] == pytest.approx(100.0 / GAMES)
+
+
+def test_dropoff_cannot_be_computed_from_the_models_own_output():
+    """THE CIRCULARITY THIS COLUMN WAS DEFINED TO AVOID.
+
+    The tempting definition of a positional dropoff is "his points over the
+    best player expected to SURVIVE to my next turn". That expectation comes
+    out of `draft_sim.survival`, which runs Monte Carlo rollouts driven by
+    THIS model -- so the feature would be a function of the coefficient vector
+    being fitted, and no backtest of it would mean anything.
+
+    Enforced structurally rather than by comment: `draft_model` does not
+    import the simulator, and a future edit that reaches for `survival` has to
+    add the import and fail here. The dependency runs the other way (the
+    simulator imports this module) and it has to stay that way for this
+    module to be importable at all.
+    """
+    import ast
+    import pathlib
+    tree = ast.parse(pathlib.Path("scoring/draft_model.py").read_text())
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module)
+            imported.update(f"{node.module}.{a.name}" for a in node.names)
+    assert not [m for m in imported if "draft_sim" in m], (
+        "draft_model imports the simulator: a feature fitted on rollout "
+        f"output is fitted on its own prediction ({sorted(imported)})")
+
+
+def test_last_of_tier_asks_who_is_still_available_not_who_was_on_the_board():
+    import numpy as np
+    from scoring.draft_model import pool_signal_features
+
+    positions = np.array(["RB", "WR", "TE", "QB"])
+    neutral = np.full(4, np.nan)
+
+    def last_of_tier(tier):
+        return pool_signal_features(positions, neutral, neutral, neutral,
+                                    neutral, np.asarray(tier, dtype=float),
+                                    {}, {}, 0)[4]
+
+    # Two players left in tier 1, one each in 2 and 3, and one unknown.
+    np.testing.assert_array_equal(last_of_tier([1.0, 1.0, 2.0, np.nan]),
+                                  [0.0, 0.0, 1.0, 0.0])
+    # The other member of tier 1 goes: the one left is now the last of it.
+    np.testing.assert_array_equal(last_of_tier([1.0, 4.0, 2.0, np.nan]),
+                                  [1.0, 1.0, 1.0, 0.0])
+    # Two unknowns are not a tier of their own.
+    np.testing.assert_array_equal(last_of_tier([np.nan, np.nan, 2.0, 3.0]),
+                                  [0.0, 0.0, 1.0, 1.0])
+
+
+def test_slots_left_at_pos_counts_the_flex_and_generalizes_need():
+    """`need` is binary and ignores the FLEX slots entirely, so a team with
+    both RB slots full reads as having no use at all for a running back.
+    `slots_left_at_pos` is the count, FLEX included, and a flex slot is only
+    open until the surplus at the flex positions has spent it."""
+    import numpy as np
+    from scoring.draft_model import pool_signal_features
+
+    positions = np.array(["QB", "RB", "WR", "TE", "K"])
+    neutral = np.full(5, np.nan)
+    starters = {"QB": 1, "RB": 2, "WR": 2, "TE": 1, "K": 1, "DST": 1}
+
+    def slots(roster):
+        return pool_signal_features(positions, neutral, neutral, neutral,
+                                    neutral, neutral, roster, starters, 2)[5]
+
+    # Nothing drafted: every dedicated slot open, both FLEX slots open to
+    # RB/WR/TE and to nobody else.
+    np.testing.assert_allclose(slots({}), [1.0, 4.0, 4.0, 3.0, 1.0])
+    # Three RBs against two RB slots: the dedicated slots are full (`need`
+    # would say 0 and stop there) and one of the two FLEX slots is spent.
+    np.testing.assert_allclose(slots({"RB": 3, "WR": 1}),
+                               [1.0, 1.0, 2.0, 2.0, 1.0])
+
+
+def test_an_unknown_board_value_reaches_the_matrix_neutral():
+    """This league's own six seasons have no preseason board to join, so all
+    five board inputs are absent there. Absent must read as 0.0 -- the same
+    neutral a missing stat profile gets -- rather than as a number."""
+    import numpy as np
+    from scoring.draft_model import FEATURE_NAMES, _POOL_SIGNAL_FEATURES
+
+    obs = PickObservation(
+        season=2026, overall_pick=41, manager="m", chosen=0,
+        pool=_pool([("rb1", "RB", 1.0), ("rb2", "RB", 2.0),
+                    ("wr1", "WR", 3.0)]),
+        roster={}, recent=[])
+    X = feature_matrix(obs, _settings())
+    for name in _POOL_SIGNAL_FEATURES:
+        column = X[:, FEATURE_NAMES.index(name)]
+        assert np.isfinite(column).all(), f"{name} is not finite: {column}"
+        if name != "slots_left_at_pos":
+            # `slots_left_at_pos` needs no board at all -- it is built from
+            # `settings` and the roster -- so it is the one column that still
+            # says something here.
+            assert (column == 0.0).all(), f"{name} is not neutral: {column}"
+
+
+def test_durability_is_centred_on_the_median_percentile():
+    """`durability` is a within-position PERCENTILE, so it averages 50 by
+    construction. Centring on 50 is what makes the neutral 0.0 an unknown
+    player gets mean "median durability" rather than "worst in the league"."""
+    import numpy as np
+    from scoring.draft_model import pool_signal_features
+
+    positions = np.array(["RB", "RB", "RB"])
+    neutral = np.full(3, np.nan)
+    durability = pool_signal_features(
+        positions, neutral, neutral, np.array([100.0, 50.0, np.nan]), neutral,
+        neutral, {}, {}, 0)[2]
+    np.testing.assert_allclose(durability, [1.0, 0.0, 0.0])
+
+
+def test_the_pool_signal_columns_are_not_named_pos_anything():
+    """`SUMMARY_FEATURES` drops every `pos_`-prefixed name, because a position
+    dummy cannot be shown one bar at a time on the manager card, and
+    `tests/test_api.py` asserts `/api/managers` against its own copy of that
+    predicate. The design document calls the first of these `pos_dropoff`; it
+    ships as `dropoff_at_pos` for exactly this reason, the same rename
+    `held_at_pos` and `rounds_since_pos` got off `pos_count`/`pos_gap`.
+
+    Pinned as a rule over the whole list rather than as a check on one name,
+    so the next feature that describes a position without being a dummy is
+    caught here instead of quietly disappearing off the card.
+    """
+    from scoring.draft_model import (FEATURE_NAMES, SUMMARY_FEATURES,
+                                     _POSITION_DUMMIES)
+    dummies = {f"pos_{p}" for p in _POSITION_DUMMIES}
+    assert {f for f in FEATURE_NAMES if f.startswith("pos_")} == dummies
+    assert set(SUMMARY_FEATURES) == set(FEATURE_NAMES) - dummies
 
 
 def test_every_feature_has_a_phrase_so_describe_never_skips_one():

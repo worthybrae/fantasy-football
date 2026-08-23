@@ -798,6 +798,12 @@ def _parity_fixture():
     player" apart from "right value". RB/WR/QB/TE each repeat (2-3 players),
     so `age`'s per-position centring has a real, non-singleton group to
     centre within, not just the trivial "lone player is his own mean" case.
+
+    The Tier 1 board columns are set the same way, and two of them need the
+    repeated positions and the taken players for the same reason: both
+    `dropoff_at_pos` and `last_of_tier` are summaries OF THE CHOICE SET, so
+    they are the columns most likely to be built off the wrong slice, and a
+    fixture where nobody is taken could not tell.
     """
     positions = np.array(["QB", "RB", "WR", "TE", "K", "DST",
                           "RB", "WR", "QB", "TE", "RB", "WR"])
@@ -830,15 +836,33 @@ def _parity_fixture():
         "peak_gap": np.array([3.0, 1.5, 6.0, 0.5, 0.0, 0.0,
                               8.25, -1.0, 2.0, np.nan, 4.75, 0.25]),
     }
+    # The Tier 1 board columns. `vor` is deliberately NOT `points` on a
+    # different scale -- if the two arrays were equal, a `_live_features` that
+    # read one where the fit reads the other would still pass.
+    points = np.linspace(300.0, 60.0, n)
+    board = {
+        "vor": np.linspace(160.0, -280.0, n),
+        "durability": np.array([91.0, 44.0, 12.0, 67.0, np.nan, 55.0,
+                                88.0, 30.0, 73.0, 5.0, np.nan, 99.0]),
+        "proj_change": np.array([1.4, -3.2, 0.6, np.nan, -0.8, 2.7,
+                                 -1.1, 0.0, 4.9, -6.3, np.nan, 1.9]),
+        # Tiers chosen so `last_of_tier` depends on WHO IS STILL AVAILABLE:
+        # player 7 is taken and is the only other member of tier 3, so player
+        # 5 is the last of his tier among the ten available and would NOT be
+        # against the full twelve. A `_live_features` that counted the whole
+        # pool instead of `available` fails here and nowhere else. Player 11's
+        # tier is unknown, which is 0.0 (not "the last one") on both sides.
+        "tier": np.array([1.0, 1.0, 4.0, 2.0, 5.0, 3.0,
+                          1.0, 3.0, 6.0, 2.0, 7.0, np.nan]),
+    }
 
     pool = SimPool(
         player_id=np.array([f"p{i}" for i in range(n)]),
         norm=norms, position=positions, adp_rank=adp_rank,
-        points=np.linspace(300.0, 60.0, n),
+        points=points,
         availability=np.full(n, 90.0),
-        vor=np.linspace(300.0, 60.0, n),
         market_rank=adp_rank, age=age, no_track_record=no_track_record,
-        hype=hype, trend=trend, **profile)
+        hype=hype, trend=trend, **profile, **board)
 
     roster = {"RB": 2, "WR": 1, "QB": 1}       # RB need false, others true
     recent = ["WR", "RB", "RB", "QB", "TE"]    # fills RUN_WINDOW exactly
@@ -856,7 +880,12 @@ def _parity_fixture():
         "age": age[available],
         "no_track_record": no_track_record[available],
         "hype": hype[available], "trend": trend[available],
-        **{name: values[available] for name, values in profile.items()}})
+        # `proj_points` is the corpus pool's own column name for what
+        # `SimPool` calls `points`; `dropoff_at_pos` is built from it on both
+        # sides, so the two names have to describe the same numbers.
+        "proj_points": points[available],
+        **{name: values[available] for name, values in profile.items()},
+        **{name: values[available] for name, values in board.items()}})
 
     return pool, available, roster, recent, obs_pool, last_pick
 
@@ -2694,19 +2723,29 @@ def test_live_features_matches_feature_matrix_on_the_new_columns():
     from scoring.draft_sim import SimPool, _live_features
     import pandas as pd
 
+    # Two RBs, so `dropoff_at_pos` has a real gap to measure rather than the
+    # trivial "lone player at his position has nobody behind him" case, and
+    # so `tier` puts two of them in one tier and leaves the rest alone.
     pool_df = pd.DataFrame({
-        "norm": ["a", "b", "c", "d"],
-        "position": ["RB", "WR", "QB", "TE"],
-        "adp_rank": [1.0, 12.0, 40.0, 90.0],
-        "market_rank": [2.0, 10.0, 55.0, 80.0],
-        "hype": [-4.0, 7.0, np.nan, 25.0],
-        "age": [23.0, 29.0, 34.0, np.nan],
-        "no_track_record": [False, False, True, False],
-        "trend": [2.5, -1.75, 0.0, 0.4],
-        "usage": [16.0, 8.5, 33.0, np.nan],
-        "efficiency": [0.9, 1.2, 0.45, 0.8],
-        "played_share": [1.0, 0.75, np.nan, 0.6],
-        "peak_gap": [2.0, -1.5, 4.25, 0.0]})
+        "norm": ["a", "b", "c", "d", "e"],
+        "position": ["RB", "WR", "QB", "TE", "RB"],
+        "adp_rank": [1.0, 12.0, 40.0, 90.0, 22.0],
+        "market_rank": [2.0, 10.0, 55.0, 80.0, 20.0],
+        "hype": [-4.0, 7.0, np.nan, 25.0, -9.0],
+        "age": [23.0, 29.0, 34.0, np.nan, 26.0],
+        "no_track_record": [False, False, True, False, False],
+        "trend": [2.5, -1.75, 0.0, 0.4, 1.1],
+        "usage": [16.0, 8.5, 33.0, np.nan, 12.0],
+        "efficiency": [0.9, 1.2, 0.45, 0.8, 0.65],
+        "played_share": [1.0, 0.75, np.nan, 0.6, 0.9],
+        "peak_gap": [2.0, -1.5, 4.25, 0.0, 3.5],
+        # The corpus pool calls this `proj_points`; `SimPool` calls it
+        # `points`. Same numbers, or `dropoff_at_pos` means two things.
+        "proj_points": [300.0, 250.0, 380.0, 190.0, 214.0],
+        "vor": [150.0, 120.0, 80.0, 60.0, 95.0],
+        "durability": [88.0, 41.0, np.nan, 70.0, 12.0],
+        "proj_change": [1.4, np.nan, -0.9, 3.3, -2.1],
+        "tier": [1.0, 1.0, 3.0, np.nan, 5.0]})
     roster = {"RB": 1}
     # This team took its RB at pick 1 and has taken nothing else, so
     # `held_at_pos`, `first_at_pos` and `rounds_since_pos` all have both of
@@ -2716,11 +2755,11 @@ def test_live_features_matches_feature_matrix_on_the_new_columns():
                           pool=pool_df, roster=roster, recent=["WR", "RB"],
                           last_pick_at_pos=last_pick)
     sim = SimPool(
-        player_id=np.array(["a", "b", "c", "d"]),
+        player_id=np.array(["a", "b", "c", "d", "e"]),
         norm=pool_df["norm"].to_numpy(), position=pool_df["position"].to_numpy(),
         adp_rank=pool_df["adp_rank"].to_numpy(),
-        points=np.array([300.0, 250.0, 380.0, 190.0]),
-        availability=np.full(4, 90.0), vor=np.array([150.0, 120.0, 80.0, 60.0]),
+        points=pool_df["proj_points"].to_numpy(),
+        availability=np.full(5, 90.0), vor=pool_df["vor"].to_numpy(),
         market_rank=pool_df["market_rank"].to_numpy(),
         age=pool_df["age"].to_numpy(),
         no_track_record=pool_df["no_track_record"].to_numpy(),
@@ -2728,8 +2767,11 @@ def test_live_features_matches_feature_matrix_on_the_new_columns():
         usage=pool_df["usage"].to_numpy(),
         efficiency=pool_df["efficiency"].to_numpy(),
         played_share=pool_df["played_share"].to_numpy(),
-        peak_gap=pool_df["peak_gap"].to_numpy())
-    available = np.arange(4)
+        peak_gap=pool_df["peak_gap"].to_numpy(),
+        durability=pool_df["durability"].to_numpy(),
+        proj_change=pool_df["proj_change"].to_numpy(),
+        tier=pool_df["tier"].to_numpy())
+    available = np.arange(5)
     np.testing.assert_allclose(
         _live_features(sim, available, 9, roster, ["WR", "RB"], S, last_pick),
         feature_matrix(obs, S))
@@ -2758,6 +2800,53 @@ def test_build_pool_fills_every_stat_profile_column(tmp_path):
         values = getattr(pool, name)
         assert values is not None, f"build_pool left {name} at its None default"
         assert len(values) == len(pool.player_id)
+
+
+def test_build_pool_carries_the_board_columns_the_model_now_reads(tmp_path):
+    """Same rule as the stat profile above, for the three Tier 1 board
+    columns: `durability`, `proj_change` and `tier` default to None on
+    `SimPool` for fixtures, and production must never run on that default --
+    it would serve a fitted coefficient a 0.0 where the fit saw a number.
+
+    The VALUES are asserted, not just the presence, because these three are
+    read straight off `build_board` with no transform. A pool that carried
+    the right column in the wrong order would pass a length check.
+    """
+    conn = get_conn(str(tmp_path / "signals.duckdb"))
+    board = pd.DataFrame([
+        {"player_id": "p1", "name": "Some Back", "position": "RB",
+         "team": "DET", "ffc_rank": 1.0, "market_rank": 1.0,
+         "proj_points": 300.0, "vor": 120.0, "durability": 90.0,
+         "proj_change": 1.5, "tier": 1.0, "stats": None},
+        {"player_id": "p2", "name": "Some Receiver", "position": "WR",
+         "team": "DAL", "ffc_rank": 2.0, "market_rank": 2.0,
+         "proj_points": 250.0, "vor": 80.0, "durability": 40.0,
+         "proj_change": -2.0, "tier": 3.0, "stats": None},
+    ])
+    pool = build_pool(conn, board, S)
+    np.testing.assert_allclose(pool.durability, [90.0, 40.0])
+    np.testing.assert_allclose(pool.proj_change, [1.5, -2.0])
+    np.testing.assert_allclose(pool.tier, [1.0, 3.0])
+    np.testing.assert_allclose(pool.vor, [120.0, 80.0])
+
+
+def test_a_board_without_the_new_columns_reaches_the_model_neutral(tmp_path):
+    """A bare fixture board has no `proj_change` and no `tier`. Missing must
+    become the neutral 0.0 the fit gives a player the join missed, not an
+    exception and not a substituted number."""
+    from scoring.draft_model import FEATURE_NAMES
+    conn = get_conn(str(tmp_path / "bare.duckdb"))
+    board = pd.DataFrame([
+        {"player_id": "p1", "name": "Some Back", "position": "RB",
+         "team": "DET", "ffc_rank": 1.0, "market_rank": 1.0, "stats": None},
+        {"player_id": "p2", "name": "Some Receiver", "position": "WR",
+         "team": "DAL", "ffc_rank": 2.0, "market_rank": 2.0, "stats": None},
+    ])
+    pool = build_pool(conn, board, S)
+    X = _live_features(pool, np.arange(2), 1, {}, [], S, {})
+    assert np.isfinite(X).all()
+    assert (X[:, FEATURE_NAMES.index("proj_change")] == 0.0).all()
+    assert (X[:, FEATURE_NAMES.index("last_of_tier")] == 0.0).all()
 
 
 def test_seed_rosters_rebuilds_when_each_team_last_took_each_position():

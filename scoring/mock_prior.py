@@ -38,6 +38,22 @@ carried before, which meant not yet measured.
 
 The numbers and what they do not establish, written up beside this fit:
 docs/superpowers/findings/2026-08-23-mock-corpus-features.md
+
+PADDED BY HAND, ONCE, AND WHAT THAT DOES AND DOES NOT MEAN
+
+The six `_POOL_SIGNAL_FEATURES` columns were appended to `FEATURE_NAMES`
+after this fit ran, and `draft_model` asserts this vector has one weight per
+feature. They carry +0.000000 here for the same reason a cut feature does:
+zero is how this file spells "contributes nothing", and a zero coefficient
+reproduces the model that was actually measured above, exactly. Their zeros
+mean NEVER FITTED, not MEASURED AND REJECTED -- the two are marked
+differently in the list below on purpose.
+
+That is the only hand edit this file tolerates and it is not an exception to
+the rule at the top: no NUMBER here has been invented, and the fit these
+coefficients came from is still the fit described above. The next
+`make fit-prior` regenerates the whole file from `FEATURE_NAMES` and either
+measures the six or cuts them.
 """
 import numpy as np
 
@@ -85,6 +101,12 @@ FEATURES = [
     'efficiency',
     'played_share',
     'peak_gap',
+    'dropoff_at_pos',
+    'vor',
+    'durability',
+    'proj_change',
+    'last_of_tier',
+    'slots_left_at_pos',
 ]
 
 # The draft_ids this was fitted on, recorded because the corpus GROWS -- a
@@ -143,6 +165,12 @@ PRIOR = np.array([
     +0.000000,  # efficiency           <- cut on delta_top1, not fitted
     +0.000000,  # played_share         <- cut on delta_top1, not fitted
     +0.000000,  # peak_gap             <- cut on delta_top1, not fitted
+    +0.000000,  # dropoff_at_pos       <- added, never fitted
+    +0.000000,  # vor                  <- added, never fitted
+    +0.000000,  # durability           <- added, never fitted
+    +0.000000,  # proj_change          <- added, never fitted
+    +0.000000,  # last_of_tier         <- added, never fitted
+    +0.000000,  # slots_left_at_pos    <- added, never fitted
 ])
 
 assert len(PRIOR) == len(FEATURES), (
