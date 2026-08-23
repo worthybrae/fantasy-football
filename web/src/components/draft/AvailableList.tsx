@@ -1,4 +1,7 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import {
+  memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,
+  type CSSProperties, type ReactNode,
+} from 'react'
 import type { LiveCandidate, LiveSettings, Player } from '../../api'
 import { CellTip, loadProfile, type CellTipKind } from './CellTip'
 import { finishHeight, finishTone, startersAt, weightedFinish } from './finish'
@@ -509,6 +512,47 @@ interface AvailableListProps {
   draftedIds: Set<string>
 }
 
+// -- pulse: how urgently a row should draw the eye -------------------------
+//
+// `survive_pct` already prints two cells to the right, in `riskTone`'s own
+// red/amber/green language -- this is the SAME number read as motion
+// instead of digits, for the same reason Health and Steady are bar meters
+// and not raw ones: a reader scanning ~250 rows under a thirty-second clock
+// is not going to read every percentage, but a row that is visibly pulsing
+// red is impossible to miss.
+//
+// Framed as DANGER (1 - survive_pct/100), not survival, because the pulse
+// answers a different question than the printed cell does -- "should I be
+// looking here" rather than "will he last" -- and those two framings point
+// opposite directions on the same number.
+//
+// SQUARED, not linear. `lastsTitle` above explains why the horizon this
+// column measures against is picked to keep survival rates spread out
+// across the whole row rather than pinned near 0% or 100% -- which means a
+// real cluster of rows sits around 40-60% survival (danger 0.4-0.6) at any
+// given moment. A linear pulse would have that whole cluster visibly
+// breathing at 40-60% of full intensity, which is most of the board
+// moving over one middling number. Squaring keeps that cluster down at
+// 16-36% of peak -- present on close inspection, not the loudest thing on
+// screen -- while a genuine long shot (danger 0.8+, survive_pct under 20%)
+// still climbs past 64%, so the rows actually in jeopardy are the ones the
+// animation is built to catch. A near-certain survivor (danger under ~0.2,
+// survive_pct above 80%) lands under 4% of peak intensity, which reads as
+// visually still -- a table where every row moves is a table where nothing
+// does, which is exactly the noise the owner asked this to avoid.
+//
+// `null` is not survive_pct's zero -- it means there is no roster to
+// survive FOR yet (no `my_slot` resolved), and the cell two columns over
+// already refuses to colour a dash for exactly that reason (see the
+// comment on that `<td>` below). A pulse is a claim about a probability
+// too, so it follows the same rule: null in, null out, never coerced to a
+// zero-intensity (still-technically-animating) pulse.
+function pulseIntensity(survivePct: number | null): number | null {
+  if (survivePct === null) return null
+  const danger = 1 - Math.max(0, Math.min(100, survivePct)) / 100
+  return danger * danger
+}
+
 // The ranked available pool: search + position filter above a table that
 // opens in the server's own `gain_now` order (`#`) and can be re-sorted by
 // any column from its header.
@@ -556,9 +600,27 @@ const AvailableRow = memo(function AvailableRow({
   // "is there a move at all" question are one answer, and calling for it
   // twice was two chances for them to be read apart.
   const projDelta = change === null ? null : signedChange(change)
+  // A taken row never pulses -- it is already fading out under
+  // `avail-row-taken`'s own animation, and stacking a second one on top
+  // would be two answers to "what happened to this row" at once. Computed
+  // even when taken (cheap, a couple of arithmetic ops) so the class/style
+  // logic just below reads as one rule rather than two branches that have
+  // to agree with each other.
+  const pulse = isTaken ? null : pulseIntensity(c.survive_pct)
   return (
               <tr key={c.player_id} data-pid={c.player_id}
-                  className={isTaken ? 'avail-row-taken' : undefined}
+                  className={isTaken
+                    ? 'avail-row-taken'
+                    : pulse === null ? undefined : 'avail-row-pulse'}
+                  // `--pulse` drives the ONE `@keyframes avail-pulse` rule in
+                  // App.css -- set once per row here rather than generating a
+                  // distinct animation per row there, which is what keeps
+                  // ~250 simultaneously-pulsing rows affordable. Left off
+                  // entirely (not set to 0) when there is nothing to
+                  // pulse -- an inert custom property with no `.avail-row-
+                  // pulse` class to read it would just be wasted work on
+                  // every one of those rows.
+                  style={pulse === null ? undefined : ({ '--pulse': pulse } as CSSProperties)}
                   aria-hidden={isTaken || undefined}>
                 <td className="avail-col-rank mono">{c.rank}</td>
                 <td className="avail-col-pos">{posBadge(c.position)}</td>
@@ -679,7 +741,9 @@ const AvailableRow = memo(function AvailableRow({
                 {/* null survive_pct (no roster to survive FOR yet) gets no
                     riskTone color at all -- riskTone's red/amber/green ramp
                     is a claim about a real probability, and coloring a dash
-                    would imply one exists. */}
+                    would imply one exists. The row's own pulse (`pulse`,
+                    above) follows the identical rule for the identical
+                    reason -- see pulseIntensity's comment. */}
                 <td
                   className="avail-col-num mono"
                   style={c.survive_pct === null ? undefined : { color: riskTone(c.survive_pct) }}
