@@ -42,7 +42,7 @@ fit-prior: ## refit the cold-start prior on the mock draft corpus; writes scorin
 	# -- any data/leagues/*.duckdb carries the same universal tables.
 	.venv/bin/python -m pipeline.fit_prior $(if $(LEAGUE_DB),--league-db $(LEAGUE_DB),)
 
-score-ladder: ## measure the ladder on HUMAN picks only (autodrafted IS FALSE), held out by draft; writes scoring/human_prior.py ONLY if the human-only refit beats the shipped prior on top-1
+score-ladder: ## measure the ladder on HUMAN picks only (autodrafted IS FALSE), held out by draft; writes scoring/human_prior.py ONLY if every rung beats the one below it on top-1
 	# The honest metric. `make fit-prior` scores every pick that is not a
 	# recorded autodraft, and most of that population is not people -- the
 	# shipped prior scores 0.3010 top-1 on ESPN's engine and 0.2308 on a
@@ -51,8 +51,13 @@ score-ladder: ## measure the ladder on HUMAN picks only (autodrafted IS FALSE), 
 	#
 	# Read-only against the corpus and the league database, and there is no
 	# --force here either: a losing rung prints its numbers, writes nothing,
-	# and exits non-zero. Takes several minutes -- one leave-one-draft-out
-	# refit per labelled draft.
+	# and exits non-zero. Rung 4 additionally drops each of the six Tier 1
+	# pool signals in turn, so it writes only the ones whose OWN delta_top1
+	# is positive, and it prints each row as that row is measured.
+	#
+	# About 45 minutes, and almost all of it is leave-one-draft-out backtests
+	# at one pooled fit per labelled draft: two rungs, six ablation rows and
+	# the shipped subset.
 	#
 	# LEAGUE_DB, same as fit-prior: needed when the API holds data/nfl.duckdb
 	# read-write, since any data/leagues/*.duckdb carries the same universal
