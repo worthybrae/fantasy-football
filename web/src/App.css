@@ -775,8 +775,16 @@ td:first-child {
 
 /* The freshest pick, and your own picks. Both are static tints rather than
    a flash, for the same reason the strip does not scroll. */
-.pick-ticker-item.is-newest /* The detail line: which pick, which position, whose team, and how far off
-   the market it landed. Everything that qualifies the name above it. */
+.pick-ticker-item.is-newest .pick-ticker-name {
+  color: var(--text-1);
+}
+
+.pick-ticker-item.is-newest .pick-ticker-no {
+  color: var(--accent);
+}
+
+/* The detail line: the position and whose team took him. Everything that
+   qualifies the name above it. */
 .pick-ticker-detail {
   display: flex;
   align-items: center;
@@ -801,15 +809,6 @@ td:first-child {
 
 .pick-ticker-adp.is-steal { color: var(--ok); }
 .pick-ticker-adp.is-reach { color: var(--fail); }
-
-
-.pick-ticker-name {
-  color: var(--text-1);
-}
-
-.pick-ticker-item.is-newest .pick-ticker-no {
-  color: var(--accent);
-}
 
 .pick-ticker-item.is-mine .pick-ticker-team {
   color: var(--accent);
