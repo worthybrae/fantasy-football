@@ -33,9 +33,18 @@ export interface ProjectedUsage {
   carries: number | null
   targets: number | null
   receptions: number | null
+  /** Rushing plus receiving. `rush_yards` is the rushing half on its own,
+   *  for a quarterback's row, where the combined figure would be answering
+   *  for a receiving line that does not exist. */
   yards: number | null
+  rush_yards: number | null
+  /** Rushing plus receiving, matching `SeasonRow.tds` -- a passing
+   *  touchdown is `pass_tds` and is never folded in here. */
+  tds: number | null
   attempts: number | null
   pass_yards: number | null
+  pass_tds: number | null
+  interceptions: number | null
 }
 
 /** Where each usage number places among the same position that season, 0-1,

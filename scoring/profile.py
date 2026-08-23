@@ -684,13 +684,27 @@ def _espn_projected_usage(conn, player_id: str, name: str, position: str,
                 seen = True
         return round(total / games, 1) if seen else None
 
+    # Touchdowns are two ids added together for a skill player and a third
+    # for a quarterback, kept apart here because they are not the same fact:
+    # `tds` on a season row is rushing plus receiving (see
+    # similarity.py, where the column is built) and never counts a throw, so
+    # a projected `tds` that folded passing in would be compared against a
+    # column that excludes it.
+    #
+    # Rushing yards on their own as well as the combined `yards`, because a
+    # quarterback's rushing row has nothing to do with his receiving zero and
+    # the combined figure would silently answer for both.
     return {"games": round(games, 1),
             "carries": per_game("proj_carries"),
             "targets": per_game("proj_targets"),
             "receptions": per_game("proj_receptions"),
             "yards": per_game("proj_rush_yards", "proj_rec_yards"),
+            "rush_yards": per_game("proj_rush_yards"),
+            "tds": per_game("proj_rush_tds", "proj_rec_tds"),
             "attempts": per_game("proj_pass_att"),
-            "pass_yards": per_game("proj_pass_yards")}
+            "pass_yards": per_game("proj_pass_yards"),
+            "pass_tds": per_game("proj_pass_tds"),
+            "interceptions": per_game("proj_interceptions")}
 
 
 def _espn_projection(conn, player_id: str, name: str, position: str) -> float | None:

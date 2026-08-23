@@ -21,39 +21,169 @@ import type { ProjectedUsage, SeasonRow } from './payload'
 // and four seasons still shows a change.
 const SHOWN = 4
 
-// Per-game rates by position, off `scoring/profile.py::_SUMMARY_STATS` -- the
-// keys are that list's, not one invented here. Two per position, because the
-// share rows above them already spend two lines of the card.
-//
-// `car` / `tgt` / `yds` are the game log's own words two cards up, not
-// abbreviations invented for this table -- four season columns leave the
-// label about fifty pixels, and "Carries / g" was being ellipsised into
-// "Carri...", which is worse than a short word a reader has already met.
+// A row is a number pulled out of a season, a number pulled out of the
+// projection, and the way both are printed. Functions rather than column
+// names, because half these rows are ratios -- catch rate is receptions over
+// targets, not a column anybody stores -- and a row that had to name a
+// stored column would have left the card at four rates.
+type Getter = (s: SeasonRow) => number | null
+type ProjGetter = (p: ProjectedUsage) => number | null
+
+interface Row {
+  label: string
+  of: Getter
+  // Null where the projection cannot answer this row: ESPN projects no
+  // completions, so there is no projected completion rate, and it projects
+  // neither a team total nor snaps, so neither share has one either. The
+  // cell prints an em dash, which is the card declining rather than
+  // guessing.
+  proj: ProjGetter | null
+  fmt: (v: number) => string
+  // Up is worse for exactly one row on this card. Interceptions rising is a
+  // quarterback getting worse, and without this the row would paint that
+  // green along with everything else.
+  invert?: boolean
+}
+
+function total(s: SeasonRow, keys: (keyof SeasonRow)[]): number {
+  return keys.reduce((sum, k) => sum + ((s[k] as number | null) ?? 0), 0)
+}
+
+// Per game, which is how every row on this card is stated: 325 carries and
+// 19.1 a game are the same fact, but only one of them survives being set
+// beside a season the player missed five weeks of.
+function pg(...keys: (keyof SeasonRow)[]): Getter {
+  return (s) => (s.games ? total(s, keys) / s.games : null)
+}
+
+// A rate that divides one column by another rather than by games. A zero
+// denominator is null, not zero: a back with no targets has no catch rate,
+// and 0% would say he dropped everything.
+function ratio(num: (keyof SeasonRow)[], den: (keyof SeasonRow)[]): Getter {
+  return (s) => {
+    const bottom = total(s, den)
+    return bottom ? total(s, num) / bottom : null
+  }
+}
+
+// The projection's own figures are already per game -- see
+// `_espn_projected_usage`, which divides by projected games before it
+// answers -- so these only add and divide. A row where EVERY key is null is
+// null: a projection that says nothing must not print a zero.
+function projTotal(p: ProjectedUsage, keys: (keyof ProjectedUsage)[]): number | null {
+  const values = keys.map((k) => p[k] as number | null)
+  return values.every((v) => v === null || v === undefined)
+    ? null : values.reduce((sum: number, v) => sum + (v ?? 0), 0)
+}
+
+function projPg(...keys: (keyof ProjectedUsage)[]): ProjGetter {
+  return (p) => projTotal(p, keys)
+}
+
+function projRatio(num: (keyof ProjectedUsage)[],
+                   den: (keyof ProjectedUsage)[]): ProjGetter {
+  return (p) => {
+    const top = projTotal(p, num)
+    const bottom = projTotal(p, den)
+    return top === null || !bottom ? null : top / bottom
+  }
+}
+
+function rate(value: number): string {
+  return value.toFixed(1)
+}
+
+function pct(share: number): string {
+  return `${Math.round(share * 100)}%`
+}
+
+// Games are counted, not measured: seventeen is "17", and only the
+// projection's fractional 16.4 spends a decimal place.
+function count(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(1)
+}
+
+// Both shares, offered to every position and dropped by the filter below for
+// the ones that cannot answer them -- a quarterback has no target share, and
+// nothing outside the skill positions has either.
+const SHARES: Row[] = [
+  { label: 'Snap %', of: (s) => s.snap_share ?? null, proj: null, fmt: pct },
+  { label: 'Target %', of: (s) => s.target_share ?? null, proj: null, fmt: pct },
+]
+
+// Availability, last because it is the row that qualifies every row above
+// it: a rate is per game, so a career of 11-game seasons reads identically
+// to a career of 17-game ones until this row says otherwise.
+const GAMES: Row = {
+  label: 'Games',
+  of: (s) => s.games || null,
+  proj: (p) => p.games,
+  fmt: count,
+}
+
+// Per-position rows, in reading order. `car` / `tgt` / `rec` / `yds` are the
+// game log's own words two cards up, not abbreviations invented here -- four
+// season columns leave the label about fifty pixels, and "Carries / g" was
+// being ellipsised into "Carri...", which is worse than a short word a
+// reader has already met.
 //
 // Yards are the sum of both halves: a back who gains 73 on the ground and 31
 // through the air had a 105-yard game, and splitting that across two rows
-// would spend the card on one stat.
+// would spend the card on one stat. The quarterback's rushing row is the one
+// exception, and it is rushing ONLY -- his receiving yards are noise.
+//
+// `tds` is rushing plus receiving and never a throw (it is built that way in
+// similarity.py), which is why the quarterback reads `pass_tds` instead and
+// the skill positions read `tds`.
 //
 // THERE IS NO `K` OR `DST` ENTRY AND THAT IS DELIBERATE. A kicker's season
 // row carries no skill columns to read, so the lookup falls through, no rate
 // row is built, and -- with no snap or target share either -- the card
 // renders nothing, which is the whole of what the payload can say about a
 // kicker's usage.
-// The third element is which projected rate answers this row -- the card's
-// last column is the season being drafted, drawn the way the panels above
-// draw theirs. Null where ESPN projects nothing that fits the row.
-type Rate = [string, (keyof SeasonRow)[], keyof ProjectedUsage | null]
-
-const RATES: Record<string, Rate[]> = {
-  QB: [['Att / g', ['attempts'], 'attempts'],
-    ['Pass yds / g', ['pass_yards'], 'pass_yards']],
-  RB: [['Car / g', ['carries'], 'carries'],
-    ['Yds / g', ['rush_yards', 'rec_yards'], 'yards']],
-  WR: [['Tgt / g', ['targets'], 'targets'],
-    ['Yds / g', ['rec_yards', 'rush_yards'], 'yards']],
-  TE: [['Tgt / g', ['targets'], 'targets'],
-    ['Yds / g', ['rec_yards', 'rush_yards'], 'yards']],
+const ROWS: Record<string, Row[]> = {
+  QB: [
+    { label: 'Att / g', of: pg('attempts'), proj: projPg('attempts'), fmt: rate },
+    { label: 'Comp %', of: ratio(['completions'], ['attempts']), proj: null, fmt: pct },
+    { label: 'Pass yds / g', of: pg('pass_yards'), proj: projPg('pass_yards'), fmt: rate },
+    { label: 'Pass TD / g', of: pg('pass_tds'), proj: projPg('pass_tds'), fmt: rate },
+    { label: 'INT / g', of: pg('interceptions'), proj: projPg('interceptions'),
+      fmt: rate, invert: true },
+    { label: 'Rush yds / g', of: pg('rush_yards'), proj: projPg('rush_yards'), fmt: rate },
+    // `tds` is rushing plus receiving and never a throw, so for a
+    // quarterback it is his legs and nothing else -- which is the half of
+    // his scoring the four rows above cannot show. ESPN projects rushing
+    // touchdowns (`proj_rush_tds`), so this row is projected like the rest
+    // rather than being history with a blank column: Jalen Hurts scored 8 on
+    // the ground in 2025 and is projected 0.5 a game, and a rushing
+    // quarterback's floor is mostly that number.
+    { label: 'Rush TD / g', of: pg('tds'), proj: projPg('tds'), fmt: rate },
+    GAMES,
+  ],
+  RB: [
+    { label: 'Car / g', of: pg('carries'), proj: projPg('carries'), fmt: rate },
+    { label: 'Rec / g', of: pg('receptions'), proj: projPg('receptions'), fmt: rate },
+    { label: 'Yds / g', of: pg('rush_yards', 'rec_yards'), proj: projPg('yards'), fmt: rate },
+    // Yards per opportunity: what one touch or one look was worth. The rate
+    // that separates a back given 300 carries from a back who earned them.
+    { label: 'Yds / opp', of: ratio(['rush_yards', 'rec_yards'], ['carries', 'targets']),
+      proj: projRatio(['yards'], ['carries', 'targets']), fmt: rate },
+    { label: 'TD / g', of: pg('tds'), proj: projPg('tds'), fmt: rate },
+    GAMES,
+  ],
+  WR: [
+    { label: 'Tgt / g', of: pg('targets'), proj: projPg('targets'), fmt: rate },
+    { label: 'Rec / g', of: pg('receptions'), proj: projPg('receptions'), fmt: rate },
+    { label: 'Catch %', of: ratio(['receptions'], ['targets']),
+      proj: projRatio(['receptions'], ['targets']), fmt: pct },
+    { label: 'Yds / g', of: pg('rec_yards', 'rush_yards'), proj: projPg('yards'), fmt: rate },
+    { label: 'Yds / opp', of: ratio(['rec_yards', 'rush_yards'], ['targets', 'carries']),
+      proj: projRatio(['yards'], ['targets', 'carries']), fmt: rate },
+    { label: 'TD / g', of: pg('tds'), proj: projPg('tds'), fmt: rate },
+    GAMES,
+  ],
 }
+ROWS.TE = ROWS.WR
 
 // Colour is a MOVE, not a placing. The card used to tint each cell by where
 // it fell among that position's spread, which meant twelve filled boxes in a
@@ -73,9 +203,9 @@ const RATES: Record<string, Rate[]> = {
 // ordinary ink, which is the card saying the role held.
 const MOVE = 0.05
 
-function tone(now: number | null, prev: number | null): string {
+function tone(now: number | null, prev: number | null, invert = false): string {
   if (now === null || prev === null || prev === 0) return ''
-  const move = (now - prev) / Math.abs(prev)
+  const move = ((now - prev) / Math.abs(prev)) * (invert ? -1 : 1)
   if (move >= MOVE) return 'delta-tone is-up'
   if (move <= -MOVE) return 'delta-tone is-down'
   return ''
@@ -83,25 +213,11 @@ function tone(now: number | null, prev: number | null): string {
 
 // The most recent season before this one that HAS a number. A missing season
 // is compared past, not treated as a zero: a player who missed a year and
-// came back at his old workload did not go up, and the arithmetic of
-// dividing by zero would have said he went up infinitely.
+// came back at his old workload did not go up, and dividing by that zero
+// would have said he went up infinitely.
 function before(values: (number | null)[], i: number): number | null {
   for (let j = i - 1; j >= 0; j -= 1) if (values[j] !== null) return values[j]
   return null
-}
-
-function pct(share: number): string {
-  return `${Math.round(share * 100)}%`
-}
-
-function rate(value: number): string {
-  return value.toFixed(1)
-}
-
-function perGame(season: SeasonRow, keys: (keyof SeasonRow)[]): number | null {
-  if (!season.games) return null
-  const total = keys.reduce((sum, k) => sum + ((season[k] as number | null) ?? 0), 0)
-  return total / season.games
 }
 
 export default function UsageLine({ seasons, position, projected }: {
@@ -114,34 +230,27 @@ export default function UsageLine({ seasons, position, projected }: {
   const shown = seasons.slice(0, SHOWN).reverse()
   if (shown.length === 0) return null
 
-  // A row is its numbers, the way it prints one, and its projection. The
-  // numbers stay numbers until the cell is drawn, because the colour is
+  // Numbers stay numbers until the cell is drawn, because the colour is
   // arithmetic between two of them -- formatting first would leave the row
   // comparing "54%" against "57%" as strings.
-  type Row = [string, (number | null)[], (v: number) => string, number | null]
+  const built = [...SHARES, ...(ROWS[position] ?? [])].map((row) => ({
+    row,
+    values: shown.map(row.of),
+    proj: row.proj && projected ? row.proj(projected) : null,
+  }))
 
-  const candidates: Row[] = [
-    // The two shares have no projected column and the em dash says so: the
-    // projection table carries no team total worth dividing by and does not
-    // project snaps at all. A blank cell here is the card declining to guess,
-    // in the same place it would otherwise be guessing hardest.
-    ['Snap %', shown.map((s) => s.snap_share ?? null), pct, null],
-    ['Target %', shown.map((s) => s.target_share ?? null), pct, null],
-    ...(RATES[position] ?? []).map(([label, keys, projKey]): Row => [
-      label,
-      shown.map((s) => perGame(s, keys)),
-      rate,
-      projKey === null || !projected ? null
-        : (projected[projKey] as number | null) ?? null,
-    ]),
-  ]
-  // A row nothing can answer is dropped rather than dashed across: a
-  // quarterback has no target share, a rookie has no seasons to read, and
-  // three em-dashes in a line is a row that costs a reader a line to learn
-  // nothing. A row with SOME seasons missing keeps its dashes -- there the
-  // gap is the fact.
-  const rows = candidates.filter(([, values, , proj]) =>
-    values.some((v) => v !== null) || proj !== null)
+  // A row nothing can answer is dropped rather than dashed across: a rookie
+  // has no seasons to read, and four em-dashes in a line is a row that costs
+  // a reader a line to learn nothing. A row with SOME seasons missing keeps
+  // its dashes -- there the gap is the fact.
+  //
+  // A row of ZEROS goes the same way, and that is what drops "Target %" off
+  // a quarterback: his target share is not missing, it is genuinely 0.000
+  // every season, and four 0% cells are four facts that never happened. The
+  // rule is the same one the dashes follow -- print a row only if some
+  // season, or the projection, has something in it.
+  const has = (v: number | null) => v !== null && v !== 0
+  const rows = built.filter(({ values, proj }) => values.some(has) || has(proj))
   if (rows.length === 0) return null
 
   return (
@@ -154,15 +263,16 @@ export default function UsageLine({ seasons, position, projected }: {
           ))}
           {projected && <span className="mono pp-pop-seasons-proj">proj</span>}
         </div>
-        {rows.map(([label, values, fmt, proj]) => (
-          <div className={`pp-pop-seasons-row${projected ? ' has-proj' : ''}`} key={label}>
-            <span>{label}</span>
+        {rows.map(({ row, values, proj }) => (
+          <div className={`pp-pop-seasons-row${projected ? ' has-proj' : ''}`} key={row.label}>
+            <span>{row.label}</span>
             {values.map((v, i) => (
               <span
-                className={`mono ${v === null ? 'is-blank' : tone(v, before(values, i))}`}
+                className={`mono ${v === null ? 'is-blank'
+                  : tone(v, before(values, i), row.invert)}`}
                 key={shown[i].season}
               >
-                {v === null ? '—' : fmt(v)}
+                {v === null ? '—' : row.fmt(v)}
               </span>
             ))}
             {projected && (
@@ -174,9 +284,9 @@ export default function UsageLine({ seasons, position, projected }: {
               // the projection has been placed against anybody.
               <span
                 className={`mono pp-pop-seasons-proj ${proj === null ? 'is-blank'
-                  : tone(proj, before(values, values.length))}`}
+                  : tone(proj, before(values, values.length), row.invert)}`}
               >
-                {proj === null ? '—' : fmt(proj)}
+                {proj === null ? '—' : row.fmt(proj)}
               </span>
             )}
           </div>
