@@ -38,20 +38,35 @@ WHICH PICKS ARE FITTED, AND WHY EACH EXCLUSION IS NARROW.
     policy and part deliberate epsilon-greedy randomness (see
     `pipeline.mock_farm`), so they are nobody's choices and modelling them
     would be fitting our own exploration noise.
-  * `autodrafted IS TRUE` is excluded: ESPN's engine made that pick because a
-    clock ran out, which is not a decision.
+  * `autodrafted IS TRUE` is excluded: ESPN's engine made that pick because
+    nobody was sitting in that seat, which is not a decision. THIS IS NOW THE
+    LOAD-BEARING FILTER, and the reason is that the flag finally means what
+    it says. It used to be filled from AUTODRAFT frames alone, and ESPN sends
+    no such frame for a seat that was never human -- so the seats ESPN pads a
+    thin room out with, the very picks this exclusion is for, came back NULL
+    and were fitted on. `pipeline.mock_farm` now seeds each slot's state from
+    the room's own `?view=mTeam` owner census (no `owners` entry, no person,
+    autodrafting from pick one) and transitions it on the AUTODRAFT
+    broadcasts, so a True here covers both the seat that was never human and
+    the human who drafted three rounds and wandered off.
   * `autodrafted IS NULL` IS KEPT. NULL means UNKNOWN, not True. Every
     backfilled pick carries NULL (`pipeline.mock_backfill` reads a `drafted`
     table that never had the column), so excluding NULL would discard
     essentially the whole corpus. This is a standing ruling; do not reverse
-    it by "tightening" the filter.
-  * The flag does NOT separate ESPN's room-filling computer seats from human
-    ones. The farm loop measured that ESPN emits no AUTODRAFT frame for the
-    seats it uses to fill a thin room (see the corpus gate finding), so a
-    False or NULL here is not evidence of a person. What IS established is
-    that the corpus is not a ranking-follower -- picks deviate further from
-    ESPN's own board than from consensus ADP -- so there is real structure to
-    learn. "Not a ranking-follower" is the claim; "these are humans" is not.
+    it by "tightening" the filter. What DID change is how much NULL there is:
+    for drafts recorded before the owner census, NULL is the usual answer and
+    those picks are a mixture of people and ESPN's engine; for drafts
+    recorded after it, NULL is rare and genuinely means unknown (the mTeam
+    read failed, or the socket joined a draft already in progress).
+  * `had_owner` is recorded per pick and `human_seats` per draft, and NEITHER
+    is filtered on here. `had_owner IS FALSE` is a strict subset of
+    `autodrafted IS TRUE` -- a seat with no owner autodrafts from pick one
+    and nothing can flip it back, because a room's roster is fixed once the
+    draft opens -- so a second exclusion would drop nothing and only add a
+    way to get the filter wrong. They are stored so a later question can be
+    asked of the corpus without re-deriving it ("fit only on rooms that had
+    at least three people in them"; "is the 5am lobby emptier than the 8pm
+    one"), which is a query, not a rule.
 
 Every pick excluded for any reason is COUNTED and printed. A silent drop looks
 exactly like a smaller corpus rather than like the join failure or filter it
