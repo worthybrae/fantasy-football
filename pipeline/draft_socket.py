@@ -29,6 +29,7 @@ import threading
 import time
 from pathlib import Path
 
+from pipeline import redact
 from pipeline.espn_league import BASE, STATE_PATH
 
 SOCKET_HOST = "wss://fantasydraft.espn.com"
@@ -143,6 +144,14 @@ def load_cookies(state_path: str = STATE_PATH) -> dict:
     Raises RuntimeError, not KeyError, when the file is missing or lacks
     either cookie: that is the "you need to log in once" case a user has to
     be told about in words, not a stack trace pointing at a dict lookup.
+
+    Both values are handed to `redact.remember_secret` on the way out. This
+    is the ONE place the saved login enters a process, so registering it here
+    means every tool that authenticates gets the literal-value layer of the
+    scrubber (see pipeline.redact) without having to know it exists -- and
+    `SWID` in particular ends up in the query string of both the invite POST
+    and the socket JOIN, where any exception that formats its URL would
+    otherwise print it.
     """
     path = Path(state_path)
     if not path.exists():
@@ -162,6 +171,8 @@ def load_cookies(state_path: str = STATE_PATH) -> dict:
         raise RuntimeError(
             f"{path} is missing {' and '.join(missing)} -- the saved ESPN "
             "login has expired or never completed; log in again.")
+    redact.remember_secret(cookies["SWID"])
+    redact.remember_secret(cookies["espn_s2"])
     return {"espn_s2": cookies["espn_s2"], "SWID": cookies["SWID"]}
 
 

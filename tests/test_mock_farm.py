@@ -25,6 +25,7 @@ import pytest
 from pipeline import draft_log as dl
 from pipeline import espn_mock_lobby as lobby
 from pipeline import mock_farm as mf
+from pipeline import redact
 from pipeline.draft_listener import DraftListener
 from pipeline.espn_live import picks_from_events
 from scoring import league
@@ -695,3 +696,216 @@ def test_the_open_time_falls_back_to_ninety_seconds_before_the_draft():
         mf.time.sleep = real_sleep
     assert len(slept) == 1
     assert 110 < slept[0] < 120    # 200s - 90s lead + 5s margin
+
+
+def test_a_far_future_open_time_is_clamped_rather_than_slept_through():
+    """`pick_room` bounds `draftDate`, but `draftAvailableDate` is a
+    different field and ESPN's value for it is taken on trust. The sleep is
+    uninterruptible, so one malformed date would hold a seat for hours and an
+    overnight run asked for five drafts would return zero."""
+    import time as _time
+    slept = []
+    room = {"draftAvailableDate": _time.time() * 1000 + 6 * 3600 * 1000,
+            "draftDate": _time.time() * 1000 + 6 * 3600 * 1000}
+    real_sleep = mf.time.sleep
+    try:
+        mf.time.sleep = lambda seconds: slept.append(seconds)
+        mf._wait_until_available(room, lambda *a: None)
+    finally:
+        mf.time.sleep = real_sleep
+    assert slept == [mf.MAX_AVAILABLE_WAIT_SECONDS]
+    assert mf.MAX_AVAILABLE_WAIT_SECONDS <= lobby.MAX_LEAD_SECONDS + 60
+
+
+# ---------------------------------------------------------------------------
+# The overnight log: what it must never contain, and what it must not spin on.
+# ---------------------------------------------------------------------------
+
+
+# A realistically shaped SWID. The cookie's real value is a brace-wrapped
+# GUID, and the test uses one because the scrubber's first line of defence is
+# that shape -- a placeholder like "{X}" would pass a test the real cookie
+# would fail.
+FAKE_SWID = "{8491403C-1CE2-4C9E-9E45-6D3D9F8A11B2}"
+
+
+class _FakeHTTPError(Exception):
+    """Shaped like httpx's `HTTPStatusError` in the two ways that matter: it
+    carries `request`/`response`, and its `str()` is prose wrapped around the
+    whole request URL. That second property is the leak -- the URL is the
+    invite POST, and the invite POST carries `memberId=<the SWID>`."""
+
+    def __init__(self, url, status):
+        super().__init__(f"Client error '{status}' for url '{url}'")
+        self.request = type("R", (), {"url": url})()
+        self.response = type("S", (), {"status_code": status})()
+
+
+def test_a_join_failure_prints_the_status_code_and_not_the_login(monkeypatch):
+    """A room filling between the directory read and the join is an ORDINARY
+    race -- ESPN answers 400 -- so this line is one the overnight log prints
+    on a normal night. It used to carry the percent-encoded SWID, which is
+    the sole credential on the draft-socket handshake, into the one artifact
+    of an unattended run that anybody reads (and pastes) in the morning."""
+    url = lobby.invite_url(4242, FAKE_SWID, 2026)
+    monkeypatch.setattr(lobby, "http_poster", lambda cookies: None)
+
+    def refuse(post, league_id, swid, season):
+        raise _FakeHTTPError(url, "400 Bad Request")
+
+    monkeypatch.setattr(lobby, "join", refuse)
+    lines = []
+    result = mf.play_draft(None, None, {"SWID": FAKE_SWID, "espn_s2": "s2"},
+                           _live_room(leagueId=4242), np.random.default_rng(0),
+                           season=2026, out=lines.append)
+
+    assert result["status"] == "join_failed"
+    printed = "\n".join(lines)
+    assert "400" in printed                       # what a reader needs
+    assert FAKE_SWID not in printed
+    assert "8491403C" not in printed              # nor any part of it
+    assert "%7B" not in printed                   # nor the escaped form
+
+
+def test_every_line_the_farm_prints_goes_through_the_scrubber(monkeypatch):
+    """The guarantee is about the OUT CHANNEL, not about the call sites. A
+    future line formatting an exception -- or the bare `traceback.format_exc`
+    the run loop already prints -- must be covered without its author having
+    to know the scrubber exists."""
+    _stub_farm_deps(monkeypatch, [_live_room(leagueId=51)])
+    lines = []
+
+    def fake_play(conn, corpus_path, cookies, room, rng, season=2026,
+                  out=print):
+        # Nothing here redacts anything; `farm` wrapped `out` before we got it.
+        out(f"pretending ESPN said no for {lobby.invite_url(51, FAKE_SWID, 2026)}")
+        return {"status": "recorded", "picks": 128, "league_id": 51}
+
+    monkeypatch.setattr(mf, "play_draft", fake_play)
+    mf.farm(1, corpus_path=str(Path(mf.tempfile.mkdtemp()) / "c.duckdb"),
+            out=lines.append)
+
+    printed = "\n".join(lines)
+    assert "memberId=" in printed                 # the URL is still readable
+    assert "8491403C" not in printed
+    assert "%7B" not in printed
+
+
+def test_the_socket_url_form_of_the_login_is_scrubbed_too():
+    """The invite POST is not the only URL carrying it: the draft socket's
+    own JOIN puts the SWID in `4=` unescaped and again inside `5=`, and any
+    handshake failure formats that URL into `_connect_session`'s log line."""
+    from pipeline.draft_socket import socket_url
+    scrubbed = redact.redact(
+        f"rejected: {socket_url(1, 2, FAKE_SWID, 999)}")
+    assert "8491403C" not in scrubbed
+    assert scrubbed.count(redact.SWID_PLACEHOLDER) == 2   # `4=` and inside `5=`
+
+
+def test_a_login_that_is_not_guid_shaped_is_scrubbed_by_value():
+    """The pattern layer only knows the shapes ESPN has actually used. The
+    literal-value layer is what makes this a fact about the credential rather
+    than a bet on a regex -- `load_cookies` registers both cookies the moment
+    the saved login is read."""
+    odd = "not-a-guid-at-all-0000"
+    redact.remember_secret(odd)
+    assert odd not in redact.redact(f"failed for memberId={odd}&join=true")
+
+
+def test_redacting_an_already_redacted_line_changes_nothing():
+    """`farm` wraps `out` and then hands it to `play_draft`, which wraps it
+    again. Double-wrapping has to be a no-op, not `memberId=<swid><swid>`."""
+    once = redact.redact(f"POST {lobby.invite_url(7, FAKE_SWID, 2026)}")
+    assert redact.redact(once) == once
+
+
+class _FakeListener:
+    """Enough of `DraftListener` for the play loop: it is our turn, the
+    socket has named our team, and no pick ever lands."""
+
+    def __init__(self, team_id):
+        self.events = []
+        self.my_team_id = team_id
+        self.on_the_clock = team_id
+        self.my_autodraft = None
+        self.selected_espn_ids = set()
+
+
+class _FakeSession:
+    """A session whose socket is published (so the play loop's guard passes)
+    but whose sends fail -- exactly the state `draft_socket` leaves behind
+    while it is reconnecting, since `_Session.socket` is never set back to
+    None once published."""
+
+    def __init__(self, listener):
+        self.listener = listener
+        self.socket = object()
+        self.error = None
+        self.stopped = False
+
+    def alive(self):
+        return self.error is None
+
+    def stop(self):
+        self.stopped = True
+
+
+def test_a_failed_pick_still_sleeps_before_the_loop_polls_again(monkeypatch):
+    """The pick branch used to `continue` past the poll sleep.
+
+    `_make_pick` returns False IMMEDIATELY when the send raises, and a send
+    raises synchronously for as long as `draft_socket` has the socket
+    detached for a reconnect -- routine, and it takes seconds. With no sleep
+    on that path the loop re-ran `draft_timeline` over every event,
+    `_seed_rosters` over every pick so far and `_greedy_choice` over ~250
+    candidates thousands of times, at 100% of a core, fighting the listener
+    thread for the GIL at exactly the moment our pick was on the clock.
+    """
+    settings = _mock_settings()
+    listener = _FakeListener(42)
+    session = _FakeSession(listener)
+    tool = mf.Tool(board=pd.DataFrame(), pool=_fake_pool(), pool_df=pd.DataFrame(),
+                   crosswalk={}, espn_by_index=[], index_by_player={},
+                   sendable=np.ones(6, dtype=bool))
+
+    monkeypatch.setattr(lobby, "http_poster", lambda cookies: None)
+    monkeypatch.setattr(lobby, "join",
+                        lambda post, league_id, swid, season: 42)
+    monkeypatch.setattr(mf, "http_fetch", lambda cookies: (lambda url: ""))
+    monkeypatch.setattr(mf, "fetch_league_settings",
+                        lambda fetch, league_id, season: {"raw": True})
+    monkeypatch.setattr(mf.league, "from_espn", lambda raw: settings)
+    monkeypatch.setattr(mf, "build_tool", lambda conn, s: tool)
+    monkeypatch.setattr(mf, "DraftListener", lambda crosswalk: listener)
+    monkeypatch.setattr(mf, "_wait_until_available", lambda room, out: None)
+    monkeypatch.setattr(mf, "_connect_session",
+                        lambda *a, **k: session)
+
+    picks = {"n": 0}
+
+    def failed_pick(*args, **kwargs):
+        picks["n"] += 1
+        return False                     # the send raised; nothing was picked
+
+    monkeypatch.setattr(mf, "_make_pick", failed_pick)
+
+    slept = []
+
+    def counted_sleep(seconds):
+        slept.append(seconds)
+        if len(slept) >= 5:
+            # Stand in for the socket thread noticing it is dead, so the
+            # loop has an ordinary way out of this test.
+            session.error = RuntimeError("socket gave up")
+
+    monkeypatch.setattr(mf.time, "sleep", counted_sleep)
+
+    result = mf.play_draft(None, None, {"SWID": FAKE_SWID, "espn_s2": "s2"},
+                           _live_room(leagueId=61), np.random.default_rng(0),
+                           season=2026, out=lambda *a: None)
+
+    assert result["status"] == "incomplete"
+    # The point: one poll sleep per failed pick, not zero.
+    assert picks["n"] == len(slept) == 5
+    assert all(s == mf.LOOP_POLL_SECONDS for s in slept)
+    assert session.stopped

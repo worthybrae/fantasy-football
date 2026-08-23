@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.espn_league import STATE_PATH, EspnClient  # noqa: E402
 from pipeline.draft_socket import load_cookies  # noqa: E402
+from pipeline import redact  # noqa: E402
 
 
 def main() -> int:
@@ -30,11 +31,19 @@ def main() -> int:
     try:
         cookies = load_cookies()
     except RuntimeError as exc:
-        print(f"Login did not complete: {exc}")
+        print(f"Login did not complete: {redact.redact(exc)}")
         return 1
+    # Neither cookie is printed, not even a prefix of one. This used to
+    # show `swid[:10]`, which is harmless on its own -- but it is the same
+    # value the mock farm keeps out of its overnight log (see
+    # pipeline.redact), and a project that redacts a credential in one place
+    # and prints ten characters of it in another has two rules about it. The
+    # lengths answer the only question this line exists for, which is
+    # whether the login actually landed. `load_cookies` has already
+    # registered both values with the scrubber by the time we get here.
     swid = cookies["SWID"]
-    print(f"Saved to {STATE_PATH}. SWID {swid[:10]}..., espn_s2 "
-          f"{len(cookies['espn_s2'])} chars.")
+    print(f"Saved to {STATE_PATH}. SWID {redact.redact(swid)} "
+          f"({len(swid)} chars), espn_s2 {len(cookies['espn_s2'])} chars.")
     return 0
 
 

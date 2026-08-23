@@ -82,6 +82,7 @@ import pandas as pd
 
 from pipeline import draft_log as dl
 from pipeline import espn_mock_lobby as lobby
+from pipeline import redact
 from pipeline.draft_listener import DraftListener
 from pipeline.draft_socket import (draft_security_token, http_fetch,
                                    load_cookies, run_socket_listener)
@@ -131,6 +132,17 @@ AVAILABLE_MARGIN_SECONDS = 5.0
 # Fallback lead when a directory row carries no `draftAvailableDate`: the
 # measured gap between the two dates in every row observed.
 AVAILABLE_LEAD_SECONDS = 90.0
+# The most we will ever sleep waiting for a room to open. Room SELECTION
+# bounds `draftDate` (at most `lobby.MAX_LEAD_SECONDS` ahead) but nothing
+# bounds `draftAvailableDate`, which is a separate field and arrives from
+# ESPN unvalidated -- so one malformed or far-future value would put an
+# uninterruptible `time.sleep` of hours in front of a seat we are holding,
+# and an overnight `N=5` would come back in the morning with zero drafts.
+# The two dates are ~90s apart in every row observed, so anything past the
+# selection bound is not a room starting late, it is a value we should not
+# be trusting; we wait the bound out and let the socket attempt fail fast
+# rather than spend the night on it.
+MAX_AVAILABLE_WAIT_SECONDS = lobby.MAX_LEAD_SECONDS + AVAILABLE_MARGIN_SECONDS
 # How many times to try opening the socket, and how long to wait between
 # tries. More than one because a room that has just opened may still be
 # spinning up on ESPN's side, and abandoning a seat we already hold over a
@@ -609,9 +621,11 @@ def _wait_until_available(room, out) -> None:
     AVAILABLE_LEAD_SECONDS before `draftDate`, the gap measured in every row
     observed.
 
-    Interruptible only by killing the process, which is fine: this is at most
-    MAX_LEAD_SECONDS of waiting by construction, since that is the newest
-    room the selection policy will pick.
+    Interruptible only by killing the process, so the wait is CLAMPED rather
+    than taken on trust. `pick_room` bounds `draftDate` to
+    `lobby.MAX_LEAD_SECONDS` ahead, but `draftAvailableDate` is a different
+    field and nothing bounds it -- see MAX_AVAILABLE_WAIT_SECONDS for why one
+    bad value would otherwise cost the whole night.
     """
     available_ms = room.get("draftAvailableDate")
     if not available_ms and room.get("draftDate"):
@@ -622,6 +636,15 @@ def _wait_until_available(room, out) -> None:
                + AVAILABLE_MARGIN_SECONDS)
     if seconds <= 0:
         return
+    if seconds > MAX_AVAILABLE_WAIT_SECONDS:
+        # Said out loud rather than clamped quietly: a room whose two dates
+        # disagree by more than the selection window is either ESPN sending
+        # something new or a room we should not have picked, and both are
+        # worth seeing in the morning's log.
+        out(f"  room says it opens in {seconds:.0f}s, past the "
+            f"{MAX_AVAILABLE_WAIT_SECONDS:.0f}s a picked room can be away "
+            "-- waiting that long and no longer")
+        seconds = MAX_AVAILABLE_WAIT_SECONDS
     out(f"  room opens in {seconds:.0f}s -- waiting before connecting")
     time.sleep(seconds)
 
@@ -754,7 +777,13 @@ def play_draft(conn, corpus_path, cookies, room, rng,
     `socket_failed` -- because this runs unattended and "it did not work" is
     not a usable morning report. Nothing here raises for an ordinary failure;
     the caller counts statuses and moves on to the next room.
+
+    `out` is wrapped in the credential scrubber here as well as in `farm`,
+    because this is a public entry point somebody will one day call on its
+    own. Wrapping twice costs one extra pass over each line and cannot
+    corrupt it -- `redact` is idempotent by construction.
     """
+    out = redact.redacting(out)
     league_id = room["leagueId"]
     swid = cookies["SWID"]
     out(f"room {league_id}: {room.get('teamsJoined')}/{room.get('leagueSize')} "
@@ -768,7 +797,17 @@ def play_draft(conn, corpus_path, cookies, room, rng,
     except Exception as exc:                    # noqa: BLE001 -- a room can
         # fill between the directory read and the join; that is an ordinary
         # race, not a bug, and the answer is the next room.
-        out(f"  join failed: {exc}")
+        #
+        # The status code, not httpx's sentence. `HTTPStatusError` stringifies
+        # to prose wrapped around the whole request URL, and that URL carries
+        # `memberId=<the SWID cookie>` -- the sole credential on the draft
+        # socket handshake -- so the plainest failure this loop has (a room
+        # that filled while we were reading the directory: ESPN answers 400)
+        # used to print the login into the overnight log. `redacted_error`
+        # keeps what a morning reader needs from it, which is the code: 400
+        # means the room went, 401 means the cookies expired, and those are
+        # different mornings.
+        out(f"  join failed: {redact.redacted_error(exc)}")
         return {"status": "join_failed", "league_id": league_id}
     started_at = datetime.now(timezone.utc)
     out(f"  joined as team {team_id}")
@@ -907,8 +946,23 @@ def play_draft(conn, corpus_path, cookies, room, rng,
                     and listener.on_the_clock == team_id):
                 _make_pick(session, tool, settings, slots, timeline, my_slot,
                            caps, turns, rng, out)
-                continue
 
+            # UNCONDITIONAL, including immediately after a pick attempt --
+            # this used to be a `continue` past it, and that was a busy-spin
+            # waiting for the one moment it would fire. `_make_pick` returns
+            # FALSE IMMEDIATELY when the send raises, and a send raises
+            # synchronously whenever `draft_socket` has detached the socket
+            # to reconnect (`SocketHandle.send` on a detached handle is an
+            # instant ConnectionError, and `session.socket` stays non-None
+            # once published, so the guard above still passes). ESPN dropping
+            # the socket mid-turn is routine and the reconnect takes seconds,
+            # during which the loop re-ran `draft_timeline` over every event,
+            # `_seed_rosters` over every pick so far and `_greedy_choice`
+            # over ~250 candidates, thousands of times, with no sleep --
+            # burning a core and fighting the listener thread for the GIL at
+            # exactly the moment our pick was on the clock. A quarter second
+            # after a pick lands costs nothing: the next thing this loop can
+            # usefully see is a frame that has not arrived yet.
             time.sleep(LOOP_POLL_SECONDS)
 
         timeline = draft_timeline(listener.events)
@@ -1001,7 +1055,18 @@ def farm(n: int, season: int = CURRENT_SEASON, seed: int = 0,
     notes concurrency as the lever to pull if throughput turns out to be the
     problem, and explicitly only after one session has been observed working
     end to end.
+
+    EVERYTHING PRINTED BELOW THIS LINE IS SCRUBBED. The wrap happens once,
+    here, rather than at the call sites that format an exception -- there are
+    six of them today, one is a bare `traceback.format_exc()`, and the next
+    one somebody adds would have to remember. See `pipeline.redact`: the
+    thing being kept out of this log is `SWID`, which rides in the query
+    string of both the invite POST and the socket JOIN, and this log is the
+    only account of an unattended night that anyone reads in the morning --
+    which makes it the most likely thing in the repo to be pasted into a
+    chat.
     """
+    out = redact.redacting(out)
     cookies = load_cookies()
     fetch = http_fetch(cookies)
     rng = np.random.default_rng(seed)
