@@ -179,6 +179,24 @@ the ladder. Starts once the in-flight Tier 1 measurement and Tier 2 mixture
 have reported, because they share `scoring/draft_model.py`,
 `scoring/draft_sim.py` and `pipeline/fit_prior.py`.
 
+## Correction carried from the halted archetype work (measured, not argued)
+
+Sampling one drafter-type per seat per rollout does NOT, by itself, widen the
+survival distribution. Eight seats sampled independently average back to the
+population mixture, so per-seat sampling leaves `survival` about where the
+pooled fit put it. What actually widens survival is variance in the WHOLE
+rollout -- e.g. the round by which all RBs are gone has sd ~1.9 under the
+pooled fit and ~3.5 once rollouts diverge -- not the per-seat draw. Any Phase B
+claim that a richer opponent model "widens survival" must be measured on the
+rollout-level spread, not asserted from the seat model. The earlier spec text
+that said per-seat sampling widens survival was wrong.
+
+Also settled by that work: **discrete drafter archetypes do not exist in this
+data.** K=1 wins the mixture (K=2 buys ~0.4% of a nat in-sample and shrinks
+held out; ICC of reach depth is 0.027). So the `seat_*` history features in
+section 3 stay small and regularized, and no part of Phase B should spend
+capacity on learning drafter classes.
+
 ## What this does not promise
 
 50% top-1. The data says 47.4% of human picks sit inside ESPN's top three and
