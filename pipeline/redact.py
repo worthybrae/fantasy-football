@@ -71,7 +71,18 @@ _RULES = (
     # its own empty value and double up; `<` and `>` are out of the class for
     # the same reason. `&` and `;` are out because they SEPARATE values -- a
     # cookie header keeps its shape, it just loses the secret.
-    (re.compile(r"(?i)\b(memberId|swid|espn_s2)=[^&;\s\"'<>]+"),
+    #
+    # `espn_custody` is the credential-custody session cookie
+    # (pipeline.credentials.COOKIE_NAME). It is not an ESPN value at all, but
+    # it belongs in this list for a stronger reason than the others: it is the
+    # PASSWORD to a stored ESPN account session, so a Cookie header printed by
+    # an exception handler in the API would be worth more to a reader of the
+    # log than the espn_s2 beside it. The literal-value layer is not available
+    # for it either -- `remember_secret` holds values for the life of the
+    # process, which is right for one owner's saved login and wrong for a
+    # server holding many strangers' -- so this rule is the whole defence, and
+    # it works on the shape of the name rather than on knowing the value.
+    (re.compile(r"(?i)\b(memberId|swid|espn_s2|espn_custody)=[^&;\s\"'<>]+"),
      lambda m: f"{m.group(1)}="
                + (SWID_PLACEHOLDER if m.group(1).lower() in ("memberid", "swid")
                   else SECRET_PLACEHOLDER)),

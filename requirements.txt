@@ -9,3 +9,9 @@ httpx>=0.27
 scipy>=1.11
 playwright>=1.40
 pypdf>=4.0
+# Fernet, for pipeline/credentials.py -- the encrypted-at-rest store holding
+# other people's ESPN account sessions. The first dependency this project has
+# taken that is not a data source: the alternative was hand-rolling an AEAD on
+# the one code path where a subtle mistake is unrecoverable for users who
+# cannot be contacted (ESPN's fan API returns no email).
+cryptography>=42.0
