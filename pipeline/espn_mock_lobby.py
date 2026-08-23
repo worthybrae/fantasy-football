@@ -38,6 +38,26 @@ back to us. Joining the fuller room is also the only decent thing to do with
 a seat that a real person might otherwise be waiting on -- the measured
 supply is a new 8-team PPR room every ~5 minutes, so there is no scarcity
 argument for squatting an empty one.
+
+WHY THE HUMAN FLOOR IS 1 AND NOT 4. `teamsJoined` IS the human count --
+verified against the league's own `?view=mTeam`, which showed exactly one
+seat with an `owners` entry for a directory row reading `teamsJoined: 1`. So
+a floor on it is a floor on people, and the obvious move is to set it high.
+The lobby says otherwise. Measured at 09:45 local over 25 8-team PPR snake
+rooms: eleven were at 8/8 and eleven more at 0/8, and of the TEN still
+joinable, four had one person, three had two, two had three and NONE had
+four. A floor of 4 would have joined nothing at all, all morning.
+
+The distribution is the explanation, and it is not "there are no people".
+Eleven full rooms is people drafting in numbers; they are simply unreachable,
+because a room that has filled cannot be joined. Waiting for an open room to
+ACCUMULATE humans and then taking a seat is self-defeating -- by the time it
+has them it is full. So the floor is set where it still means something and
+costs nothing: never take a room with nobody in it while a room with somebody
+in it exists, and if nothing at all has a person, wait rather than fill an
+empty room with our own bot. Everything past that is decided at fit time,
+where a pick wrongly excluded can be included again by changing a query and a
+room we declined to join is gone forever.
 """
 import json
 import time
@@ -95,6 +115,15 @@ MAX_LEAD_SECONDS = 900
 # known tiers rather than being dropped.
 EXPERIENCE_ORDER = {"EXPERT": 0, "PRO": 0, "BEGINNER": 2}
 _UNKNOWN_EXPERIENCE = 1
+
+# The fewest people a room must already hold before we will take a seat in
+# it. See the module docstring for the measurement behind the value: 1 is the
+# largest floor that does not starve the run, and it buys the one thing worth
+# buying -- an empty room is never taken while an occupied one is on offer.
+# Configurable because the right value is a function of the time of day (ESPN
+# recommends 12:00, 17:00 and 20:00 local and windows the lobby 12:00-22:00),
+# and an evening run can afford to be pickier than a 5am one.
+MIN_TEAMS_JOINED = 1
 
 
 def lobby_url(season: int) -> str:
@@ -158,7 +187,8 @@ def list_mock_leagues(fetch, season: int) -> list:
 
 def is_farmable(row: dict, now_ms: float,
                 min_lead_seconds: float = MIN_LEAD_SECONDS,
-                max_lead_seconds: float = MAX_LEAD_SECONDS) -> bool:
+                max_lead_seconds: float = MAX_LEAD_SECONDS,
+                min_teams_joined: int = MIN_TEAMS_JOINED) -> bool:
     """Whether one directory row is a room this farm should play.
 
     Every clause is required; see the module docstring for the reasoning
@@ -178,6 +208,15 @@ def is_farmable(row: dict, now_ms: float,
     if row.get("full"):
         return False
     if row.get("draftInProgress"):
+        return False
+    # SKIPPED, not merely ranked below. A room with nobody in it is eight
+    # ESPN autodrafters plus us, and its 128 picks are ADP read back to us
+    # under a label saying "mock draft" -- worse than no draft, because a
+    # later reader cannot tell it from a room of people. A missing
+    # `teamsJoined` reads as 0 for the same reason every other `.get` here
+    # does: a row that will not say is a room we know less about than the
+    # policy requires.
+    if int(row.get("teamsJoined") or 0) < int(min_teams_joined):
         return False
     draft_date = row.get("draftDate")
     if not draft_date:
@@ -204,7 +243,8 @@ def _rank_key(row: dict) -> tuple:
 
 def rank_rooms(rows, now_ms: float | None = None, exclude=(),
                min_lead_seconds: float = MIN_LEAD_SECONDS,
-               max_lead_seconds: float = MAX_LEAD_SECONDS) -> list:
+               max_lead_seconds: float = MAX_LEAD_SECONDS,
+               min_teams_joined: int = MIN_TEAMS_JOINED) -> list:
     """The farmable rooms among `rows`, best first.
 
     `exclude` is the set of league ids this process has already tried and
@@ -217,13 +257,15 @@ def rank_rooms(rows, now_ms: float | None = None, exclude=(),
     skip = {str(x) for x in exclude}
     keep = [r for r in rows
             if str(r.get("leagueId")) not in skip
-            and is_farmable(r, now_ms, min_lead_seconds, max_lead_seconds)]
+            and is_farmable(r, now_ms, min_lead_seconds, max_lead_seconds,
+                            min_teams_joined)]
     return sorted(keep, key=_rank_key)
 
 
 def pick_room(rows, now_ms: float | None = None, exclude=(),
               min_lead_seconds: float = MIN_LEAD_SECONDS,
-              max_lead_seconds: float = MAX_LEAD_SECONDS) -> dict | None:
+              max_lead_seconds: float = MAX_LEAD_SECONDS,
+              min_teams_joined: int = MIN_TEAMS_JOINED) -> dict | None:
     """The single best room to join right now, or None if the lobby has
     nothing that fits. None is an ordinary outcome -- the lobby serves rooms
     in batches, so a poll landing between batches sees no room inside the
@@ -231,8 +273,33 @@ def pick_room(rows, now_ms: float | None = None, exclude=(),
     not to relax the filter.
     """
     ranked = rank_rooms(rows, now_ms, exclude, min_lead_seconds,
-                        max_lead_seconds)
+                        max_lead_seconds, min_teams_joined)
     return ranked[0] if ranked else None
+
+
+def lobby_report(rows, now_ms: float | None = None, exclude=(),
+                 min_lead_seconds: float = MIN_LEAD_SECONDS,
+                 max_lead_seconds: float = MAX_LEAD_SECONDS) -> dict:
+    """What the lobby is offering, ignoring the human floor. For the LOG.
+
+    `pick_room` returning None is two very different situations wearing the
+    same face: a poll that landed between batches and saw no 8-team PPR room
+    at all, or a lobby full of them with nobody sitting in any. An unattended
+    run that only ever prints "nothing fits" cannot tell whether the floor is
+    starving it, and that is precisely the number somebody reading the log in
+    the morning needs.
+
+    So this counts the survivors of every filter EXCEPT the human floor, and
+    reports the best `teamsJoined` among them. `best` is None when there were
+    no shape-and-timing survivors to have a best of -- which is the "between
+    batches" case, said in the one way that distinguishes it.
+    """
+    open_rooms = rank_rooms(rows, now_ms, exclude, min_lead_seconds,
+                            max_lead_seconds, min_teams_joined=0)
+    joined = [int(r.get("teamsJoined") or 0) for r in open_rooms]
+    return {"rows": len(rows), "open": len(open_rooms),
+            "best": max(joined) if joined else None,
+            "size": FARM_LEAGUE_SIZE}
 
 
 def join(post, league_id, swid: str, season: int) -> int:

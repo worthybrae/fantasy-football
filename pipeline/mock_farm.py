@@ -82,12 +82,13 @@ import pandas as pd
 
 from pipeline import draft_log as dl
 from pipeline import espn_mock_lobby as lobby
+from pipeline import farm_claims as claims
 from pipeline import redact
 from pipeline.draft_listener import DraftListener
 from pipeline.draft_socket import (draft_security_token, http_fetch,
                                    load_cookies, run_socket_listener)
 from pipeline.espn_live import build_crosswalk
-from pipeline.espn_teams import fetch_league_settings
+from pipeline.espn_teams import fetch_league_settings, fetch_team_owners
 from scoring import league
 from scoring.board import build_board
 from scoring.config import CURRENT_SEASON
@@ -180,13 +181,15 @@ CORPUS_LOCK_RETRY_SECONDS = 5.0
 
 
 class PickFrame(NamedTuple):
-    """One confirmed pick, as ESPN's own frames describe it.
+    """One confirmed pick, as ESPN's frames and the room's roster describe it.
 
-    `autodrafted` is None, not False, when ESPN has never sent an AUTODRAFT
-    frame for that team -- the same three-valued honesty
-    `DraftListener.my_autodraft` keeps, and the same reason: "ESPN has not
-    said" and "ESPN said no" are different facts and the corpus stores which
-    one it has.
+    `autodrafted` is None, not False, only when NOTHING has said -- neither an
+    AUTODRAFT frame for that team nor the room's own owner census (see
+    `draft_timeline`'s `owners` argument). "ESPN has not said" and "ESPN said
+    no" are different facts and the corpus stores which one it has; what
+    changed is that the first case is now rare rather than usual, because a
+    seat with no owner is known to be autodrafting before a single frame
+    arrives.
     """
     pick_no: int
     team_id: int | None
@@ -194,7 +197,7 @@ class PickFrame(NamedTuple):
     autodrafted: bool | None
 
 
-def draft_timeline(events) -> list:
+def draft_timeline(events, owners: dict | None = None) -> list:
     """Fold a socket event stream into one `PickFrame` per pick, in order.
 
     THE PICK NUMBERING HERE MUST MATCH `espn_live.picks_from_events` EXACTLY,
@@ -215,22 +218,50 @@ def draft_timeline(events) -> list:
     `tests/test_mock_farm.py` pins that agreement against the real recorded
     draft rather than trusting this comment.
 
-    The autodraft flag is carried forward from the AUTODRAFT frames seen so
-    far, which is what makes it a PER-PICK fact rather than a snapshot of the
-    room's current state. ESPN sends `AUTODRAFT <team> true` the moment a
-    team's clock expires and the auto-pick lands immediately after (verified
-    in data/draft_room_trace.jsonl: line 1112 is the flag, 1113 the pick), so
-    reading the flag at the moment the SELECTED arrives attributes it to the
-    right pick.
+    THE AUTODRAFT FLAG IS A PER-SLOT STATE MACHINE, and both halves of it are
+    needed. Neither alone answers.
 
-    One honest limit: picks that were already made before this process's
-    FIRST connect arrive as a replay, and ESPN replays the autodraft state as
-    it stands now rather than as it stood at each of those picks. The farm
+      - THE INITIAL STATE comes from `owners` (ESPN team id -> does a real
+        person sit there, from `espn_teams.fetch_team_owners`). A seat ESPN
+        padded the room out with has no owner and is autodrafting from pick
+        one; a seat with an owner starts human. This is the half that was
+        missing, and its absence is why the corpus came back 0 True / 32
+        False / 96 NULL per draft: ESPN sends NO AUTODRAFT frame for a seat
+        that was never human, so those picks -- the majority of most rooms --
+        were simply unknown.
+      - THE TRANSITIONS come from the frames ESPN broadcasts to the whole
+        room. `AUTODRAFT <teamId> true` flips that seat to the engine,
+        `AUTODRAFT <teamId> false` flips it back, and both directions really
+        happen: in data/draft_room_trace.jsonl team 3 goes true after pick
+        13, false after 22 and true again after 29, while team 7 goes true
+        after pick 38 and stays. That is the human who drafts three rounds
+        and wanders off, which is the case worth catching.
+
+    Each pick is stamped with ITS OWN slot's state at the moment the SELECTED
+    landed, not the room's state at the end -- which is why this folds the
+    retained event list rather than reading `DraftListener.autodraft_by_team`,
+    a latest-value dict that answers only for "now". ESPN sends
+    `AUTODRAFT <team> true` the moment a team's clock expires and the
+    auto-pick lands immediately after (verified in the capture: line 1112 is
+    the flag, 1113 the pick), so reading the flag as the SELECTED arrives
+    attributes it to the right pick.
+
+    `owners` omitted, or missing a team, leaves that seat NULL until a frame
+    says otherwise -- the old behaviour, kept for the case where the mTeam
+    read failed. NULL now means genuinely unknown rather than "usual".
+
+    One honest limit remains: picks already made before this process's FIRST
+    connect arrive as a replay, and ESPN replays the autodraft state as it
+    stands now rather than as it stood at each of those picks. The farm
     always joins before the draft starts, so that case does not arise in
-    practice -- but it is why this is described as ESPN's own frames rather
-    than as a guarantee.
+    practice -- and with `owners` in hand a never-human seat is right even
+    then, because it never changed.
     """
-    autodraft: dict = {}
+    # A seat with no owner is on the engine from pick one; a seat with one
+    # starts human. Copied, never mutated in place: the caller's map is the
+    # room's census and is read again when the record is built.
+    autodraft: dict = {team: (not human)
+                       for team, human in (owners or {}).items()}
     seen: set = set()
     out: list = []
     pick_no = 0
@@ -465,6 +496,21 @@ def build_tool(conn, settings) -> Tool:
                 sendable=sendable, names=names)
 
 
+def human_seats(owners: dict | None, my_team_id: int | None) -> int | None:
+    """How many seats held a real person, ours not counted. None if unasked.
+
+    None rather than 0 when `owners` is empty or absent: "the mTeam read
+    failed" and "the room was entirely computers" are different facts about a
+    draft, and only one of them is a reason to distrust its picks. Our own
+    team is subtracted whether or not it appears in the map, so a census taken
+    before our own seat was written still answers the same number.
+    """
+    if not owners:
+        return None
+    return sum(1 for team, human in owners.items()
+               if human and team != my_team_id)
+
+
 def taken_order_from(timeline, tool) -> list:
     """One entry per pick made so far: the pool index taken, or None.
 
@@ -483,7 +529,9 @@ def taken_order_from(timeline, tool) -> list:
 
 
 def build_record(timeline, tool, settings, league_id, season, my_slot,
-                 started_at, teams: int, rounds: int) -> tuple:
+                 started_at, teams: int, rounds: int,
+                 owners: dict | None = None,
+                 my_team_id: int | None = None) -> tuple:
     """The finished draft as a `DraftRecord`, plus how many picks were
     dropped for want of a pool row.
 
@@ -500,6 +548,16 @@ def build_record(timeline, tool, settings, league_id, season, my_slot,
     what `owner_profile` builds a personal profile from. `my_slot` on the
     draft head is how a reader identifies (and, for fitting human behaviour,
     excludes) those picks.
+
+    `owners` (ESPN team id -> is a person sitting there) is stamped onto each
+    pick as `had_owner` and counted onto the draft head as `human_seats`. The
+    per-pick copy is what a fit reads while walking picks; the per-draft count
+    is what a later query filters whole drafts on ("only rooms with at least
+    three people in them"), and it EXCLUDES OUR OWN SEAT, because we always
+    have an owner and we are a bot -- counting ourselves would make every room
+    look one person more human than it was. `my_team_id` is therefore needed
+    as well as `my_slot`: `owners` is keyed by ESPN team id and the head count
+    is taken over that map, not over the picks.
 
     A pick whose player has no pool row is DROPPED and COUNTED, never written
     half-filled -- the same discipline, and the same reasoning, as
@@ -524,10 +582,12 @@ def build_record(timeline, tool, settings, league_id, season, my_slot,
             "is_anonymous": True,
             "player_id": None if player_id is None else str(player_id),
             "autodrafted": frame.autodrafted,
+            "had_owner": (None if owners is None
+                          else owners.get(frame.team_id)),
         })
     picks = pd.DataFrame(rows, columns=[
         "pick_no", "round", "slot", "owner_key", "is_anonymous", "player_id",
-        "autodrafted"])
+        "autodrafted", "had_owner"])
     picks = picks.merge(
         tool.pool_df[["player_id", "position", "adp_rank", "proj_points"]],
         on="player_id", how="left")
@@ -537,6 +597,7 @@ def build_record(timeline, tool, settings, league_id, season, my_slot,
     record = dl.DraftRecord(
         source=dl.SOURCE_MOCK, league_id=str(league_id), season=int(season),
         teams=int(teams), rounds=int(rounds), my_slot=my_slot,
+        human_seats=human_seats(owners, my_team_id),
         settings_json=league.to_json(settings), started_at=started_at,
         picks=picks[~missing].reset_index(drop=True), pool=tool.pool_df,
         draft_id=draft_id)
@@ -876,6 +937,32 @@ def play_draft(conn, corpus_path, cookies, room, rng,
                 f"not {team_id} -- using the socket's answer")
             team_id = listener.my_team_id
 
+        # THE OWNER CENSUS, TAKEN HERE AND NOWHERE ELSE. A mock league 404s
+        # the moment its draft ends -- verified -- so this is the last chance
+        # to learn which of the eight seats holds a person, and every use of
+        # it downstream reads this one map rather than asking ESPN again.
+        #
+        # Taken after the socket is up rather than straight after the invite
+        # POST, and that is the whole accuracy of the number. `pick_room`
+        # takes a seat up to MAX_LEAD_SECONDS (15 minutes) before the draft
+        # starts and people keep arriving in that window; a census taken at
+        # the invite would record the room as we found it rather than as it
+        # drafted, and would call a seat "computer" that a person took two
+        # minutes later. By this line the room has passed
+        # `draftAvailableDate`, ESPN has accepted our JOIN and named our team,
+        # and the lobby countdown is nearly out -- the roster is as final as
+        # it gets while still being readable.
+        owners = fetch_team_owners(fetch, league_id, season)
+        if owners:
+            out(f"  seats: {human_seats(owners, team_id)} of "
+                f"{len(owners)} held by a person (ours excluded)")
+        else:
+            # Said out loud: without it every seat starts NULL and the draft
+            # lands in the corpus with the same unusable autodraft column
+            # this whole read exists to fix.
+            out("  could not read the room's owners -- autodraft state will "
+                "be unknown for any seat ESPN never sends a frame about")
+
         my_slot = slot_from_pick_order(settings, team_id)
         timeline = []
         picks_seen = -1
@@ -887,7 +974,7 @@ def play_draft(conn, corpus_path, cookies, room, rng,
             if not session.alive():
                 out(f"  socket thread stopped: {session.error}")
                 break
-            timeline = draft_timeline(listener.events)
+            timeline = draft_timeline(listener.events, owners)
             n = len(timeline)
             if n != picks_seen:
                 picks_seen, last_progress = n, time.monotonic()
@@ -965,7 +1052,7 @@ def play_draft(conn, corpus_path, cookies, room, rng,
             # usefully see is a frame that has not arrived yet.
             time.sleep(LOOP_POLL_SECONDS)
 
-        timeline = draft_timeline(listener.events)
+        timeline = draft_timeline(listener.events, owners)
     finally:
         # Always, on every path out of the loop above -- a finished draft, an
         # abandoned room, an exception, a KeyboardInterrupt. A bot that keeps
@@ -999,14 +1086,18 @@ def play_draft(conn, corpus_path, cookies, room, rng,
         return {"status": "no_slot", "league_id": league_id}
 
     record, dropped = build_record(timeline, tool, settings, league_id, season,
-                                   my_slot, started_at, teams, rounds)
+                                   my_slot, started_at, teams, rounds,
+                                   owners=owners, my_team_id=team_id)
     draft_id = record_draft(record, corpus_path, out)
     autodrafted = sum(1 for f in timeline if f.autodrafted)
+    unknown = sum(1 for f in timeline if f.autodrafted is None)
     out(f"  recorded {draft_id}: {len(record.picks)} picks, slot {my_slot}, "
-        f"{autodrafted} autodrafted, {dropped} dropped")
+        f"{autodrafted} autodrafted, {unknown} unknown, "
+        f"{record.human_seats} human seats, {dropped} dropped")
     return {"status": "recorded", "league_id": league_id, "draft_id": draft_id,
             "picks": int(len(record.picks)), "dropped": dropped,
-            "autodrafted": autodrafted, "my_slot": my_slot}
+            "autodrafted": autodrafted, "my_slot": my_slot,
+            "human_seats": record.human_seats}
 
 
 def open_board_db(path: str | None = None, out=print):
@@ -1046,15 +1137,32 @@ def open_board_db(path: str | None = None, out=print):
 
 def farm(n: int, season: int = CURRENT_SEASON, seed: int = 0,
          db_path: str | None = None, corpus_path: str | None = None,
-         out=print) -> dict:
+         min_humans: int = lobby.MIN_TEAMS_JOINED, out=print) -> dict:
     """Play up to `n` mock drafts, one at a time, and record each one.
 
-    ONE SESSION AT A TIME, on purpose. ESPN authenticates every socket with
-    the same SWID; two concurrent drafts as the same member is untested and
-    is the sort of thing that gets an account's sockets dropped. The intel
-    notes concurrency as the lever to pull if throughput turns out to be the
-    problem, and explicitly only after one session has been observed working
-    end to end.
+    ONE SESSION PER PROCESS, BUT SEVERAL PROCESSES ARE NOW SAFE. One ESPN
+    account can hold seats in several drafts at once -- confirmed by the
+    owner -- so the only thing that ever made a second farm process dangerous
+    was that it would pick the SAME room as the first. `pick_room` ranks
+    deterministically, so two loops polling the same lobby agree on the best
+    row; both would join it, we would hold two of the eight seats, and
+    because `draft_id` is a content hash of (league_id, picks) both would
+    compute the same id and the second `record()` would overwrite the first
+    -- leaving one bot seat labelled `my_slot` and the OTHER bot seat
+    indistinguishable, to every later reader, from a person. That is a corpus
+    that quietly teaches the model somebody drafts at random.
+
+    `pipeline.farm_claims` is the fix and this is the only place it is used:
+    the rooms other live processes hold are excluded from the ranking, and
+    the room this one is about to join is claimed BEFORE the invite POST and
+    released in a `finally` afterwards. A claim that loses a race just means
+    the next room down is tried, in the same poll, rather than a wasted wait.
+
+    `min_humans` is the floor on `teamsJoined` -- see `espn_mock_lobby` for
+    why the default is 1 rather than the 4 that would read better. Below the
+    floor the loop WAITS and re-polls rather than filling an empty room with
+    its own bot, and says what it saw while waiting so an unattended log
+    shows whether the floor is starving the run.
 
     EVERYTHING PRINTED BELOW THIS LINE IS SCRUBBED. The wrap happens once,
     here, rather than at the call sites that format an exception -- there are
@@ -1088,14 +1196,42 @@ def farm(n: int, season: int = CURRENT_SEASON, seed: int = 0,
                     f"{LOBBY_RETRY_SECONDS:.0f}s")
                 time.sleep(LOBBY_RETRY_SECONDS)
                 continue
-            room = lobby.pick_room(rooms, exclude=played)
+            # Rooms another live farm process is sitting in are excluded the
+            # same way rooms this one has already played are: by league id,
+            # before ranking. Swept of dead claims on every read, so a
+            # process killed mid-draft does not fence its room off forever.
+            skip = played | claims.claimed()
+            ranked = lobby.rank_rooms(rooms, exclude=skip,
+                                      min_teams_joined=min_humans)
+            # Claim, then join -- never the other way round. Two processes can
+            # rank identically and both reach this line; exactly one of them
+            # wins the exclusive create, and the loser drops to the next room
+            # in its own ranking instead of taking a second seat in the first.
+            room = next((r for r in ranked
+                         if claims.claim(r["leagueId"])), None)
             if room is None:
-                out(f"no 8-team PPR snake room in the lobby's "
-                    f"{len(rooms)} rows right now -- waiting "
-                    f"{LOBBY_RETRY_SECONDS:.0f}s")
+                # Three different reasons to be here and they call for three
+                # different mornings, so they are said apart rather than
+                # collapsed into "nothing fits".
+                report = lobby.lobby_report(rooms, exclude=skip)
+                if ranked:
+                    out(f"another farm process holds all {len(ranked)} "
+                        f"qualifying room(s) -- waiting "
+                        f"{LOBBY_RETRY_SECONDS:.0f}s")
+                elif report["open"] == 0:
+                    out(f"no joinable 8-team PPR snake room in the lobby's "
+                        f"{report['rows']} rows right now -- waiting "
+                        f"{LOBBY_RETRY_SECONDS:.0f}s")
+                else:
+                    out(f"{report['open']} joinable 8-team PPR snake "
+                        f"room(s) in the lobby's {report['rows']} rows, but "
+                        f"the fullest holds {report['best']}/"
+                        f"{report['size']} and the floor is {min_humans} "
+                        f"-- waiting {LOBBY_RETRY_SECONDS:.0f}s")
                 time.sleep(LOBBY_RETRY_SECONDS)
                 continue
-            played.add(str(room["leagueId"]))
+            league_id = str(room["leagueId"])
+            played.add(league_id)
             counts["attempted"] += 1
             try:
                 result = play_draft(conn, corpus_path, cookies, room, rng,
@@ -1108,9 +1244,16 @@ def farm(n: int, season: int = CURRENT_SEASON, seed: int = 0,
                 # unattended, and the log is the only account of it there
                 # will be in the morning.
                 import traceback
-                out(f"room {room.get('leagueId')} raised: {exc}")
+                out(f"room {league_id} raised: {exc}")
                 out(traceback.format_exc())
-                result = {"status": "crashed", "league_id": room.get("leagueId")}
+                result = {"status": "crashed", "league_id": league_id}
+            finally:
+                # On every path out, including the KeyboardInterrupt that
+                # re-raises past it. A claim left behind by a process that is
+                # no longer in the room costs the next poll a room it could
+                # have played, and the TTL that would eventually retire it is
+                # ninety minutes long.
+                claims.release(league_id)
             status = result["status"]
             counts["by_status"][status] = counts["by_status"].get(status, 0) + 1
             if status == "recorded":
@@ -1147,14 +1290,25 @@ def farm(n: int, season: int = CURRENT_SEASON, seed: int = 0,
 def main(argv: list) -> int:
     """Farm N mock drafts into the cross-league corpus.
 
-    Run: python -m pipeline.mock_farm [N] [--seed S]
+    Run: python -m pipeline.mock_farm [N] [--seed=S] [--min-humans=H]
+
+    `--min-humans` is the floor on how many seats a room must already hold
+    before we will take one of the rest (default `lobby.MIN_TEAMS_JOINED`).
+    Raising it in the evening, when ESPN's own recommended draft times are,
+    buys a more human corpus; raising it overnight starves the run. See
+    `espn_mock_lobby`'s docstring for the measurement.
+
+    Several of these can now run at once against the same account: rooms are
+    claimed through `pipeline.farm_claims`, so two processes never sit in the
+    same draft.
     """
     args = [a for a in argv[1:] if not a.startswith("--")]
     flags = {a.split("=")[0]: a.partition("=")[2]
              for a in argv[1:] if a.startswith("--")}
     n = int(args[0]) if args and args[0] else 1
     seed = int(flags.get("--seed") or 0)
-    counts = farm(n, seed=seed)
+    min_humans = int(flags.get("--min-humans") or lobby.MIN_TEAMS_JOINED)
+    counts = farm(n, seed=seed, min_humans=min_humans)
     print(json.dumps(counts, indent=2, default=str))
     return 0
 

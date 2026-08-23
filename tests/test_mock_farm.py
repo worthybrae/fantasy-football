@@ -46,6 +46,19 @@ TRACE_AUTODRAFTED = 30       # picks ESPN made for a team whose clock expired
 TRACE_NOT_AUTODRAFTED = 13   # picks with an explicit AUTODRAFT <team> false
 TRACE_AUTODRAFT_UNKNOWN = 85  # teams ESPN had not sent any AUTODRAFT for yet
 
+# The room's own owner census, as `?view=mTeam` would report it -- four seats
+# with a person, four of ESPN's computer entries. Invented (the capture is a
+# socket trace and carries no REST body), but invented to match the shape the
+# lobby actually serves: the live measurement at 09:45 found no joinable
+# 8-team room with more than three people in it.
+TRACE_OWNERS = {1: True, 2: True, 3: True, 4: False,
+                5: False, 6: False, 7: True, 8: False}
+# What the state machine makes of the capture once those four computer seats
+# start out autodrafting. Counted from the fold once and pinned, so a change
+# in the state machine fails here rather than passing quietly.
+TRACE_AUTO_WITH_OWNERS = 94
+TRACE_HUMAN_WITH_OWNERS = 34
+
 
 def _trace_listener() -> DraftListener:
     """The real recorded draft, replayed through the real listener.
@@ -132,6 +145,72 @@ def test_autodraft_flags_match_the_capture():
     assert flags.count(True) == TRACE_AUTODRAFTED
     assert flags.count(False) == TRACE_NOT_AUTODRAFTED
     assert flags.count(None) == TRACE_AUTODRAFT_UNKNOWN
+
+
+def test_the_owner_census_decides_a_seat_nobody_ever_sent_a_frame_about():
+    """The whole point of the mTeam read. ESPN sends NO AUTODRAFT frame for a
+    seat that was never human, so before the census those picks were NULL --
+    0 True / 32 False / 96 NULL per draft, useless -- and the fit kept them."""
+    events = _trace_listener().events
+    blind = mf.draft_timeline(events)
+    assert (sum(1 for f in blind if f.autodrafted is None)
+            == TRACE_AUTODRAFT_UNKNOWN)
+
+    timeline = mf.draft_timeline(events, TRACE_OWNERS)
+    flags = [f.autodrafted for f in timeline]
+    assert flags.count(None) == 0, "every pick's seat is now accounted for"
+    assert flags.count(True) == TRACE_AUTO_WITH_OWNERS
+    assert flags.count(False) == TRACE_HUMAN_WITH_OWNERS
+    # Team 4 is one of ESPN's computer seats and ESPN never says so on the
+    # socket. All sixteen of its picks are the engine's, from pick one.
+    assert all(f.autodrafted is True
+               for f in timeline if f.team_id == 4)
+
+
+def test_a_seat_flips_both_ways_and_each_pick_takes_its_own_state():
+    """The case that matters most: somebody drafts a few rounds and wanders
+    off, then comes back. The capture has it -- team 2 is human, ESPN takes
+    over after pick 62, the client asks for it back after pick 77, and ESPN
+    takes over again after 126 -- and the flag has to follow, pick by pick,
+    rather than being the room's state at the end."""
+    timeline = mf.draft_timeline(_trace_listener().events, TRACE_OWNERS)
+    team_2 = [(f.pick_no, f.autodrafted) for f in timeline if f.team_id == 2]
+    assert team_2 == [
+        (2, False), (15, False), (18, False), (31, False), (34, False),
+        (47, False), (50, False),
+        (63, True), (66, True),                       # ESPN took over
+        (79, False), (82, False), (95, False), (98, False),
+        (111, False), (114, False),                   # and gave it back
+        (127, True)]                                  # and took it again
+    # The listener's own dict is a LATEST-VALUE snapshot and says only what
+    # the room looked like when the socket closed. That is why the timeline
+    # folds the retained event list instead of reading it.
+    assert _trace_listener().autodraft_by_team[2] is True
+
+
+def test_a_frame_still_beats_the_census_it_contradicts():
+    """The census is the INITIAL state, not an override. A seat ESPN listed
+    as a computer that then sends `AUTODRAFT <team> false` is a person who
+    arrived late, and the frame is the newer fact."""
+    listener = DraftListener({})
+    for frame in ["SELECTED 1 100 2\n", "AUTODRAFT 1 false\n",
+                  "SELECTED 1 200 4\n"]:
+        listener.on_frame(frame)
+    timeline = mf.draft_timeline(listener.events, {1: False})
+    assert [f.autodrafted for f in timeline] == [True, False]
+
+
+def test_the_head_count_leaves_our_own_seat_out():
+    """We always have an owner and we are a bot. Counting ourselves would
+    make every room in the corpus look one person more human than it was."""
+    assert mf.human_seats(TRACE_OWNERS, 2) == 3      # 4 owned seats, minus us
+    assert mf.human_seats(TRACE_OWNERS, 5) == 4      # our seat was unowned
+    # None, not 0: "the mTeam read failed" and "the room was all computers"
+    # are different facts about a draft and only one is a reason to distrust
+    # its picks.
+    assert mf.human_seats({}, 2) is None
+    assert mf.human_seats(None, 2) is None
+    assert mf.human_seats({1: False, 2: False}, 9) == 0
 
 
 def test_a_replayed_pick_does_not_consume_a_second_pick_number():
@@ -270,6 +349,66 @@ def test_the_record_round_trips_through_the_corpus(tmp_path):
         assert corpus.execute(
             "SELECT count(*) FROM draft_log_pick WHERE draft_id = ?",
             [draft_id]).fetchone()[0] == TRACE_PICKS
+    finally:
+        corpus.close()
+
+
+def test_the_owner_census_reaches_the_corpus_on_every_pick(tmp_path):
+    """`had_owner` and `human_seats` are two more columns added by ALTER, and
+    a record that builds fine but does not STORE is exactly the failure that
+    would not surface until a refit read NULLs it did not expect."""
+    timeline = mf.draft_timeline(_trace_listener().events, TRACE_OWNERS)
+    record, _ = mf.build_record(
+        timeline, _tool_for(timeline), _mock_settings(), league_id="999",
+        season=2026, my_slot=2, started_at=None, teams=TRACE_TEAMS,
+        rounds=TRACE_ROUNDS, owners=TRACE_OWNERS, my_team_id=2)
+    assert record.human_seats == 3            # four owned seats, ours not one
+
+    corpus = dl.corpus_conn(str(tmp_path / "corpus.duckdb"))
+    try:
+        draft_id = dl.record(corpus, record)
+        assert corpus.execute(
+            "SELECT human_seats FROM draft_log WHERE draft_id = ?",
+            [draft_id]).fetchone()[0] == 3
+        rows = corpus.execute(
+            "SELECT count(*), "
+            "  sum(CASE WHEN had_owner THEN 1 ELSE 0 END), "
+            "  sum(CASE WHEN autodrafted THEN 1 ELSE 0 END), "
+            "  count(*) FILTER (WHERE autodrafted IS NULL) "
+            "FROM draft_log_pick WHERE draft_id = ?", [draft_id]).fetchone()
+        # Four owned seats x 16 rounds, and not one unknown pick left.
+        assert rows == (TRACE_PICKS, 64, TRACE_AUTO_WITH_OWNERS, 0)
+        # The subset claim `fit_prior` leans on: an unowned seat is ALWAYS
+        # autodrafted, so excluding `autodrafted IS TRUE` already excludes
+        # every computer seat and no second filter is needed.
+        assert corpus.execute(
+            "SELECT count(*) FROM draft_log_pick WHERE draft_id = ? "
+            "AND had_owner IS FALSE AND NOT autodrafted",
+            [draft_id]).fetchone()[0] == 0
+    finally:
+        corpus.close()
+
+
+def test_a_draft_with_no_census_stores_nulls_rather_than_guesses(tmp_path):
+    """The mTeam read is best-effort and a room can refuse it. NULL is the
+    honest answer for that draft -- and `human_seats` is NULL too, so a later
+    query can tell "nobody was in the room" from "nobody asked"."""
+    timeline = mf.draft_timeline(_trace_listener().events)
+    record, _ = mf.build_record(
+        timeline, _tool_for(timeline), _mock_settings(), league_id="999",
+        season=2026, my_slot=2, started_at=None, teams=TRACE_TEAMS,
+        rounds=TRACE_ROUNDS, owners={}, my_team_id=2)
+    assert record.human_seats is None
+    corpus = dl.corpus_conn(str(tmp_path / "corpus.duckdb"))
+    try:
+        draft_id = dl.record(corpus, record)
+        assert corpus.execute(
+            "SELECT count(*) FROM draft_log_pick "
+            "WHERE draft_id = ? AND had_owner IS NULL",
+            [draft_id]).fetchone()[0] == TRACE_PICKS
+        assert corpus.execute(
+            "SELECT human_seats FROM draft_log WHERE draft_id = ?",
+            [draft_id]).fetchone()[0] is None
     finally:
         corpus.close()
 
@@ -460,10 +599,56 @@ def test_receptions_are_required_even_when_the_name_says_ppr():
 def test_the_fullest_room_wins():
     """The single most important ordering key: a room at 6/8 is six humans
     waiting for a draft, a room at 0/8 fills with ESPN's autodraft engine."""
-    rooms = [_room(leagueId=1, teamsJoined=0),
+    rooms = [_room(leagueId=1, teamsJoined=1),
              _room(leagueId=2, teamsJoined=6),
              _room(leagueId=3, teamsJoined=2)]
     assert [r["leagueId"] for r in lobby.rank_rooms(rooms, NOW_MS)] == [2, 3, 1]
+
+
+def test_an_empty_room_is_skipped_rather_than_ranked_last():
+    """Not a preference. A room with nobody in it is eight ESPN autodrafters
+    plus us, and its 128 picks are ADP read back to us under a label saying
+    "mock draft" -- which is worse than no draft, because a later reader
+    cannot tell it apart from a room of people."""
+    rooms = [_room(leagueId=1, teamsJoined=0),
+             _room(leagueId=2, teamsJoined=0)]
+    assert lobby.rank_rooms(rooms, NOW_MS) == []
+    assert lobby.pick_room(rooms, NOW_MS) is None
+    assert lobby.is_farmable(_room(teamsJoined=0), NOW_MS) is False
+    assert lobby.is_farmable(_room(teamsJoined=1), NOW_MS) is True
+
+
+def test_the_human_floor_is_a_knob_and_defaults_to_one():
+    """Measured at 09:45 over 25 8-team PPR snake rooms: of the ten still
+    joinable, four had one person, three had two, two had three and NONE had
+    four. A hard floor of 4 would have joined nothing at all, all morning --
+    so the default is the largest floor that does not starve the run, and the
+    rest of the filtering happens at fit time where it is reversible."""
+    assert lobby.MIN_TEAMS_JOINED == 1
+    rooms = [_room(leagueId=1, teamsJoined=1),
+             _room(leagueId=2, teamsJoined=3)]
+    assert len(lobby.rank_rooms(rooms, NOW_MS)) == 2
+    assert len(lobby.rank_rooms(rooms, NOW_MS, min_teams_joined=3)) == 1
+    assert lobby.rank_rooms(rooms, NOW_MS, min_teams_joined=4) == []
+    # And zero means "take anything", which is what the report below needs.
+    assert len(lobby.rank_rooms([_room(teamsJoined=0)], NOW_MS,
+                                min_teams_joined=0)) == 1
+
+
+def test_the_lobby_report_says_whether_the_floor_is_the_problem():
+    """`pick_room` returning None is two different situations wearing one
+    face -- a poll between batches, or a lobby full of empty rooms -- and an
+    unattended log that cannot tell them apart cannot say whether the floor
+    is starving the run."""
+    empty = [_room(leagueId=1, teamsJoined=0),
+             _room(leagueId=2, teamsJoined=0),
+             _room(leagueId=3, leagueSize=12)]      # wrong shape entirely
+    report = lobby.lobby_report(empty, NOW_MS)
+    assert report == {"rows": 3, "open": 2, "best": 0, "size": 8}
+    # Nothing of the right shape at all: `best` is None rather than 0, which
+    # is the distinction the log turns into two different sentences.
+    nothing = lobby.lobby_report([_room(leagueSize=12)], NOW_MS)
+    assert nothing["open"] == 0 and nothing["best"] is None
 
 
 def test_experience_breaks_a_tie_before_start_time():
@@ -566,7 +751,11 @@ def _live_room(**overrides) -> dict:
                  draftAvailableDate=now_ms + 210_000, **overrides)
 
 
-def _stub_farm_deps(monkeypatch, rooms):
+def _stub_farm_deps(monkeypatch, rooms, tmp_path):
+    # Claims are files on disk, so every loop test gets its own directory --
+    # otherwise a test would see the claims of the farm process the owner may
+    # have running against the real `data/farm-claims`.
+    monkeypatch.setattr(mf.claims, "CLAIM_DIR", str(tmp_path / "claims"))
     monkeypatch.setattr(mf, "load_cookies",
                         lambda: {"SWID": "{X}", "espn_s2": "s2"})
     monkeypatch.setattr(mf, "http_fetch", lambda cookies: (lambda url: "[]"))
@@ -581,7 +770,7 @@ def test_a_recorded_draft_is_counted_once(monkeypatch, tmp_path):
     """`recorded` is both a status name and the counter the loop's `while`
     reads. Counting it in one place made a run asked for N stop at N/2."""
     _stub_farm_deps(monkeypatch, [_live_room(leagueId=11),
-                                  _live_room(leagueId=12)])
+                                  _live_room(leagueId=12)], tmp_path)
     seen = []
 
     def fake_play(conn, corpus_path, cookies, room, rng, season=2026,
@@ -603,7 +792,8 @@ def test_one_rooms_crash_does_not_end_the_night(monkeypatch, tmp_path):
     unreachable for a moment, a room that vanished -- must cost that room and
     nothing else."""
     _stub_farm_deps(monkeypatch, [_live_room(leagueId=21, teamsJoined=6),
-                                  _live_room(leagueId=22, teamsJoined=1)])
+                                  _live_room(leagueId=22, teamsJoined=1)],
+                    tmp_path)
 
     def fake_play(conn, corpus_path, cookies, room, rng, season=2026,
                   out=print):
@@ -623,7 +813,7 @@ def test_a_room_is_never_attempted_twice(monkeypatch, tmp_path):
     """ESPN keeps a room in the directory after we take a seat, so without
     the exclusion the loop would re-join the room it just played."""
     _stub_farm_deps(monkeypatch, [_live_room(leagueId=31),
-                                  _live_room(leagueId=32)])
+                                  _live_room(leagueId=32)], tmp_path)
     seen = []
 
     def fake_play(conn, corpus_path, cookies, room, rng, season=2026,
@@ -648,6 +838,110 @@ def test_a_room_is_never_attempted_twice(monkeypatch, tmp_path):
                      out=lambda *a: None)
     assert seen == [31, 32]
     assert counts["by_status"] == {"incomplete": 2}
+
+
+def test_the_loop_waits_rather_than_filling_an_empty_room(monkeypatch,
+                                                          tmp_path):
+    """And says what it saw while waiting. An overnight run that only ever
+    prints "nothing fits" cannot tell a lobby between batches from a lobby
+    full of rooms nobody has joined, and the second is the one that means the
+    floor is starving the run."""
+    _stub_farm_deps(monkeypatch, [_live_room(leagueId=41, teamsJoined=0),
+                                  _live_room(leagueId=42, teamsJoined=0)],
+                    tmp_path)
+    played = []
+    monkeypatch.setattr(mf, "play_draft",
+                        lambda *a, **k: played.append(1) or {
+                            "status": "recorded", "picks": 128})
+    lines = []
+
+    def counted_sleep(seconds):
+        if len(lines) > 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(mf.time, "sleep", counted_sleep)
+    mf.farm(1, corpus_path=str(tmp_path / "c.duckdb"), out=lines.append)
+
+    assert played == [], "an empty room is our bot drafting against ESPN's"
+    waited = "\n".join(lines)
+    assert "2 joinable" in waited
+    assert "0/8" in waited and "floor is 1" in waited
+
+
+def test_a_room_another_farm_process_holds_is_left_alone(monkeypatch,
+                                                         tmp_path):
+    """Two processes rank identically, so without the claim they would take
+    two of the eight seats in the SAME room -- and since `draft_id` hashes
+    (league_id, picks) the second record would overwrite the first, leaving
+    one bot seat labelled `my_slot` and the other indistinguishable from a
+    person."""
+    _stub_farm_deps(monkeypatch, [_live_room(leagueId=61, teamsJoined=6),
+                                  _live_room(leagueId=62, teamsJoined=2)],
+                    tmp_path)
+    # Stand in for the other process: it got there first and holds 61.
+    assert mf.claims.claim(61) is True
+    seen = []
+
+    def fake_play(conn, corpus_path, cookies, room, rng, season=2026,
+                  out=print):
+        seen.append(room["leagueId"])
+        # The room we DID take is claimed while we are in it.
+        assert "62" in mf.claims.claimed()
+        return {"status": "recorded", "picks": 128, "league_id": 62}
+
+    monkeypatch.setattr(mf, "play_draft", fake_play)
+    mf.farm(1, corpus_path=str(tmp_path / "c.duckdb"), out=lambda *a: None)
+    assert seen == [62], "the fuller room was held, so the next one was taken"
+    # Released on the way out, so the next poll (or the next process) may
+    # have it; the other process's claim is untouched.
+    assert mf.claims.claimed() == {"61"}
+
+
+def test_a_claim_is_released_even_when_the_room_raises(monkeypatch, tmp_path):
+    """A claim left behind by a process that is no longer in the room costs
+    the next poll a room it could have played, and the TTL that would
+    eventually retire it is ninety minutes long."""
+    _stub_farm_deps(monkeypatch, [_live_room(leagueId=71, teamsJoined=4)],
+                    tmp_path)
+
+    def fake_play(conn, corpus_path, cookies, room, rng, season=2026,
+                  out=print):
+        raise RuntimeError("ESPN said no")
+
+    monkeypatch.setattr(mf, "play_draft", fake_play)
+    calls = {"n": 0}
+
+    def counted_sleep(seconds):
+        calls["n"] += 1
+        if calls["n"] > 3:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(mf.time, "sleep", counted_sleep)
+    mf.farm(1, corpus_path=str(tmp_path / "c.duckdb"), out=lambda *a: None)
+    assert mf.claims.claimed() == set()
+
+
+def test_the_human_floor_is_passed_through_from_the_caller(monkeypatch,
+                                                           tmp_path):
+    """An evening run can afford to be pickier than a 5am one -- ESPN's own
+    recommended draft times are 12:00, 17:00 and 20:00 -- so the floor is an
+    argument rather than a constant."""
+    _stub_farm_deps(monkeypatch, [_live_room(leagueId=81, teamsJoined=2)],
+                    tmp_path)
+    played = []
+    monkeypatch.setattr(mf, "play_draft",
+                        lambda *a, **k: played.append(1) or {
+                            "status": "recorded", "picks": 128})
+    lines = []
+
+    def counted_sleep(seconds):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(mf.time, "sleep", counted_sleep)
+    mf.farm(1, corpus_path=str(tmp_path / "c.duckdb"), min_humans=3,
+            out=lines.append)
+    assert played == []
+    assert "floor is 3" in "\n".join(lines)
 
 
 def test_the_loop_waits_for_the_room_to_open_before_connecting():
@@ -772,7 +1066,8 @@ def test_every_line_the_farm_prints_goes_through_the_scrubber(monkeypatch):
     future line formatting an exception -- or the bare `traceback.format_exc`
     the run loop already prints -- must be covered without its author having
     to know the scrubber exists."""
-    _stub_farm_deps(monkeypatch, [_live_room(leagueId=51)])
+    _stub_farm_deps(monkeypatch, [_live_room(leagueId=51)],
+                    Path(mf.tempfile.mkdtemp()))
     lines = []
 
     def fake_play(conn, corpus_path, cookies, room, rng, season=2026,
