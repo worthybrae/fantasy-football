@@ -1,5 +1,5 @@
 import PopCard from './PopCard'
-import type { ProjectedUsage, SeasonPercentiles, SeasonRow } from './payload'
+import type { ProjectedUsage, SeasonRow } from './payload'
 
 // What the points were made of, season by season, and how big a share of the
 // offence they came off.
@@ -16,9 +16,9 @@ import type { ProjectedUsage, SeasonPercentiles, SeasonRow } from './payload'
 //
 // Four. Five reached back to a season most of these players were not the
 // same player in -- and the columns are what pay for it: at four they get
-// their width back, which is what keeps a percentage and its chip legible.
-// Older usage is a different team; seeing WHEN a role changed is the reason
-// to look at all, and four seasons still shows a change.
+// their width back, which is what keeps a percentage legible. Older usage is
+// a different team; seeing WHEN a role changed is the reason to look at all,
+// and four seasons still shows a change.
 const SHOWN = 4
 
 // Per-game rates by position, off `scoring/profile.py::_SUMMARY_STATS` -- the
@@ -39,47 +39,69 @@ const SHOWN = 4
 // row is built, and -- with no snap or target share either -- the card
 // renders nothing, which is the whole of what the payload can say about a
 // kicker's usage.
-// The third element is the percentile that colours the row -- the pool the
-// number is good or bad against. A row with none (a quarterback's passing
-// rates, and snap share) prints its number uncoloured rather than borrowing
-// a neighbour's pool.
-// The fourth element is which projected rate answers this row -- the card's
+// The third element is which projected rate answers this row -- the card's
 // last column is the season being drafted, drawn the way the panels above
 // draw theirs. Null where ESPN projects nothing that fits the row.
-type Rate = [string, (keyof SeasonRow)[], keyof SeasonPercentiles | null,
-             keyof ProjectedUsage | null]
+type Rate = [string, (keyof SeasonRow)[], keyof ProjectedUsage | null]
 
 const RATES: Record<string, Rate[]> = {
-  QB: [['Att / g', ['attempts'], null, 'attempts'],
-    ['Pass yds / g', ['pass_yards'], null, 'pass_yards']],
-  RB: [['Car / g', ['carries'], 'carries_pg', 'carries'],
-    ['Yds / g', ['rush_yards', 'rec_yards'], 'yards_pg', 'yards']],
-  WR: [['Tgt / g', ['targets'], 'targets_pg', 'targets'],
-    ['Yds / g', ['rec_yards', 'rush_yards'], 'yards_pg', 'yards']],
-  TE: [['Tgt / g', ['targets'], 'targets_pg', 'targets'],
-    ['Yds / g', ['rec_yards', 'rush_yards'], 'yards_pg', 'yards']],
+  QB: [['Att / g', ['attempts'], 'attempts'],
+    ['Pass yds / g', ['pass_yards'], 'pass_yards']],
+  RB: [['Car / g', ['carries'], 'carries'],
+    ['Yds / g', ['rush_yards', 'rec_yards'], 'yards']],
+  WR: [['Tgt / g', ['targets'], 'targets'],
+    ['Yds / g', ['rec_yards', 'rush_yards'], 'yards']],
+  TE: [['Tgt / g', ['targets'], 'targets'],
+    ['Yds / g', ['rec_yards', 'rush_yards'], 'yards']],
 }
 
-// The five steps, cut on the percentile. Even fifths: unlike a positional
-// finish there is no starter count to cut against here -- the question is
-// simply where in his position's spread this number falls.
-function chipTone(pctl: number | null | undefined): string {
-  if (pctl === null || pctl === undefined) return 'is-unrated'
-  if (pctl >= 0.8) return 'is-elite'
-  if (pctl >= 0.6) return 'is-strong'
-  if (pctl >= 0.4) return 'is-starter'
-  if (pctl >= 0.2) return 'is-fringe'
-  return 'is-out'
+// Colour is a MOVE, not a placing. The card used to tint each cell by where
+// it fell among that position's spread, which meant twelve filled boxes in a
+// card whose whole point is reading across a row -- and the placing was
+// already the honest answer to a different question, one the Per game panel
+// above it answers with a ranked bar.
+//
+// So: green if the number is up on the season before it, red if it is down,
+// and the ink is the number itself. Two colours over four columns say the
+// one thing a share is worth reading back four years for -- which way the
+// role is going.
+//
+// The step a move has to clear to earn a colour, as a fraction of what it
+// moved FROM. Relative, not absolute: three points of snap share is a real
+// change at 20% and rounding at 90%, and a card that painted the second one
+// green would be colouring noise. Below the step the number keeps its
+// ordinary ink, which is the card saying the role held.
+const MOVE = 0.05
+
+function tone(now: number | null, prev: number | null): string {
+  if (now === null || prev === null || prev === 0) return ''
+  const move = (now - prev) / Math.abs(prev)
+  if (move >= MOVE) return 'delta-tone is-up'
+  if (move <= -MOVE) return 'delta-tone is-down'
+  return ''
 }
 
-function pct(share: number | null | undefined): string | null {
-  return share === null || share === undefined ? null : `${Math.round(share * 100)}%`
+// The most recent season before this one that HAS a number. A missing season
+// is compared past, not treated as a zero: a player who missed a year and
+// came back at his old workload did not go up, and the arithmetic of
+// dividing by zero would have said he went up infinitely.
+function before(values: (number | null)[], i: number): number | null {
+  for (let j = i - 1; j >= 0; j -= 1) if (values[j] !== null) return values[j]
+  return null
 }
 
-function perGame(season: SeasonRow, keys: (keyof SeasonRow)[]): string | null {
+function pct(share: number): string {
+  return `${Math.round(share * 100)}%`
+}
+
+function rate(value: number): string {
+  return value.toFixed(1)
+}
+
+function perGame(season: SeasonRow, keys: (keyof SeasonRow)[]): number | null {
   if (!season.games) return null
   const total = keys.reduce((sum, k) => sum + ((season[k] as number | null) ?? 0), 0)
-  return (total / season.games).toFixed(1)
+  return total / season.games
 }
 
 export default function UsageLine({ seasons, position, projected }: {
@@ -92,29 +114,25 @@ export default function UsageLine({ seasons, position, projected }: {
   const shown = seasons.slice(0, SHOWN).reverse()
   if (shown.length === 0) return null
 
-  type Cell = { text: string | null; tone: string }
-  const rate = (v: number | null | undefined) =>
-    v === null || v === undefined ? null : v.toFixed(1)
-  const cells = (values: (string | null)[],
-                 key: keyof SeasonPercentiles | null): Cell[] =>
-    values.map((text, i) => ({
-      text,
-      tone: chipTone(key === null ? null : shown[i].pcts?.[key]),
-    }))
+  // A row is its numbers, the way it prints one, and its projection. The
+  // numbers stay numbers until the cell is drawn, because the colour is
+  // arithmetic between two of them -- formatting first would leave the row
+  // comparing "54%" against "57%" as strings.
+  type Row = [string, (number | null)[], (v: number) => string, number | null]
 
-  const candidates: [string, Cell[], string | null][] = [
+  const candidates: Row[] = [
     // The two shares have no projected column and the em dash says so: the
     // projection table carries no team total worth dividing by and does not
     // project snaps at all. A blank cell here is the card declining to guess,
     // in the same place it would otherwise be guessing hardest.
-    ['Snap %', cells(shown.map((s) => pct(s.snap_share)), 'snap_share'), null],
-    ['Target %', cells(shown.map((s) => pct(s.target_share)), 'target_share'), null],
-    ...(RATES[position] ?? []).map(([label, keys, key, projKey]):
-    [string, Cell[], string | null] => [
+    ['Snap %', shown.map((s) => s.snap_share ?? null), pct, null],
+    ['Target %', shown.map((s) => s.target_share ?? null), pct, null],
+    ...(RATES[position] ?? []).map(([label, keys, projKey]): Row => [
       label,
-      cells(shown.map((s) => perGame(s, keys)), key),
+      shown.map((s) => perGame(s, keys)),
+      rate,
       projKey === null || !projected ? null
-        : rate(projected[projKey] as number | null),
+        : (projected[projKey] as number | null) ?? null,
     ]),
   ]
   // A row nothing can answer is dropped rather than dashed across: a
@@ -122,8 +140,8 @@ export default function UsageLine({ seasons, position, projected }: {
   // three em-dashes in a line is a row that costs a reader a line to learn
   // nothing. A row with SOME seasons missing keeps its dashes -- there the
   // gap is the fact.
-  const rows = candidates.filter(([, cs, proj]) =>
-    cs.some((c) => c.text !== null) || proj !== null)
+  const rows = candidates.filter(([, values, , proj]) =>
+    values.some((v) => v !== null) || proj !== null)
   if (rows.length === 0) return null
 
   return (
@@ -136,21 +154,30 @@ export default function UsageLine({ seasons, position, projected }: {
           ))}
           {projected && <span className="mono pp-pop-seasons-proj">proj</span>}
         </div>
-        {rows.map(([label, values, proj]) => (
+        {rows.map(([label, values, fmt, proj]) => (
           <div className={`pp-pop-seasons-row${projected ? ' has-proj' : ''}`} key={label}>
             <span>{label}</span>
-            {values.map((c, i) => (
-              <span className="mono" key={shown[i].season}>
-                <span className={`pp-pop-chip ${c.text === null ? 'is-unrated' : c.tone}`}>
-                  {c.text ?? '—'}
-                </span>
+            {values.map((v, i) => (
+              <span
+                className={`mono ${v === null ? 'is-blank' : tone(v, before(values, i))}`}
+                key={shown[i].season}
+              >
+                {v === null ? '—' : fmt(v)}
               </span>
             ))}
             {projected && (
-              // Behind a rule and uncoloured, exactly as the Per game panel
-              // draws its own projected column: it has not happened, so it is
-              // not ranked against anyone.
-              <span className="mono pp-pop-seasons-proj">{proj ?? '—'}</span>
+              // The projection is coloured by the same rule as every column
+              // before it, against the last season that happened. It is the
+              // one comparison a drafter came to this card for -- is the
+              // number being projected a step up on the year, or a step down
+              // -- and it is a move, not a ranking, so nothing here claims
+              // the projection has been placed against anybody.
+              <span
+                className={`mono pp-pop-seasons-proj ${proj === null ? 'is-blank'
+                  : tone(proj, before(values, values.length))}`}
+              >
+                {proj === null ? '—' : fmt(proj)}
+              </span>
             )}
           </div>
         ))}

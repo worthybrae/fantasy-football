@@ -4720,31 +4720,22 @@ button.roster-row:focus-visible {
   color: var(--text-3);
 }
 
-/* A usage number, tinted by where it places among the same position that
-   season. A wash rather than a solid fill: twelve saturated boxes in one
-   small card would shout over the panels above, and the number has to stay
-   the thing being read. The ramp's own tokens, so a chip and a bar of the
-   same step cannot drift apart. */
-.pp-pop-chip {
-  display: inline-block;
-  padding: 1px 4px;
-  border-radius: 3px;
-  background: color-mix(in srgb, var(--chip) 20%, transparent);
-  color: var(--text-1);
-}
+/* Which way the number moved on the season before it: green up, red down,
+   and no colour at all for a move too small to mean anything. The ink is the
+   number itself -- this card replaced twelve tinted boxes, which fought the
+   panels above it for attention and answered a question (where does he place
+   among his position) that the Per game panel already answers with a bar.
+   Both rules are `>` children of the row and carry three classes, because
+   `.pp-pop-seasons-row > span:not(:first-child)` below sets every cell to
+   --text-1 and would otherwise outrank them. */
+.pp-pop-seasons-row > .delta-tone.is-up { color: var(--ok); }
+.pp-pop-seasons-row > .delta-tone.is-down { color: var(--fail); }
 
-.pp-pop-chip.is-elite { --chip: var(--ok); }
-.pp-pop-chip.is-strong { --chip: var(--ramp-strong); }
-.pp-pop-chip.is-starter { --chip: var(--ramp-mid); }
-.pp-pop-chip.is-fringe { --chip: var(--accent); }
-.pp-pop-chip.is-out { --chip: var(--fail); }
-
-/* No pool to place it against -- snap share, today -- so no colour. A grey
-   cell here is the card saying it does not know, which is the one thing a
-   tinted one could not say. */
-.pp-pop-chip.is-unrated {
-  background: none;
-  color: var(--text-2);
+/* A season with no number in it. Dimmer than the numbers beside it, so a
+   row that is half missing reads as a row with gaps rather than as a row of
+   equally weighted cells one of which happens to be a dash. */
+.pp-pop-seasons-row > .is-blank.is-blank {
+  color: var(--text-3);
 }
 
 /* A small season table: a label column that takes what it needs and one
