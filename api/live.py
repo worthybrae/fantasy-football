@@ -1096,7 +1096,20 @@ def _board_cell(player_id, pick_no, teams: int, slots: list, by_id: dict) -> dic
             # anyone ESPN doesn't project (DST, deep rookies).
             "proj_ppg": round(espn_proj / 17, 1) if espn_proj else None,
             # >0 = fell past ADP (a steal), <0 = reach; null with no ADP.
-            "value": None if market_rank is None else float(overall) - market_rank,
+            #
+            # AND null when the consensus never expected him to be drafted in
+            # this league at all. A kicker's consensus rank is around 250 and a
+            # defense's around 212, in a draft whose last pick is 120: taken at
+            # 98, every one of them scores as a hundred-slot "reach", and the
+            # rail flagged nearly every kicker and defense in the back half of
+            # the draft. That is not a decision anyone made, it is the market
+            # ranking players nobody in an 8-team league drafts -- 137 of 250
+            # board rows sit past the last pick. A number that fires on all of
+            # them says nothing about the ones it should.
+            #
+            # `len(slots)` is the snake order, so it IS the last pick.
+            "value": (None if market_rank is None or market_rank > len(slots)
+                      else float(overall) - market_rank),
             # The rail under the room draws a face beside each landed pick.
             # Null for a defense, for anyone nflverse has no photo of, and on
             # any database refreshed before the column existed.

@@ -880,6 +880,20 @@ button.pick-ticker-pick:hover {
   font-size: 10px;
 }
 
+/* Name and its move on one line: the two things a reader is here for. */
+.pick-ticker-nameline {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* Only an entry wearing a corner flag reserves room for it, so the ordinary
+   ones are not padded out to fit a word they do not carry. */
+.pick-ticker-pick.has-flag .pick-ticker-nameline {
+  padding-right: 44px;
+}
+
 /* The name over the team, each with the whole entry's width. Side by side
    they split it and both ellipsised, which named neither. */
 .pick-ticker-who {

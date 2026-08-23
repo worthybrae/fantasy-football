@@ -119,7 +119,8 @@ export default function PickTicker({ board, onOpenPlayer }: PickTickerProps) {
                 {onOpenPlayer ? (
                   <button
                     type="button"
-                    className="pick-ticker-pick"
+                    className={`pick-ticker-pick${
+                      crazyFlag(cell.player.value) ? ' has-flag' : ''}`}
                     onClick={() => onOpenPlayer(cell.player)}
                     aria-label={label}
                   >
@@ -137,17 +138,28 @@ export default function PickTicker({ board, onOpenPlayer }: PickTickerProps) {
                         a quieter second line underneath. */}
                     {crazyFlag(cell.player.value)}
                     <span className="pick-ticker-who">
-                      <span className="pick-ticker-name">{cell.player.name}</span>
+                      {/* The move sits with the name, because they are the
+                          two things a reader is here for: who went, and
+                          whether it was a bargain. The line under it is the
+                          bookkeeping -- which pick, which position, whose
+                          team. */}
+                      <span className="pick-ticker-nameline">
+                        <span className="pick-ticker-name">{cell.player.name}</span>
+                        {adpDelta(cell.player.value)}
+                      </span>
                       <span className="pick-ticker-detail">
                         <span className="mono pick-ticker-no">{cell.overall}</span>
                         {posBadge(cell.player.position)}
                         <span className="pick-ticker-team">{team}</span>
-                        {adpDelta(cell.player.value)}
                       </span>
                     </span>
                   </button>
                 ) : (
-                  <span className="pick-ticker-pick" aria-label={label}>
+                  <span
+                    className={`pick-ticker-pick${
+                      crazyFlag(cell.player.value) ? ' has-flag' : ''}`}
+                    aria-label={label}
+                  >
                     {cell.player.headshot && (
                       // `alt=""` -- the name is right beside it and the
                       // button already carries the whole pick as its label,
@@ -162,12 +174,19 @@ export default function PickTicker({ board, onOpenPlayer }: PickTickerProps) {
                         a quieter second line underneath. */}
                     {crazyFlag(cell.player.value)}
                     <span className="pick-ticker-who">
-                      <span className="pick-ticker-name">{cell.player.name}</span>
+                      {/* The move sits with the name, because they are the
+                          two things a reader is here for: who went, and
+                          whether it was a bargain. The line under it is the
+                          bookkeeping -- which pick, which position, whose
+                          team. */}
+                      <span className="pick-ticker-nameline">
+                        <span className="pick-ticker-name">{cell.player.name}</span>
+                        {adpDelta(cell.player.value)}
+                      </span>
                       <span className="pick-ticker-detail">
                         <span className="mono pick-ticker-no">{cell.overall}</span>
                         {posBadge(cell.player.position)}
                         <span className="pick-ticker-team">{team}</span>
-                        {adpDelta(cell.player.value)}
                       </span>
                     </span>
                   </span>
