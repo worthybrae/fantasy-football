@@ -758,6 +758,21 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
     from api.live import register_live_routes
     register_live_routes(app, conn, db_path)
 
+    # Imported here rather than at module scope for the same reason the live
+    # routes are: this is the seam where the app is assembled, and neither
+    # module is importable as a plain dependency of this one -- `api.mocks`
+    # imports `api.live`'s cell builder, so a top-level import here would fix
+    # the order the three modules must load in.
+    #
+    # `conn` and nothing else: the mock pages read the DRAFT CORPUS, which is
+    # a different file with a different lifetime, and they open it read-only
+    # per request rather than holding a handle for the process lifetime --
+    # the farm has to be able to take that file's write lock while the API is
+    # up. `conn` is passed only so a mock board can name its players out of
+    # the board this process already has.
+    from api.mocks import register_mock_routes
+    register_mock_routes(app, conn)
+
     return app
 
 app = create_app()
