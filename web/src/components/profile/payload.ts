@@ -23,6 +23,21 @@ import type {
 // invented: a value the payload nulls is rendered as missing, not as zero.
 
 /** One season row: `SeasonSummary` plus the six the redesign asked for. */
+/** ESPN's projected stat line for the season being drafted, per game. No
+ *  shares: the projection table has no trustworthy team total to divide by
+ *  and does not project snaps at all -- see
+ *  scoring/profile._espn_projected_usage. Null for a player it does not
+ *  project, and any single rate is null where his position has no such stat. */
+export interface ProjectedUsage {
+  games: number
+  carries: number | null
+  targets: number | null
+  receptions: number | null
+  yards: number | null
+  attempts: number | null
+  pass_yards: number | null
+}
+
 /** Where each usage number places among the same position that season, 0-1,
  *  higher better. Null for a season the pool could not rank -- a snap table
  *  with no row for him, or a rate his position does not have. */

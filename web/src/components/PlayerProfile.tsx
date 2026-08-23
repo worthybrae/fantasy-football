@@ -384,7 +384,8 @@ function PopCards({ profile, ranked, onSelectPlayer }: {
         />
       </div>
       <div className="pp-pop-row">
-        <UsageLine seasons={profile.seasons} position={header.position} />
+        <UsageLine seasons={profile.seasons} position={header.position}
+                   projected={profile.summary?.proj_usage} />
         {/* Null for every defense by construction (see LineQualityData): the
             o-line is a fact about the eleven who leave the field when this
             unit comes on. */}

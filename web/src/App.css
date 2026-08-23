@@ -4500,6 +4500,22 @@ button.roster-row:focus-visible {
   align-items: baseline;
 }
 
+/* The projected column, when there is one: a fourth track, and the rule that
+   separates what happened from what is only expected -- the same dashed line
+   the Per game and Finish panels put in front of their own projections. */
+.pp-pop-seasons-head.has-proj,
+.pp-pop-seasons-row.has-proj {
+  grid-template-columns: minmax(0, 1fr) repeat(3, 34px) 40px;
+}
+
+.pp-pop-seasons-proj {
+  padding-left: 5px;
+  border-left: 1px dashed var(--border);
+  text-align: right;
+  font-size: 10px;
+  color: var(--text-2);
+}
+
 .pp-pop-seasons-head {
   font-size: 9px;
   letter-spacing: 0.07em;

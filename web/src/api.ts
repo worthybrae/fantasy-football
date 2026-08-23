@@ -139,6 +139,19 @@ export interface ProfileSummary {
   w_stats: Record<string, number>;
   proj_ppg: number | null;
   proj_delta: number | null;
+  /** The stat line behind `proj_ppg`, per game -- ESPN's projected carries,
+   *  targets and yards for the season being drafted. Null for a player it
+   *  does not project. Shares are deliberately absent; see
+   *  scoring/profile._espn_projected_usage. */
+  proj_usage: {
+    games: number
+    carries: number | null
+    targets: number | null
+    receptions: number | null
+    yards: number | null
+    attempts: number | null
+    pass_yards: number | null
+  } | null;
 }
 export interface DepthChartGroup {
   position: string;

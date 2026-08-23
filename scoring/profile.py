@@ -427,6 +427,67 @@ def career_summary(seasons: list[dict]) -> dict:
     return {"w_ppg": round(w_ppg, 1), "w_stats": stats}
 
 
+def _espn_projected_usage(conn, player_id: str, name: str, position: str,
+                          season: int) -> dict | None:
+    """ESPN's projected stat line for the season being drafted, per game.
+
+    The same source and the same two-step match as `_espn_projection` -- the
+    sleeper crosswalk first, then name and position -- because a projection's
+    points and the carries behind them have to describe the same player.
+
+    Per game rather than per season, so the row reads against the seasons
+    beside it: 325 carries and 19.1 a game are the same fact, but only one of
+    them can be compared with what he did last year.
+
+    NO SHARES. A share needs a projected team total and this table has no
+    trustworthy one: its 439 rows cover 5 to 14 players a team, and summing
+    them gives Arizona 533 targets against 88 pass attempts and Atlanta 411
+    targets against none at all. Snap share it does not project at all. The
+    card leaves both blank in the projected column rather than dividing by a
+    denominator that is wrong by a quarter and saying nothing about it.
+    """
+    proj = read_table(conn, "espn_projections")
+    if proj.empty or "season" not in proj.columns:
+        return None
+    rows = proj[proj["season"] == season]
+    if rows.empty:
+        return None
+    hit = pd.DataFrame()
+    sleeper = read_table(conn, "sleeper_ids")
+    if not sleeper.empty and "espn_id" in rows.columns:
+        xwalk = sleeper[["gsis_id", "espn_id"]].dropna().drop_duplicates("espn_id")
+        joined = rows.merge(xwalk, on="espn_id")
+        hit = joined[joined["gsis_id"] == player_id]
+    if hit.empty and {"position", "espn_name"}.issubset(rows.columns):
+        hit = rows[(rows["position"] == position)
+                   & (rows["espn_name"].map(_norm_name) == _norm_name(name))]
+    if hit.empty:
+        return None
+    r = hit.iloc[0]
+    games = r.get("proj_games")
+    if games is None or pd.isna(games) or float(games) <= 0:
+        return None
+    games = float(games)
+
+    def per_game(*cols):
+        total = 0.0
+        seen = False
+        for c in cols:
+            v = r.get(c)
+            if v is not None and not pd.isna(v):
+                total += float(v)
+                seen = True
+        return round(total / games, 1) if seen else None
+
+    return {"games": round(games, 1),
+            "carries": per_game("proj_carries"),
+            "targets": per_game("proj_targets"),
+            "receptions": per_game("proj_receptions"),
+            "yards": per_game("proj_rush_yards", "proj_rec_yards"),
+            "attempts": per_game("proj_pass_att"),
+            "pass_yards": per_game("proj_pass_yards")}
+
+
 def _espn_projection(conn, player_id: str, name: str, position: str) -> float | None:
     """Projected season points from the ESPN table, or None.
 
@@ -1363,6 +1424,11 @@ def build_profile(conn, player_id: str, weights: dict | None = None,
     if proj_total and proj_scale is not None and not pd.isna(proj_scale):
         proj_total = proj_total * float(proj_scale)
     summary["proj_ppg"] = round(proj_total / 17, 1) if proj_total else None
+    # The stat line behind that number, per game, for the usage card's own
+    # projected column. Same table, same match, so the points and the carries
+    # cannot describe two different players.
+    summary["proj_usage"] = _espn_projected_usage(
+        conn, player_id, header["name"], header["position"], frames.draft_season)
     summary["proj_delta"] = (round(summary["proj_ppg"] - summary["w_ppg"], 1)
                              if summary["proj_ppg"] is not None and summary["w_ppg"] is not None
                              else None)
