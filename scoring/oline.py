@@ -43,6 +43,19 @@ _SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
 # a garbage-time snap the summer before nflverse marks his rookie season.
 _ROOKIE_SEASON_SLACK = 1
 
+# How many seasons of daylight it takes to call a same-name collision.
+#
+# Eight is about the length of a career, and it is chosen against both sides
+# of the evidence rather than picked round. The three real collisions this
+# exists for clear it easily: Aaron Jones by 29 seasons, Marvin Harrison Jr.
+# by 28, DJ Moore by 9. The case that must STAY ambiguous is the one
+# tests/test_oline.py builds -- a 2022 pfr debut against a 2015 rookie and a
+# 2021 rookie, a margin of 6 -- because a player seven years into his career
+# really could be taking those snaps, and there is no father-and-son story to
+# tell them apart. Below eight, that fixture starts resolving, which is the
+# guess this whole path refuses to make.
+_ERA_GAP = 8
+
 # Continuity is the best-documented public predictor of line quality (see
 # `_continuity`); availability is the user's explicitly-requested
 # first-class output and gets nearly as much weight. `returning` and
@@ -152,6 +165,42 @@ def reconcile_pfr_to_gsis(conn, *, positions=OL_SNAP_POSITIONS,
     counts = matched.groupby("pfr_player_id")["gsis_id"].nunique()
     unique_ids = counts[counts == 1].index
     out = matched[matched["pfr_player_id"].isin(unique_ids)][["pfr_player_id", "gsis_id"]]
+
+    # The plausibility test above is one-sided: it rejects a candidate whose
+    # career began AFTER these snaps, and never one whose career began far
+    # too early. So a son collides with his father and both survive as
+    # "plausible" -- Marvin Harrison Jr.'s 2024 snaps matched Marvin Harrison
+    # (rookie 1996) as readily as himself, and the pair was dropped as
+    # ambiguous. Measured on data/nfl.duckdb that cost 7.6% of recent
+    # player-seasons their per-game snap share, including Aaron Jones
+    # (against a 1988 namesake), DJ Moore (a 2009 D.J. Moore) and Harrison.
+    # The card showed an em dash per week and said nothing about why.
+    #
+    # So: when several candidates survive, the one whose career actually
+    # explains these snaps wins -- but only when it is not a close call.
+    # `_ERA_GAP` seasons of daylight between the best candidate and the next
+    # is the bar, which the three above clear by 29, 9 and 28. Anything
+    # tighter stays dropped, because the docstring's promise holds: a real
+    # same-era collision (two guards named Michael Jordan) is not something
+    # to guess at, and a wrong per-game snap share is a lie told seventeen
+    # times rather than a gap admitted once.
+    contested = matched[~matched["pfr_player_id"].isin(unique_ids)].copy()
+    if not contested.empty:
+        contested["_distance"] = (contested["first_season"]
+                                  - contested["rookie_season"]).abs()
+        contested = contested.sort_values(["pfr_player_id", "_distance"])
+        # `cumcount` rather than `nth`: the group key's placement in what
+        # `nth` returns has moved between pandas versions, and this is a
+        # position within an already-sorted frame either way.
+        contested["_place"] = contested.groupby("pfr_player_id").cumcount()
+        best = contested[contested["_place"] == 0].set_index("pfr_player_id")
+        runner = contested[contested["_place"] == 1].set_index("pfr_player_id")
+        margin = runner["_distance"] - best["_distance"].reindex(runner.index)
+        decided = margin[margin >= _ERA_GAP].index
+        resolved = (best.loc[best.index.isin(decided), ["gsis_id"]]
+                    .reset_index()[["pfr_player_id", "gsis_id"]])
+        out = pd.concat([out, resolved], ignore_index=True)
+
     return out.drop_duplicates().reset_index(drop=True)
 
 

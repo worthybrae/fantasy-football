@@ -325,3 +325,42 @@ def test_line_quality_empty_db_returns_correct_columns(tmp_path):
     q = oline.line_quality(conn, SEASON)
     assert q.empty
     assert list(q.columns) == oline.LINE_QUALITY_COLUMNS
+
+
+def _seed_a_father_and_a_son(tmp_path):
+    """The collision that folding a suffix creates.
+
+    `_norm_name` strips "Jr." so a son folds onto his father, and the
+    plausibility test only rules out candidates whose careers began too LATE
+    -- a 1996 rookie is never too old for a 2024 snap row. Both survive, the
+    pair reads as ambiguous, and the son loses his per-game snap share.
+    """
+    conn = get_conn(str(tmp_path / "family.duckdb"))
+    write_table(conn, "players", pd.DataFrame([
+        {"gsis_id": "dad", "display_name": "Marvin Harrison",
+         "birth_date": "1972-08-25", "rookie_season": 1996},
+        {"gsis_id": "son", "display_name": "Marvin Harrison Jr.",
+         "birth_date": "2002-08-07", "rookie_season": 2024},
+    ]))
+    write_table(conn, "snap_counts", pd.DataFrame(
+        _snap_rows("HarrMa09", "Marvin Harrison Jr.", "ARI", 2024, [1, 2], 60, 1.0)))
+    return conn
+
+
+def test_reconcile_resolves_a_son_from_his_father(tmp_path):
+    """Twenty-eight seasons apart is not two men who could both have taken
+    these snaps. The one whose career actually explains them wins."""
+    mapping = oline.reconcile_pfr_to_gsis(_seed_a_father_and_a_son(tmp_path),
+                                          positions=None)
+    assert dict(zip(mapping["pfr_player_id"], mapping["gsis_id"])) == {
+        "HarrMa09": "son"}
+
+
+def test_reconcile_still_refuses_a_close_call(tmp_path):
+    """The margin rule only fires on daylight. `_seed_reconciliation`'s
+    SmitJo02 sits 7 and 1 seasons from its two candidates -- a margin of 6,
+    under `_ERA_GAP` -- and a veteran seven years in really could be the man
+    on those snaps. It stays dropped, because a wrong per-game snap share is
+    a lie told every week rather than a gap admitted once."""
+    mapping = oline.reconcile_pfr_to_gsis(_seed_reconciliation(tmp_path))
+    assert "SmitJo02" not in set(mapping["pfr_player_id"])
