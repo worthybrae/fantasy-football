@@ -1,0 +1,286 @@
+"""ESPN's public mock-draft lobby: what rooms are open, and how to take a seat.
+
+WHY A LOBBY CLIENT EXISTS AT ALL. `pipeline.mock_backfill` harvests mock
+drafts that were already played by hand and left on disk -- a fixed pile that
+does not grow on its own. The pick model's cold-start prior is fitted on
+about 700 picks from one league of eight people, and E006 measured that a
+corpus that small cannot resolve an effect smaller than roughly r = 0.4. The
+only answer is more drafts, and ESPN gives them away: its mock lobby opens a
+new room every few minutes, all night, for free. This module is the half of
+the farm that finds a room and gets into it; `pipeline.mock_farm` is the half
+that plays it and writes it down.
+
+EVERY ENDPOINT HERE WAS PROBED LIVE before it was written, and the findings
+are recorded in this plan's `espn-lobby-intel.md`. Two of them cost a round
+of guessing each and are worth restating where the code is:
+
+  - The directory path segment is the subType NAME, `MOCKDRAFT_LOBBY`, not
+    the numeric id (4). The numeric form does not answer.
+  - The invite POST requires `join=true` in the query string. Without it
+    ESPN returns HTTP 400 with an HTML body and no explanation of what was
+    wrong. The body is also a JSON ARRAY, `[{"teamId": -1}]`, not an object,
+    and `-1` means "any open seat".
+
+ROOM SELECTION IS A POLICY, NOT A PREFERENCE. `pick_room` filters to 8-team
+PPR snake rooms and nothing else. That is the owner's explicit instruction
+(2026-08-23) and it is load-bearing for the corpus: `scoring.config.
+LEAGUE_TEAMS` is 8, every draft Task 1 harvested is 8x16, and a prior fitted
+over a mixture of 8-, 12- and 20-team rooms is averaging over league shapes
+this tool is never used on. Team count changes who is on the clock at pick
+k, which changes every reach/fall feature the model reads; it is not a
+nuisance parameter.
+
+WHAT THE RANKING IS ACTUALLY FOR. Survivors are ordered by `teamsJoined`
+descending before anything else. A room at 6/8 is six humans waiting for a
+draft to fill, and their picks are the signal the corpus wants. A room at 0/8
+fills with ESPN's own autodraft engine and teaches us nothing but ADP read
+back to us. Joining the fuller room is also the only decent thing to do with
+a seat that a real person might otherwise be waiting on -- the measured
+supply is a new 8-team PPR room every ~5 minutes, so there is no scarcity
+argument for squatting an empty one.
+"""
+import json
+import time
+from urllib.parse import quote
+
+from pipeline.draft_socket import DRAFT_SECURITY_HEADERS
+from pipeline.espn_league import BASE
+
+# The write host is a DIFFERENT hostname from `espn_league.BASE`'s read host,
+# and that is not cosmetic: `lm-api-reads` answers the invite POST with an
+# error. Both were probed; only this one accepts the join.
+WRITES_BASE = "https://lm-api-writes.fantasy.espn.com/apis/v3/games/ffl"
+
+# The lobby's own subType, by name. See the module docstring: the numeric id
+# (4) does not work in this path position.
+MOCK_SUBTYPE = "MOCKDRAFT_LOBBY"
+
+# The room shape the corpus is being built out of. See the module docstring
+# for why this is a policy rather than a default -- changing either number
+# means the drafts recorded after the change are not comparable with the ones
+# recorded before it.
+FARM_LEAGUE_SIZE = 8
+FARM_DRAFT_TYPE = "SNAKE"
+FARM_RANK_TYPE = "PPR"
+# ESPN stat id 53 is receptions. A room's `rankType` says "PPR" and its
+# `scoringItemStatIds` says whether receptions are actually scored, and both
+# are checked rather than either alone: they agreed in every one of the 234
+# rows observed, which is exactly why disagreement would be worth hearing
+# about, and a room whose name says PPR while its scoring omits receptions
+# would fill the corpus with standard-scoring behaviour under a PPR label.
+RECEPTION_STAT_ID = 53
+
+# How far ahead of `draftDate` a room has to be to be worth joining, and how
+# far ahead is too far.
+#
+# The floor: joining, fetching the room's settings and opening the socket is
+# a handful of seconds, and a room whose clock starts while that is still in
+# flight costs the first pick or two. `draftAvailableDate` is ~90s before
+# `draftDate` (measured), so a 60s floor also lands inside the window where
+# the room is actually enterable rather than merely listed.
+#
+# The ceiling: a seat held for half an hour before the draft starts is a seat
+# a person cannot use, and it is dead time for a loop whose whole job is
+# volume. At the measured supply (a new 8-team PPR room every ~5 minutes) a
+# 15-minute window always holds several rooms, so nothing is given up.
+MIN_LEAD_SECONDS = 60
+MAX_LEAD_SECONDS = 900
+
+# PRO and EXPERT rooms before BEGINNER, as the second sort key. Not a claim
+# that beginners draft badly -- it is that the tool is used against the
+# league the owner actually plays in, and a corpus weighted toward rooms of
+# people who have drafted before is a closer population to that. Ranked
+# lowest-first (see `_rank_key`), so smaller sorts earlier; an
+# experienceType ESPN has never been observed sending falls between the two
+# known tiers rather than being dropped.
+EXPERIENCE_ORDER = {"EXPERT": 0, "PRO": 0, "BEGINNER": 2}
+_UNKNOWN_EXPERIENCE = 1
+
+
+def lobby_url(season: int) -> str:
+    """The mock-draft directory for a season."""
+    return f"{BASE}/seasons/{int(season)}/leaguedirectory/{MOCK_SUBTYPE}"
+
+
+def invite_url(league_id, swid: str, season: int) -> str:
+    """The invite POST that takes a seat in a room.
+
+    `join=true` is required (see the module docstring). `swid` is
+    percent-encoded because the cookie's own value carries braces --
+    `{8491403C-...}` -- which are not legal in a query string unescaped;
+    `quote` with an empty `safe` escapes them rather than passing them
+    through, which is the difference between a 201 and an argument ESPN
+    silently reads as something else.
+    """
+    return (f"{WRITES_BASE}/seasons/{int(season)}/segments/0/leagues/"
+            f"{league_id}/invites?memberId={quote(str(swid), safe='')}"
+            "&join=true")
+
+
+def _as_json(body):
+    """A parsed body, whether the injected transport handed back text or
+    already-decoded JSON.
+
+    Same seam and the same tolerance as `draft_socket.draft_security_token`:
+    `http_fetch` returns `response.text`, a test hands back a list or dict
+    directly, and neither caller should have to care which.
+    """
+    if isinstance(body, (list, dict)):
+        return body
+    return json.loads(body)
+
+
+def list_mock_leagues(fetch, season: int) -> list:
+    """Every room ESPN's mock lobby is currently advertising.
+
+    `fetch(url) -> body` is injected -- the same testable seam
+    `draft_socket.draft_security_token` uses, so nothing in this module
+    imports httpx or touches the network in a test.
+
+    Returns the rows verbatim. Filtering belongs to `pick_room`, which is
+    where the policy lives; a caller that wants to count what the lobby is
+    serving (how many 12-team rooms, how many already drafting) needs the
+    unfiltered list and there is no reason to make it fetch twice.
+
+    Raises rather than returning [] when the body is not a JSON array. An
+    empty lobby and an expired `espn_s2` are different situations with the
+    same shape from a caller's point of view, and only one of them is fixed
+    by waiting -- so the one that is not must be loud.
+    """
+    payload = _as_json(fetch(lobby_url(season)))
+    if not isinstance(payload, list):
+        raise ValueError(
+            f"ESPN's mock lobby returned {type(payload).__name__}, not a "
+            "list of rooms -- the espn_s2/SWID cookies may have expired, or "
+            f"ESPN has changed this endpoint (got {str(payload)[:200]!r})")
+    return payload
+
+
+def is_farmable(row: dict, now_ms: float,
+                min_lead_seconds: float = MIN_LEAD_SECONDS,
+                max_lead_seconds: float = MAX_LEAD_SECONDS) -> bool:
+    """Whether one directory row is a room this farm should play.
+
+    Every clause is required; see the module docstring for the reasoning
+    behind the shape filters and the two lead-time bounds. `.get` throughout
+    rather than `[]`: a row missing a field it has always carried is a room
+    we know less about than the policy requires, which is a reason to skip
+    it, not to raise out of a filter.
+    """
+    if row.get("leagueSize") != FARM_LEAGUE_SIZE:
+        return False
+    if row.get("draftType") != FARM_DRAFT_TYPE:
+        return False
+    if row.get("rankType") != FARM_RANK_TYPE:
+        return False
+    if RECEPTION_STAT_ID not in (row.get("scoringItemStatIds") or []):
+        return False
+    if row.get("full"):
+        return False
+    if row.get("draftInProgress"):
+        return False
+    draft_date = row.get("draftDate")
+    if not draft_date:
+        return False
+    lead = (float(draft_date) - float(now_ms)) / 1000.0
+    return min_lead_seconds <= lead <= max_lead_seconds
+
+
+def _rank_key(row: dict) -> tuple:
+    """Sort key for a survivor, lowest first.
+
+    `-teamsJoined` first, so the fullest room wins -- the single most
+    important ordering key, and the reason is in the module docstring: a full
+    room is humans drafting, an empty one is ESPN's autodraft engine
+    reflecting ADP back at us. Then experience tier, then soonest start so
+    the loop is idle for as little as possible.
+    """
+    return (
+        -int(row.get("teamsJoined") or 0),
+        EXPERIENCE_ORDER.get(row.get("experienceType"), _UNKNOWN_EXPERIENCE),
+        float(row.get("draftDate") or 0),
+    )
+
+
+def rank_rooms(rows, now_ms: float | None = None, exclude=(),
+               min_lead_seconds: float = MIN_LEAD_SECONDS,
+               max_lead_seconds: float = MAX_LEAD_SECONDS) -> list:
+    """The farmable rooms among `rows`, best first.
+
+    `exclude` is the set of league ids this process has already tried and
+    should not try again -- a room whose join failed, or one already played.
+    ESPN keeps a room in the directory after we have taken a seat in it, so
+    without this the loop would rank its own room top (its `teamsJoined` just
+    went up by one) and try to join it a second time.
+    """
+    now_ms = time.time() * 1000 if now_ms is None else now_ms
+    skip = {str(x) for x in exclude}
+    keep = [r for r in rows
+            if str(r.get("leagueId")) not in skip
+            and is_farmable(r, now_ms, min_lead_seconds, max_lead_seconds)]
+    return sorted(keep, key=_rank_key)
+
+
+def pick_room(rows, now_ms: float | None = None, exclude=(),
+              min_lead_seconds: float = MIN_LEAD_SECONDS,
+              max_lead_seconds: float = MAX_LEAD_SECONDS) -> dict | None:
+    """The single best room to join right now, or None if the lobby has
+    nothing that fits. None is an ordinary outcome -- the lobby serves rooms
+    in batches, so a poll landing between batches sees no room inside the
+    lead-time window -- and the caller's answer is to wait and poll again,
+    not to relax the filter.
+    """
+    ranked = rank_rooms(rows, now_ms, exclude, min_lead_seconds,
+                        max_lead_seconds)
+    return ranked[0] if ranked else None
+
+
+def join(post, league_id, swid: str, season: int) -> int:
+    """Take a seat in a room. Returns the team id ESPN assigned.
+
+    `post(url, payload) -> body` is injected, mirroring the `fetch` seam
+    above. The payload is a JSON array holding one object with `teamId: -1`
+    ("any open seat") -- both the array wrapper and the sentinel were probed
+    live; neither is a guess.
+
+    The 201 response carries the assignment as `[{"isDeleted": false,
+    "teamId": 7}]`, and that value is READ, never assumed. A wrong team id
+    mints a socket URL for somebody else's seat, and the failure would show
+    up as a draft in which our picks never land rather than as an error here.
+    A response that does not carry one raises, for the same reason.
+    """
+    body = _as_json(post(invite_url(league_id, swid, season), [{"teamId": -1}]))
+    rows = body if isinstance(body, list) else [body]
+    for row in rows:
+        if isinstance(row, dict) and row.get("teamId") is not None:
+            team_id = int(row["teamId"])
+            if team_id > 0:
+                return team_id
+    raise ValueError(
+        f"ESPN accepted the join for league {league_id} but did not say "
+        f"which seat: {str(body)[:200]!r}")
+
+
+def http_poster(cookies: dict):
+    """A `post(url, payload) -> body_text` callable hitting ESPN over httpx.
+
+    The counterpart to `draft_socket.http_fetch`, and deliberately the same
+    shape: headers are that module's already-verified `DRAFT_SECURITY_HEADERS`
+    plus the `content-type: application/json` this endpoint needs, cookies are
+    the saved `espn_s2`/`SWID`, and the return value is the raw text so the
+    parsing stays in `join` where a test can reach it.
+
+    httpx is already a project dependency; nothing new is required to make
+    one POST with two cookies.
+    """
+    import httpx
+
+    headers = dict(DRAFT_SECURITY_HEADERS)
+    headers["content-type"] = "application/json"
+
+    def post(url: str, payload):
+        response = httpx.post(url, cookies=cookies, headers=headers,
+                              json=payload, timeout=15.0)
+        response.raise_for_status()
+        return response.text
+    return post
