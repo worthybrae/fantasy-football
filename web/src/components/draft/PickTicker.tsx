@@ -1,23 +1,43 @@
 import type { ReactNode } from 'react'
 import type { BoardCell, BoardPlayer, LiveBoard } from '../../api'
 
-// How far past his ADP a pick landed: >0 he FELL that many slots (a steal),
-// <0 he went that many early (a reach). Same number, same words and the same
-// two colours the snake board's cells already use for it -- `value` is
-// computed once in api/live.py and both views read it, so the rail and the
-// grid cannot disagree about whether a pick was a bargain.
+// The one number in this strip worth raising a voice about.
 //
-// Nothing at all when there is no ADP to compare against, or when a pick
-// landed exactly on it: a bare "0" is a fact about arithmetic rather than
-// about the draft.
+// `value` is where the pick landed against the market: >0 he FELL that many
+// slots, <0 somebody jumped him. Computed once in api/live.py, so the rail and
+// the snake board's cells cannot disagree about whether a pick was a bargain.
+//
+// UNDER TEN SLOTS IT DRAWS NOTHING. Most picks land about where the market
+// said, and a strip that marks every one of them is a strip that marks
+// nothing -- six entries of coloured numbers read as an alarm rather than as
+// news, which is exactly what it did. Ten either way is the move you would
+// say out loud at a real table.
+//
+// Past sixty the magnitude has stopped meaning anything -- a rookie
+// quarterback whose consensus rank is near 500 comes back as -215 -- so it
+// clamps and the arrow carries it. One number like that in the row otherwise
+// sets the width and the volume of every entry beside it.
+const CRAZY_SLOTS = 10
+const CLAMP_SLOTS = 60
+
 function adpDelta(value: number | null | undefined): ReactNode {
-  if (value === null || value === undefined || Math.round(value) === 0) return null
-  const steal = value > 0
+  if (value === null || value === undefined) return null
+  const slots = Math.round(value)
+  if (Math.abs(slots) < CRAZY_SLOTS) return null
+  const steal = slots > 0
+  const size = Math.abs(slots)
+  const shown = size <= CLAMP_SLOTS ? String(size) : `${CLAMP_SLOTS}+`
   return (
-    <span className={`pick-ticker-adp board-cell-adp ${steal ? 'is-steal' : 'is-reach'}`}
-          title={steal ? `Fell ${Math.round(value)} picks past his ADP`
-            : `Taken ${Math.abs(Math.round(value))} picks early`}>
-      {steal ? `+${Math.round(value)}` : Math.round(value)}
+    <span
+      className={`pick-ticker-adp ${steal ? 'is-steal' : 'is-reach'}`}
+      title={steal ? `Fell ${shown} picks past his ADP`
+        : `Taken ${shown} picks before his ADP`}
+    >
+      {/* The glyph is the direction and the number is the size, in that
+          order, because at the edge of an eye reading a ranked list the
+          direction is the whole message. */}
+      <span aria-hidden="true">{steal ? '\u25b2' : '\u25bc'}</span>
+      {shown}
     </span>
   )
 }
@@ -102,18 +122,20 @@ export default function PickTicker({ board, onOpenPlayer }: PickTickerProps) {
                       <img className="pick-ticker-face" src={cell.player.headshot}
                            alt="" width={30} height={30} loading="lazy" />
                     )}
-                    <span className="pick-ticker-no mono">{cell.overall}</span>
-                    {posBadge(cell.player.position)}
-                    {/* Stacked, not in a row. Sharing one line, the name and
-                        the team each got half the width and both ellipsised
-                        -- "Bijan R..." next to "Tristan's Tal..." names
-                        neither the player nor the manager. Two lines give
-                        each of them the whole entry to use. */}
+                    {/* The first line is the name and nothing else, so a
+                        scan down the rail reads names. Everything that
+                        qualifies it -- which pick, which position, whose
+                        team, and how far off the market it landed -- sits on
+                        a quieter second line underneath. */}
                     <span className="pick-ticker-who">
                       <span className="pick-ticker-name">{cell.player.name}</span>
-                      <span className="pick-ticker-team">{team}</span>
+                      <span className="pick-ticker-detail">
+                        <span className="mono pick-ticker-no">{cell.overall}</span>
+                        {posBadge(cell.player.position)}
+                        <span className="pick-ticker-team">{team}</span>
+                        {adpDelta(cell.player.value)}
+                      </span>
                     </span>
-                    {adpDelta(cell.player.value)}
                   </button>
                 ) : (
                   <span className="pick-ticker-pick" aria-label={label}>
@@ -124,18 +146,20 @@ export default function PickTicker({ board, onOpenPlayer }: PickTickerProps) {
                       <img className="pick-ticker-face" src={cell.player.headshot}
                            alt="" width={30} height={30} loading="lazy" />
                     )}
-                    <span className="pick-ticker-no mono">{cell.overall}</span>
-                    {posBadge(cell.player.position)}
-                    {/* Stacked, not in a row. Sharing one line, the name and
-                        the team each got half the width and both ellipsised
-                        -- "Bijan R..." next to "Tristan's Tal..." names
-                        neither the player nor the manager. Two lines give
-                        each of them the whole entry to use. */}
+                    {/* The first line is the name and nothing else, so a
+                        scan down the rail reads names. Everything that
+                        qualifies it -- which pick, which position, whose
+                        team, and how far off the market it landed -- sits on
+                        a quieter second line underneath. */}
                     <span className="pick-ticker-who">
                       <span className="pick-ticker-name">{cell.player.name}</span>
-                      <span className="pick-ticker-team">{team}</span>
+                      <span className="pick-ticker-detail">
+                        <span className="mono pick-ticker-no">{cell.overall}</span>
+                        {posBadge(cell.player.position)}
+                        <span className="pick-ticker-team">{team}</span>
+                        {adpDelta(cell.player.value)}
+                      </span>
                     </span>
-                    {adpDelta(cell.player.value)}
                   </span>
                 )}
               </li>

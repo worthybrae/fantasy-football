@@ -775,13 +775,32 @@ td:first-child {
 
 /* The freshest pick, and your own picks. Both are static tints rather than
    a flash, for the same reason the strip does not scroll. */
-.pick-ticker-item.is-newest /* Sits at the end of the entry, after the two stacked lines it comments on.
-   `margin-left: auto` so it hugs the right edge whatever the name did. */
+.pick-ticker-item.is-newest /* The detail line: which pick, which position, whose team, and how far off
+   the market it landed. Everything that qualifies the name above it. */
+.pick-ticker-detail {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* Direction first, size second, and only from ten slots out (PickTicker.tsx
+   decides that). No box and no background: the position tag beside it is
+   already a coloured object, and two of them on one line was the strip
+   reading as an alarm. */
 .pick-ticker-adp {
   flex-shrink: 0;
-  margin-left: auto;
-  padding-left: var(--space-2);
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
 }
+
+.pick-ticker-adp.is-steal { color: var(--ok); }
+.pick-ticker-adp.is-reach { color: var(--fail); }
 
 .pick-ticker-name {
   color: var(--text-1);
@@ -822,8 +841,15 @@ button.pick-ticker-pick:hover {
 
 .pick-ticker-no {
   flex-shrink: 0;
-  font-size: var(--text-xs);
+  font-size: 10px;
   color: var(--text-3);
+}
+
+/* A step down from the table's tag: this line is the quiet one. */
+.pick-ticker-detail .pos-badge {
+  min-width: 26px;
+  padding: 1px 5px;
+  font-size: 10px;
 }
 
 /* The name over the team, each with the whole entry's width. Side by side
