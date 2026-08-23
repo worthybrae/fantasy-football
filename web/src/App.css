@@ -5338,3 +5338,609 @@ button.pp-pop-comp:focus-visible {
   background: color-mix(in srgb, var(--accent) 22%, var(--bg-1));
   color: var(--accent);
 }
+
+/* ==========================================================================
+   Who made the pick
+
+   An extension of the draft board grid above, and the page that exists to
+   read it (/mocks). The farm joins public ESPN mock drafts, and most of the
+   seats in one are not people: ESPN fills a room with computer teams, and
+   the people who ARE there wander off and get autopicked for. One real
+   8-team room went 94 machine picks out of 128. A board that does not say
+   so looks exactly like a room full of drafters and is worth studying far
+   less than it appears.
+
+   So the shading is not decoration, it is the finding, and it is built out
+   of LIGHT rather than out of hue: a human pick is the brightest thing on
+   the board and a machine pick sinks toward the page background, which is
+   what makes the ratio legible from across the room without reading a
+   single name. Hue was not available for this anyway -- --accent is
+   reserved for interactive state, --ok/--fail have fixed meanings, and the
+   position hues are already spent on positions (see index.css) -- and it
+   would have been the wrong tool regardless: five hues is a code to be
+   memorised, one brightness ramp is a picture.
+
+   The two machine states are NOT just two dimnesses, because they answer
+   different questions:
+     auto   -- a person WAS here and left. Knocked back, but hatched: the
+               diagonal texture reads as a struck-through seat, a room that
+               had people in it.
+     engine -- nobody was ever here. Not textured, but drained: the darkest
+               fill on the board (below the panel it sits on, so the cell
+               reads as a hole in the grid) and the position badge loses its
+               colour entirely. Colour drains out of a column ESPN was
+               always playing.
+   So a room that emptied out looks striped, and a room that was never full
+   looks punched through, which is the distinction the reader actually cares
+   about.
+
+   `us` is our own bot's seat. It is neither signal nor ESPN -- it drafts
+   semi-randomly on purpose -- so it takes the accent tint the board already
+   gives our column rather than a place on the human/machine ramp.
+   `unknown` gets nothing at all: no glyph, no tint, the plain cell the
+   /draft board has always drawn. Every draft recorded before the farm
+   labelled picks is unknown, as is every harvested one, and a board with no
+   labels must not look like a board full of people.
+
+   A glyph rides in each labelled cell beside the ADP delta -- filled, half,
+   hollow circle for human, auto, engine, a diamond for us -- so once you
+   look straight at a cell it says which state it is in without a colour
+   judgement. See DraftBoardGrid's MAKER_MARK.
+   -------------------------------------------------------------------- */
+
+/* -- human: the signal. Lifted off the panel rather than tinted, plus a
+   bright rule down the cell's leading edge -- a run of them in one column
+   joins into a line you can find without reading. -- */
+.board-cell-filled.board-cell-by-human {
+  background: color-mix(in srgb, var(--text-1) 8%, var(--bg-1));
+}
+
+.board-cell-filled.board-cell-by-human:hover {
+  background: color-mix(in srgb, var(--text-1) 15%, var(--bg-1));
+}
+
+/* ::after, not ::before -- `.board-cell-clock::before` is the on-the-clock
+   overlay and must keep painting over whatever the cell already carries. */
+.board-cell-by-human::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--text-1);
+  opacity: 0.65;
+  pointer-events: none;
+}
+
+/* -- auto: a seat that had somebody in it. Sunk below the panel and
+   hatched. -- */
+.board-cell-filled.board-cell-by-auto {
+  background: color-mix(in srgb, var(--bg-0) 45%, var(--bg-1));
+}
+
+.board-cell-filled.board-cell-by-auto:hover {
+  background: color-mix(in srgb, var(--bg-0) 20%, var(--bg-2));
+}
+
+.board-cell-by-auto::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    135deg,
+    transparent 0 4px,
+    color-mix(in srgb, var(--text-3) 55%, transparent) 4px 5px
+  );
+  opacity: 0.55;
+}
+
+.board-cell-by-auto .board-cell-name {
+  color: var(--text-2);
+  font-weight: 500;
+}
+
+.board-cell-by-auto .pos-badge,
+.board-cell-by-auto .board-cell-adp {
+  opacity: 0.55;
+}
+
+/* -- engine: a seat nobody was ever in. Darker than the page's own panel,
+   flat, and with the position colour drained out of it -- the one state on
+   the board that carries no hue at all. -- */
+.board-cell-filled.board-cell-by-engine {
+  background: var(--bg-0);
+}
+
+.board-cell-filled.board-cell-by-engine:hover {
+  background: color-mix(in srgb, var(--bg-2) 55%, var(--bg-0));
+}
+
+.board-cell-by-engine .board-cell-name {
+  color: var(--text-3);
+  font-weight: 500;
+}
+
+.board-cell-by-engine .pos-badge,
+.board-cell-by-engine .board-cell-adp {
+  filter: grayscale(1);
+  opacity: 0.5;
+}
+
+.board-cell-by-engine .board-cell-team {
+  opacity: 0.6;
+}
+
+/* -- us: the same accent the board already spends on our own column, so our
+   seat reads as ours and not as a verdict on the room. -- */
+.board-cell-filled.board-cell-by-us {
+  background: color-mix(in srgb, var(--accent) 20%, var(--bg-1));
+}
+
+.board-cell-filled.board-cell-by-us:hover {
+  background: color-mix(in srgb, var(--accent) 30%, var(--bg-2));
+}
+
+.board-cell-by-us::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--accent);
+  pointer-events: none;
+}
+
+.board-cell-by-us .board-cell-name {
+  color: var(--text-1);
+}
+
+/* The per-cell glyph, and the same glyph in the /mocks key. Grouped so the
+   two can never drift into meaning different things. */
+.board-by-mark,
+.mocks-key-mark {
+  flex-shrink: 0;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.board-by-mark.is-human,
+.mocks-key-mark.is-human { color: var(--text-1); }
+
+.board-by-mark.is-auto,
+.mocks-key-mark.is-auto { color: var(--text-2); }
+
+.board-by-mark.is-engine,
+.mocks-key-mark.is-engine { color: var(--text-3); }
+
+.board-by-mark.is-us,
+.mocks-key-mark.is-us { color: var(--accent); }
+
+/* -- column headers: did anyone ever sit here at all --
+
+   The same filled/hollow circle the cells use, so the header answers for
+   the whole column what a cell answers for one pick -- without scanning
+   sixteen rounds to find out. A seat nobody ever took also has its header
+   knocked back, `:not(.board-col-mine)` so our own column keeps its accent
+   whatever the farm recorded about it (our bot is not a person, and a
+   header that lost its tint over that would be reporting the wrong thing).
+   -------------------------------------------------------------------- */
+.board-col-owner {
+  flex-shrink: 0;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--text-3);
+}
+
+.board-col-owner.is-owned {
+  color: var(--text-1);
+}
+
+.board-col-header.board-col-vacant:not(.board-col-mine) {
+  background: color-mix(in srgb, var(--bg-0) 50%, var(--bg-1));
+}
+
+.board-col-header.board-col-vacant:not(.board-col-mine) .board-col-name {
+  color: var(--text-3);
+  font-weight: 500;
+}
+
+/* ==========================================================================
+   Mock drafts (/mocks)
+
+   The farm's own record: every ESPN mock draft it has joined, live or
+   finished, with the selected one's board beside the list. Same shell as
+   the draft room (`.draft-topbar` and friends are reused as-is) because it
+   is the same tool looking at the same kind of thing, just afterwards.
+   -------------------------------------------------------------------- */
+
+.mocks-page {
+  height: 100svh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-0);
+  color: var(--text-2);
+  text-align: left;
+}
+
+.mocks-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+
+.mocks-refresh {
+  padding: 3px 10px;
+  font-size: var(--text-xs);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.mocks-refresh:hover {
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+.mocks-refresh:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 2px;
+}
+
+/* Two regions, each with its own scroll -- same call the draft room makes:
+   the page itself never scrolls, so the list of rooms stays put while a
+   sixteen-round board is read beside it. */
+.mocks-body {
+  display: flex;
+  flex-grow: 1;
+  min-height: 0;
+}
+
+.mocks-list {
+  flex-shrink: 0;
+  width: 320px;
+  overflow-y: auto;
+  background: var(--bg-1);
+  border-right: 1px solid var(--border);
+}
+
+.mocks-empty {
+  display: block;
+  padding: var(--space-4);
+  line-height: 1.5;
+}
+
+.mocks-row {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  width: 100%;
+  padding: 10px var(--space-3);
+  font: inherit;
+  text-align: left;
+  color: var(--text-2);
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  /* Reserved on every row, not added to the active one, so selecting a room
+     never shifts the text of the list sideways by 2px. */
+  border-left: 2px solid transparent;
+  cursor: pointer;
+}
+
+.mocks-row:hover {
+  background: var(--bg-2);
+}
+
+.mocks-row.is-active {
+  background: var(--bg-2);
+  border-left-color: var(--accent);
+}
+
+.mocks-row:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: -2px;
+}
+
+.mocks-row-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+/* The ESPN league id -- the only name one of these rooms has. */
+.mocks-row-id {
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+.mocks-row.is-active .mocks-row-id {
+  color: var(--accent);
+}
+
+.mocks-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  padding: 2px 7px;
+  border-radius: 10px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+/* Same --ok/neutral vocabulary the room's own connection pill uses: a room
+   still playing is live, a finished one is not a failure. */
+.mocks-pill.is-live {
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+  color: var(--ok);
+}
+
+.mocks-pill.is-done {
+  background: var(--bg-2);
+  color: var(--text-3);
+}
+
+.mocks-pill-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+  animation: mocks-live-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes mocks-live-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+/* The word LIVE and the dot's colour already carry it; the pulse is the
+   part that can be dropped without losing the state. */
+@media (prefers-reduced-motion: reduce) {
+  .mocks-pill-dot {
+    animation: none;
+  }
+}
+
+.mocks-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+/* A meter, not a rule. The track is a tint rather than a darker fill for
+   exactly that reason: at 3px across the full width of a row, anything with
+   an edge to it reads as a divider and cuts the row in half. */
+.mocks-row-bar {
+  display: block;
+  height: 3px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--text-3) 22%, transparent);
+  overflow: hidden;
+}
+
+.mocks-row-bar-fill {
+  display: block;
+  height: 100%;
+  background: color-mix(in srgb, var(--text-2) 55%, transparent);
+}
+
+.mocks-row.is-active .mocks-row-bar-fill {
+  background: var(--accent);
+}
+
+.mocks-row-foot {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+/* Bright only when there were people in the room -- the same "light means a
+   person" rule the board's own shading runs on, so the list and the grid
+   say the same thing in the same language. */
+.mocks-row-humans.has-humans {
+  color: var(--text-1);
+  font-weight: 600;
+}
+
+.mocks-board {
+  flex-grow: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.mocks-board-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-3) var(--space-4) 0;
+}
+
+.mocks-board-title {
+  font-size: var(--text-lg);
+  color: var(--text-1);
+}
+
+.mocks-board-sub {
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+
+/* Not `.draft-error-banner`: that one spans the window under the top bar,
+   and this failure belongs to the board pane only -- the list beside it is
+   still fine and must not look implicated. */
+.mocks-board-error {
+  margin: var(--space-3) var(--space-4) 0;
+  padding: var(--space-2) var(--space-3);
+  background: color-mix(in srgb, var(--fail) 10%, var(--bg-1));
+  border: 1px solid var(--fail);
+  border-radius: var(--radius);
+  font-size: var(--text-sm);
+}
+
+.mocks-grid {
+  padding-top: var(--space-2);
+}
+
+/* -- the tally over the board: the finding as a sentence, as a bar, and as
+   a key -- */
+.mocks-tally {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4) 0;
+}
+
+.mocks-verdict {
+  font-size: var(--text-md);
+  color: var(--text-2);
+}
+
+.mocks-verdict-n {
+  font-family: var(--font-mono);
+  font-size: var(--text-lg);
+  font-weight: 700;
+  color: var(--text-1);
+}
+
+/* Nobody at all. Dimmed rather than dropped -- a zero here is the whole
+   point of the page and has to be readable as a zero. */
+.mocks-verdict-n.is-none {
+  color: var(--text-3);
+}
+
+.mocks-verdict-sep {
+  margin: 0 var(--space-2);
+  color: var(--text-3);
+}
+
+/* The track is the RAISED surface, not the darkest one, so the `engine`
+   segment -- which is deliberately the darkest fill in the whole vocabulary
+   -- still reads as a hole punched in the bar instead of disappearing into
+   an equally dark trough. */
+.mocks-tally-bar {
+  display: flex;
+  height: 10px;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  background: var(--bg-2);
+  overflow: hidden;
+}
+
+/* A single pick in a 240-pick draft still has to be visible. */
+.mocks-tally-seg {
+  min-width: 2px;
+}
+
+/* The fills, shared by the proportion bar and the key's swatches so the two
+   cannot drift. Each one is the flat version of what the matching cell does
+   on the board above: bright for a person, accent for us, hatched for a
+   seat that emptied out, a bordered hole for a seat that was never filled,
+   flat grey for a pick nobody labelled. */
+.by-fill.is-human { background: color-mix(in srgb, var(--text-1) 82%, var(--bg-1)); }
+.by-fill.is-us { background: var(--accent); }
+
+.by-fill.is-auto {
+  background-color: color-mix(in srgb, var(--bg-0) 45%, var(--bg-1));
+  background-image: repeating-linear-gradient(
+    135deg,
+    transparent 0 3px,
+    color-mix(in srgb, var(--text-2) 60%, transparent) 3px 4px
+  );
+}
+
+.by-fill.is-engine {
+  background: var(--bg-0);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.by-fill.is-unknown { background: color-mix(in srgb, var(--text-3) 40%, var(--bg-1)); }
+
+.mocks-key {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  gap: 3px var(--space-4);
+  font-size: var(--text-xs);
+}
+
+.mocks-key-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--text-2);
+}
+
+/* A state with no picks in this draft stays in the key -- the key is a
+   fixed vocabulary, and five entries that come and go per board would have
+   to be relearned every time -- but it steps out of the way. */
+.mocks-key-item.is-none {
+  opacity: 0.45;
+}
+
+.mocks-key-swatch {
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+}
+
+.mocks-key-mark {
+  width: 10px;
+  text-align: center;
+}
+
+.mocks-key-name {
+  color: var(--text-1);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.mocks-key-n {
+  color: var(--text-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.mocks-key-note {
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Narrow: the list goes over the board rather than squeezing it, since the
+   board is the wide thing and already has a horizontal scroller of its own
+   that nobody wants to live in. */
+@media (max-width: 900px) {
+  .mocks-body {
+    flex-direction: column;
+  }
+
+  .mocks-list {
+    width: 100%;
+    max-height: 40%;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+}

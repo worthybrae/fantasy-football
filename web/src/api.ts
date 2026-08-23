@@ -495,6 +495,18 @@ export interface BoardPlayer {
   value: number | null
 }
 
+// Who put a pick on the board. Only a recorded mock draft carries this
+// (see fetchMockBoard) -- ESPN's own draft socket says who is on the clock,
+// not whether a person is behind the seat, so the labels are recorded by
+// the farm as it watches a room, and no room it did not watch can ever be
+// labelled.
+//   human   -- a person chose this
+//   auto    -- the seat HAD a person, but ESPN was picking for them
+//   engine  -- the seat never had a person at all
+//   us      -- our own bot's seat
+//   unknown -- not recorded (every draft from before the farm labelled them)
+export type PickMaker = 'human' | 'auto' | 'engine' | 'us' | 'unknown'
+
 // One landed pick, already placed at its `round`/`slot` by the server --
 // the grid trusts these rather than re-deriving them from `overall` and the
 // team count, so it never has to know this league's snake variant.
@@ -503,6 +515,10 @@ export interface BoardCell {
   round: number
   slot: number
   player: BoardPlayer
+  // ABSENT from /api/live/board, which never labels a pick. Optional rather
+  // than `| undefined` so the live room's own board still typechecks
+  // untouched, and read everywhere as "missing means `unknown`".
+  made_by?: PickMaker
 }
 
 // One column header. `is_me` marks the viewer's own team -- there is
@@ -511,6 +527,11 @@ export interface BoardColumn {
   slot: number
   team_name: string
   is_me: boolean
+  // Whether a person ever sat in this seat, over the whole draft -- true
+  // even if they wandered off and ESPN finished the column for them.
+  // `null` for a draft with no labels at all; ABSENT from /api/live/board,
+  // same as `made_by` above.
+  had_owner?: boolean | null
 }
 
 // Mirrors `LiveState`'s own convention (see its comment above): every field
@@ -818,5 +839,47 @@ export interface LandingPlayer {
 export async function fetchLandingPreview(limit = 12): Promise<{ pool: number; players: LandingPlayer[] }> {
   const res = await fetch(`/api/landing/preview?limit=${limit}`)
   if (!res.ok) throw new Error(`Failed to load the board preview (${res.status})`)
+  return res.json()
+}
+
+// -- the mock draft farm (/mocks) --
+
+// One room the farm has joined: still playing (`live`) or finished
+// (`complete`). `human_seats` is how many of the `teams` seats ever held a
+// person, and is null for a draft recorded before the farm tracked that --
+// the same "not recorded" that BoardCell.made_by spells `unknown`, which is
+// why it is null and not 0: nobody home and nobody counted are different
+// facts. `my_slot` is our own bot's seat.
+export interface MockDraft {
+  id: string
+  league_id: string
+  status: 'live' | 'complete'
+  teams: number
+  rounds: number
+  picks_made: number
+  human_seats: number | null
+  my_slot: number | null
+  started_at: string | null
+}
+
+// Live rooms first, then finished ones, newest first -- the server's own
+// order, kept as it arrives.
+export async function fetchMockDrafts(): Promise<MockDraft[]> {
+  const res = await fetch('/api/mocks')
+  if (!res.ok) {
+    throw new Error(`Failed to load the mock drafts (${res.status}): ${await detailText(res)}`)
+  }
+  const body = await res.json()
+  return Array.isArray(body.drafts) ? body.drafts : []
+}
+
+// The same shape the live room's board comes in, so one grid draws both --
+// plus the `made_by`/`had_owner` labels declared as optional above, which
+// only this endpoint fills in.
+export async function fetchMockBoard(id: string): Promise<LiveBoard> {
+  const res = await fetch(`/api/mocks/${encodeURIComponent(id)}/board`)
+  if (!res.ok) {
+    throw new Error(`Failed to load that draft board (${res.status}): ${await detailText(res)}`)
+  }
   return res.json()
 }

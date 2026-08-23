@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState, type CSSProperties, type FocusEvent, type MouseEvent, type ReactNode } from 'react'
-import type { BoardCell, BoardPlayer, LiveBoard } from '../api'
+import type { BoardCell, BoardPlayer, LiveBoard, PickMaker } from '../api'
 
 // duplicated from LiveDraft.tsx (unexported there): a four-line pure
 // function isn't worth a shared module between the board's two views. The
@@ -8,6 +8,55 @@ import type { BoardCell, BoardPlayer, LiveBoard } from '../api'
 function posBadge(position: string | undefined): ReactNode {
   if (!position) return null
   return <span className={`pos-badge pos-badge-${position.toLowerCase()}`}>{position}</span>
+}
+
+// -- who made the pick --------------------------------------------------
+//
+// Only a recorded mock draft carries these labels (/api/mocks/{id}/board);
+// the live room's own board never does, so `made_by` is undefined there and
+// every helper below reads that exactly as 'unknown' -- no label, no
+// shading, the cell the /draft board has always drawn.
+//
+// The vocabulary is one ramp: how much of a PERSON is behind the seat.
+// Filled circle, half circle, hollow circle -- human, walked away, never
+// there. Our own bot gets a diamond instead of a place on that ramp,
+// because it is not a person and is not ESPN either: it plays semi-randomly
+// on purpose, so its picks say nothing about whether the room was worth
+// anything. The colour and the fill of the cell behind these do the work at
+// a glance (see App.css); the glyph is what settles WHICH state a cell is
+// in once you look straight at it.
+export const MAKER_MARK: Record<Exclude<PickMaker, 'unknown'>, string> = {
+  human: '\u25cf',
+  auto: '\u25d0',
+  engine: '\u25cb',
+  us: '\u25c6',
+}
+
+// Read aloud in the cell's own aria-label, and shown on hover. Written as
+// what happened, not as the label's name -- "auto" means nothing to someone
+// who has not read the legend.
+export const MAKER_LABEL: Record<Exclude<PickMaker, 'unknown'>, string> = {
+  human: 'picked by a person',
+  auto: 'autopicked -- this seat had a person, but ESPN was picking for them',
+  engine: 'picked by ESPN -- this seat never had a person',
+  us: 'picked by our bot',
+}
+
+function isLabelled(made_by: PickMaker | undefined): made_by is Exclude<PickMaker, 'unknown'> {
+  return made_by !== undefined && made_by !== 'unknown'
+}
+
+// The mark rides in the cell's top row beside the ADP delta rather than
+// over the name: the name is the thing being read, and a board where most
+// picks are machine-made would otherwise be a wall of glyphs across the
+// content.
+function makerMark(made_by: PickMaker | undefined): ReactNode {
+  if (!isLabelled(made_by)) return null
+  return (
+    <span className={`board-by-mark is-${made_by}`} title={MAKER_LABEL[made_by]} aria-hidden="true">
+      {MAKER_MARK[made_by]}
+    </span>
+  )
 }
 
 interface HoverInfo {
@@ -166,8 +215,34 @@ export default function DraftBoardGrid({ board, onOpenPlayer }: DraftBoardGridPr
       <div className="board-grid" style={{ gridTemplateColumns: `40px repeat(${teams}, minmax(0, 1fr))` }}>
         <div className="board-corner" />
         {columns.map((col) => (
-          <div key={col.slot} className={`board-col-header${col.is_me ? ' board-col-mine' : ''}`}>
+          <div
+            key={col.slot}
+            className={[
+              'board-col-header',
+              col.is_me ? 'board-col-mine' : '',
+              // Only ever set on a labelled board: `had_owner === false` is
+              // "the farm watched this seat and nobody was ever in it",
+              // which is worth knocking the header back for. Undefined
+              // (the live room) and null (an unlabelled recording) both
+              // leave the header exactly as it was.
+              col.had_owner === false ? 'board-col-vacant' : '',
+            ].filter(Boolean).join(' ')}
+          >
             <span className="board-col-name">{col.team_name}</span>
+            {/* Same filled/hollow circle the cells use, so "a person sat
+                here" reads the same in the header as it does in the column
+                under it -- without having to scan the column to find out. */}
+            {col.had_owner !== undefined && col.had_owner !== null && (
+              <span
+                className={`board-col-owner${col.had_owner ? ' is-owned' : ''}`}
+                title={col.had_owner ? 'a person sat in this seat' : 'nobody ever sat in this seat'}
+              >
+                <span aria-hidden="true">{col.had_owner ? '\u25cf' : '\u25cb'}</span>
+                <span className="sr-only">
+                  {col.had_owner ? 'a person sat in this seat' : 'nobody ever sat in this seat'}
+                </span>
+              </span>
+            )}
             {col.is_me && <span className="board-you-chip">YOU</span>}
           </div>
         ))}
@@ -211,9 +286,14 @@ export default function DraftBoardGrid({ board, onOpenPlayer }: DraftBoardGridPr
                   key={col.slot}
                   type="button"
                   className={['board-cell board-cell-filled',
-                    col.is_me ? 'board-cell-mine' : '', rowClass.trim()]
+                    col.is_me ? 'board-cell-mine' : '',
+                    // Absent on the live room's board (no label, no class),
+                    // so /draft keeps drawing exactly the cell it always has.
+                    isLabelled(cell.made_by) ? `board-cell-by-${cell.made_by}` : '',
+                    rowClass.trim()]
                     .filter(Boolean).join(' ')}
-                  aria-label={`${cell.player.name}, ${cell.player.position}, pick ${cell.round}.${pickInRound}`}
+                  aria-label={`${cell.player.name}, ${cell.player.position}, pick ${cell.round}.${pickInRound}`
+                    + (isLabelled(cell.made_by) ? `, ${MAKER_LABEL[cell.made_by]}` : '')}
                   onClick={() => handleCellClick(cell)}
                   onMouseEnter={(e) => showPopover(cell, e)}
                   onMouseLeave={() => setHover(null)}
@@ -223,6 +303,7 @@ export default function DraftBoardGrid({ board, onOpenPlayer }: DraftBoardGridPr
                   <div className="board-cell-top">
                     {posBadge(cell.player.position)}
                     <span className="board-cell-meta">
+                      {makerMark(cell.made_by)}
                       {adpDelta(cell.player.value)}
                       <span className="board-cell-team mono">{cell.player.team ?? ''}</span>
                     </span>
