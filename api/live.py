@@ -256,11 +256,13 @@ import re
 import threading
 import time
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from websockets.exceptions import ConnectionClosed
 
+from api.custody import establish_custody, require_secure
+from pipeline import credentials as custody
 from pipeline.draft_listener import DraftListener, run_listener
 from pipeline.draft_socket import run_socket_listener
 from pipeline.espn_league import STATE_PATH, parse_league_id
@@ -603,20 +605,32 @@ class ConnectBody(BaseModel):
 class TokenBody(BaseModel):
     """What the bookmarklet delivers.
 
-    Deliberately NOT the account session. `token` is ESPN's per-draft
+    FOUR OF THESE FIVE ARE NOT CREDENTIALS. `token` is ESPN's per-draft
     draftSecurity value -- scoped to this one draft, worthless once it ends --
     and `swid` identifies the account but is not a login credential on its
-    own. The espn_s2 session cookie never reaches here: the bookmarklet uses
-    it only to fetch this token from ESPN (on ESPN's own origin, where the
-    cookie stays) and forwards just the result. So the most this endpoint ever
-    holds is a two-hour nonce, in memory, which is the whole point of doing it
-    this way rather than taking a password.
+    own. That was once the whole story here, and for the single-user local
+    path it still is: a bookmarklet that sends no `espn_s2` leaves this
+    endpoint holding a two-hour nonce in memory, exactly as before.
+
+    `espn_s2` IS the account session, and it is optional for that reason.
+    When it is present the request is no longer "here is a nonce for one
+    draft", it is "here is my ESPN login, keep it" -- so its presence, and
+    nothing else, is what switches on every protection in
+    `pipeline/credentials.py`: the TLS refusal, the encrypted row, the
+    `httpOnly` cookie, the thirty-day reaper. Absent, none of that machinery
+    runs and nothing is written anywhere.
+
+    It is `None`-by-default rather than required because the existing
+    bookmarklet does not send it and must keep working unchanged; a required
+    field would have made this a breaking API change for the one user who
+    already has the bookmark saved.
     """
     leagueId: str
     teamId: str
     swid: str
     token: str
     season: str
+    espn_s2: str | None = None
 
 
 
@@ -3536,7 +3550,8 @@ def register_live_routes(app, conn, db_path):
                                 run_fn, progress=progress)
 
     @app.post("/api/live/connect-token")
-    def live_connect_token(body: TokenBody):
+    def live_connect_token(body: TokenBody, request: Request,
+                           response: Response):
         """Open the draft socket directly, from a token the bookmarklet minted
         in the user's own browser -- no browser window on this machine.
 
@@ -3549,7 +3564,31 @@ def register_live_routes(app, conn, db_path):
         a live board. This is the whole point of the bookmarklet path, and
         the reason the browser-window fallback (`/api/live/connect`) can be
         avoided whenever the drafter can click a bookmark.
+
+        WHEN THE BOOKMARKLET ALSO SENDS `espn_s2`, this endpoint additionally
+        takes custody of the account session: encrypted row, `httpOnly`
+        cookie, thirty-day reaper. See `pipeline/credentials.py` for what that
+        costs and why it is shaped the way it is, and TokenBody above for why
+        the field is optional.
         """
+        # FIRST STATEMENT IN THE HANDLER, before the progress row, before the
+        # validation, before anything that costs time or leaves a trace.
+        #
+        # Two things can put credential material on this wire: an `espn_s2` in
+        # the body on the way in, and the custody cookie on the way back (and
+        # on every later request the browser makes). If either is in play the
+        # connection has to be TLS, and the refusal has to happen before the
+        # work rather than after it -- a request that has already been read
+        # off a plaintext socket cannot be un-transmitted, but it can at least
+        # be refused loudly enough that nobody keeps retrying it.
+        #
+        # A request with NEITHER is the pre-existing single-user path (a draft
+        # nonce, no account session, no cookie) and is left alone: refusing it
+        # over http://localhost would break the owner's own machine to protect
+        # a credential that is not in the request. The guard follows the
+        # credential, not the route.
+        if body.espn_s2 or request.cookies.get(custody.COOKIE_NAME):
+            require_secure(request)
         progress, _seq = _new_progress(token_path=True, league_id=body.leagueId)
         progress.begin("token")
         # NOTHING about this step reaches ESPN: the token is a per-draft nonce
@@ -3616,6 +3655,23 @@ def register_live_routes(app, conn, db_path):
                 my_slot=session.my_slot)
         except OSError:      # noqa: BLE001 -- see above
             pass
+        # CUSTODY, last, deliberately.
+        #
+        # Everything above can still fail -- the league id, the team id, the
+        # session build -- and a connect that ended in a 422 must not leave
+        # this project holding a stranger's ESPN session it never got to use.
+        # Doing it here means the row is written only after the session has
+        # actually been built, and the cookie rides back on that same
+        # response.
+        #
+        # NOT wrapped in a try/except the way save_session_record above is.
+        # That one is best-effort because losing it costs a convenience (an
+        # automatic reconnect after a restart). This one is not: if the
+        # credential cannot be stored, the user must not be told it was, and
+        # the connect screen must not offer a disconnect control for a row
+        # that does not exist. A 503 saying so is the honest answer.
+        if body.espn_s2:
+            establish_custody(request, response, body.swid, body.espn_s2)
         return _launch_listener(work_conn, league_conn, body.leagueId, session,
                                 run_fn, progress=progress)
 

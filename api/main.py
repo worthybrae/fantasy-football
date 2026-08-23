@@ -781,6 +781,19 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
     from api.lobby import register_lobby_routes
     register_lobby_routes(app)
 
+    # Credential custody: the two disconnect controls and the status probe
+    # the connect screen reads. Imported here for the same assembly-seam
+    # reason as the routers above, and given no arguments at all -- it shares
+    # nothing with `conn`, because stored ESPN sessions live in their own
+    # database file (see pipeline/credentials.DEFAULT_DB_PATH for why they
+    # must not ride along in the one that gets copied to seed new leagues).
+    #
+    # Registering the routes does NOT open that file: the store is lazy (see
+    # `default_store`), so a deployment nobody has connected an account to
+    # never creates it, and the test suite never takes its lock.
+    from api.custody import register_custody_routes
+    register_custody_routes(app)
+
     return app
 
 app = create_app()
