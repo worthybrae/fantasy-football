@@ -854,6 +854,20 @@ def _parity_fixture():
         # tier is unknown, which is 0.0 (not "the last one") on both sides.
         "tier": np.array([1.0, 1.0, 4.0, 2.0, 5.0, 3.0,
                           1.0, 3.0, 6.0, 2.0, 7.0, np.nan]),
+        # The ESPN board. `espn_rank` disagrees with `adp_rank` (1..12) so
+        # `board_disagreement` and `espn_list_pos` are not a copy of the
+        # market order, is set on the full twelve including the two taken WRs
+        # so a wrong-slice `_live_features` is caught, and puts DST's rank at
+        # NaN (ESPN's PPR list never ranks a defense) so the neutral path is
+        # live on a real position. `espn_proj` carries a NaN inside the TE
+        # group (players 3 and 9 are both TE and available) so
+        # `espn_proj_dropoff`'s unknown-projection path is exercised on both
+        # sides too, and differs from `points` so a column read off the wrong
+        # projection would still be caught.
+        "espn_rank": np.array([6.0, 1.0, 3.0, 9.0, 44.0, np.nan,
+                               2.0, 5.0, 60.0, 12.0, 4.0, 8.0]),
+        "espn_proj": np.array([298.0, 279.0, 262.0, 241.0, 128.0, 101.0,
+                               276.0, 249.0, 309.0, np.nan, 266.0, 236.0]),
     }
 
     pool = SimPool(

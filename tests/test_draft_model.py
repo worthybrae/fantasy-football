@@ -958,6 +958,18 @@ def _shape_pool():
     pool["durability"] = [91.0, 44.0, np.nan, 67.0, 55.0]
     pool["proj_change"] = [1.4, -3.2, 0.6, np.nan, -0.8]
     pool["tier"] = [1.0, 1.0, 2.0, 4.0, 6.0]
+    # The ESPN board, set so every `_ESPN_BOARD_FEATURES` column has something
+    # to say on this choice set at overall pick 41 (round 6):
+    # - `espn_rank` straddles the pick number (some above 41, some below), so
+    #   `espn_reach` AND `espn_fall` both vary rather than one being all-zero;
+    # - it disagrees with `market_rank` (the two RBs are swapped, wr1 sits a
+    #   few spots later on ESPN), so `board_disagreement` and `espn_list_pos`
+    #   are not a monotone copy of the market order;
+    # - `espn_proj` gives the two RBs a real drop so `espn_proj_dropoff` is
+    #   nonzero for rb1, and differs from `proj_points` so the two dropoff
+    #   columns are not identical.
+    pool["espn_rank"] = [2.0, 1.0, 9.0, 55.0, 30.0]
+    pool["espn_proj"] = [284.0, 226.0, 260.0, 178.0, 315.0]
     return pool
 
 
@@ -1249,9 +1261,11 @@ def test_feature_names_end_with_the_unmeasured_columns_in_the_briefed_order():
         "held_at_pos", "first_at_pos", "rounds_since_pos", "first_at_pos_round",
         "usage", "efficiency", "played_share", "peak_gap",
         "dropoff_at_pos", "vor", "durability", "proj_change", "last_of_tier",
-        "slots_left_at_pos"]
+        "slots_left_at_pos",
+        "espn_reach", "espn_fall", "espn_list_pos", "board_disagreement",
+        "espn_proj_dropoff"]
     assert FEATURE_NAMES[-len(UNMEASURED_FEATURES):] == UNMEASURED_FEATURES
-    assert len(COLD_START_PRIOR) == len(FEATURE_NAMES) == 29
+    assert len(COLD_START_PRIOR) == len(FEATURE_NAMES) == 34
 
 
 # --- Tier 1: the six pool signals. What the board already computed, what the
@@ -1437,6 +1451,120 @@ def test_the_pool_signal_columns_are_not_named_pos_anything():
     dummies = {f"pos_{p}" for p in _POSITION_DUMMIES}
     assert {f for f in FEATURE_NAMES if f.startswith("pos_")} == dummies
     assert set(SUMMARY_FEATURES) == set(FEATURE_NAMES) - dummies
+
+
+# --- The ESPN board features: the list the room is actually reading. Same
+# kinds of signal as `reach`/`fall`/`dropoff_at_pos`, computed against
+# `espn_rank`/`espn_proj` instead of the market board. -----------------------
+
+def test_espn_reach_and_fall_are_reach_and_fall_on_the_espn_rank():
+    """`espn_reach`/`espn_fall` are `_log_rank_features(espn_rank, pick_no)` --
+    the identical transform the market pair has, on ESPN's own rank."""
+    import numpy as np
+    from scoring.draft_model import (FEATURE_NAMES, feature_matrix,
+                                     _log_rank_features)
+
+    X = feature_matrix(_shape_obs(overall_pick=41), _settings())
+    espn = _shape_pool()["espn_rank"].to_numpy()
+    want_reach, want_fall = _log_rank_features(espn, 41)
+    np.testing.assert_allclose(X[:, FEATURE_NAMES.index("espn_reach")], want_reach)
+    np.testing.assert_allclose(X[:, FEATURE_NAMES.index("espn_fall")], want_fall)
+
+
+def test_espn_list_pos_is_the_place_on_the_available_list_by_espn_rank():
+    """`espn_list_pos` is log1p of a candidate's 0-based place on ESPN's list
+    among the players STILL AVAILABLE -- and it moves as the man above him
+    comes off the board, the same choice-set dependence `dropoff_at_pos` has.
+    An unranked player (no ESPN row) is neutral 0.0, not forced to the bottom.
+    """
+    import numpy as np
+    from scoring.draft_model import espn_board_features
+
+    positions = np.array(["RB", "RB", "RB", "WR"])
+    espn_rank = np.array([10.0, 4.0, 25.0, np.nan])   # WR is unranked
+    neutral = np.full(4, np.nan)
+
+    def list_pos(keep):
+        return espn_board_features(positions[keep], espn_rank[keep],
+                                   neutral[keep], neutral[keep], 1)[2]
+
+    # rank order among the three ranked RBs is 4 < 10 < 25, so places 0/1/2;
+    # the unranked WR is neutral 0.0.
+    np.testing.assert_allclose(list_pos(np.array([0, 1, 2, 3])),
+                               [np.log1p(1), np.log1p(0), np.log1p(2), 0.0])
+    # The rank-4 RB is drafted: the rank-10 RB is now the top of the list.
+    np.testing.assert_allclose(list_pos(np.array([0, 2, 3])),
+                               [np.log1p(0), np.log1p(1), 0.0])
+
+
+def test_board_disagreement_is_the_log_rank_gap_between_the_two_boards():
+    """`board_disagreement` is `log1p(market_rank) - log1p(espn_rank)`, and it
+    is 0.0 wherever either board does not rank the player."""
+    import numpy as np
+    from scoring.draft_model import FEATURE_NAMES, feature_matrix
+
+    pool = _shape_pool()
+    X = feature_matrix(_shape_obs(overall_pick=41), _settings())
+    want = np.log1p(pool["market_rank"].to_numpy()) - np.log1p(
+        pool["espn_rank"].to_numpy())
+    np.testing.assert_allclose(X[:, FEATURE_NAMES.index("board_disagreement")],
+                               want)
+
+
+def test_espn_proj_dropoff_is_the_gap_on_espn_projection_off_the_pool():
+    """`espn_proj_dropoff` is `dropoff_at_pos`'s definition on `espn_proj`:
+    a candidate's ESPN projection minus the next AVAILABLE player's at his
+    position, per game. Read off the choice set, so it changes once that next
+    man is gone -- pool state, no model output, no circularity."""
+    import numpy as np
+    from scoring.board import GAMES
+    from scoring.draft_model import espn_board_features
+
+    positions = np.array(["RB", "RB", "RB"])
+    espn_proj = np.array([300.0, 280.0, 200.0])
+    neutral = np.full(3, np.nan)
+
+    def dropoff(keep):
+        return espn_board_features(positions[keep], neutral[keep],
+                                   espn_proj[keep], neutral[keep], 1)[4]
+
+    everyone = dropoff(np.array([0, 1, 2]))
+    assert everyone[0] == pytest.approx(20.0 / GAMES)
+    assert everyone[1] == pytest.approx(80.0 / GAMES)
+    assert everyone[2] == pytest.approx(0.0)            # last one, nobody behind
+    # The middle RB goes: the gap behind the best is now 100.
+    without_the_second = dropoff(np.array([0, 2]))
+    assert without_the_second[0] == pytest.approx(100.0 / GAMES)
+
+
+def test_an_unknown_espn_board_reaches_the_matrix_neutral():
+    """A DST (never on ESPN's PPR list), this league's own history (no ESPN
+    board to join) and a bare pool all reach the matrix with no ESPN rank.
+    Every ESPN column must be 0.0 there -- the same neutral a missing board
+    signal gets -- so a choice set with no ESPN board contributes constant
+    columns that cancel out of the softmax rather than fabricated evidence."""
+    import numpy as np
+    from scoring.draft_model import FEATURE_NAMES, _ESPN_BOARD_FEATURES
+
+    obs = PickObservation(
+        season=2026, overall_pick=41, manager="m", chosen=0,
+        pool=_pool([("rb1", "RB", 1.0), ("rb2", "RB", 2.0),
+                    ("wr1", "WR", 3.0)]),         # `_pool` carries no ESPN cols
+        roster={}, recent=[])
+    X = feature_matrix(obs, _settings())
+    for name in _ESPN_BOARD_FEATURES:
+        column = X[:, FEATURE_NAMES.index(name)]
+        assert np.isfinite(column).all(), f"{name} is not finite: {column}"
+        assert (column == 0.0).all(), f"{name} is not neutral: {column}"
+
+
+def test_espn_columns_are_not_named_pos_anything():
+    """`espn_proj_dropoff` and `board_disagreement` describe a position without
+    being dummies, so -- like `dropoff_at_pos` -- they must not wear the
+    `pos_` prefix `SUMMARY_FEATURES` reserves for the five position dummies."""
+    from scoring.draft_model import _ESPN_BOARD_FEATURES, SUMMARY_FEATURES
+    assert not any(f.startswith("pos_") for f in _ESPN_BOARD_FEATURES)
+    assert set(_ESPN_BOARD_FEATURES) <= set(SUMMARY_FEATURES)
 
 
 def test_every_feature_has_a_phrase_so_describe_never_skips_one():

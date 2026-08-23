@@ -435,6 +435,59 @@ _POOL_SIGNAL_FEATURES = ["dropoff_at_pos", "vor", "durability", "proj_change",
 # `roster_shape_features` has one.
 FLEX_POSITIONS = ("RB", "WR", "TE")
 
+# THE BOARD THE ROOM IS ACTUALLY READING. Everything above prices a candidate
+# against `market_rank` -- the cheat-sheet/FFC blend `reach`/`fall` are
+# computed on, with a -11.24 coefficient. But an ESPN mock lobby drafts off
+# ESPN's OWN ranked list on screen, and the measurement in
+# docs/superpowers/specs/2026-08-23-best-opponent-model-design.md is blunt
+# about the cost of the mismatch: 23.1% of human picks are the top name on
+# ESPN's list against 15.9% on the market's, 47.4% top-3 against 36.8%. The
+# model has been reading the wrong board. These five compute the same kinds
+# of signal `reach`/`fall`/`dropoff_at_pos` do, but against `espn_rank` and
+# `espn_proj` -- the corpus now stores both per pool row (backfilled from the
+# preseason board, preseason-stable, same provenance status as `vor`), and
+# the live board carries `espn_ppr_rank`/`espn_proj` directly, so every one
+# is computable in the fit AND at serve time.
+#
+#   espn_reach / espn_fall  `_log_rank_features(espn_rank, pick_no)`, exactly
+#                           the shape `reach`/`fall` have on market rank.
+#   espn_list_pos           log rank among the AVAILABLE candidates by ESPN
+#                           rank -- literally how far down the on-screen list
+#                           the player sits right now.
+#   board_disagreement      `log1p(market_rank) - log1p(espn_rank)`: where the
+#                           market and ESPN order the same player differently,
+#                           which the design document argues is itself a
+#                           signal rather than noise to average away.
+#   espn_proj_dropoff       `espn_proj` minus the next-available player's at
+#                           his position -- `dropoff_at_pos` on ESPN's shown
+#                           projection instead of the league-scaled one. Pure
+#                           pool state: no model output, no rollout, no
+#                           circularity, the same discipline `dropoff_at_pos`
+#                           was defined under.
+#
+# ALL FIVE ARE CANDIDATE-SPECIFIC, the entry requirement stated above
+# `_ROSTER_SHAPE_FEATURES`: a column holding one value for every candidate in
+# a choice set divides straight back out of the softmax and contributes
+# exactly nothing. `espn_list_pos`, `board_disagreement` and `espn_proj_dropoff`
+# all vary player to player; `espn_reach`/`espn_fall` vary the moment two
+# candidates sit on different sides of the pick number, exactly as the market
+# pair does.
+#
+# UNKNOWN IS NEUTRAL, and here that carries real weight. A DST is never on
+# ESPN's PPR list, this league's own six seasons have no ESPN board to join,
+# and ESPN publishes ~500 players while a pool is deeper -- so `espn_rank`
+# and `espn_proj` are genuinely absent on some rows. Every one of the five
+# reads a non-finite input as the neutral 0.0 (see `espn_board_features`), so
+# a choice set with no ESPN board at all contributes constant-zero columns
+# that cancel out of the likelihood -- no evidence, rather than fabricated
+# evidence, exactly as `_pool_signal` argues for the board columns.
+#
+# `espn_proj_dropoff` and `board_disagreement` earn the `_at_pos`-style names
+# off the `pos_` prefix that `SUMMARY_FEATURES` reserves for the position
+# dummies, the same rename `dropoff_at_pos` got off the spec's `pos_dropoff`.
+_ESPN_BOARD_FEATURES = ["espn_reach", "espn_fall", "espn_list_pos",
+                        "board_disagreement", "espn_proj_dropoff"]
+
 # Everything added since the last measurement of THIS LEAGUE's fit, in one
 # list, so the thing that has to be measured is enumerable rather than
 # remembered. `ablation` takes it as `candidates`.
@@ -458,7 +511,7 @@ FLEX_POSITIONS = ("RB", "WR", "TE")
 # `FEATURE_NAMES` and left off this list would ride into the matrix on the
 # next refit without ever being asked to justify itself.
 UNMEASURED_FEATURES = (_ROSTER_SHAPE_FEATURES + _STAT_PROFILE_FEATURES
-                       + _POOL_SIGNAL_FEATURES)
+                       + _POOL_SIGNAL_FEATURES + _ESPN_BOARD_FEATURES)
 
 # The 15 features every backtest number on record was measured against.
 # Appending to FEATURE_NAMES rather than inserting is not cosmetic: `backtest`
@@ -916,6 +969,110 @@ def pool_signal_features(positions, points, vor, durability, proj_change,
             slots_left)
 
 
+def _espn_list_pos(espn_rank) -> np.ndarray:
+    """log1p of a candidate's 0-based position among the AVAILABLE players by
+    ESPN rank -- how far down the on-screen list he sits at this moment.
+
+    Read off the choice set, exactly like `_next_best_gap`: both callers pass
+    the AVAILABLE players (`pool.iloc[where]` in the fit, `pool.*[available]`
+    at serve), so "position on the list" is a fact about what is still there
+    and it moves as players come off the board, which is the whole point. The
+    top available name is position 0 -> log1p(0) = 0.0; the next is
+    log1p(1) = 0.69; and so on down the screen.
+
+    A candidate ESPN does not rank (a DST, a player past ESPN's ~500, a season
+    with no ESPN board at all) has a non-finite rank and is NOT on the visible
+    list. He gets 0.0 -- the neutral every other column here spells "nothing
+    known" with, and the same value the top-of-list player carries. That
+    collision is deliberate and it is the same one `reach` already lives with
+    (a player exactly at the pick number reads 0.0, indistinguishable from an
+    unknown rank): fabricating a "bottom of the screen" position for a player
+    ESPN simply never ranked would inject a strong "do not take him" signal
+    the fit never earned, and a choice set with no ESPN board would then stop
+    cancelling out of the softmax. Neutral-and-ambiguous beats confident-and-
+    invented, the same trade `_pool_signal` makes for the board columns.
+
+    Ranked among the FINITE entries only, so two unranked players are not
+    forced into an order relative to each other.
+    """
+    espn_rank = np.asarray(espn_rank, dtype=float)
+    n = len(espn_rank)
+    out = np.zeros(n)
+    finite = np.isfinite(espn_rank)
+    if not finite.any():
+        return out
+    idx = np.flatnonzero(finite)
+    # `argsort` of the finite ranks gives their order; scattering `arange`
+    # back through it gives each its 0-based place on the list. `stable` so a
+    # tie (a duplicated backfilled rank) keeps a deterministic order rather
+    # than one that depends on the pool's incoming row order, which the fit
+    # and the live board need not share.
+    order = idx[np.argsort(espn_rank[idx], kind="stable")]
+    out[order] = np.log1p(np.arange(len(order), dtype=float))
+    return out
+
+
+def espn_board_features(positions, espn_rank, espn_proj, market_rank, pick_no,
+                        groups=None) -> tuple:
+    """The five `_ESPN_BOARD_FEATURES` columns, in `FEATURE_NAMES` order.
+
+    ONE IMPLEMENTATION, TWO CALLERS, for the reason `roster_shape_features`
+    and `pool_signal_features` state at length: `feature_matrix` is what the
+    model is FITTED on and `draft_sim._live_features` is what it is SERVED
+    from, and a disagreement between them applies a fitted coefficient to a
+    different quantity at draft time without anything raising. Every scaling
+    decision, and what an unknown value becomes, lives HERE, once.
+
+    `espn_rank` is ESPN's own printed PPR rank (raw, so it can run past the
+    pool's depth); `espn_proj` is ESPN's shown projection; `market_rank` is
+    the pool's own dense reference rank -- the `adp_rank` the corpus stores,
+    renamed. `pick_no` is the overall pick, the same `overall_pick`
+    `_log_rank_features` reads for the market pair.
+
+    Non-finite inputs are the "unknown" both pools spell with NaN and every
+    column here comes out at the neutral 0.0 for them, so a choice set with no
+    ESPN board contributes constant-zero columns that cancel out of the
+    likelihood. `_log_rank_features` on a NaN rank yields NaN through its
+    `maximum`, which `_finite_or_neutral` then flattens; `board_disagreement`'s
+    subtraction is NaN wherever either rank is; `_next_best_gap` already reads
+    a NaN projection as neutral; and `_espn_list_pos` parks an unranked player
+    at 0.0.
+
+    Returns `(espn_reach, espn_fall, espn_list_pos, board_disagreement,
+    espn_proj_dropoff)`.
+    """
+    if groups is None:
+        groups = position_groups(positions)
+    espn_rank = np.asarray(espn_rank, dtype=float)
+    espn_proj = np.asarray(espn_proj, dtype=float)
+    market_rank = np.asarray(market_rank, dtype=float)
+
+    # The same `_log_rank_features` the market pair is built from -- not a
+    # second copy of the log-rank arithmetic -- so `espn_reach` and `reach`
+    # are the identical transform on two boards. `_finite_or_neutral` because
+    # a NaN `espn_rank` makes both come back NaN, where the market rank (a
+    # dense 1..k) is never NaN and so never needed it.
+    espn_reach, espn_fall = _log_rank_features(espn_rank, pick_no)
+    espn_reach = _finite_or_neutral(espn_reach)
+    espn_fall = _finite_or_neutral(espn_fall)
+
+    list_pos = _espn_list_pos(espn_rank)
+
+    disagreement = _finite_or_neutral(
+        np.log1p(market_rank) - np.log1p(espn_rank))
+
+    # `dropoff_at_pos` on ESPN's projection instead of the league-scaled one,
+    # per game and off the pool as it stands. `_next_best_gap` is the shared
+    # definition, so the two dropoffs differ only in which projection they
+    # read -- and in this corpus `espn_proj` equals `proj_points` on ~95% of
+    # rows, so this column is expected to be largely redundant with
+    # `dropoff_at_pos`; the ablation is what decides whether the other 5% buys
+    # anything.
+    proj_dropoff = _next_best_gap(espn_proj, groups) / GAMES
+
+    return (espn_reach, espn_fall, list_pos, disagreement, proj_dropoff)
+
+
 def feature_matrix(obs: PickObservation, settings) -> np.ndarray:
     pool = obs.pool
     n = len(pool)
@@ -1002,6 +1159,19 @@ def feature_matrix(obs: PickObservation, settings) -> np.ndarray:
         _pool_signal(pool, "durability"), _pool_signal(pool, "proj_change"),
         _pool_signal(pool, "tier"), obs.roster, starters, settings.flex_slots,
         groups))
+
+    # --- `_ESPN_BOARD_FEATURES`: the list the room is actually reading. Same
+    # arrangement as the two blocks above -- the arithmetic and the treatment
+    # of an unknown rank live in `espn_board_features` so `_live_features`
+    # reads one definition. `_pool_signal` for the two ESPN inputs for the
+    # same reason it is used above: a pool with no ESPN board (this league's
+    # own history, a bare fixture) has neither column, and NaN -- read as
+    # neutral -- is the honest answer rather than a fabricated rank. The
+    # `market_rank` side of `board_disagreement` is the pool's own dense rank,
+    # which the corpus stores as `adp_rank` and renames here.
+    columns.extend(espn_board_features(
+        positions, _pool_signal(pool, "espn_rank"),
+        _pool_signal(pool, "espn_proj"), ranks, obs.overall_pick, groups))
 
     return np.column_stack(columns) if n else np.zeros((0, len(FEATURE_NAMES)))
 
@@ -1267,6 +1437,25 @@ _PHRASES = {
                      "lets a tier run out"),
     "slots_left_at_pos": ("fills the positions he has most slots open at",
                           "drafts regardless of how many slots are open"),
+    # The `_ESPN_BOARD_FEATURES` columns, on the same rule again. Signs.
+    # `espn_reach`/`espn_fall` mirror `reach`/`fall` on ESPN's own rank, so a
+    # positive `espn_reach` is "reaches past where ESPN's list has him".
+    # `espn_list_pos` grows as a candidate sits further down the on-screen
+    # list, so positive means "willing to go down the ESPN list" and negative
+    # is "sticks to the top names on screen". `board_disagreement` is
+    # market-rank minus ESPN-rank on a log axis, positive where ESPN ranks him
+    # ahead of the market, so a positive coefficient is "follows ESPN where it
+    # is higher on a player than the market". `espn_proj_dropoff` is
+    # `dropoff_at_pos` on ESPN's shown projection.
+    "espn_reach": ("reaches past ESPN's list", "drafts in ESPN's list order"),
+    "espn_fall": ("chases players ESPN ranks earlier than the pick",
+                  "ignores where ESPN's rank has slid"),
+    "espn_list_pos": ("goes down ESPN's on-screen list",
+                      "sticks to the top of ESPN's list"),
+    "board_disagreement": ("follows ESPN where it likes a player more than "
+                           "the market", "follows the market over ESPN"),
+    "espn_proj_dropoff": ("takes the last player before a cliff on ESPN's "
+                          "projection", "ignores cliffs on ESPN's projection"),
 }
 
 

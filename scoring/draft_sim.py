@@ -35,7 +35,8 @@ from scoring.draft_model import (COLD_START_PRIOR, EARLY_ROUNDS, FEATURE_NAMES,
                                  FFC_BLEND_WEIGHT, FLEX_POSITIONS, HYPE_SCALE,
                                  RUN_WINDOW, _ATTRIBUTE_DEFAULTS,
                                  _centre_within_position, _log_rank_features,
-                                 _STAT_PROFILE_FEATURES, position_groups,
+                                 _STAT_PROFILE_FEATURES, espn_board_features,
+                                 position_groups,
                                  pool_signal_features, roster_shape_features)
 from scoring.player_history import assert_no_column_collision, attributes_as_of
 
@@ -199,6 +200,11 @@ _DURABILITY = FEATURE_NAMES.index("durability")
 _PROJ_CHANGE = FEATURE_NAMES.index("proj_change")
 _LAST_OF_TIER = FEATURE_NAMES.index("last_of_tier")
 _SLOTS_LEFT_AT_POS = FEATURE_NAMES.index("slots_left_at_pos")
+_ESPN_REACH = FEATURE_NAMES.index("espn_reach")
+_ESPN_FALL = FEATURE_NAMES.index("espn_fall")
+_ESPN_LIST_POS = FEATURE_NAMES.index("espn_list_pos")
+_BOARD_DISAGREEMENT = FEATURE_NAMES.index("board_disagreement")
+_ESPN_PROJ_DROPOFF = FEATURE_NAMES.index("espn_proj_dropoff")
 
 
 class SimPool(NamedTuple):
@@ -267,6 +273,17 @@ class SimPool(NamedTuple):
     durability: np.ndarray = None
     proj_change: np.ndarray = None
     tier: np.ndarray = None
+    # The ESPN board the room reads on screen: `espn_rank` is ESPN's own PPR
+    # ranking (`board["espn_ppr_rank"]`), `espn_proj` its shown projection.
+    # `_live_features` hands both to `espn_board_features`, the same function
+    # `feature_matrix` calls, so `espn_reach`/`espn_list_pos`/... mean one
+    # thing on both sides. Defaulted to None for hand-built fixtures exactly
+    # like the board columns above: `_live_features` expands None to an
+    # all-NaN column, which `espn_board_features` reads as the neutral 0.0 --
+    # the same value a pool with no ESPN board join produces (a DST, a player
+    # past ESPN's ~500, a bare fixture). `build_pool` populates both.
+    espn_rank: np.ndarray = None
+    espn_proj: np.ndarray = None
 
 
 def snake_slots(teams: int, rounds: int) -> list:
@@ -340,6 +357,59 @@ def _board_signal(ranked: pd.DataFrame, name: str) -> np.ndarray:
     if name in ranked.columns:
         return pd.to_numeric(ranked[name], errors="coerce").to_numpy(dtype=float)
     return np.full(len(ranked), np.nan)
+
+
+def _espn_board_columns(conn, ranked: pd.DataFrame) -> tuple:
+    """`(espn_rank, espn_proj)` per ranked board row, one value per row in
+    `ranked`'s order so it can be handed to `SimPool` positionally.
+
+    THE SAME TWO SOURCES the corpus stored these from
+    (`mock_farm.espn_pool_columns`, which `pipeline.backfill_espn_board`
+    reuses), read here rather than imported because `mock_farm` imports THIS
+    module and the dependency cannot run both ways -- but from the identical
+    columns, so a backfilled corpus row and a live serve row carry the same
+    number:
+
+      - `espn_rank` is the board's own `espn_ppr_rank` (`_BOARD_COLUMNS`
+        carries it; `scoring.market` is where it is joined to our
+        `player_id`). Read straight off `ranked`, positional.
+      - `espn_proj` is ESPN's RAW projection, which `_BOARD_COLUMNS` drops --
+        the board's `proj_points` is that number already re-priced into the
+        league's scoring rules -- so it is joined back off `espn_adp` on the
+        `espn_id` the board already carries. An id join, not a name match, so
+        one player's projection cannot land on another's row.
+
+    Positional throughout, never `.map`ed on `player_id`: `ranked` can hold a
+    duplicate `player_id` (two ADP rows folded onto one nflverse id) and
+    `.map` against that raises, the same hazard `build_pool`'s top comment
+    records. The `espn_id`->projection lookup below IS a `.map`, but its
+    KEY (`espn_id`) is deduplicated on the lookup side, so it is a value join
+    per row and safe.
+
+    Missing sources -> all-NaN, which `espn_board_features` reads as the
+    neutral 0.0 on both sides of the fit/serve line: a bare fixture board
+    with no `espn_ppr_rank`, or a database with no `espn_adp`, then produces
+    the same neutral columns a season with no ESPN board does in the fit.
+    """
+    n = len(ranked)
+    if "espn_ppr_rank" in ranked.columns:
+        espn_rank = pd.to_numeric(ranked["espn_ppr_rank"],
+                                  errors="coerce").to_numpy(dtype=float)
+    else:
+        espn_rank = np.full(n, np.nan)
+
+    espn_proj = np.full(n, np.nan)
+    espn = read_table(conn, "espn_adp")
+    if (not espn.empty and {"espn_id", "espn_proj"} <= set(espn.columns)
+            and "espn_id" in ranked.columns):
+        keyed = espn.assign(_key=pd.to_numeric(espn["espn_id"],
+                                               errors="coerce"))
+        keyed = keyed.dropna(subset=["_key"]).drop_duplicates("_key",
+                                                              keep="first")
+        proj = keyed.set_index("_key")["espn_proj"]
+        espn_proj = (pd.to_numeric(ranked["espn_id"], errors="coerce")
+                     .map(proj).to_numpy(dtype=float))
+    return espn_rank, espn_proj
 
 
 def _sliced_or_unknown(values, available, n) -> np.ndarray:
@@ -537,7 +607,12 @@ def build_pool(conn, board: pd.DataFrame, settings) -> SimPool:
         # a copy that drifts.
         durability=_board_signal(ranked, "durability"),
         proj_change=_board_signal(ranked, "proj_change"),
-        tier=_board_signal(ranked, "tier"))
+        tier=_board_signal(ranked, "tier"),
+        # The ESPN board the room reads, from the same two sources the corpus
+        # stored -- computed once here after every sort, so the two arrays
+        # line up positionally with `dense_rank` like everything else above.
+        **dict(zip(("espn_rank", "espn_proj"),
+                   _espn_board_columns(conn, ranked))))
 
 
 def _live_features(pool, available, overall_pick, roster, recent, settings,
@@ -633,6 +708,19 @@ def _live_features(pool, available, overall_pick, roster, recent, settings,
         _sliced_or_unknown(pool.proj_change, available, n),
         _sliced_or_unknown(pool.tier, available, n),
         roster, settings.starters, settings.flex_slots, groups)
+
+    # The ESPN board block, from the SAME function `feature_matrix` calls.
+    # `espn_list_pos` and `espn_proj_dropoff` both summarize the choice set,
+    # so both read the `available` slice for the same reason `dropoff_at_pos`
+    # does -- the on-screen position and the drop to the next man both change
+    # as players come off the board. `ranks` is the market rank already sliced
+    # above, the `market_rank` side of `board_disagreement`.
+    (X[:, _ESPN_REACH], X[:, _ESPN_FALL], X[:, _ESPN_LIST_POS],
+     X[:, _BOARD_DISAGREEMENT], X[:, _ESPN_PROJ_DROPOFF]) = espn_board_features(
+        positions,
+        _sliced_or_unknown(pool.espn_rank, available, n),
+        _sliced_or_unknown(pool.espn_proj, available, n),
+        ranks, overall_pick, groups)
     return X
 
 

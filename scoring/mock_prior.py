@@ -41,13 +41,16 @@ docs/superpowers/findings/2026-08-23-mock-corpus-features.md
 
 PADDED BY HAND, ONCE, AND WHAT THAT DOES AND DOES NOT MEAN
 
-The six `_POOL_SIGNAL_FEATURES` columns were appended to `FEATURE_NAMES`
-after this fit ran, and `draft_model` asserts this vector has one weight per
-feature. They carry +0.000000 here for the same reason a cut feature does:
-zero is how this file spells "contributes nothing", and a zero coefficient
-reproduces the model that was actually measured above, exactly. Their zeros
-mean NEVER FITTED, not MEASURED AND REJECTED -- the two are marked
-differently in the list below on purpose.
+The six `_POOL_SIGNAL_FEATURES` columns AND the five `_ESPN_BOARD_FEATURES`
+columns were appended to `FEATURE_NAMES` after this fit ran, and
+`draft_model` asserts this vector has one weight per feature. They carry
++0.000000 here for the same reason a cut feature does: zero is how this file
+spells "contributes nothing", and a zero coefficient reproduces the model
+that was actually measured above, exactly. Their zeros mean NEVER FITTED, not
+MEASURED AND REJECTED -- the two are marked differently in the list below on
+purpose. The ESPN board columns were measured on human picks only by
+`make score-ladder` (which writes `scoring/human_prior.py`, a separate
+artifact); this file's own fit has never seen them.
 
 That is the only hand edit this file tolerates and it is not an exception to
 the rule at the top: no NUMBER here has been invented, and the fit these
@@ -107,6 +110,11 @@ FEATURES = [
     'proj_change',
     'last_of_tier',
     'slots_left_at_pos',
+    'espn_reach',
+    'espn_fall',
+    'espn_list_pos',
+    'board_disagreement',
+    'espn_proj_dropoff',
 ]
 
 # The draft_ids this was fitted on, recorded because the corpus GROWS -- a
@@ -171,6 +179,11 @@ PRIOR = np.array([
     +0.000000,  # proj_change          <- added, never fitted
     +0.000000,  # last_of_tier         <- added, never fitted
     +0.000000,  # slots_left_at_pos    <- added, never fitted
+    +0.000000,  # espn_reach           <- added, never fitted
+    +0.000000,  # espn_fall            <- added, never fitted
+    +0.000000,  # espn_list_pos        <- added, never fitted
+    +0.000000,  # board_disagreement   <- added, never fitted
+    +0.000000,  # espn_proj_dropoff    <- added, never fitted
 ])
 
 assert len(PRIOR) == len(FEATURES), (
