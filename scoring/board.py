@@ -1246,6 +1246,25 @@ def build_board(conn, weights: dict | None = None,
     if "espn_unranked" in uni.columns:
         uni = uni[~uni["espn_unranked"]].drop(columns=["espn_unranked"])
 
+    # The numbering above counted players the line before just took off the
+    # board, and nothing put it back: a 252-row board carried ranks running
+    # past 690, so "your board 222" was not 222nd of anything. Rows are still
+    # in rank order here (the sort is above, the filter only removes), so
+    # renumbering is the position each survivor actually holds.
+    uni = uni.reset_index(drop=True)
+    uni["rank"] = uni.index + 1
+    # And `edge` is a number of SLOTS, so both sides have to be counting the
+    # same slots. `market_rank` is the median of five sources, each ranking
+    # its own universe -- ESPN's runs past 500 where this board holds 252 --
+    # so subtracting it from a board rank subtracted a position in one
+    # population from a position in another, and reported the difference as
+    # though it were rounds. Measured on the real board that inflated the
+    # median disagreement from 29 slots to 49 and the largest from 131 to
+    # 390. The market's own number is still carried as it is, because an ADP
+    # means something in the world; the EDGE is its order restated over the
+    # players this board actually holds.
+    uni["edge"] = uni["market_rank"].rank(method="first") - uni["rank"]
+
     drafted_ids = set(drafted["player_id"]) if not drafted.empty else set()
     uni["drafted"] = uni["player_id"].isin(drafted_ids)
 

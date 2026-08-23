@@ -1416,3 +1416,74 @@ def test_consistency_ranks_against_the_supplied_pool_only():
     # apart; against the board the spread is the whole range.
     assert everyone["startable_a"] - everyone["startable_b"] < 0.34
     assert drafted["startable_a"] - drafted["startable_b"] == pytest.approx(0.5)
+
+
+def _seed_with_an_undraftable_ahead(tmp_path):
+    """Two receivers: the better one is not in ESPN's rankings.
+
+    That is the shape the ordering bug needs and `_seed` cannot make -- its
+    unranked player sorts last, so dropping him leaves 1..N intact by luck.
+    Here the dropped player sorts FIRST, so every survivor behind him keeps a
+    number one too high unless the board renumbers after the drop.
+    """
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    # ESPN's opinion is only trusted once it covers ESPN_MIN_RANKED players
+    # (market.py) -- below that a missing feed would empty the board, so the
+    # flag is forced all-False and nothing is dropped. A fixture that wants
+    # the drop has to clear that bar.
+    from scoring.market import ESPN_MIN_RANKED
+    field = [(f"p{i}", f"Ranked Guy {i}", 4 + (i % 5)) for i in range(ESPN_MIN_RANKED)]
+    rows = []
+    for pid, name, rec in field + [("star", "Unranked Star", 14)]:
+        rows += [{"player_id": pid, "player_display_name": name, "position": "WR",
+                  "recent_team": "DET", "opponent_team": "GB", "season": 2025,
+                  "week": w, "receptions": rec, "receiving_yards": rec * 12,
+                  "targets": rec + 2, "carries": 0} for w in range(1, 18)]
+    write_table(conn, "weekly", pd.DataFrame(rows))
+    write_table(conn, "schedules", pd.DataFrame([
+        {"home_team": "DET", "away_team": "GB", "week": 1,
+         "total_line": 51.0, "spread_line": 3.0}]))
+    write_table(conn, "adp", pd.DataFrame(
+        [{"adp_name": name, "position": "WR", "team": "DET", "adp": 20.0 + i}
+         for i, (_, name, _) in enumerate(field)]
+        + [{"adp_name": "Unranked Star", "position": "WR", "team": "DET",
+            "adp": 5.0}]))
+    write_table(conn, "depth_charts", pd.DataFrame(
+        columns=["gsis_id", "depth_team", "formation", "week", "position"]))
+    # Only one of them is a player ESPN ranks, so the other is dropped from
+    # the draftable board -- after the ordering has already counted him.
+    write_table(conn, "espn_adp", pd.DataFrame(
+        [{"espn_id": 500 + i, "espn_name": name, "position": "WR",
+          "espn_adp": 20.0 + i, "espn_ppr_rank": 20 + i}
+         for i, (_, name, _) in enumerate(field)]))
+    return conn
+
+
+def test_rank_describes_the_board_it_is_on(tmp_path):
+    """A board of N players is ranked 1..N, with no gaps.
+
+    `rank` is assigned over the whole universe and the undraftable players
+    (everyone ESPN does not rank) are dropped two lines later. Nothing put
+    the numbering back, so a 252-row board carried ranks running past 690:
+    "your board 222" was not 222nd of anything, and every number derived
+    from it -- the edge against consensus most of all -- was arithmetic on a
+    ruler the board no longer used.
+    """
+    board = build_board(_seed_with_an_undraftable_ahead(tmp_path))
+    ranks = sorted(int(r) for r in board["rank"])
+    assert ranks == list(range(1, len(board) + 1))
+
+
+def test_edge_compares_two_positions_in_the_same_pool(tmp_path):
+    """`edge` is a number of SLOTS, so both sides have to count the same
+    slots. `market_rank` is the median of five sources, each ranking its own
+    universe -- ESPN's runs past 500 where this board holds 252 -- so
+    subtracting it from a board rank was subtracting a position in one
+    population from a position in another. The market's own number is still
+    reported as it is (an ADP means something in the world); the EDGE is the
+    market's order restated over the players this board actually holds.
+    """
+    board = build_board(_seed(tmp_path))
+    ranked = board.dropna(subset=["market_rank"])
+    expected = (ranked["market_rank"].rank(method="first") - ranked["rank"])
+    assert (ranked["edge"] - expected).abs().max() < 1e-9
