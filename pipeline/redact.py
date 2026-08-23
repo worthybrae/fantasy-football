@@ -66,6 +66,43 @@ _RULES = (
     (re.compile(rf"\{{{_GUID}\}}"), SWID_PLACEHOLDER),
     # Bare, for anywhere the braces were stripped on the way through.
     (re.compile(_GUID), SWID_PLACEHOLDER),
+    # QUOTED forms, which the unquoted rule below cannot reach and which are
+    # where the credential actually escapes in a server. Three real shapes,
+    # all of them produced by code nobody wrote on purpose:
+    #
+    #   JSON      {"espn_s2": "AEB..."}   -- FastAPI's own 422 body echoes the
+    #                                        rejected request under "input",
+    #                                        so a malformed connect prints the
+    #                                        session straight back to the
+    #                                        client and into every access log.
+    #   repr      espn_s2='AEB...'        -- any dict or dataclass that reaches
+    #                                        a traceback frame.
+    #   dataclass MintedSession(cookie='...') -- which is the password to a
+    #                                        stored session, not merely a
+    #                                        session id.
+    #
+    # The unquoted rule cannot do this job: its value class excludes quotes
+    # (deliberately -- see its own comment), so it matches nothing at all once
+    # the value is wrapped in them. `cookie` is in THIS list and not in that
+    # one because unquoted `cookie=` is ordinary prose in a log line, while
+    # `cookie='...'` is a value someone is printing.
+    #
+    # The name may itself be quoted (JSON) or bare (repr), so the quote around
+    # it is captured and backreferenced -- `"espn_s2":` and `espn_s2=` both
+    # match, `x"espn_s2:` does not. The value quote is backreferenced the same
+    # way so a single-quoted value cannot be closed by a double quote.
+    # Idempotent: the placeholder contains no quote character, so re-running
+    # this rule over its own output reproduces it exactly.
+    (re.compile(r"""(?ix)
+        (["']?) (memberId|swid|espn_s2|espn_custody|cookie) \1
+        (\s*[:=]\s*)
+        (["']) [^"']* \4
+     """),
+     lambda m: (f"{m.group(1)}{m.group(2)}{m.group(1)}{m.group(3)}"
+                f"{m.group(4)}"
+                + (SWID_PLACEHOLDER if m.group(2).lower() in ("memberid", "swid")
+                   else SECRET_PLACEHOLDER)
+                + f"{m.group(4)}")),
     # By parameter name, for a value that is not GUID-shaped at all. `+`
     # rather than `*` so an already-redacted `memberId=<swid>` does not match
     # its own empty value and double up; `<` and `>` are out of the class for

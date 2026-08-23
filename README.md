@@ -133,6 +133,71 @@ The Playwright browser install is a one-time step. It's only needed for
 `make espn-import` (below), which drives a real Chromium window to log in to
 ESPN. Everything else in this repo works without it.
 
+## Holding other people's ESPN sessions
+
+Only a deployment that other people connect their ESPN accounts to needs this
+section. A single-user local setup does not. Nothing is stored until a request
+sends an `espn_s2`, and your own bookmarklet does not send one.
+
+What such a deployment ends up holding is a full ESPN account session. It stays
+valid for months, and ESPN offers no per-application revocation. ESPN's fan API
+returns no email address either, so a user cannot be contacted, cannot recover,
+and cannot be warned. The design is
+`docs/superpowers/specs/2026-08-23-espn-credential-custody-design.md`; the code
+and the reasoning behind each choice are in `pipeline/credentials.py`.
+
+The one property the whole thing exists to give you: a stolen database file is
+inert. That holds only while the key stays out of it.
+
+**CAUTION: Keep the key out of the database and out of this repository. A
+stolen database with the key in it gives up every stored session.**
+
+**CAUTION: Do not lose the key. Stored sessions become unreadable, and you
+cannot tell the users, because ESPN gives you no address for them.**
+
+To set up the store:
+
+1. Generate a key.
+   ```bash
+   .venv/bin/python -c "from pipeline.credentials import generate_key; print(generate_key())"
+   ```
+2. Set `ESPN_CUSTODY_KEYS` to that key in the server environment.
+3. Serve the API over HTTPS.
+4. Start the API.
+
+Copy `.env.example` for the full list. Nothing loads that file for you; export
+the values, or give them to your process manager.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `ESPN_CUSTODY_KEYS` | none | The key, or a versioned list for rotation. Required. |
+| `ESPN_CUSTODY_DB_PATH` | `data/custody/custody.duckdb` | Where the two tables live. |
+| `ESPN_CUSTODY_TTL_DAYS` | `30` | Idle days before a stored session is deleted. |
+| `ESPN_CUSTODY_ALLOW_PLAINTEXT_HTTP` | off | Local development only. Allows plain HTTP. |
+| `ESPN_CUSTODY_TRUST_FORWARDED_PROTO` | off | Set only behind a proxy that ends TLS. |
+
+The last two accept `1`, `true`, `yes`, or `on`. Every other value, `0` and
+`false` included, leaves the protection on.
+
+If `ESPN_CUSTODY_KEYS` is not set, the server does not fall back to plaintext.
+It answers 503 to every request that carries a credential, and it does not
+create the database file.
+
+**CAUTION: Run one writer. DuckDB locks the file, so a second worker or a
+second replica answers 503 to every custody request.**
+
+To rotate the key:
+
+1. Generate a second key.
+2. Set `ESPN_CUSTODY_KEYS="1:<old key>,2:<new key>"`.
+3. Restart the API.
+4. Wait. Each row moves to the new key when its owner next reconnects.
+5. Delete the old key from the list.
+
+Step 4 has no deadline, and step 5 does not wait for it. A row that never moved
+becomes unreadable when you delete its key. The server logs a line that names
+the version, and the reaper deletes the row inside `ESPN_CUSTODY_TTL_DAYS`.
+
 ## Usage
 
 ```bash

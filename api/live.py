@@ -261,7 +261,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from websockets.exceptions import ConnectionClosed
 
-from api.custody import establish_custody, require_secure
+from api.custody import (abandon_custody, establish_custody,
+                         require_secure, set_session_cookie)
 from pipeline import credentials as custody
 from pipeline.draft_listener import DraftListener, run_listener
 from pipeline.draft_socket import run_socket_listener
@@ -3670,10 +3671,32 @@ def register_live_routes(app, conn, db_path):
         # credential cannot be stored, the user must not be told it was, and
         # the connect screen must not offer a disconnect control for a row
         # that does not exist. A 503 saying so is the honest answer.
+        minted = None
         if body.espn_s2:
-            establish_custody(request, response, body.swid, body.espn_s2)
-        return _launch_listener(work_conn, league_conn, body.leagueId, session,
-                                run_fn, progress=progress)
+            minted = establish_custody(request, response, body.swid,
+                                       body.espn_s2)
+        try:
+            launched = _launch_listener(work_conn, league_conn, body.leagueId,
+                                        session, run_fn, progress=progress)
+        except BaseException:
+            # THE ROW MUST NOT OUTLIVE THE REQUEST THAT FAILED. The cookie
+            # only reaches the browser if this handler returns, so a launch
+            # that raises would leave a live ESPN session stored with nobody
+            # holding the one thing that can delete it -- see
+            # `abandon_custody`. BaseException, not Exception: a cancelled
+            # request strands the row exactly as thoroughly as a failed one.
+            abandon_custody(minted)
+            raise
+        if minted is not None and isinstance(launched, Response):
+            # The cookie rides on the injected `response` object, which FastAPI
+            # merges into whatever the handler RETURNS -- unless the handler
+            # returns a Response of its own, in which case that object is used
+            # as-is and the merge never happens. `_launch_listener` returns a
+            # dict today, so this branch is defensive; it is here because the
+            # failure it prevents is silent and produces precisely the
+            # stranded row above.
+            set_session_cookie(launched, minted)
+        return launched
 
     def _restore_saved_session(record):
         """Rebuild the session the previous process was running, and reopen

@@ -30,10 +30,28 @@ rather than the route.
 """
 from __future__ import annotations
 
+import duckdb
 from fastapi import HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.datastructures import Headers
 
 from pipeline import credentials as cred
+from pipeline import redact
+from pipeline.espn_identity import OwnershipUnproven
+
+# Paths whose REQUEST BODY may carry an ESPN account session, and which the
+# transport guard therefore has to look inside. Everything under
+# `/api/espn/custody` is covered by the cookie check alone and needs no entry
+# here; this list is for endpoints that take a credential as a field.
+CREDENTIAL_BEARING_PATHS = frozenset({"/api/live/connect-token"})
+
+# How much of such a body to buffer while deciding. These bodies are a few
+# hundred bytes; the cap exists so that a deliberately enormous POST cannot be
+# used to make the guard hold a request in memory. Past the cap the guard
+# stops buffering and lets the rest stream through, having already seen far
+# more than enough to find the field name.
+_MAX_GUARDED_BODY = 64 * 1024
 
 
 def _forwarded_proto(request: Request) -> str | None:
@@ -58,6 +76,139 @@ def require_secure(request: Request) -> None:
 
 def _store(store=None):
     return store if store is not None else cred.default_store()
+
+
+class CredentialTransportGuard:
+    """Refuse a plaintext request carrying credentials, BEFORE the app sees it.
+
+    WHY THIS IS NOT A CHECK INSIDE THE HANDLER, which is where it started.
+    FastAPI validates the request body before it enters the handler function,
+    so a check written as the handler's first statement never runs on a
+    request whose body fails validation -- and a body that fails validation is
+    still a body that was transmitted. Worse, FastAPI's own 422 echoes the
+    rejected input straight back, so a connect with one field misspelled sent
+    the account session over plaintext AND printed it into the response, the
+    access log and the browser's network tab. Measured, on the real model:
+    omit `season` and the 422 body contains the whole `espn_s2`.
+
+    ASGI middleware runs before routing, before validation, and before
+    anything can serialise a value. That is the only layer at which "plain
+    HTTP fails closed" is a statement about every request rather than about
+    the requests that happened to be well formed.
+
+    Written as raw ASGI rather than `BaseHTTPMiddleware` because it has to
+    read the body and then hand the SAME body to the application. Raw ASGI can
+    buffer the messages and replay them; `BaseHTTPMiddleware` cannot without
+    consuming the stream the route is about to read.
+
+    The body is searched for the BYTES `espn_s2`, not parsed as JSON. That is
+    the point: a malformed body, a wrongly typed field, an extra field, a body
+    that is not JSON at all -- none of them parse, and all of them can still
+    carry the credential. A byte search cannot be fooled by a shape, and its
+    only failure mode is refusing a request that merely mentions the name,
+    which costs nothing.
+    """
+
+    def __init__(self, app, paths=None, store=None):
+        self.app = app
+        self.paths = frozenset(paths or CREDENTIAL_BEARING_PATHS)
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            return await self.app(scope, receive, send)
+        headers = Headers(scope=scope)
+        # The cookie is in the headers, so this costs nothing and covers every
+        # path: a request presenting the custody cookie is carrying the
+        # password to a stored ESPN session whatever else it is doing.
+        carries = cred.COOKIE_NAME in _cookie_names(headers.get("cookie", ""))
+
+        replay = []
+        if not carries and scope.get("path", "") in self.paths:
+            buffered = b""
+            while True:
+                message = await receive()
+                replay.append(message)
+                if message.get("type") != "http.request":
+                    break
+                buffered += message.get("body", b"") or b""
+                if not message.get("more_body", False):
+                    break
+                if len(buffered) >= _MAX_GUARDED_BODY:
+                    break
+            carries = b"espn_s2" in buffered.lower()
+
+        if carries:
+            try:
+                cred.require_secure_transport(
+                    scope.get("scheme", ""), headers.get("x-forwarded-proto"))
+            except cred.InsecureTransport as exc:
+                response = JSONResponse(status_code=400,
+                                        content={"detail": str(exc)})
+                return await response(scope, receive, send)
+
+        if not replay:
+            return await self.app(scope, receive, send)
+
+        # Hand the application the messages already taken off the wire, then
+        # get out of the way. Without this the route would await a body that
+        # has already been consumed and hang.
+        pending = list(replay)
+
+        async def replaying_receive():
+            if pending:
+                return pending.pop(0)
+            return await receive()
+
+        return await self.app(scope, replaying_receive, send)
+
+
+def _cookie_names(header: str):
+    """Just the names in a Cookie header. Values are never parsed here -- the
+    guard only needs to know whether ours is present, and a parser that
+    touches the value is a parser that can log it."""
+    return {part.split("=", 1)[0].strip()
+            for part in (header or "").split(";") if part.strip()}
+
+
+def safe_validation_error_handler(request: Request, exc):
+    """FastAPI's 422, with the rejected input removed.
+
+    THE DEFAULT HANDLER ECHOES THE BODY. Pydantic attaches the offending value
+    to every error as `input`, and FastAPI serialises the lot, so one missing
+    field on a connect returns the caller's whole `espn_s2` in the response --
+    into the browser's network tab, into every proxy's access log, and into
+    whatever error reporter the page installs. The field being validated does
+    not have to be the credential; `input` on a missing-field error is the
+    ENTIRE body.
+
+    So the input never leaves this function. What goes back is what a client
+    can actually act on -- which field, and what is wrong with it -- and even
+    that is passed through the scrubber, because `loc` and `msg` are built
+    from names this server does not control.
+
+    The transport guard above stops such a request over plaintext; this stops
+    it over TLS as well, where the value would still reach the log. Neither
+    substitutes for the other.
+    """
+    safe = [{"type": error.get("type"),
+             "loc": [redact.redact(part) for part in error.get("loc", ())],
+             "msg": redact.redact(error.get("msg", ""))}
+            for error in exc.errors()]
+    return JSONResponse(status_code=422, content={"detail": safe})
+
+
+def install_credential_guards(app, paths=None):
+    """Both pre-handler protections, mounted together so neither is forgotten.
+
+    One call rather than two exported pieces: they cover the same failure from
+    two sides (the request must not arrive in the clear; the rejection must
+    not echo it back), and an app that installed one and not the other would
+    look protected while leaking.
+    """
+    app.add_middleware(CredentialTransportGuard, paths=paths)
+    app.add_exception_handler(RequestValidationError,
+                              safe_validation_error_handler)
+    return app
 
 
 def set_session_cookie(response: Response, minted: cred.MintedSession,
@@ -113,19 +264,66 @@ def establish_custody(request: Request, response: Response, swid: str,
 
     The one function that puts a credential into the store. Both entry points
     (`/api/live/connect-token` and anything added later) go through it, so the
-    transport check, the encryption and the cookie flags cannot drift apart
-    between callers.
+    transport check, the ownership proof, the encryption and the cookie flags
+    cannot drift apart between callers.
+
+    The caller's existing cookie is passed through, and it is what decides
+    whether this connect may REPLACE a stored session or only attach a new
+    browser to it (see `CredentialStore.connect`, lock 2). Read from the
+    request rather than taken as an argument for the same reason `custody_for`
+    is: a cookie the caller assembled from somewhere else is not authorization.
     """
     require_secure(request)
     try:
-        minted = _store(store).connect(swid, espn_s2)
+        minted = _store(store).connect(
+            swid, espn_s2, cookie=request.cookies.get(cred.COOKIE_NAME))
+    except OwnershipUnproven as exc:
+        # 403, not 401: the caller is not being asked to authenticate to US,
+        # they are being told the session they sent does not demonstrably
+        # belong to the account they named. `str(exc)` is written to be
+        # showable; it names no value and distinguishes no SWID.
+        raise HTTPException(status_code=403, detail=str(exc)) from None
     except cred.CustodyUnavailable as exc:
         # 503, not 500: the code is fine and the request was fine; the
-        # deployment has no key. `str(exc)` is written to name the variable
-        # and never the value (see _parse_keys).
+        # deployment has no key, or another process holds the store's write
+        # lock. `str(exc)` is written to name the variable and never the
+        # value (see _parse_keys).
         raise HTTPException(status_code=503, detail=str(exc)) from None
+    except duckdb.Error as exc:
+        # Any other storage failure. Never a 500 with a traceback: this
+        # request has an ESPN session in it, and an unhandled exception is the
+        # one path where a framework decides for itself what to print.
+        raise HTTPException(
+            status_code=503,
+            detail=f"the credential store is not usable "
+                   f"({type(exc).__name__})") from None
     set_session_cookie(response, minted)
     return minted
+
+
+def abandon_custody(minted, store=None) -> None:
+    """Undo an `establish_custody` whose request then failed.
+
+    THE STRANDED ROW. `establish_custody` writes the credential and puts the
+    cookie on the response object, but the response is only sent if the
+    handler returns. If anything after it raises, the row holds a live
+    `espn_s2` and NO browser holds the cookie for it -- and every way out of
+    the store (`disconnect`, `disconnect-everywhere`, `custody_for`) requires
+    that cookie. Nobody, including the user whose session it is, can delete
+    it. It survives the full thirty-day TTL with no remedy.
+
+    So the failure path deletes it. Best effort and silent: this runs while an
+    exception is already on its way up, and a second exception raised here
+    would replace a diagnosable error with a confusing one. If it fails the
+    reaper still gets the row eventually, which is the same guarantee the
+    stranded case had -- just without pretending it is fine.
+    """
+    if minted is None:
+        return
+    try:
+        _store(store).forget_credential(minted.credential_id)
+    except Exception:      # noqa: BLE001 -- see above
+        pass
 
 
 def custody_for(request: Request, store=None):
@@ -146,6 +344,14 @@ def custody_for(request: Request, store=None):
         return _store(store).resolve(cookie)
     except cred.CustodyUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from None
+    except duckdb.Error as exc:
+        # Same reasoning as `establish_custody`: a second uvicorn worker
+        # holding the file lock must be a clean 503, not an unhandled 500 on a
+        # request that carries the custody cookie.
+        raise HTTPException(
+            status_code=503,
+            detail=f"the credential store is not usable "
+                   f"({type(exc).__name__})") from None
 
 
 def _account_hint(swid: str) -> str:
@@ -161,12 +367,19 @@ def _account_hint(swid: str) -> str:
     return body[-4:] if len(body) >= 4 else ""
 
 
-def register_custody_routes(app, store=None):
+def register_custody_routes(app, store=None, paths=None):
     """Mount the disconnect controls and the status probe.
 
     Three endpoints and no more. Every one of them is authorised by the
     cookie; none of them accepts an identifier of any kind.
+
+    Also installs the two pre-handler guards on the app it is given (see
+    `install_credential_guards`). They are mounted here rather than left to
+    the caller because they protect `/api/live/connect-token` as much as these
+    routes, and an app that mounted the endpoints without them would be the
+    dangerous configuration.
     """
+    install_credential_guards(app, paths=paths)
 
     @app.get("/api/espn/custody")
     def custody_status(request: Request):

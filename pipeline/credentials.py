@@ -63,6 +63,7 @@ from pathlib import Path
 import duckdb
 
 from pipeline import redact
+from pipeline.espn_identity import OwnershipUnproven, canonical_swid, verify_account
 
 # The environment variable holding the key material. NEVER a column, never a
 # file beside the database, never a default baked into this file: the whole
@@ -78,7 +79,14 @@ KEYS_ENV = "ESPN_CUSTODY_KEYS"
 # debugging this project opens first. Neither is a place stored account
 # sessions should be able to ride along in by accident.
 DB_PATH_ENV = "ESPN_CUSTODY_DB_PATH"
-DEFAULT_DB_PATH = "data/custody.duckdb"
+# In its OWN directory, which is created 0700, because DuckDB will not accept a
+# pre-created empty file (it refuses anything on that path that is not already
+# a valid database) and therefore creates the file itself at the process umask
+# -- 0644 on a default machine. A file that is briefly world-readable inside a
+# directory nobody else can traverse is not readable by anybody; the same file
+# directly in `data/` would be. `_lock_down` then tightens the file itself, so
+# both locks are on.
+DEFAULT_DB_PATH = "data/custody/custody.duckdb"
 
 # How long a credential survives without being used. Sliding: every successful
 # `resolve` pushes it out again, so this is an IDLE timeout, not a hard
@@ -155,6 +163,13 @@ class MintedSession:
     credential_id: str
     session_id: str
     expires_at: datetime
+    # Whether this connect actually rewrote the stored ESPN session, or merely
+    # attached a new browser to the one that was already held. False is the
+    # ordinary answer for a second browser with no cookie -- see `connect`,
+    # lock 2 -- and it is worth returning rather than inferring, because it is
+    # the difference between "your session was updated" and "this browser is
+    # now signed in to the session you already gave us".
+    replaced: bool = True
 
 
 @dataclass(frozen=True)
@@ -212,6 +227,24 @@ def _parse_keys(spec: str) -> dict:
         except ValueError:
             raise CustodyUnavailable(
                 f"{KEYS_ENV} has a non-numeric key version {version!r}")
+        if number < 1:
+            # Versions are compared with max() to pick the writer and sorted
+            # to order lookups, so a zero or negative version sorts below a
+            # real one and would quietly never be written under. It is always
+            # a typo; there is no deployment that wants it.
+            raise CustodyUnavailable(
+                f"{KEYS_ENV} has key version {number}; versions start at 1")
+        if number in keys:
+            # THE EXPENSIVE TYPO. `"1:old,1:new"` parses cleanly and the
+            # second value silently wins, so every row already written under
+            # the first is permanently unreadable -- and the failure does not
+            # appear until a user comes back, by which time the old key may
+            # have been rotated out of wherever it was kept. Refusing to start
+            # is enormously cheaper than discovering this later.
+            raise CustodyUnavailable(
+                f"{KEYS_ENV} lists key version {number} twice; one version is "
+                "one key, and the second would make the first version's rows "
+                "unreadable")
         try:
             fernet = Fernet(material.strip())
         except (ValueError, TypeError) as exc:
@@ -221,9 +254,19 @@ def _parse_keys(spec: str) -> dict:
                 f"{KEYS_ENV} version {number} is not a valid Fernet key "
                 "(32 url-safe base64 bytes, as `Fernet.generate_key()` "
                 "prints)") from exc
+        raw = base64.urlsafe_b64decode(material.strip())
+        if not any(raw):
+            # An all-zero key is what a placeholder, a truncated secret store
+            # read, or a `base64 < /dev/zero` copy-paste produces. It is a
+            # valid Fernet key and encrypts perfectly well, which is the
+            # problem: the ciphertext is decryptable by anyone who guesses the
+            # single most guessable key there is.
+            raise CustodyUnavailable(
+                f"{KEYS_ENV} version {number} is all zero bytes, which is a "
+                "placeholder rather than a key")
         keys[number] = CustodyKey(
             version=number, fernet=fernet,
-            index_key=_derive_index_key(base64.urlsafe_b64decode(material.strip())))
+            index_key=_derive_index_key(raw))
     if not keys:
         raise CustodyUnavailable(
             f"{KEYS_ENV} is not set. Generate one with "
@@ -261,6 +304,25 @@ def _utc(value: datetime | None) -> datetime:
     return value
 
 
+# The only strings that turn a protection OFF. Everything else -- including
+# the empty string, "0", "false", "no", "off", and anything misspelled -- means
+# the protection stays ON.
+#
+# WHY THIS IS NOT A STYLE PREFERENCE. `bool(os.environ.get(NAME))` is true for
+# every non-empty string, so an operator who writes `..._ALLOW_PLAINTEXT_HTTP=0`
+# meaning "off" gets the opposite of what they wrote: plain HTTP accepted, and
+# the session cookie shipped WITHOUT its `Secure` flag. The same bug on
+# `..._TRUST_FORWARDED_PROTO=false` makes the server believe a CLIENT-supplied
+# `X-Forwarded-Proto: https` header and skip the TLS refusal entirely. Both
+# variables exist to weaken a protection deliberately, so both are parsed so
+# that only a deliberate, affirmative value can do it.
+_AFFIRMATIVE = frozenset({"1", "true", "yes", "on", "y", "t"})
+
+
+def _env_flag(env, name: str) -> bool:
+    return str(env.get(name, "")).strip().lower() in _AFFIRMATIVE
+
+
 def is_secure_transport(scheme: str, forwarded_proto: str | None = None,
                         env=None) -> bool:
     """Whether a request carrying credentials may be honoured.
@@ -272,10 +334,10 @@ def is_secure_transport(scheme: str, forwarded_proto: str | None = None,
     env = os.environ if env is None else env
     if (scheme or "").lower() == "https":
         return True
-    if env.get(TRUST_FORWARDED_PROTO_ENV) and (
+    if _env_flag(env, TRUST_FORWARDED_PROTO_ENV) and (
             forwarded_proto or "").split(",")[0].strip().lower() == "https":
         return True
-    return bool(env.get(ALLOW_PLAINTEXT_ENV))
+    return _env_flag(env, ALLOW_PLAINTEXT_ENV)
 
 
 def require_secure_transport(scheme: str, forwarded_proto: str | None = None,
@@ -338,16 +400,188 @@ _SCHEMA = (
 )
 
 
+def _lock_down(path: str) -> None:
+    """Owner-only on the database and its write-ahead log.
+
+    `api/live.py`'s `save_session_record` has used mode 0600 since it was
+    written, for a per-draft nonce that expires in two hours. This file holds
+    full ESPN account sessions that stay valid for months, so it does not get
+    to be the more readable of the two.
+
+    DuckDB creates both files itself, offers no mode argument, and REFUSES to
+    open a path that already exists and is not a valid database -- so
+    pre-creating the file at 0600 (the trick `save_session_record` uses) is
+    not available here. What closes the window instead is the directory: it is
+    created 0700, so the file's brief 0644 existence is inside something no
+    other user can traverse. This then tightens the file and the WAL, and is
+    called again after every write because the WAL appears on the first one.
+
+    Best effort: a chmod that fails (a filesystem with no modes, a path owned
+    by somebody else) must not take down a connect. The value the mode
+    protects is already encrypted; this is the second lock on the same door.
+    """
+    for candidate in (path, path + ".wal"):
+        try:
+            os.chmod(candidate, 0o600)
+        except OSError:
+            pass
+    try:
+        os.chmod(Path(path).parent, 0o700)
+    except OSError:
+        pass
+
+
 def _connect(path: str):
+    """The one connection to the custody file, opened on first use.
+
+    Every DuckDB failure becomes `CustodyUnavailable`. The one that actually
+    happens is the file lock: DuckDB allows a single writer per file, so a
+    second uvicorn worker, a second replica, or a developer with a REPL open
+    makes every custody request in every other process raise `IOException`.
+    Uncaught, that is a 500 raised AFTER the credential has already been read
+    off the wire. As `CustodyUnavailable` it is a clean, logged 503 that says
+    what is wrong, and the credential is not stored by a process that could
+    not have stored it anyway.
+    """
     with _CONN_LOCK:
         conn = _CONNS.get(path)
         if conn is None:
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
-            conn = duckdb.connect(path)
-            for statement in _SCHEMA:
-                conn.execute(statement)
+            try:
+                # 0700 on the directory, which is what actually protects the
+                # file during the moment DuckDB creates it. `mode` applies to
+                # the leaf directory and only when this call creates it, so a
+                # path the operator already made keeps whatever they chose --
+                # `_lock_down` still tightens the files inside it.
+                Path(path).parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                conn = duckdb.connect(path)
+                for statement in _SCHEMA:
+                    conn.execute(statement)
+            except duckdb.Error as exc:
+                raise CustodyUnavailable(
+                    f"the credential store at {path} is not usable "
+                    f"({type(exc).__name__}). Another process may hold its "
+                    "write lock -- this store supports one writer.") from None
+            except OSError as exc:
+                raise CustodyUnavailable(
+                    f"the credential store at {path} could not be opened "
+                    f"({exc.strerror})") from None
+            _lock_down(path)
             _CONNS[path] = conn
         return conn
+
+
+# Every table the store owns, in the order a rebuild must create them. Kept
+# beside _SCHEMA rather than derived from it so that adding a table forces a
+# decision about whether `_compact` should carry it across.
+_TABLES = ("espn_credential", "espn_session")
+
+
+def _compact(path: str):
+    """Rewrite the store from its live rows, so deleted ones cannot be read
+    back out of the file. Returns the connection to use afterwards.
+
+    WHY A CHECKPOINT IS NOT ENOUGH, measured rather than assumed. DuckDB is
+    copy-on-write: a checkpoint writes the surviving rows to NEW blocks and
+    marks the old ones free, but free blocks keep their bytes until something
+    reuses them. Deleting one credential out of five and checkpointing leaves
+    all five ciphertexts in the file. (The single-row case happens to come out
+    clean, which is exactly how a weak test can pass over this.)
+
+    Nothing in the storage engine erases one row's bytes, so the store is
+    rebuilt instead: a fresh database containing only the live rows, swapped
+    into place with `os.replace`. What is left afterwards contains what the
+    tables contain and nothing else.
+
+    AFFORDABLE BECAUSE OF WHAT THIS TABLE IS. One row per person who has
+    connected an account, a few hundred bytes each; a rebuild measured about
+    10ms. And it runs only when a credential is actually removed or replaced,
+    which is a person clicking disconnect, a 401, or the reaper -- never on a
+    read. If this table ever grows to a size where that is the wrong trade,
+    the thing to change is the storage, not this guarantee.
+
+    ATOMIC, so a crash cannot lose the store: the rebuild is written to a
+    separate file and `os.replace` swaps it in one step. A crash before the
+    swap leaves the original intact and a stale `.compact` file that the next
+    attempt removes; a crash after it leaves the complete new one.
+
+    THE HANDLE YOU HELD IS DEAD AFTERWARDS. This closes the connection and
+    opens a new one against the new file, so any caller holding a connection
+    across a mutation must ask `_connect` for it again -- which is why every
+    method here fetches one at the top rather than caching it.
+
+    Best effort about FAILING: if anything goes wrong the original file is
+    left exactly as it was and the caller carries on. A store that could not
+    be compacted is a store with recoverable deleted rows in it, which is
+    worse than nothing -- but losing the live credentials of everyone using
+    the product would be worse still.
+    """
+    with _CONN_LOCK:
+        conn = _CONNS.get(path)
+        if conn is None:
+            return _connect(path)
+        if "'" in path:
+            # ATTACH takes no bind parameters, so a quote in the path could
+            # end the string literal. No deployment has one; refusing beats
+            # building SQL out of it.
+            return conn
+        tmp = path + ".compact"
+        try:
+            for stale in (tmp, tmp + ".wal"):
+                if os.path.exists(stale):
+                    os.unlink(stale)
+            conn.execute(f"ATTACH '{tmp}' AS compacted")
+            for statement in _SCHEMA:
+                conn.execute(statement.replace(
+                    "CREATE TABLE IF NOT EXISTS ",
+                    "CREATE TABLE IF NOT EXISTS compacted."))
+            for table in _TABLES:
+                conn.execute(
+                    f"INSERT INTO compacted.{table} SELECT * FROM {table}")
+            conn.execute("DETACH compacted")
+            # Closed before the swap so DuckDB folds and removes its own WAL
+            # first -- replacing the file underneath an open handle would
+            # leave a connection reading a file that no longer exists.
+            conn.close()
+            _CONNS.pop(path, None)
+            if os.path.exists(path + ".wal"):
+                os.unlink(path + ".wal")
+            os.replace(tmp, path)
+        except (duckdb.Error, OSError):
+            for stale in (tmp, tmp + ".wal"):
+                try:
+                    os.unlink(stale)
+                except OSError:
+                    pass
+        return _connect(path)
+
+
+def _flush(conn, path: str) -> None:
+    """Force the write-ahead log into the database file, then forget it.
+
+    WHY A DELETE IS NOT A DELETE WITHOUT THIS. DuckDB writes changes to a WAL
+    and only folds it into the main file when it grows past its auto-checkpoint
+    threshold, which defaults to 16 MB -- tens of thousands of operations at
+    these row sizes. Until then the WAL still holds the ORIGINAL INSERT of
+    every row, including every credential a user has explicitly deleted. So a
+    long-running API would keep a recoverable copy of every ESPN session it
+    had ever been given, and "disconnect everywhere" would be a lie told to
+    the one user who cared enough to ask.
+
+    Measured on this schema: after `disconnect_everywhere` the ciphertext is
+    still present in the files on disk; after a `CHECKPOINT` it is gone.
+
+    Called after writes as well as deletes, so the WAL cannot sit there
+    accumulating live credentials in the first place.
+    """
+    try:
+        conn.execute("CHECKPOINT")
+    except duckdb.Error:
+        # A checkpoint can be refused while another cursor holds a
+        # transaction. Not fatal and not worth failing a user's disconnect
+        # over: the next mutation checkpoints again, and the row is already
+        # gone from the table either way.
+        pass
+    _lock_down(path)
 
 
 def close_all() -> None:
@@ -374,10 +608,21 @@ class CredentialStore:
     """
 
     def __init__(self, path: str | None = None, keys: str | None = None,
-                 ttl_days: float | None = None, out=print):
+                 ttl_days: float | None = None, out=print, verifier=None):
         self.path = path or os.environ.get(DB_PATH_ENV) or DEFAULT_DB_PATH
         self._keys_spec = keys
         self._ttl_days = ttl_days
+        # How this store proves that whoever sent an espn_s2 owns the account
+        # they claim (see `pipeline/espn_identity.py`, and `connect` below for
+        # why a write path needs authorization at all). Injected at
+        # CONSTRUCTION rather than passed per call, so that no call site can
+        # skip it by forgetting an argument; tests substitute a fake one and
+        # therefore never touch the network.
+        self._verifier = verifier or verify_account
+        # Key versions whose absence has already been reported, so a retired
+        # key logs once rather than on every request from every browser that
+        # still holds a cookie minted under it.
+        self._warned_versions: set = set()
         # Every line this module prints goes through the scrubber, once, here
         # -- rather than at each call site, which is the argument
         # pipeline/redact.py makes at length: call sites accumulate and one of
@@ -443,67 +688,154 @@ class CredentialStore:
 
     # -- writing ------------------------------------------------------------
 
-    def connect(self, swid: str, espn_s2: str, now=None) -> MintedSession:
+    def connect(self, swid: str, espn_s2: str, now=None,
+                cookie: str | None = None) -> MintedSession:
         """Take custody of one ESPN session and mint a browser session for it.
 
-        Upsert, not insert: reconnecting from the same browser must not leave
-        the previous credential row behind holding an older `espn_s2`, and
-        must not disturb the OTHER browsers this user has connected from.
+        THE WRITE PATH NEEDS AUTHORIZATION TOO, and getting that wrong is
+        worse than getting the read path wrong. SWID is public -- it is in the
+        invite POST's query string and the draft socket's JOIN url -- so an
+        upsert keyed on the CLIENT'S `swid` field lets a stranger post their
+        own `espn_s2` under a victim's SWID and replace the victim's stored
+        session. The victim is not merely logged out: their browser keeps a
+        valid cookie, which now resolves to the ATTACKER'S ESPN account, so
+        the next feature that acts on a resolved credential acts on the wrong
+        account while looking perfectly healthy.
+
+        Two independent locks, because either alone leaves a hole.
+
+        1. THE ACCOUNT IS PROVEN, NOT CLAIMED. `self._verifier` asks ESPN who
+           the presented `espn_s2` actually belongs to, and the row is keyed on
+           ESPN'S ANSWER. The `swid` argument is only a hint about which
+           profile to ask for; it is never what gets hashed. So a caller who
+           does not hold a working session for an account cannot get a row
+           written under it at all, and the attack above cannot start. Fails
+           closed: if ESPN cannot be reached, nothing is stored.
+
+        2. REPLACING A STORED SECRET NEEDS THE COOKIE FOR IT. Verification is
+           one endpoint's behaviour away from being wrong, so it is not the
+           only thing standing between a stranger and another browser's
+           session. A connect that presents no cookie for an account already
+           held here does NOT overwrite what is stored -- it attaches a new
+           browser to the credential that is already there.
+
+           That is deliberately an attach rather than a refusal, and the
+           difference matters. Refusing would break the ordinary case this
+           design exists to support: the same person clicking the bookmarklet
+           from a second browser, which has no cookie yet and whose ESPN
+           session is usually a different `espn_s2` because ESPN reissues
+           them. Attaching lets that browser work immediately, while the
+           stored secret -- the thing every other browser resolves through --
+           can only be changed by someone who already holds a cookie for it.
+           Nothing is retargeted, and nobody is evicted.
+
+           If the stored secret has genuinely gone stale, ESPN answers 401 and
+           `forget_if_unauthorized` deletes the credential; the next connect
+           then creates it fresh. The system heals without ever letting an
+           unauthenticated caller rewrite a live one.
         """
         if not swid or not espn_s2:
             # Storing half a session buys nothing and costs the same custody
             # obligations, so it is refused rather than half-written.
             raise ValueError("both swid and espn_s2 are required")
+        # BEFORE anything is written, and before the database file is even
+        # opened: a caller who cannot prove the account must leave no trace.
+        owner = canonical_swid(self._verifier(swid, espn_s2))
+        if not owner:
+            raise OwnershipUnproven("ESPN named no account for that session")
+
         now = _utc(now)
         key = self.current_key
-        conn = _connect(self.path)
-        blob = key.fernet.encrypt(
-            json.dumps({"swid": str(swid), "espn_s2": str(espn_s2)},
-                       separators=(",", ":")).encode("utf-8")).decode("ascii")
-        credential_id = self._row_id(swid, key)
         expires_at = now + self.ttl
 
+        # Resolved BEFORE the lock and before the store is touched, because
+        # `resolve` is itself a full read path (it reaps, it slides expiry)
+        # and running it inside this method's critical section would nest two
+        # different jobs in one transaction for no reason.
+        holder = self.resolve(cookie, now=now) if cookie else None
+        conn = _connect(self.path)
+
         with _CONN_LOCK:
-            # An existing row for this user, possibly under an older key
+            # An existing row for this account, possibly under an older key
             # version and therefore under a DIFFERENT id.
             previous = None
-            for candidate_key, candidate_id in self._candidate_ids(swid):
+            for _candidate_key, candidate_id in self._candidate_ids(owner):
                 row = conn.execute(
                     "SELECT id, created_at FROM espn_credential WHERE id = ?",
                     [candidate_id]).fetchone()
                 if row:
                     previous = row
                     break
-            created_at = previous[1] if previous else now
-            conn.execute("DELETE FROM espn_credential WHERE id = ?",
-                         [credential_id])
-            conn.execute(
-                "INSERT INTO espn_credential VALUES (?, ?, ?, ?, ?, ?)",
-                [credential_id, blob, key.version, created_at, now, expires_at])
-            if previous and previous[0] != credential_id:
-                # Rotation caught up with this user: their row moves to the new
-                # key version, so their id changes. Their OTHER browsers are
-                # repointed rather than orphaned -- the two-table split exists
-                # precisely so a second browser is not evicted, and a key
-                # rotation is not a reason to start evicting them.
-                conn.execute(
-                    "UPDATE espn_session SET credential_id = ? "
-                    "WHERE credential_id = ?", [credential_id, previous[0]])
+
+            # Note what is compared: the cookie must resolve to THIS
+            # credential, not merely to some credential -- one user's valid
+            # cookie must never authorise rewriting another user's row.
+            authorised = (previous is not None and holder is not None
+                          and holder.credential_id == previous[0])
+
+            if previous is not None and not authorised:
+                # Attach only. The stored secret, its key version and its
+                # created_at are all left exactly as they were.
+                credential_id = previous[0]
+                replaced = False
+            else:
+                credential_id = self._row_id(owner, key)
+                blob = key.fernet.encrypt(
+                    json.dumps({"swid": owner, "espn_s2": str(espn_s2)},
+                               separators=(",", ":")).encode("utf-8")
+                ).decode("ascii")
+                created_at = previous[1] if previous else now
                 conn.execute("DELETE FROM espn_credential WHERE id = ?",
-                             [previous[0]])
+                             [credential_id])
+                conn.execute(
+                    "INSERT INTO espn_credential VALUES (?, ?, ?, ?, ?, ?)",
+                    [credential_id, blob, key.version, created_at, now,
+                     expires_at])
+                if previous and previous[0] != credential_id:
+                    # Rotation caught up with this user: their row moves to the
+                    # new key version, so its id changes. Their OTHER browsers
+                    # are repointed rather than orphaned -- the two-table split
+                    # exists precisely so a second browser is not evicted, and
+                    # a key rotation is not a reason to start evicting them.
+                    conn.execute(
+                        "UPDATE espn_session SET credential_id = ? "
+                        "WHERE credential_id = ?", [credential_id, previous[0]])
+                    conn.execute("DELETE FROM espn_credential WHERE id = ?",
+                                 [previous[0]])
+                replaced = True
 
             # 256 bits from the OS CSPRNG. This value is the password to a
             # stored ESPN account session, so it is generated the same way a
             # password reset token would be and is never derived from anything
             # guessable (no user id, no timestamp, no counter).
-            cookie = secrets.token_urlsafe(32)
-            session_id = self._row_id(cookie, key)
+            minted = secrets.token_urlsafe(32)
+            session_id = self._row_id(minted, key)
             conn.execute("DELETE FROM espn_session WHERE id = ?", [session_id])
             conn.execute(
                 "INSERT INTO espn_session VALUES (?, ?, ?, ?, ?, ?)",
                 [session_id, credential_id, key.version, now, now, expires_at])
-        return MintedSession(cookie=cookie, credential_id=credential_id,
-                             session_id=session_id, expires_at=expires_at)
+            # The credential is alive again whether or not its secret changed,
+            # so its clock restarts either way -- otherwise a user who keeps
+            # connecting new browsers would still be reaped on the old one's
+            # schedule.
+            conn.execute(
+                "UPDATE espn_credential SET last_used_at = ?, expires_at = ? "
+                "WHERE id = ?", [now, expires_at, credential_id])
+            # Fold the write-ahead log into the file now rather than at
+            # DuckDB's 16 MB threshold, so a live credential is not left
+            # sitting in a WAL that nothing will fold in for months. See
+            # `_flush`.
+            _flush(conn, self.path)
+        if replaced and previous is not None:
+            # A replaced credential leaves the SUPERSEDED ciphertext in a
+            # freed block, which is the same residue a delete leaves and the
+            # same problem: ESPN reissues `espn_s2`, so the old one is still a
+            # live session for as long as ESPN honours it. Outside the lock
+            # because `_compact` takes it again and does its own bookkeeping.
+            _compact(self.path)
+        return MintedSession(cookie=minted, credential_id=credential_id,
+                             session_id=session_id, expires_at=expires_at,
+                             replaced=replaced)
 
     # -- reading ------------------------------------------------------------
 
@@ -535,7 +867,10 @@ class CredentialStore:
             # only thing that ever removes an abandoned credential; making it
             # depend on a cron somebody remembered to write would mean it does
             # not really exist.
-            self._reap(conn, now)
+            if self._reap(conn, now)["credentials"]:
+                # `_compact` replaces the file, so the handle taken above is
+                # dead from here on -- everything below uses the new one.
+                conn = _compact(self.path)
             found = None
             for _key, session_id in self._candidate_ids(cookie):
                 row = conn.execute(
@@ -545,6 +880,16 @@ class CredentialStore:
                     found = row
                     break
             if not found:
+                # A miss is almost always an ordinary wrong or expired cookie
+                # and says nothing. But it is ALSO what a retired key looks
+                # like: session ids are HMAC-ed under the key too, so a cookie
+                # minted under a version that is no longer configured cannot
+                # be found at all, and this returns None long before the
+                # `key_version` check further down could report anything. That
+                # is a whole deployment's users appearing to be logged out
+                # with not one line explaining why, so the rows are asked
+                # directly which versions they were written under.
+                self._warn_about_retired_keys(conn)
                 return None
             session_id, credential_id = found
             row = conn.execute(
@@ -557,6 +902,7 @@ class CredentialStore:
                 # never again resolve to anything.
                 conn.execute("DELETE FROM espn_session WHERE id = ?",
                              [session_id])
+                _flush(conn, self.path)
                 return None
             blob, key_version, expires_at = row
             key = self.keys.get(int(key_version))
@@ -616,6 +962,9 @@ class CredentialStore:
                         [session_id]).fetchone():
                     conn.execute("DELETE FROM espn_session WHERE id = ?",
                                  [session_id])
+                    # Without this the deleted row stays fully recoverable in
+                    # the write-ahead log, possibly for months. See `_flush`.
+                    _flush(conn, self.path)
                     return True
         return False
 
@@ -635,7 +984,17 @@ class CredentialStore:
         """Delete one credential and every session that pointed at it."""
         conn = _connect(self.path)
         with _CONN_LOCK:
-            return self._delete_credential(conn, credential_id) >= 0
+            gone = self._delete_credential(conn, credential_id) >= 0
+            # THE DELETION THAT HAS TO BE REAL. This is the call behind
+            # "disconnect everywhere" and behind a 401, so a copy left
+            # recoverable anywhere in the file would make both of them a lie
+            # told to the one user who cared enough to ask. `_flush` gets it
+            # out of the write-ahead log; `_compact` gets it out of the blocks
+            # the checkpoint merely marked free.
+            _flush(conn, self.path)
+            if gone:
+                _compact(self.path)
+            return gone
 
     @staticmethod
     def _delete_credential(conn, credential_id: str) -> int:
@@ -709,7 +1068,11 @@ class CredentialStore:
         """
         conn = _connect(self.path)
         with _CONN_LOCK:
-            return self._reap(conn, _utc(now))
+            reaped = self._reap(conn, _utc(now))
+            _flush(conn, self.path)
+            if reaped["credentials"]:
+                _compact(self.path)
+            return reaped
 
     @staticmethod
     def _reap(conn, now: datetime) -> dict:
@@ -731,6 +1094,29 @@ class CredentialStore:
             [now]).fetchone()[0])
         conn.execute("DELETE FROM espn_session WHERE expires_at <= ?", [now])
         return {"credentials": len(expired), "sessions": gone}
+
+    def _warn_about_retired_keys(self, conn) -> None:
+        """Say once, per version, that rows exist under a key we do not hold.
+
+        Once, because the alternative is a line per request per browser for
+        every user of a deployment whose key list is wrong -- which is a log
+        nobody reads, on exactly the day somebody needs to.
+        """
+        known = set(self.keys)
+        try:
+            rows = conn.execute(
+                "SELECT DISTINCT key_version FROM espn_session").fetchall()
+        except duckdb.Error:
+            return
+        for (version,) in rows:
+            version = int(version)
+            if version in known or version in self._warned_versions:
+                continue
+            self._warned_versions.add(version)
+            self._out(
+                f"custody: sessions exist under key version {version}, which "
+                f"is not in {KEYS_ENV}. Every browser holding one appears "
+                "logged out until that key is restored.")
 
     # -- introspection, for operators and tests -----------------------------
 

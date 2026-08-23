@@ -16,13 +16,30 @@ Entirely offline: no ESPN call, no socket, no real credential.
 """
 import pytest
 from fastapi import Body, FastAPI, Request, Response
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from api.custody import establish_custody, register_custody_routes, require_secure
 from pipeline import credentials as cred
+from pipeline.espn_identity import OwnershipUnproven
 
 FAKE_SWID = "{7A1F9C34-BEEF-4D01-9A55-C0FFEE001122}"
 FAKE_S2 = "AEBz" + "QqcustodyFIXTUREnotarealsessionvalue" * 3 + "%2Fend"
+OTHER_SWID = "{11112222-3333-4444-5555-666677778888}"
+OTHER_S2 = "AEBz" + "OTHERcustodyFIXTUREvalue" * 3
+
+# Which account each fixture session really belongs to -- the answer the real
+# `verify_account` gets from ESPN. Keyed on the SESSION and never on the
+# claimed swid, because that is the whole distinction: a session identifies its
+# own owner, and a client's claim about it is not evidence.
+_ACCOUNTS = {FAKE_S2: FAKE_SWID, OTHER_S2: OTHER_SWID}
+
+
+def _verifier(swid, espn_s2):
+    owner = _ACCOUNTS.get(str(espn_s2))
+    if owner is None:
+        raise OwnershipUnproven("ESPN did not accept that session")
+    return owner
 
 
 @pytest.fixture
@@ -40,6 +57,11 @@ def custody_env(tmp_path, monkeypatch):
     monkeypatch.setenv(cred.DB_PATH_ENV, str(tmp_path / "custody.duckdb"))
     monkeypatch.delenv(cred.ALLOW_PLAINTEXT_ENV, raising=False)
     monkeypatch.delenv(cred.TRUST_FORWARDED_PROTO_ENV, raising=False)
+    # The ownership proof, stubbed at the name the store resolves when it is
+    # CONSTRUCTED -- which is why this is set before `default_store()` below.
+    # Nothing in this file touches the network, and a test that accidentally
+    # did would hang rather than quietly verify against the real ESPN.
+    monkeypatch.setattr(cred, "verify_account", _verifier)
     cred.reset_default_store()
     yield cred.default_store()
     cred.reset_default_store()
@@ -57,7 +79,9 @@ def _app():
     those two lines is covered separately below.
     """
     app = FastAPI()
-    register_custody_routes(app)
+    # The harness's own mint path joins the guarded set, so the middleware
+    # inspects its body exactly as it does the real endpoint's.
+    register_custody_routes(app, paths={"/_connect", "/api/live/connect-token"})
 
     @app.post("/_connect")
     def _connect(request: Request, response: Response, body: dict = Body(...)):
@@ -323,6 +347,10 @@ def _live_app(tmp_path):
     path = str(tmp_path / "live.duckdb")
     app = FastAPI()
     register_live_routes(app, get_conn(path), path)
+    # `create_app` mounts these on the same app as the live routes, and they
+    # are what protects `/api/live/connect-token` -- so a harness without them
+    # would be testing a configuration that does not ship.
+    register_custody_routes(app)
     return app
 
 
@@ -354,3 +382,197 @@ def test_connect_token_without_an_account_session_is_left_alone(
     assert resp.status_code == 422, resp.text
     assert "missing" in resp.json()["detail"]
     assert custody_env.counts() == {"credentials": 0, "sessions": 0}
+
+
+# --- A malformed request must not become a disclosure ------------------------
+#
+# FastAPI validates the body BEFORE the handler runs, so a check written as the
+# handler's first statement never sees a request that fails validation -- and a
+# body that fails validation is still a body that was transmitted. FastAPI's
+# own 422 then echoes the rejected input straight back. The two findings
+# compound: omit one field over plain http and the account session went out in
+# the clear AND came back in the response.
+
+def test_a_malformed_body_never_echoes_the_session(custody_env, tmp_path):
+    """Over TLS, where the transport guard has nothing to say, the 422 itself
+    is the leak. Pydantic attaches the offending value to every error as
+    `input`, and on a missing-field error `input` is the ENTIRE body -- so the
+    espn_s2 comes back to the caller, into the browser's network tab, and into
+    every proxy's access log between here and there."""
+    client = TestClient(_live_app(tmp_path), base_url="https://testserver")
+    for body in (
+            # a missing field
+            {"leagueId": "1", "teamId": "2", "swid": FAKE_SWID,
+             "token": "t", "espn_s2": FAKE_S2},
+            # a wrongly typed one
+            {"leagueId": "1", "teamId": "2", "swid": FAKE_SWID, "token": 7,
+             "season": [], "espn_s2": FAKE_S2},
+            # a body that is not the shape at all
+            {"espn_s2": FAKE_S2},
+    ):
+        resp = client.post("/api/live/connect-token", json=body)
+        assert resp.status_code == 422, resp.text
+        assert FAKE_S2 not in resp.text, "the 422 echoed the account session"
+        assert "input" not in resp.text
+        # Still useful: it says which field and why.
+        assert "loc" in resp.text and "msg" in resp.text
+
+
+def test_a_malformed_body_over_plain_http_is_refused_before_validation(
+        custody_env, tmp_path):
+    """The transport refusal has to happen at a layer validation cannot get in
+    front of. Every one of these bodies fails validation, and every one of
+    them carries the credential."""
+    client = TestClient(_live_app(tmp_path), base_url="http://testserver")
+    for body in ({"leagueId": "1", "espn_s2": FAKE_S2},
+                 {"espn_s2": FAKE_S2},
+                 {"espn_s2": {"nested": FAKE_S2}},
+                 [{"espn_s2": FAKE_S2}]):
+        resp = client.post("/api/live/connect-token", json=body)
+        assert resp.status_code == 400, (body, resp.text)
+        assert cred.ALLOW_PLAINTEXT_ENV in resp.json()["detail"]
+        assert FAKE_S2 not in resp.text
+
+    # Not even as raw bytes that are not JSON at all: the guard searches for
+    # the field NAME, so nothing about the body's shape can smuggle it past.
+    raw = client.post("/api/live/connect-token",
+                      content=f'espn_s2={FAKE_S2}'.encode(),
+                      headers={"content-type": "text/plain"})
+    assert raw.status_code == 400
+    assert FAKE_S2 not in raw.text
+    assert custody_env.counts() == {"credentials": 0, "sessions": 0}
+
+
+def test_the_guard_lets_an_ordinary_request_through_with_its_body_intact(
+        custody_env, tmp_path):
+    """The middleware reads the body to decide, so it has to hand the SAME
+    body to the route afterwards. If it did not, every guarded request would
+    hang or arrive empty -- which would look like a bug in the endpoint rather
+    than in the guard."""
+    client = TestClient(_live_app(tmp_path), base_url="http://testserver")
+    resp = client.post("/api/live/connect-token", json={
+        "leagueId": "1", "teamId": "2", "swid": FAKE_SWID,
+        "token": "", "season": "2026"})
+    # Reached the handler and hit its OWN validation, which means the body
+    # survived the middleware.
+    assert resp.status_code == 422
+    assert "missing" in resp.json()["detail"]
+
+
+# --- The takeover, at the HTTP layer -----------------------------------------
+
+def test_a_stranger_cannot_take_over_an_account_through_the_api(custody_env):
+    """The same attack as the store test, driven the way it would really
+    arrive: a POST naming the victim's public SWID and carrying the attacker's
+    own ESPN session."""
+    victim = _connected(_client())
+    assert victim.get("/api/espn/custody").json()["account_hint"] == "1122"
+
+    attacker = TestClient(_app(), base_url="https://testserver")
+    resp = attacker.post("/_connect",
+                         json={"swid": FAKE_SWID, "espn_s2": OTHER_S2})
+    assert resp.status_code == 200          # they connected THEIR OWN account
+
+    # The victim's browser is untouched and still points at their own account.
+    still = victim.get("/api/espn/custody").json()
+    assert still["connected"] is True
+    assert still["account_hint"] == "1122"
+    # And the attacker got their own row, not the victim's.
+    assert attacker.get("/api/espn/custody").json()["account_hint"] == "8888"
+    assert custody_env.counts()["credentials"] == 2
+
+
+def test_a_session_espn_will_not_vouch_for_is_refused(custody_env):
+    """403, not 401: the caller is not being asked to authenticate to us, they
+    are being told the session they sent does not demonstrably belong to the
+    account they named."""
+    client = TestClient(_app(), base_url="https://testserver")
+    resp = client.post("/_connect", json={"swid": FAKE_SWID,
+                                          "espn_s2": "AEBnot-a-real-session"})
+    assert resp.status_code == 403
+    assert "set-cookie" not in resp.headers
+    assert custody_env.counts() == {"credentials": 0, "sessions": 0}
+
+
+# --- A failed request must not strand a credential ---------------------------
+
+def test_a_request_that_fails_after_connecting_strands_nothing(custody_env):
+    """THE UNREACHABLE ROW. `establish_custody` writes the credential and puts
+    the cookie on the response object -- but the response is only sent if the
+    handler returns. Anything raising afterwards leaves a live espn_s2 stored
+    with NO browser holding the cookie, and every way out of the store needs
+    that cookie. Nobody, including the person whose session it is, could
+    delete it; it would survive the full thirty-day TTL.
+    """
+    from api.custody import abandon_custody
+
+    app = FastAPI()
+    register_custody_routes(app)
+
+    @app.post("/_connect_then_fail")
+    def _boom(request: Request, response: Response, body: dict = Body(...)):
+        minted = establish_custody(request, response, body["swid"],
+                                   body["espn_s2"])
+        try:
+            raise RuntimeError("the listener would not start")
+        except BaseException:
+            abandon_custody(minted)
+            raise
+
+    client = TestClient(app, base_url="https://testserver",
+                        raise_server_exceptions=False)
+    resp = client.post("/_connect_then_fail",
+                       json={"swid": FAKE_SWID, "espn_s2": FAKE_S2})
+    assert resp.status_code == 500
+    assert custody_env.counts() == {"credentials": 0, "sessions": 0}, \
+        "a failed request left a credential nobody can delete"
+
+
+def test_the_cookie_still_reaches_a_handler_that_returns_a_response_object(
+        custody_env):
+    """FastAPI merges the injected `response` object's headers into whatever
+    the handler RETURNS -- unless the handler returns a Response of its own,
+    which is used as-is. That silently drops the cookie and produces exactly
+    the stranded row above, so the connect path sets it on the returned object
+    directly."""
+    from api.custody import set_session_cookie
+
+    app = FastAPI()
+    register_custody_routes(app)
+
+    @app.post("/_connect_returning_a_response")
+    def _explicit(request: Request, response: Response, body: dict = Body(...)):
+        minted = establish_custody(request, response, body["swid"],
+                                   body["espn_s2"])
+        out = JSONResponse(content={"connected": True})
+        set_session_cookie(out, minted)
+        return out
+
+    client = TestClient(app, base_url="https://testserver")
+    resp = client.post("/_connect_returning_a_response",
+                       json={"swid": FAKE_SWID, "espn_s2": FAKE_S2})
+    assert resp.status_code == 200
+    assert cred.COOKIE_NAME in resp.headers.get("set-cookie", "")
+    assert client.get("/api/espn/custody").json()["connected"] is True
+
+
+# --- The store being unavailable is a 503, never a 500 -----------------------
+
+def test_a_locked_store_is_a_clean_503(custody_env, monkeypatch):
+    """DuckDB allows one writer per file, so under `uvicorn --workers 2` every
+    worker but one raises IOException -- AFTER the credential has been read
+    off the wire. Unhandled, that is a 500 with a traceback on a request
+    carrying an ESPN session."""
+    import duckdb
+
+    def refuse(*a, **k):
+        raise duckdb.IOException("Conflicting lock is held")
+
+    monkeypatch.setattr(cred.duckdb, "connect", refuse)
+    cred.close_all()
+    client = TestClient(_app(), base_url="https://testserver",
+                        raise_server_exceptions=False)
+    resp = client.post("/_connect", json={"swid": FAKE_SWID,
+                                          "espn_s2": FAKE_S2})
+    assert resp.status_code == 503
+    assert FAKE_S2 not in resp.text

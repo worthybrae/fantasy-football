@@ -15,6 +15,7 @@ Entirely offline. The only ESPN artefacts are invented strings chosen to be
 unmistakable in a hex dump (see FAKE_SWID / FAKE_S2), and nothing here opens a
 socket, a browser, or the repository's real database.
 """
+import base64
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -23,6 +24,7 @@ import pytest
 
 from pipeline import credentials as cred
 from pipeline import redact
+from pipeline.espn_identity import OwnershipUnproven
 
 # Deliberately shaped like the real things -- a brace-wrapped GUID and a long
 # opaque cookie -- so that a test asserting "this string is not in the file"
@@ -41,6 +43,44 @@ def _key():
     return cred.generate_key()
 
 
+# Which ESPN account each fixture session really belongs to. This is the table
+# the fake verifier answers from, and it is the whole point of the fake: the
+# real `verify_account` asks ESPN, and ESPN is the only party that can say. A
+# test double that simply echoed the CLAIMED swid back would reproduce exactly
+# the bug the verifier exists to close, and every takeover test below would
+# pass while the product was wide open.
+_ACCOUNTS = {}
+
+
+def _verifier(swid, espn_s2):
+    """Stands in for `pipeline.espn_identity.verify_account`.
+
+    Note the signature it honours: the answer depends ONLY on `espn_s2`. The
+    claimed `swid` is ignored, because a session identifies its own owner and
+    the claim is not evidence.
+    """
+    owner = _ACCOUNTS.get(str(espn_s2))
+    if owner is None:
+        raise OwnershipUnproven("ESPN did not accept that session")
+    return owner
+
+
+@pytest.fixture(autouse=True)
+def _accounts():
+    """Who each fixture session belongs to, for the length of one test.
+
+    Autouse and file-wide because EVERY store in this file needs it, including
+    the ones the rotation tests build themselves, and a test that forgot to
+    seed it would fail with "ESPN did not accept that session" rather than
+    with whatever it was actually asserting.
+    """
+    _ACCOUNTS.clear()
+    _ACCOUNTS[FAKE_S2] = FAKE_SWID
+    _ACCOUNTS[OTHER_S2] = OTHER_SWID
+    yield _ACCOUNTS
+    _ACCOUNTS.clear()
+
+
 @pytest.fixture
 def store(tmp_path):
     """A store on a throwaway file with an explicit, throwaway key.
@@ -51,7 +91,8 @@ def store(tmp_path):
     and the inert-dump tests read the file's raw bytes.
     """
     made = cred.CredentialStore(path=str(tmp_path / "custody.duckdb"),
-                                keys=f"1:{_key()}", out=lambda *a: None)
+                                keys=f"1:{_key()}", out=lambda *a: None,
+                                verifier=_verifier)
     yield made
     cred.close_all()
 
@@ -110,7 +151,7 @@ def test_a_stolen_database_without_the_key_yields_nothing_usable(store):
     # And with a key of their own, which is the closest they can get: HMAC is
     # keyed, so a wrong key produces an id that matches nothing.
     thief = cred.CredentialStore(path=store.path, keys=f"1:{_key()}",
-                                 out=lambda *a: None)
+                                 out=lambda *a: None, verifier=_verifier)
     assert thief.resolve(FAKE_SWID) is None
     thief_id = thief._row_id(FAKE_SWID, thief.current_key)
     assert thief_id.encode() not in raw
@@ -157,7 +198,7 @@ def test_a_missing_key_is_a_refusal_and_never_a_plaintext_fallback(tmp_path):
     exists to make worthless.
     """
     broken = cred.CredentialStore(path=str(tmp_path / "c.duckdb"), keys="",
-                                  out=lambda *a: None)
+                                  out=lambda *a: None, verifier=_verifier)
     with pytest.raises(cred.CustodyUnavailable):
         broken.connect(FAKE_SWID, FAKE_S2)
     with pytest.raises(cred.CustodyUnavailable):
@@ -403,13 +444,14 @@ def test_a_row_written_under_key_version_1_survives_version_2(tmp_path):
     path = str(tmp_path / "custody.duckdb")
     key1, key2 = _key(), _key()
 
-    old = cred.CredentialStore(path=path, keys=f"1:{key1}", out=lambda *a: None)
+    old = cred.CredentialStore(path=path, keys=f"1:{key1}",
+                               out=lambda *a: None, verifier=_verifier)
     first_browser = old.connect(FAKE_SWID, FAKE_S2)
     second_browser = old.connect(FAKE_SWID, FAKE_S2)
 
     # Version 2 arrives. Nothing has been rewritten.
     rotated = cred.CredentialStore(path=path, keys=f"1:{key1},2:{key2}",
-                                   out=lambda *a: None)
+                                   out=lambda *a: None, verifier=_verifier)
     assert rotated.current_key.version == 2
     resolved = rotated.resolve(first_browser.cookie)
     assert resolved is not None, "a version-1 row stopped resolving"
@@ -419,9 +461,15 @@ def test_a_row_written_under_key_version_1_survives_version_2(tmp_path):
     assert conn.execute(
         "SELECT key_version FROM espn_credential").fetchone()[0] == 1
 
-    # The user reconnects. Their row moves to version 2 -- and their OTHER
-    # browser, whose session id was HMAC-ed under version 1, still works.
-    rotated.connect(FAKE_SWID, FAKE_S2)
+    # The user reconnects FROM A BROWSER THAT HOLDS THE COOKIE, which is what
+    # authorises rewriting the stored secret (see `connect`, lock 2) and so is
+    # also what moves the row to the new key. Their OTHER browser, whose
+    # session id was HMAC-ed under version 1, still works afterwards.
+    rotated.connect(FAKE_SWID, FAKE_S2, cookie=first_browser.cookie)
+    # Re-fetched, not reused: replacing a credential compacts the store, which
+    # rebuilds the file and closes the old handle (see `_compact`). Any code
+    # holding a connection across a mutation has to ask for it again.
+    conn = cred._connect(path)
     assert conn.execute(
         "SELECT key_version FROM espn_credential").fetchone()[0] == 2
     assert conn.execute("SELECT count(*) FROM espn_credential").fetchone()[0] == 1
@@ -451,20 +499,21 @@ def test_retiring_a_key_makes_its_rows_unreadable_rather_than_dangerous(tmp_path
     key1, key2 = _key(), _key()
     lines = []
 
-    old = cred.CredentialStore(path=path, keys=f"1:{key1}", out=lambda *a: None)
+    old = cred.CredentialStore(path=path, keys=f"1:{key1}",
+                               out=lambda *a: None, verifier=_verifier)
     minted = old.connect(FAKE_SWID, FAKE_S2)
 
     # Version 2 arrives and the user reconnects, so the credential moves to
     # version 2 while this browser's session id stays a version-1 HMAC.
     rotated = cred.CredentialStore(path=path, keys=f"1:{key1},2:{key2}",
-                                   out=lambda *a: None)
-    rotated.connect(FAKE_SWID, FAKE_S2)
+                                   out=lambda *a: None, verifier=_verifier)
+    rotated.connect(FAKE_SWID, FAKE_S2, cookie=minted.cookie)
     assert rotated.resolve(minted.cookie) is not None
 
     # Version 2 is rolled back. The session still resolves; its credential
     # does not.
     reverted = cred.CredentialStore(path=path, keys=f"1:{key1}",
-                                    out=lines.append)
+                                    out=lines.append, verifier=_verifier)
     assert reverted.resolve(minted.cookie) is None
     assert reverted.counts()["credentials"] == 1     # left for the clock
     assert any("key version 2" in line for line in lines), \
@@ -472,7 +521,7 @@ def test_retiring_a_key_makes_its_rows_unreadable_rather_than_dangerous(tmp_path
 
     # And the plain case: a key that is gone with nothing left that knows it.
     gone = cred.CredentialStore(path=path, keys=f"9:{_key()}",
-                                out=lambda *a: None)
+                                out=lambda *a: None, verifier=_verifier)
     assert gone.resolve(minted.cookie) is None
     cred.close_all()
 
@@ -526,7 +575,7 @@ def test_the_401_log_path_scrubs_a_token_carried_in_a_url(store):
     exception."""
     lines = []
     talkative = cred.CredentialStore(path=store.path, keys=store._keys_spec,
-                                     out=lines.append)
+                                     out=lines.append, verifier=_verifier)
     minted = talkative.connect(FAKE_SWID, FAKE_S2)
     talkative.forget_if_unauthorized(minted.credential_id,
                                      _FakeHTTPStatusError(401, _espn_url()))
@@ -560,7 +609,7 @@ def test_a_stored_credential_never_reaches_a_log_by_accident(store):
     checking what came out."""
     lines = []
     noisy = cred.CredentialStore(path=store.path, keys=store._keys_spec,
-                                 out=lines.append)
+                                 out=lines.append, verifier=_verifier)
     minted = noisy.connect(FAKE_SWID, FAKE_S2)
     noisy.resolve(minted.cookie)
     noisy.disconnect(minted.cookie)
@@ -580,12 +629,15 @@ def test_half_a_session_is_refused_rather_than_half_stored(store):
     assert store.counts() == {"credentials": 0, "sessions": 0}
 
 
-def test_reconnecting_replaces_the_stored_session_rather_than_adding_one(store):
-    """ESPN reissues espn_s2; the second connect must overwrite the first,
-    not leave a stale copy of a session we would otherwise hold forever."""
+def test_reconnecting_from_the_same_browser_replaces_the_stored_session(store):
+    """ESPN reissues espn_s2; a reconnect from a browser that already holds
+    the cookie must overwrite the stored copy, not leave a stale one we would
+    otherwise keep for thirty days."""
     first = store.connect(FAKE_SWID, FAKE_S2)
     replacement = FAKE_S2 + "ROTATEDBYESPN"
-    second = store.connect(FAKE_SWID, replacement)
+    _ACCOUNTS[replacement] = FAKE_SWID
+    second = store.connect(FAKE_SWID, replacement, cookie=first.cookie)
+    assert second.replaced is True
     assert store.counts()["credentials"] == 1
     assert store.resolve(second.cookie).espn_s2 == replacement
     assert store.resolve(first.cookie).espn_s2 == replacement
@@ -609,3 +661,418 @@ def test_the_blob_is_the_only_place_the_pair_lives(store):
     blob = conn.execute("SELECT blob FROM espn_credential").fetchone()[0]
     payload = json.loads(store.current_key.fernet.decrypt(blob.encode()))
     assert payload == {"swid": FAKE_SWID, "espn_s2": FAKE_S2}
+
+
+# --- The write path needs authorization too ----------------------------------
+#
+# Everything above this line was true of the store as first written, and none
+# of it stopped the attack below: a stranger posting their OWN espn_s2 under a
+# victim's PUBLIC swid replaced the victim's stored session, leaving the
+# victim's browser holding a valid cookie that resolved to the attacker's ESPN
+# account. The read path was the only one with a password on it.
+
+def test_a_stranger_cannot_replace_a_users_stored_session(store):
+    """THE TAKEOVER, reproduced and then refused.
+
+    The attacker has everything a real attacker has: the victim's SWID, which
+    is public and rides in every draft url, and a working ESPN session of
+    their own. What they do not have is a session belonging to the victim's
+    account -- and that is now the only thing that decides which row is
+    written, because the row is keyed on what ESPN says the presented cookie
+    owns, never on the `swid` field the client filled in.
+    """
+    victim = store.connect(FAKE_SWID, FAKE_S2)
+    assert store.resolve(victim.cookie).espn_s2 == FAKE_S2
+
+    # The attacker names the victim's account and sends their own session.
+    attacker = store.connect(FAKE_SWID, OTHER_S2)
+
+    resolved = store.resolve(victim.cookie)
+    assert resolved is not None, "the victim was logged out"
+    assert resolved.espn_s2 == FAKE_S2, \
+        "the victim's browser now resolves to somebody else's ESPN account"
+    assert resolved.swid == FAKE_SWID
+    # The attacker got a row, but their own -- keyed on the account they can
+    # actually prove, which is the one their session belongs to.
+    assert store.resolve(attacker.cookie).swid == OTHER_SWID
+    assert attacker.credential_id != victim.credential_id
+    assert store.counts()["credentials"] == 2
+
+
+def test_the_row_is_keyed_on_espns_answer_not_on_the_claimed_swid(store):
+    """The claim is not evidence, so it is not the key either.
+
+    Connecting one session while naming four different accounts produces ONE
+    row, under the account that session actually belongs to.
+    """
+    for claimed in (FAKE_SWID, OTHER_SWID, "{00000000-0000-0000-0000-000000000000}",
+                    "not-a-swid-at-all"):
+        minted = store.connect(claimed, FAKE_S2, cookie=None)
+        assert store.resolve(minted.cookie).swid == FAKE_SWID
+    assert store.counts()["credentials"] == 1
+
+
+def test_a_session_espn_does_not_recognise_is_never_stored(store):
+    """Fails closed. An unverifiable session -- expired, forged, or ESPN
+    unreachable -- leaves nothing behind, because "we could not check, so we
+    kept it for thirty days" is not an available answer on a write path that
+    stores account credentials."""
+    with pytest.raises(OwnershipUnproven):
+        store.connect(FAKE_SWID, "AEBnot-a-session-espn-has-ever-issued")
+    assert store.counts() == {"credentials": 0, "sessions": 0}
+
+
+def test_a_refused_connect_does_not_even_create_the_database(tmp_path):
+    """The refusal happens before the store is opened, so a server being
+    probed by strangers does not accumulate an empty custody database as
+    evidence that somebody tried."""
+    path = str(tmp_path / "nested" / "custody.duckdb")
+    lonely = cred.CredentialStore(path=path, keys=f"1:{_key()}",
+                                  out=lambda *a: None, verifier=_verifier)
+    with pytest.raises(OwnershipUnproven):
+        lonely.connect(FAKE_SWID, "AEBunknown")
+    assert not pathlib_exists(path)
+    cred.close_all()
+
+
+def pathlib_exists(path):
+    return Path(path).exists()
+
+
+def test_a_second_browser_attaches_rather_than_rewriting_the_stored_session(store):
+    """LOCK 2, and the reason it is an attach and not a refusal.
+
+    Verification proves the caller owns the account they are posting. It
+    cannot, by itself, stop a caller who owns that account from retargeting a
+    row other browsers already resolve through -- so replacing the stored
+    secret additionally requires a cookie for it.
+
+    Refusing the cookie-less case would have broken the ordinary flow this
+    design exists to support: the same person clicking the bookmarklet from a
+    second browser, which has no cookie and whose ESPN session is usually a
+    different espn_s2. So that case ATTACHES: the new browser works
+    immediately, and the stored secret every other browser depends on is
+    untouched.
+    """
+    first = store.connect(FAKE_SWID, FAKE_S2)
+    reissued = FAKE_S2 + "REISSUEDBYESPN"
+    _ACCOUNTS[reissued] = FAKE_SWID
+
+    second = store.connect(FAKE_SWID, reissued)        # no cookie
+    assert second.replaced is False
+    assert second.credential_id == first.credential_id
+    assert store.counts() == {"credentials": 1, "sessions": 2}
+    # Both browsers work, and both see the secret that was already stored --
+    # nothing was retargeted.
+    assert store.resolve(first.cookie).espn_s2 == FAKE_S2
+    assert store.resolve(second.cookie).espn_s2 == FAKE_S2
+
+    # With the cookie, the same call is authorised and does replace it.
+    third = store.connect(FAKE_SWID, reissued, cookie=first.cookie)
+    assert third.replaced is True
+    assert store.resolve(first.cookie).espn_s2 == reissued
+
+
+def test_an_attach_still_restarts_the_credentials_clock(store):
+    """A user connecting new browsers is plainly still here, so the reaper's
+    countdown restarts even on a connect that changed nothing."""
+    start = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
+    store.connect(FAKE_SWID, FAKE_S2, now=start)
+    later = start + timedelta(days=25)
+    second = store.connect(FAKE_SWID, FAKE_S2, now=later)
+    assert second.replaced is False
+    assert store.reap(now=start + timedelta(days=31))["credentials"] == 0
+
+
+# --- A delete has to be a delete -------------------------------------------
+
+def _raw_bytes_live(store):
+    """The files as they are RIGHT NOW, with the connection still open.
+
+    Deliberately does not close anything, because closing is what a test can
+    do and a running API cannot. The bug this catches was invisible to a scan
+    that closed first: DuckDB folds its write-ahead log into the database on
+    close, which is exactly the step a live server never reaches.
+    """
+    base = Path(store.path)
+    blob = b""
+    for candidate in base.parent.iterdir():
+        if candidate.name.startswith(base.name):
+            blob += candidate.read_bytes()
+    return blob
+
+
+def _crowd(store, count=5, now=None):
+    """`count` connected accounts, and the ciphertext of each.
+
+    SEVERAL, not one, and that is the whole point of this helper. A store
+    holding a single credential is the one case where deleting it happens to
+    leave the file clean -- so a test written against one row passes over
+    precisely the bug these tests exist to catch. With neighbours in the
+    table, a delete rewrites the surviving rows into new blocks and leaves the
+    deleted one's bytes sitting in the block that was merely marked free.
+    """
+    made = []
+    for n in range(count):
+        swid = FAKE_SWID.replace("7A1F9C34", f"7A1F9C3{n}")
+        secret = f"{FAKE_S2}-{n}"
+        _ACCOUNTS[secret] = swid
+        minted = store.connect(swid, secret, now=now)
+        blob = cred._connect(store.path).execute(
+            "SELECT blob FROM espn_credential WHERE id = ?",
+            [minted.credential_id]).fetchone()[0].encode()
+        made.append((minted, blob))
+    on_disk = _raw_bytes_live(store)
+    for _minted, blob in made:
+        assert blob in on_disk, "a fixture credential never reached the disk"
+    return made
+
+
+def test_a_deleted_credential_leaves_no_recoverable_copy_behind(store):
+    """DISCONNECT EVERYWHERE HAS TO BE TRUE ON DISK, not just in the table.
+
+    Two mechanisms hide a deleted credential in a file that reports it gone,
+    and a delete has to defeat both.
+
+    THE WRITE-AHEAD LOG. DuckDB folds it into the database only past an
+    auto-checkpoint threshold that defaults to 16 MB -- tens of thousands of
+    operations at these row sizes. Until then it still holds the original
+    INSERT, so a long-running API retains every credential it was ever given,
+    including every one a user explicitly deleted.
+
+    FREED BLOCKS. DuckDB is copy-on-write, so even a checkpoint only writes
+    the survivors to new blocks and marks the old ones free -- and free blocks
+    keep their bytes. Measured: delete one credential of five, checkpoint, and
+    all five ciphertexts are still in the file.
+
+    Asserted against the LIVE files, without closing the connection, because
+    closing is what hides it: a close checkpoints and folds, so a test that
+    closed first would pass while the server leaked.
+    """
+    crowd = _crowd(store)
+    (victim, gone), survivors = crowd[0], crowd[1:]
+
+    assert store.disconnect_everywhere(victim.cookie) is True
+
+    on_disk = _raw_bytes_live(store)
+    assert gone not in on_disk, \
+        "the deleted credential is still recoverable from the files"
+    # And the deletion did not take anybody else with it, which is the other
+    # half of getting this right.
+    for minted, blob in survivors:
+        assert blob in on_disk, "compaction dropped a live credential"
+        assert store.resolve(minted.cookie) is not None
+
+
+def test_a_reaped_credential_leaves_no_recoverable_copy_either(store):
+    """Same for the clock, which is the path that removes the credentials of
+    users who never come back -- the ones who cannot be asked and cannot be
+    told."""
+    start = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
+    crowd = _crowd(store, now=start)
+    # One goes quiet; the rest keep coming back.
+    for minted, _blob in crowd[1:]:
+        store.resolve(minted.cookie, now=start + timedelta(days=20))
+
+    assert store.reap(now=start + timedelta(days=31))["credentials"] == 1
+    on_disk = _raw_bytes_live(store)
+    assert crowd[0][1] not in on_disk
+    for _minted, blob in crowd[1:]:
+        assert blob in on_disk
+
+
+def test_a_401_deletion_leaves_no_recoverable_copy_either(store):
+    """And the 401 path, which exists precisely because keeping a known-dead
+    session on disk is pure liability -- which it would remain if the delete
+    were only a table delete."""
+    crowd = _crowd(store)
+    victim, gone = crowd[0]
+
+    store.forget_if_unauthorized(victim.credential_id,
+                                 _FakeHTTPStatusError(401, _espn_url()))
+    on_disk = _raw_bytes_live(store)
+    assert gone not in on_disk
+    for _minted, blob in crowd[1:]:
+        assert blob in on_disk
+
+
+def test_a_replaced_credential_leaves_no_recoverable_copy_either(store):
+    """ESPN reissues `espn_s2`, so a reconnect supersedes a stored token that
+    is still a live session for as long as ESPN honours it. Leaving the old
+    ciphertext in a freed block would keep it exactly as recoverable as a
+    deleted one."""
+    crowd = _crowd(store)
+    minted, superseded = crowd[0]
+
+    fresher = f"{FAKE_S2}-0-REISSUED"
+    _ACCOUNTS[fresher] = store.resolve(minted.cookie).swid
+    store.connect(_ACCOUNTS[fresher], fresher, cookie=minted.cookie)
+
+    on_disk = _raw_bytes_live(store)
+    assert superseded not in on_disk, "the superseded session is still on disk"
+    for _other, blob in crowd[1:]:
+        assert blob in on_disk
+
+
+# --- One account is one row -------------------------------------------------
+
+def test_one_account_is_one_row_however_its_swid_is_spelled(store):
+    """`{GUID}`, `GUID`, `%7BGUID%7D`, lower case and a stray trailing space
+    are all the same person.
+
+    Hashed as sent they were FIVE rows, each holding a live ESPN session, and
+    a "disconnect everywhere" that cleared exactly one of them -- which is the
+    worst possible version of that button, because it reports success.
+    """
+    body = FAKE_SWID.strip("{}")
+    spellings = [FAKE_SWID, body, body.lower(), f"%7B{body}%7D",
+                 f"  {FAKE_SWID} ", "{" + body.lower() + "}"]
+    cookies = [store.connect(spelling, FAKE_S2).cookie for spelling in spellings]
+
+    assert store.counts()["credentials"] == 1, "one account made several rows"
+    assert len({store.resolve(c).credential_id for c in cookies}) == 1
+    # And the stored swid is one canonical spelling, not whichever arrived first.
+    assert store.resolve(cookies[0]).swid == FAKE_SWID
+
+    assert store.disconnect_everywhere(cookies[0]) is True
+    assert store.counts() == {"credentials": 0, "sessions": 0}, \
+        "disconnect everywhere left a row behind"
+
+
+# --- Operational failure modes ----------------------------------------------
+
+def test_the_store_files_are_owner_only(store):
+    """`api/live.py` has used 0600 since it was written for a per-draft nonce
+    that dies in two hours. This file holds account sessions that live for
+    months; it does not get to be the more readable of the two."""
+    store.connect(FAKE_SWID, FAKE_S2)
+    base = Path(store.path)
+    assert oct(base.stat().st_mode)[-3:] == "600"
+    for sibling in base.parent.iterdir():
+        if sibling.name.startswith(base.name):
+            assert oct(sibling.stat().st_mode)[-3:] == "600", sibling
+
+
+def test_a_second_process_on_the_store_is_a_clean_refusal(tmp_path, monkeypatch):
+    """DuckDB allows one writer per file. Under `uvicorn --workers 2`, or two
+    replicas, every worker but one raises `IOException` -- and it raises it
+    AFTER the credential has been read off the wire, which as an unhandled
+    exception is a 500 with a traceback on a request carrying an ESPN session.
+    As `CustodyUnavailable` it is a clean, logged 503 that names the cause."""
+    import duckdb
+
+    def refuse(*a, **k):
+        raise duckdb.IOException("Conflicting lock is held")
+
+    monkeypatch.setattr(cred.duckdb, "connect", refuse)
+    contended = cred.CredentialStore(path=str(tmp_path / "c.duckdb"),
+                                     keys=f"1:{_key()}", out=lambda *a: None,
+                                     verifier=_verifier)
+    with pytest.raises(cred.CustodyUnavailable) as caught:
+        contended.connect(FAKE_SWID, FAKE_S2)
+    assert "one writer" in str(caught.value)
+
+
+def test_a_retired_key_says_so_instead_of_silently_logging_everyone_out(tmp_path):
+    """Session ids are HMAC-ed under the key too, so a cookie minted under a
+    version that is no longer configured is not merely undecryptable -- it
+    cannot be FOUND, and `resolve` returns None long before it could read a
+    `key_version` and report anything. A whole deployment's users appear
+    logged out with no line explaining why, on the one morning somebody needs
+    to know that the key list is what changed."""
+    path = str(tmp_path / "custody.duckdb")
+    key1 = _key()
+    old = cred.CredentialStore(path=path, keys=f"1:{key1}",
+                               out=lambda *a: None, verifier=_verifier)
+    minted = old.connect(FAKE_SWID, FAKE_S2)
+
+    lines = []
+    retired = cred.CredentialStore(path=path, keys=f"2:{_key()}",
+                                   out=lines.append, verifier=_verifier)
+    assert retired.resolve(minted.cookie) is None
+    assert any("key version 1" in line for line in lines), \
+        "a retired key logged nothing at all"
+    # Once, not once per request: a wrong key list must not bury the log it
+    # is trying to appear in.
+    retired.resolve(minted.cookie)
+    retired.resolve(minted.cookie)
+    assert len([ln for ln in lines if "key version 1" in ln]) == 1
+    cred.close_all()
+
+
+def test_the_key_parser_refuses_the_specs_that_lose_data(tmp_path):
+    """Each of these parses cleanly and then costs something irreversible, so
+    each is a refusal at startup rather than a surprise later."""
+    good = _key()
+    for spec, why in (
+            (f"0:{good}", "version 0 sorts below every real one"),
+            (f"-1:{good}", "so does a negative version"),
+            (f"1:{good},1:{_key()}", "the second silently wins and the first "
+                                     "version's rows become unreadable"),
+            ("1:" + base64.urlsafe_b64encode(b"\x00" * 32).decode(),
+             "an all-zero key is a placeholder, and the most guessable key "
+             "there is"),
+            ("1:not-a-key", "not a Fernet key at all"),
+    ):
+        with pytest.raises(cred.CustodyUnavailable):
+            cred._parse_keys(spec), why
+
+
+def test_a_rejected_key_spec_never_prints_the_key(tmp_path):
+    """These messages reach a log. The offending value is a key."""
+    material = _key()
+    try:
+        cred._parse_keys(f"1:{material},1:{material}")
+    except cred.CustodyUnavailable as exc:
+        assert material not in str(exc)
+    else:
+        raise AssertionError("a duplicate version was accepted")
+
+
+# --- Only an affirmative value weakens a protection --------------------------
+
+def test_a_falsy_looking_value_does_not_turn_a_protection_off():
+    """`bool(os.environ.get(NAME))` is true for EVERY non-empty string, so an
+    operator writing `=0` to mean "off" got the opposite of what they wrote:
+    plain HTTP accepted, and the session cookie shipped without its `Secure`
+    flag. Both of these variables exist to weaken a protection deliberately,
+    so only a deliberate value may do it."""
+    for value in ("0", "false", "False", "no", "off", "", "  ", "nope"):
+        with pytest.raises(cred.InsecureTransport):
+            cred.require_secure_transport(
+                "http", env={cred.ALLOW_PLAINTEXT_ENV: value})
+        # And the forwarded-proto switch, where the consequence is worse: a
+        # CLIENT-supplied header would bypass the TLS refusal entirely.
+        with pytest.raises(cred.InsecureTransport):
+            cred.require_secure_transport(
+                "http", "https", env={cred.TRUST_FORWARDED_PROTO_ENV: value})
+    for value in ("1", "true", "TRUE", "yes", "on", " y "):
+        cred.require_secure_transport("http",
+                                      env={cred.ALLOW_PLAINTEXT_ENV: value})
+        cred.require_secure_transport(
+            "http", "https", env={cred.TRUST_FORWARDED_PROTO_ENV: value})
+
+
+# --- Redaction of the shapes a server actually produces ----------------------
+
+def test_redaction_covers_the_json_and_repr_shapes_too(store):
+    """The rule that existed matched `espn_s2=value`. A server does not
+    produce that shape -- it produces JSON (FastAPI echoing a rejected request
+    body) and Python reprs (a dataclass or dict reaching a traceback), both of
+    which quote the value, and the unquoted rule's value class excludes quotes
+    so it matched none of them."""
+    minted = store.connect(FAKE_SWID, FAKE_S2)
+    resolved = store.resolve(minted.cookie)
+    for line in (
+            '{"detail":[{"loc":["body","season"],"input":'
+            f'{{"swid":"{FAKE_SWID}","espn_s2":"{FAKE_S2}"}}}}]}}',
+            repr(resolved),
+            repr(minted),
+            repr({"swid": FAKE_SWID, "espn_s2": FAKE_S2}),
+            f"espn_s2='{FAKE_S2}'",
+    ):
+        scrubbed = redact.redact(line)
+        assert FAKE_S2 not in scrubbed, line[:60]
+        assert FAKE_SWID not in scrubbed, line[:60]
+        assert minted.cookie not in scrubbed, line[:60]
+        assert redact.redact(scrubbed) == scrubbed, "not idempotent"
