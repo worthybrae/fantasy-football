@@ -1,4 +1,19 @@
-"""Rung 5 of the ladder: drafter archetypes. Run: make fit-archetypes
+"""Rung 5 of the ladder: drafter archetypes.
+
+    .venv/bin/python -m pipeline.fit_archetypes --league-db data/leagues/X.duckdb \
+        --jobs 8 --restarts 3 --ks 1,2,3,4
+
+NOTHING HAS EVER FINISHED A FULL SWEEP WITH THIS, AND THE MODEL IT FITS IS
+SUPERSEDED. The only run against the real corpus was halted at 23 of 43 folds
+because it saturated the machine for two hours and stalled the live mock farm,
+which is the higher priority; and while it ran, the opponent-model design moved
+on from a flat latent-class mixture to a nested logit with positions as nests
+(`docs/superpowers/specs/2026-08-23-best-opponent-model-design.md`, section 4).
+What survives is the machinery and the measurement, kept so the question can be
+re-asked cheaply rather than rebuilt: see
+`docs/superpowers/findings/2026-08-23-drafter-archetypes.md` for what the
+halted run did and did not establish, and READ THE COST NOTE UNDER `sweep`
+BEFORE RUNNING THIS AGAIN.
 
 WHAT THIS MEASURES, AND WHY IT IS A SEPARATE MODULE FROM `score_ladder`.
 `pipeline/score_ladder.py` establishes rungs 1-3 -- the market, the shipped
@@ -36,13 +51,24 @@ writes nothing, and exits 1. K=1 winning the sweep is a real and expected
 outcome -- 41 drafts and ~240 seats is thin -- and it is a finding, not a
 failure. Nothing here is tuned until something splits.
 
-COST, AND THE `--jobs` FLAG. A leave-one-draft-out sweep over K in {1,2,3,4}
-with restarts is a few hundred conditional-logit fits per fold. Folds are
-independent, so they run in a process pool; `--jobs 1` keeps it serial and is
-what the tests use. The pool is FORKED rather than spawned so the children
-inherit the design matrices (~100MB) instead of pickling them 41 times, which
-is safe here because the fork happens before any thread exists and the children
-only read.
+COST, AND THE `--jobs` FLAG. MEASURED, AND IT IS WORSE THAN IT LOOKS. A
+leave-one-draft-out sweep over K in {1,2,3,4} with three restarts is a few
+hundred conditional-logit fits per fold, and on 43 drafts and 2,889 human picks
+one fold took 25-40 MINUTES. Eight workers cleared 23 folds in 108 minutes and
+the full run was heading for about four hours, during which it held the machine
+at capacity and starved the live mock farm of CPU. Do not run this on a machine
+that is doing anything else, and budget half a day rather than an hour.
+
+Folds are independent, so they run in a process pool; `--jobs 1` keeps it
+serial and is what the tests use. The pool is FORKED rather than spawned so the
+children inherit the design matrices (~100MB) instead of pickling them once per
+fold, which is safe here because the fork happens before any thread exists and
+the children only read.
+
+THE RUN PRINTS NOTHING UNTIL IT FINISHES, which is the first thing to fix if
+anyone picks this up. The per-fold reports live in one list in `sweep` and are
+aggregated at the end, so a run that is stopped part-way loses every fold it
+completed. That is exactly what happened to the only real run there has been.
 
 READ-ONLY, ABSOLUTELY. Same rule as `score_ladder`: the corpus cannot be
 rebuilt, a farm loop is writing new drafts into it while this runs, both
@@ -301,7 +327,7 @@ _MODULE_TEMPLATE = '''"""Drafter archetypes. GENERATED -- do not edit by hand.
 
 K coefficient vectors and their population weights, fitted as a latent-class
 conditional logit by `scoring/mixture.py` and written by
-`pipeline/fit_archetypes.py` (`make fit-archetypes`) ONLY because the mixture
+`pipeline/fit_archetypes.py` ONLY because the mixture
 beat the rung below it on held-out human top-1. There is no force flag, so a
 losing sweep leaves this file exactly as it was.
 
@@ -358,7 +384,7 @@ BETAS = np.array([
 
 assert BETAS.shape == (len(WEIGHTS), len(FEATURES)), (
     "the generated archetypes and their feature list disagree -- regenerate "
-    "with `make fit-archetypes` rather than editing either by hand")
+    "by re-running pipeline/fit_archetypes.py rather than editing either "\n    "by hand")
 assert abs(float(WEIGHTS.sum()) - 1.0) < 1e-6, (
     "the class weights are a distribution over classes and must sum to 1")
 '''
