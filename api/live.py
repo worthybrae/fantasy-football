@@ -22,7 +22,7 @@ from pipeline.espn_live import build_crosswalk
 from scoring import league as league_mod
 from scoring.board import build_board
 from scoring.draft_model import FEATURE_NAMES, fit_all
-from scoring.draft_sim import build_pool
+from scoring.draft_sim import build_pool, cold_start_opponent
 
 # Pinned, not generated. See DraftSession.seed.
 DEFAULT_SEED = 20260811
@@ -101,6 +101,14 @@ class DraftSession:
     # question actually being asked, which is "did this list come off ESPN
     # just now". This states that fact outright and cannot drift from it.
     settings_from_espn: bool = False
+    # The cold-start opponent model, or None. A HybridModel (flat early, nested
+    # mid/late -- the measured best predictor) when this league has NO
+    # per-manager history to fit, so its mock/first-connect opponents are
+    # simulated with it; None when the league HAS fitted managers, which keeps
+    # the existing per-manager + flat-pooled behaviour untouched. Passed as
+    # `nested=` to every survival/rank call. default None so test fixtures and
+    # any direct DraftSession construction need not supply it.
+    nested: object = None
 
 
 def _attach_espn_proj(conn, board):
@@ -238,12 +246,20 @@ def build_session(conn, my_slot: int | None, seed: int = DEFAULT_SEED,
     pooled = fits.get("__pooled__", np.zeros(len(FEATURE_NAMES)))
     betas = {m: fits.get(m, pooled) for m in fits if m != "__pooled__"}
 
+    # The cold-start opponent. With no per-manager fits (`betas` empty -- the
+    # mock and first-connect case), the opponents are simulated with the HYBRID
+    # model, threaded as `nested=` into survival where it serves every seat
+    # whose beta is None (every opponent seat here). A league WITH history keeps
+    # `nested=None`, so its fitted seats use their own betas and unfit seats the
+    # flat pooled prior, exactly as before.
+    nested = cold_start_opponent() if not betas else None
+
     draft_order = read_table(conn, "draft_order")
     slot_managers = dict(zip(draft_order["slot"].astype(int),
                              draft_order["manager"]))
     return DraftSession(
         my_slot=my_slot, league_id=league_id, slot_managers=slot_managers,
-        settings=settings, pool=pool, betas=betas,
+        settings=settings, pool=pool, betas=betas, nested=nested,
         crosswalk=build_crosswalk(board),
         board_fingerprint=board_fingerprint(board), seed=seed,
         started_at=datetime.now(timezone.utc), board=board,
@@ -1803,7 +1819,7 @@ def register_live_routes(app, conn, db_path):
                 session.my_slot, taken, session.betas,
                 n_rollouts=SURVIVAL_ROLLOUTS, seed=session.seed,
                 taken_order=taken_order, on_the_clock=on_the_clock,
-                horizon=h)["avail_pct"].to_numpy()
+                horizon=h, nested=session.nested)["avail_pct"].to_numpy()
             # Read under the lock, like every other cross-worker read
             # here: the plan worker writes `state["plan"]` whole, so an
             # unlocked read could observe a plan from one session next to a
