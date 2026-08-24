@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { connectWithToken, fetchConnectProgress, fetchLiveState,
          type ConnectProgress, type LiveState, type TokenConnectParams } from '../api'
 import { BOOKMARKLET } from '../lib/bookmarklet'
@@ -536,6 +536,10 @@ export default function Landing() {
         <span className="lp-bar-price">
           Mock drafts free · <span className="mono">$4.99</span> a real draft
         </span>
+        {/* The only way into /mocks that isn't typing the URL: a reading room
+            for drafts already played, off to the side of the pitch rather
+            than in it. */}
+        <Link to="/mocks" className="lp-bar-link">See mock drafts</Link>
       </header>
 
       {gate === 'live' && (

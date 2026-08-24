@@ -99,6 +99,27 @@
   color: var(--text-1);
 }
 
+/* The one link into /mocks -- a reading room for drafts already played,
+   not part of the pitch, so it sits past the price rather than beside the
+   wordmark. Underlined like a link rather than buttoned like a CTA: it is
+   not the action this page wants a visitor to take. */
+.lp-bar-link {
+  color: var(--text-2);
+  text-decoration: underline;
+  text-decoration-color: var(--border);
+  text-underline-offset: 3px;
+}
+
+.lp-bar-link:hover {
+  color: var(--text-1);
+  text-decoration-color: var(--text-3);
+}
+
+.lp-bar-link:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 2px;
+}
+
 /* -- hero --------------------------------------------------------------- */
 
 /* Two columns on a desktop, one on anything narrower than a small laptop.
