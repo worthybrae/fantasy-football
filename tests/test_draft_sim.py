@@ -964,7 +964,12 @@ def _fixed_nested_model(seed=0):
     return model
 
 
-@pytest.mark.parametrize("overall_pick,late", [(5, False), (50, True)])
+# 5 is early and 50 is mid; 24/25 straddle the EXACT early/mid bucket boundary
+# (round 3 ends at overall 24, round 4 starts at 25 for S's 8 teams) and 65 is
+# a late-bucket pick (round 9). So fit/serve parity is pinned in every bucket
+# and at the round where the hybrid's routing seam flips.
+@pytest.mark.parametrize("overall_pick,late",
+                         [(5, False), (50, True), (24, True), (25, True), (65, True)])
 def test_position_features_live_matches_features_for(overall_pick, late):
     pool, available, roster, recent, obs_pool, last_pick = _parity_fixture()
     last_pick = last_pick if late else {}
@@ -977,7 +982,12 @@ def test_position_features_live_matches_features_for(overall_pick, late):
     np.testing.assert_allclose(actual, expected)
 
 
-@pytest.mark.parametrize("overall_pick,late", [(5, False), (50, True)])
+# 5 is early and 50 is mid; 24/25 straddle the EXACT early/mid bucket boundary
+# (round 3 ends at overall 24, round 4 starts at 25 for S's 8 teams) and 65 is
+# a late-bucket pick (round 9). So fit/serve parity is pinned in every bucket
+# and at the round where the hybrid's routing seam flips.
+@pytest.mark.parametrize("overall_pick,late",
+                         [(5, False), (50, True), (24, True), (25, True), (65, True)])
 def test_nested_prediction_is_identical_fit_and_serve(overall_pick, late):
     """THE GATE: the per-candidate nested probability vector computed through
     the serving path equals the one computed through the fit/measurement path,
@@ -1052,7 +1062,12 @@ def _fixed_hybrid(seed=0):
     return hyb.HybridModel(flat_beta, _fixed_nested_model(seed))
 
 
-@pytest.mark.parametrize("overall_pick,late", [(5, False), (50, True)])
+# 5 is early and 50 is mid; 24/25 straddle the EXACT early/mid bucket boundary
+# (round 3 ends at overall 24, round 4 starts at 25 for S's 8 teams) and 65 is
+# a late-bucket pick (round 9). So fit/serve parity is pinned in every bucket
+# and at the round where the hybrid's routing seam flips.
+@pytest.mark.parametrize("overall_pick,late",
+                         [(5, False), (50, True), (24, True), (25, True), (65, True)])
 def test_hybrid_prediction_is_identical_fit_and_serve(overall_pick, late):
     """THE HYBRID GATE: the per-candidate vector the serving path computes for
     the hybrid equals its intended fit-side vector -- flat softmax in the early
@@ -1110,6 +1125,47 @@ def test_hybrid_routes_flat_early_and_nested_late():
     np.testing.assert_allclose(hybrid_late, nested_only, rtol=0, atol=1e-12)
     # The whole point: routing changes the answer.
     assert not np.allclose(hybrid_early, hybrid_late)
+
+
+def test_hybrid_routing_boundary_is_exactly_the_early_bucket():
+    """Pin the routing seam at the EXACT early/mid boundary. The prior tests
+    sample one early pick and one mid pick well inside their buckets; this one
+    stands on the seam: the LAST early-bucket pick is still the flat model and
+    the FIRST mid-bucket pick is already the nested model, and the two are
+    different vectors -- so the flip lands between exactly those two picks. A
+    change to `EARLY_ROUNDS` (which moves `_round_bucket`) trips this."""
+    pool, available, roster, recent, obs_pool, last_pick = _parity_fixture()
+    model = _fixed_hybrid()
+
+    # S is 8 teams, EARLY_ROUNDS=3: round 3 ends at overall 24, round 4 starts
+    # at 25. Pin those bucket labels so the boundary is asserted, not assumed.
+    last_early, first_mid = 24, 25
+    assert _round_bucket(last_early, S.teams) == "early"
+    assert _round_bucket(first_mid, S.teams) == "mid"
+
+    def flat_at(p):
+        return nm._softmax(
+            _live_features(pool, available, p, roster, recent, S, last_pick)
+            @ model.flat_beta)
+
+    def nested_at(p):
+        return np.exp(_nested_scores(model.nested, pool, available, p, roster,
+                                     recent, S, last_pick))
+
+    def hybrid_at(p):
+        return np.exp(_nested_scores(model, pool, available, p, roster,
+                                     recent, S, last_pick))
+
+    # Last early pick: the hybrid IS the flat model (serve==fit to 1e-12) and
+    # is NOT the nested one.
+    np.testing.assert_allclose(hybrid_at(last_early), flat_at(last_early),
+                               rtol=0, atol=1e-12)
+    assert not np.allclose(hybrid_at(last_early), nested_at(last_early))
+
+    # First mid pick: the hybrid IS the nested model, and is NOT the flat one.
+    np.testing.assert_allclose(hybrid_at(first_mid), nested_at(first_mid),
+                               rtol=0, atol=1e-12)
+    assert not np.allclose(hybrid_at(first_mid), flat_at(first_mid))
 
 
 def test_cold_start_hybrid_builds_from_artifact_and_serves():
