@@ -16,29 +16,41 @@ still clears the flat baseline. A tie or any regression on either metric keeps
 the live model untouched. There is no --force; a no-swap is a normal outcome,
 not an error, and this exits 0 for it.
 
-WHY THE COMPARISON IS CONSERVATIVE (the bulletproof property). The two sides are
-measured with DELIBERATELY ASYMMETRIC handicaps, both in the safe direction:
+WHY BOTH SIDES ARE SCORED HELD-OUT (the fair-comparison property). Held-out --
+leave-one-draft-out -- is the honest estimate of how a model performs on the
+NEXT draft, the one it has not seen. That is the only thing the gate should care
+about, so BOTH sides are measured that way, SYMMETRICALLY, on the identical
+human picks:
 
-  * CHAMPION = the current live artifact (`nested_model.cold_start_nested()`),
-    scored FULL-WIDTH -- every human pick, including the drafts it was fit on.
-    That is literally what users get, and scoring it on its own training rows
-    only FLATTERS it, so the bar the candidate must clear is if anything set
-    too HIGH.
-  * CANDIDATE = the same model refit LEAVE-ONE-DRAFT-OUT on the current corpus.
-    Every pick it is scored on comes from a draft it never trained on, so it
-    CANNOT win by memorising. Its number is an honest generalisation estimate,
-    if anything set too LOW (each fold trains on one draft less than the served
-    all-data artifact will).
+  * CHAMPION = the live hybrid architecture (flat early + nested mid/late),
+    scored LEAVE-ONE-DRAFT-OUT exactly as `measure_hybrid` scores its "HYBRID"
+    row: the nested factor is refit per fold and scored on the held-out draft,
+    the flat prior routes the early bucket. Every pick it is scored on comes
+    from a draft that fold never trained on -- its honest generalisation number.
+  * CANDIDATE = the SAME hybrid architecture (or, later, a higher-capacity one)
+    with the nested factor refit on the current corpus, scored the SAME way:
+    leave-one-draft-out, paired by draft.
 
-So of the four possible fit/serve handicap combinations this is the most
-conservative: a candidate that clears a flattered champion's bar while under its
-own leave-one-out handicap is a genuine, robust improvement, and a candidate
-that merely memorises the new drafts loses its held-out number and is NOT
-promoted. Both sides are scored on the IDENTICAL human picks, paired by draft,
-standard errors clustered by draft -- everything that makes one room harder than
-another cancels. The early rounds of both hybrids are the SAME flat vector
-(`draft_model.COLD_START_PRIOR`), so the comparison is decided entirely by the
-mid/late nested picks, which is exactly where a refit can move the number.
+Scoring the champion FULL-WIDTH instead -- on the very drafts it was fit on --
+would INFLATE its top-1 (the smoke showed ~0.2877 full-width vs an honest
+held-out ~0.26). That inflated bar is not "what users get"; it is a memorisation
+bonus the candidate can never match under its own held-out handicap, so a
+genuinely better model that beats the champion held-out by less than that
+inflation would be blocked from promotion -- forever. That is a false-negative
+barrier, not safety. Scoring both held-out removes the unfair handicap without
+removing any real safety: a worse model still loses a fair held-out comparison,
+and the strict-greater gate, the log-loss guard, the flat floor and the
+post-swap parity revert all still stand. Both sides are scored on the IDENTICAL
+human picks, paired by draft, standard errors clustered by draft -- everything
+that makes one room harder than another cancels. The early rounds of both
+hybrids are the SAME flat vector (`draft_model.COLD_START_PRIOR`), so the
+comparison is decided entirely by the mid/late nested picks, which is exactly
+where a refit or a new architecture can move the number.
+
+Because today's candidate is the same nested architecture on the same corpus,
+its held-out ladder is bit-identical to the champion's, so the two TIE and the
+gate correctly holds (no swap; the model is saturated). The comparison only
+separates when the candidate is a genuinely different, better model.
 
 HONEST EXPECTATION -- read this before you expect swaps. The current
 nested/hybrid model is SATURATED. Refitting on more data tightens the coefficient
@@ -216,41 +228,48 @@ def should_skip(labelled_now: int, state: "dict | None",
 #
 # Both columns are the per-pick top-1/top-3/top-5 hit flags and the log-prob of
 # the chosen player, in the SAME pick order, so they can be routed together and
-# clustered by the same draft labels. The champion column reads the frozen live
-# artifact full-width; the candidate column is the leave-one-draft-out ladder.
+# clustered by the same draft labels. BOTH are the leave-one-draft-out ladder --
+# the champion and the candidate scored by the identical held-out method, so
+# neither side gets a memorisation bonus and the comparison is fair.
 
 
-def score_champion_nested_fullwidth(design) -> "tuple[np.ndarray, ...]":
-    """The LIVE artifact's nested prediction on every pick, scored full-width.
+def champion_heldout_columns(design) -> "tuple[np.ndarray, ...]":
+    """The LIVE hybrid architecture's nested factor, scored leave-one-draft-out.
 
-    `cold_start_nested()` rebuilds exactly the served `NestedModel` from
-    `scoring/nested_prior.py`; `predict_pick` is the same reconstruction the
-    serving path runs. No fold is held out because the artifact is a fixed,
-    already-fit object -- this is its real behaviour on these boards, which is
-    what "what users get" means and which (being scored on its own training
-    rows) only flatters it."""
-    model = nm.cold_start_nested()
-    n = len(design)
-    h1 = np.zeros(n, int); h3 = np.zeros(n, int)
-    h5 = np.zeros(n, int); lp = np.zeros(n, float)
-    for i in range(n):
-        prob = model.predict_pick(design, i)
-        h1[i], h3[i], h5[i], lp[i] = nm.score_pick(prob, design.chosen[i])
-    return h1, h3, h5, lp
+    This is the champion's HONEST generalisation estimate -- the same ladder
+    `measure_hybrid` runs for its "HYBRID" row: `measure_nested._nested_perpick`
+    refits the nested model without each draft in turn and scores that draft's
+    held-out picks (the flat prior routes the early bucket; the caller applies
+    that routing identically to both sides). `workers=1` is deliberate -- the
+    corpus is being written by a live farm and parallel fit workers stalled the
+    system once.
+
+    Scored the SAME way as the candidate (below), not full-width: scoring the
+    live artifact on its own training rows would inflate its top-1 and set a bar
+    the candidate could never clear under its own held-out handicap, blocking
+    promotion of a genuinely better model. Held-out is the honest estimate of
+    next-draft performance, so both sides use it."""
+    mn._DESIGN = design                      # the fold scorer reads it off here
+    return mn._nested_perpick(design, workers=1)
 
 
-def candidate_heldout_columns(design) -> "tuple[np.ndarray, ...]":
-    """The candidate's nested prediction, leave-one-draft-out and single process.
+def candidate_heldout_columns(design, champion_cols=None) -> "tuple[np.ndarray, ...]":
+    """The CANDIDATE model's prediction, leave-one-draft-out and single process.
 
-    Reuses `measure_nested._nested_perpick` unchanged: it refits the nested
-    model without each draft in turn and scores that draft's held-out picks.
-    `workers=1` is deliberate -- the corpus is being written by a live farm and
-    parallel fit workers stalled the system once.
+    TODAY the candidate is the SAME nested architecture refit on the SAME corpus
+    as the champion, so its leave-one-draft-out ladder is BIT-IDENTICAL to the
+    champion's. When the caller passes the champion's already-computed held-out
+    columns (`champion_cols`) we return them rather than run an identical ladder
+    a second time; the two sides then TIE and the gate correctly holds (no swap;
+    the model is saturated). Without them it computes the ladder itself, exactly
+    as the champion does.
 
-    A FUTURE `sequence_model` candidate replaces THIS function (and
-    `refit_candidate_artifact`) and nothing else: score the new model
-    leave-one-draft-out to the same four columns and the gate compares it to the
-    same champion on the same picks."""
+    A FUTURE higher-capacity `sequence_model` candidate replaces THIS function
+    (and `refit_candidate_artifact`) and nothing else: it IGNORES `champion_cols`
+    and scores its OWN model leave-one-draft-out to the same four columns, and
+    the gate compares it to the same held-out champion on the same picks."""
+    if champion_cols is not None:
+        return champion_cols
     mn._DESIGN = design                      # the fold scorer reads it off here
     return mn._nested_perpick(design, workers=1)
 
@@ -370,9 +389,10 @@ def _log_header() -> str:
             "fit + validation). Skips -- runs that found too little new data -- "
             "are logged to the daemon's stdout, not here. `nll` is log-loss "
             "(lower better); `t1`/`t5` are held-out top-1/top-5 (higher "
-            "better). champion = the live artifact scored full-width; candidate "
-            "= the refit scored leave-one-draft-out; both on the identical "
-            "human picks. Decision is the gate's verdict.\n\n"
+            "better). champion = the live hybrid scored leave-one-draft-out; "
+            "candidate = the refit scored leave-one-draft-out the SAME way; "
+            "both on the identical human picks. Decision is the gate's "
+            "verdict.\n\n"
             "| when (UTC) | corpus | labelled | champ t1 | cand t1 | champ nll | "
             "cand nll | flat t1 | decision | commit |\n"
             "|---|---|---|---|---|---|---|---|---|---|\n")
@@ -456,10 +476,14 @@ def main(argv=None) -> int:
     early = np.asarray(design.buckets) == "early"
 
     # --- step 3: validate held-out -------------------------------------------
-    _log("scoring flat baseline + champion (full-width) + candidate (LODO)...")
+    _log("scoring flat baseline + champion (LODO) + candidate (LODO)...")
     f1, f3, f5, fll = mn._champion_perpick(X_list, chosen)   # flat, shared early
-    cn1, cn3, cn5, cnll = score_champion_nested_fullwidth(design)
-    dn1, dn3, dn5, dnll = candidate_heldout_columns(design)
+    cn1, cn3, cn5, cnll = champion_heldout_columns(design)
+    # Today the candidate is the same nested architecture on the same corpus, so
+    # its held-out ladder is bit-identical to the champion's; reuse it rather
+    # than run the identical single-process ladder a second time.
+    dn1, dn3, dn5, dnll = candidate_heldout_columns(
+        design, champion_cols=(cn1, cn3, cn5, cnll))
 
     champ = _aggregate(_route(early, f1, cn1), _route(early, f5, cn5),
                        _route(early, fll, cnll), groups)
@@ -469,7 +493,7 @@ def main(argv=None) -> int:
 
     _log(f"flat     top1 {flat_top1:.4f}")
     _log(f"champion top1 {champ.top1:.4f} +/-{champ.se1:.4f}  top5 {champ.top5:.4f}"
-         f"  nll {champ.nll:.4f}   (live artifact, full-width)")
+         f"  nll {champ.nll:.4f}   (live hybrid, leave-one-draft-out)")
     _log(f"candidate top1 {cand.top1:.4f} +/-{cand.se1:.4f}  top5 {cand.top5:.4f}"
          f"  nll {cand.nll:.4f}   (refit, leave-one-draft-out)")
 

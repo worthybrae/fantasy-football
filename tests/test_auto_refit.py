@@ -9,9 +9,21 @@ without ever touching the real corpus or the real `scoring/nested_prior.py`.
 """
 import subprocess
 
+import numpy as np
 import pytest
 
-from pipeline.auto_refit import Metrics, gate, should_skip, promote
+from pipeline import auto_refit as ar
+from pipeline import measure_nested as mn
+from pipeline.auto_refit import (
+    Metrics,
+    _aggregate,
+    _route,
+    candidate_heldout_columns,
+    champion_heldout_columns,
+    gate,
+    promote,
+    should_skip,
+)
 
 
 # --------------------------------------------------------------------- the gate
@@ -53,6 +65,96 @@ def test_gate_swaps_on_a_strict_top1_win_with_nonworse_logloss():
 def test_gate_swaps_when_logloss_is_exactly_tied_and_top1_wins():
     # "not worse" is <=, so an equal log-loss with a strict top-1 win passes.
     assert _swaps(Metrics(top1=0.2650, top5=0.69, nll=2.6900))
+
+
+# ----------------------------------------- symmetric held-out scoring (the fix)
+#
+# The design flaw this replaced scored the CHAMPION full-width (in-sample) and
+# the CANDIDATE held-out, so a genuinely better model could be blocked forever.
+# The fix scores BOTH leave-one-draft-out, by the identical method. These pin
+# that: neither column function runs a full-width path, and an identical
+# candidate TIES (no swap) while a strictly-better held-out candidate SWAPS.
+
+
+def test_champion_side_is_scored_held_out_not_full_width(monkeypatch):
+    # The champion column is the leave-one-draft-out ladder
+    # (`measure_nested._nested_perpick`, single process), NOT the frozen live
+    # artifact scored full-width. Stub the ladder and assert the champion side
+    # is exactly what it returns, called with workers=1.
+    sentinel = (np.array([1, 0]), np.array([1, 1]),
+                np.array([1, 1]), np.array([-0.1, -0.2]))
+    seen = {}
+
+    def fake_perpick(design, workers=1):
+        seen["workers"] = workers
+        return sentinel
+
+    monkeypatch.setattr(mn, "_nested_perpick", fake_perpick)
+    got = champion_heldout_columns(object())
+    assert got is sentinel and seen["workers"] == 1
+
+
+def test_candidate_and_champion_use_the_identical_held_out_columns(monkeypatch):
+    # Same architecture on the same corpus => the candidate reuses the
+    # champion's held-out columns rather than run a second, identical ladder.
+    # Both sides therefore see the SAME held-out numbers -- the symmetry the
+    # fix guarantees -- and (with no champion_cols) the candidate would run the
+    # very same ladder itself.
+    calls = []
+    sentinel = (np.array([1, 0]), np.array([1, 1]),
+                np.array([1, 1]), np.array([-0.1, -0.2]))
+
+    def fake_perpick(design, workers=1):
+        calls.append(workers)
+        return sentinel
+
+    monkeypatch.setattr(mn, "_nested_perpick", fake_perpick)
+
+    champ_cols = champion_heldout_columns(object())
+    # reuse path: champion's columns handed in, no second ladder run
+    reused = candidate_heldout_columns(object(), champion_cols=champ_cols)
+    assert reused is champ_cols
+    assert len(calls) == 1                    # only the champion ran the ladder
+
+    # standalone path (a future model would score itself here): same method
+    standalone = candidate_heldout_columns(object())
+    assert standalone is sentinel
+    assert len(calls) == 2
+
+
+def _routed_metrics(nested_cols):
+    """Aggregate a hybrid's Metrics from mid/late nested columns, holding the
+    flat-early routing constant (all picks mid/late), exactly as `main` does."""
+    groups = np.array([0, 0, 1, 1])
+    early = np.array([False, False, False, False])
+    flat = np.zeros(4)
+    h1, h5, lp = nested_cols
+    return _aggregate(_route(early, flat, h1), _route(early, flat, h5),
+                      _route(early, flat, lp), groups)
+
+
+def test_identical_held_out_candidate_ties_and_does_not_swap():
+    # A candidate scored by the SAME held-out method on the SAME picks produces
+    # identical columns -> an exact top-1 tie -> the strict-greater gate holds.
+    nested = (np.array([1, 0, 1, 0]), np.array([1, 1, 1, 1]),
+              np.array([-0.5, -1.0, -0.5, -1.0]))
+    champ = _routed_metrics(nested)
+    cand = _routed_metrics(nested)
+    assert champ.top1 == cand.top1            # symmetric held-out => exact tie
+    do, _why = gate(champ, cand, flat_top1=0.0)
+    assert not do
+
+
+def test_strictly_better_held_out_candidate_swaps():
+    # Held-out symmetry does NOT block a genuinely better model: one more top-1
+    # hit and a no-worse log-loss clears the gate.
+    champ = _routed_metrics((np.array([1, 0, 1, 0]), np.array([1, 1, 1, 1]),
+                             np.array([-0.5, -1.0, -0.5, -1.0])))
+    cand = _routed_metrics((np.array([1, 1, 1, 0]), np.array([1, 1, 1, 1]),
+                            np.array([-0.5, -0.9, -0.5, -1.0])))
+    assert cand.top1 > champ.top1 and cand.nll <= champ.nll
+    do, _why = gate(champ, cand, flat_top1=0.0)
+    assert do
 
 
 # ------------------------------------------------------------------- the skip
