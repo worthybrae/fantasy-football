@@ -182,3 +182,4 @@ web/dist/
 
 # design canvas working files (mockups, not app source)
 .design/
+auto_refit_daemon.out
