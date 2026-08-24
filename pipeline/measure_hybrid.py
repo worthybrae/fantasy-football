@@ -54,6 +54,10 @@ def main(argv=None):
     assert list(groups) == list(design.groups), "designs misaligned"
     corpus.close(); league.close()
 
+    # measure_nested's fold scorer reads the design off ITS module global
+    # (so forked workers need not pickle it); set it before reusing that path.
+    mn._DESIGN = design
+
     groups = np.asarray(design.groups)
     buckets = np.asarray(design.buckets)
 
