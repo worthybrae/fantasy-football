@@ -886,14 +886,20 @@ export async function fetchLobby(): Promise<LobbySummary> {
 // facts. `my_slot` is our own bot's seat.
 export interface MockDraft {
   id: string
-  league_id: string
+  // Null for a room whose league the farm never resolved -- see api/mocks.py.
+  league_id: string | null
   status: 'live' | 'complete'
   teams: number
   rounds: number
   picks_made: number
   human_seats: number | null
   my_slot: number | null
+  // Set only while the room is still playing (`status: 'live'`).
   started_at: string | null
+  // Set only once the draft is done and the farm has written it out
+  // (`status: 'complete'`) -- when that happened, not when the draft did.
+  // `started_at` and `recorded_at` are never both set on the same row.
+  recorded_at: string | null
 }
 
 // Live rooms first, then finished ones, newest first -- the server's own

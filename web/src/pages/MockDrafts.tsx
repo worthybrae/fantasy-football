@@ -69,6 +69,17 @@ function humanSeatsLabel(draft: MockDraft): string {
   return `${draft.human_seats} of ${draft.teams} seats human`
 }
 
+// When this draft happened, in the shape that answers "how long ago": a live
+// room reads by when it started, a finished one by when the farm recorded it
+// -- the two never both carry a value, so this is the one place that
+// decides which timestamp the rest of the page shows, and both the row and
+// the board head read it from here rather than each picking their own.
+function draftWhen(draft: MockDraft): { at: string; label: 'started' | 'recorded' } | null {
+  if (draft.started_at) return { at: draft.started_at, label: 'started' }
+  if (draft.recorded_at) return { at: draft.recorded_at, label: 'recorded' }
+  return null
+}
+
 // The headline over the board, in the shape of the question the page is
 // asked: was this room worth anything? A machine pick is a machine pick
 // whether ESPN was covering for someone who left or filling a seat nobody
@@ -90,6 +101,7 @@ function DraftRow({ draft, active, onSelect }: {
   const pct = total > 0 ? Math.min(100, (draft.picks_made / total) * 100) : 0
   const live = draft.status === 'live'
   const hasHumans = draft.human_seats !== null && draft.human_seats > 0
+  const when = draftWhen(draft)
   return (
     <button
       type="button"
@@ -121,9 +133,9 @@ function DraftRow({ draft, active, onSelect }: {
         </span>
         <span
           className="mocks-row-when"
-          title={draft.started_at ? new Date(draft.started_at).toLocaleString() : undefined}
+          title={when ? new Date(when.at).toLocaleString() : undefined}
         >
-          {draft.started_at ? ageLabel(draft.started_at) : 'no start time'}
+          {when ? ageLabel(when.at) : 'no time recorded'}
         </span>
       </span>
     </button>
@@ -250,6 +262,7 @@ export default function MockDrafts() {
     [drafts, selectedId],
   )
   const selectedLive = selected?.status === 'live'
+  const selectedWhen = selected ? draftWhen(selected) : null
 
   // Blanked on the way to a DIFFERENT room only, never on a re-poll of the
   // same one -- a board that flickers to "loading" every five seconds is
@@ -373,7 +386,7 @@ export default function MockDrafts() {
               <span className="mocks-board-sub">
                 {selected.teams} teams · {selected.rounds} rounds
                 {selected.my_slot !== null && ` · we drafted from slot ${selected.my_slot}`}
-                {selected.started_at && ` · started ${ageLabel(selected.started_at)}`}
+                {selectedWhen && ` · ${selectedWhen.label} ${ageLabel(selectedWhen.at)}`}
               </span>
             </div>
           )}
