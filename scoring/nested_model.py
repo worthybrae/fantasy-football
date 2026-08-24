@@ -331,6 +331,62 @@ class NestedModel:
         return self.predict_from(design.pos_X[i:i + 1], design.within_X[i],
                                  design.cand_pos[i])
 
+    def predict_serve(self, X, pos_x, cand_pos, overall_pick=None,
+                      teams=None) -> np.ndarray:
+        """Serve from the FULL live feature matrix `X`.
+
+        `X` is `draft_sim._live_features` over the available board -- every
+        `draft_model.FEATURE_NAMES` column, in board order -- which is exactly
+        the matrix `draft_model.feature_matrix` builds and which the tests pin
+        equal. This slices it to `WITHIN_IDX` for the within factor and defers
+        to `predict_from`, so the served vector equals the measured one.
+
+        `overall_pick` and `teams` are accepted and IGNORED here: the nested
+        model has no round-dependent behaviour. They are in the signature so
+        the nested and the hybrid (`hybrid_model.HybridModel`) serve through
+        one interface -- `draft_sim._nested_scores` calls `predict_serve` and
+        does not know or care which of the two it holds.
+        """
+        X = np.asarray(X, dtype=float)
+        return self.predict_from(pos_x, X[:, WITHIN_IDX], cand_pos)
+
+
+def cold_start_nested() -> "NestedModel":
+    """Reconstruct the pre-fit cold-start `NestedModel` from `nested_prior`.
+
+    The nested analogue of binding `draft_model.COLD_START_PRIOR` to the flat
+    prior: a `NestedModel` whose two factors carry the coefficients fitted on
+    the whole human-pick corpus, built with NO corpus access. The position
+    factor is rebuilt by setting the standardization and softmax weights the
+    generator serialized straight onto a `MultinomialLogistic`; the within
+    factor is the stored conditional-logit vector.
+
+    Both feature-order lists are checked against the LIVE definitions, the same
+    guard `draft_model` runs on `COLD_START_PRIOR`: a column reordered or
+    renamed since the artifact was written trips an assert here rather than
+    reading the wrong coefficient on every pick.
+    """
+    from scoring import nested_prior as npr
+
+    assert list(npr.POSITION_FEATURES) == list(pm.FEATURE_NAMES), (
+        "scoring/nested_prior.py was fitted against a different position "
+        "feature order than position_model.FEATURE_NAMES holds now; "
+        "regenerate it (scratchpad/fit_nested_prior.py)")
+    assert list(npr.WITHIN_FEATURES) == list(WITHIN_POSITION_FEATURES), (
+        "scoring/nested_prior.py was fitted against a different within-position "
+        "feature order than nested_model.WITHIN_POSITION_FEATURES holds now; "
+        "regenerate it (scratchpad/fit_nested_prior.py)")
+
+    model = NestedModel(position_lam=npr.POSITION_LAM)
+    clf = pm.MultinomialLogistic(lam=npr.POSITION_LAM)
+    clf.mean_ = np.asarray(npr.POSITION_MEAN, dtype=float)
+    clf.std_ = np.asarray(npr.POSITION_STD, dtype=float)
+    clf.W_ = np.asarray(npr.POSITION_W, dtype=float)
+    clf.b_ = np.asarray(npr.POSITION_B, dtype=float)
+    model.position_ = clf
+    model.within_ = np.asarray(npr.WITHIN_BETA, dtype=float)
+    return model
+
 
 # --------------------------------------------------- the position factor, SERVED
 #
