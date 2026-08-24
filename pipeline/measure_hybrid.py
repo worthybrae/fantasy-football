@@ -1,12 +1,15 @@
-"""Measure a HYBRID opponent model: flat champion early, nested mid/late.
+"""Measure a HYBRID opponent model: flat prior early, nested mid/late.
 
-The nested model (`measure_nested`) beats the flat champion overall but LOSES
-the early rounds -- there the best player overall and the best at his position
-are the same consensus name, so splitting the call into two factors only
-dilutes a near-deterministic pick.  The flat champion's single sharp board read
-wins early; the nested model wins mid and late.  So route by round: use the
-flat champion's prediction in the early bucket and the nested model's from mid
-on.  Both per-pick prediction sets are exactly what `measure_nested` already
+The "flat prior" here is the SERVED flat cold-start prior
+`draft_model.COLD_START_PRIOR` (== `scoring/mock_prior.PRIOR`) -- the vector
+`measure_nested._champion_perpick` scores, NOT `scoring/human_prior.py` (a
+different artifact). The nested model (`measure_nested`) beats the flat prior
+overall but LOSES the early rounds -- there the best player overall and the
+best at his position are the same consensus name, so splitting the call into
+two factors only dilutes a near-deterministic pick.  The flat prior's single
+sharp board read wins early; the nested model wins mid and late.  So route by
+round: use the flat prior's prediction in the early bucket and the nested
+model's from mid on.  Both per-pick prediction sets are exactly what `measure_nested` already
 computes, held out by draft -- this reuses them and applies one routing rule,
 so the hybrid is scored on the identical picks under the identical folds and is
 directly comparable to both parents.
@@ -101,7 +104,7 @@ def main(argv=None):
         with open(FINDINGS, "w") as fh:
             fh.write("# Hybrid opponent model (flat early, nested mid/late)\n\n"
                      "**Diagnostic. Held out by draft, human picks only. "
-                     "Routes per pick: flat champion in the early bucket, nested "
+                     "Routes per pick: flat prior in the early bucket, nested "
                      "from mid on.**\n\n```\n" + report + "\n```\n")
     except OSError:
         pass

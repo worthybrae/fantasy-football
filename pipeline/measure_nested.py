@@ -1,26 +1,29 @@
-"""Measure the nested (position-then-player) opponent model against the champion.
+"""Measure the nested (position-then-player) opponent model against the flat prior.
 
 THE DELIVERABLE. `scoring/position_model.py` established that the POSITION a
 human takes is predictable at ~0.53 held-out, which puts the ceiling of a
-nested top-1 at ~0.29-0.32 -- past the flat champion's 0.2595. This script
-BUILDS OUT that ceiling: it fits the nested model (`scoring/nested_model.py`)
-leave-one-draft-out on the same human-only corpus the champion was measured on,
-scores every held-out pick, and compares -- top-1, top-3, top-5 and log-loss,
-overall and by round bucket -- against the shipped flat champion
-(`scoring/human_prior.py`, `COLD_START_PRIOR`) scored on the identical picks.
+nested top-1 at ~0.29-0.32 -- past the flat baseline's ~0.23 on human picks.
+This script BUILDS OUT that ceiling: it fits the nested model
+(`scoring/nested_model.py`) leave-one-draft-out on the same human-only corpus
+the flat baseline was measured on, scores every held-out pick, and compares --
+top-1, top-3, top-5 and log-loss, overall and by round bucket -- against the
+SERVED flat cold-start prior (`draft_model.COLD_START_PRIOR`, i.e.
+`scoring/mock_prior.PRIOR`) scored on the identical picks. That is the vector
+this script actually scores; it is NOT `scoring/human_prior.py` (the human-only
+refit, ~0.2595), which is a different artifact and is not the served opponent.
 
 WHY THIS IS AN HONEST COMPARISON. Both models are scored on the SAME held-out
 human picks in the SAME rooms, built by the one shared replay
 (`score_ladder.human_observations`). The nested model is refit leave-one-
 draft-out, so every pick it scores comes from a draft it never trained on. The
-champion is scored full-width with no fold, exactly as the ladder scores it --
+flat prior is scored full-width with no fold, exactly as the ladder scores it --
 it was fitted elsewhere under a different filter, so it has already seen some
-of these picks; that only makes the champion's number OPTIMISTIC, so a nested
+of these picks; that only makes the flat prior's number OPTIMISTIC, so a nested
 win over it is if anything understated. Standard errors are clustered by draft;
 the head-to-head delta is paired by draft, so everything that makes one room
 harder than another cancels.
 
-THE DECISION. If the nested model beats the champion on top-1, or ties top-1
+THE DECISION. If the nested model beats the flat prior on top-1, or ties top-1
 and improves log-loss, the decomposition is a genuine advance and this script
 says so with the numbers. If it does not, that is a real finding too -- the
 factorization did not pay -- and the write-up says that instead. Either way the
@@ -48,7 +51,13 @@ from scoring import nested_model as nm
 from scoring.draft_model import COLD_START_PRIOR, _softmax
 
 FINDINGS = "docs/superpowers/findings/2026-08-24-nested-model.md"
-CHAMPION_TOP1 = 0.2595   # scoring/human_prior.py, for the headline callout
+# The served flat cold-start prior's human-pick top-1, for the headline
+# callout. This is `COLD_START_PRIOR` (== `mock_prior.PRIOR`) -- the vector
+# `_champion_perpick` below actually scores -- at the 0.2308 `score_ladder`
+# documents for the shipped prior on human picks. (Not `human_prior`'s 0.2595;
+# that is a different artifact and is not what this script scores.) The run
+# also prints the live number for the current snapshot.
+FLAT_PRIOR_TOP1 = 0.2308
 
 # The fold pool reads the design off a module global so a forked worker
 # inherits it without pickling ~4,600 candidate matrices per task. Set once,
@@ -60,7 +69,7 @@ _MAX_WORKERS = 7          # the bound the controller set on this process's forks
 # ----------------------------------------------------------------- champion side
 
 def _champion_perpick(X_list, chosen):
-    """Per-pick top-1/3/5 hit flags and log-prob for the flat champion.
+    """Per-pick top-1/3/5 hit flags and log-prob for the served flat prior.
 
     The same softmax over `COLD_START_PRIOR` that `fit_prior.score` runs, but
     returned per pick rather than aggregated, so these can be bucketed by round
@@ -207,35 +216,37 @@ def _report(design, X_list, chosen, n_hit, workers):
     beat_top1 = d_top1 > 0
     tie_top1 = abs(d_top1) < 1e-9
     if beat_top1:
-        verdict = (f"VERDICT: the nested model BEATS the flat champion on top-1 "
+        verdict = (f"VERDICT: the nested model BEATS the flat prior on top-1 "
                    f"({n1.mean():.4f} vs {c1.mean():.4f}, {d_top1:+.4f}). The "
                    f"position-then-player decomposition is a genuine advance.")
     elif tie_top1 and d_ll < 0:
-        verdict = ("VERDICT: the nested model ties the champion on top-1 and "
+        verdict = ("VERDICT: the nested model ties the flat prior on top-1 and "
                    "improves log-loss -- a calibration win under the spec's "
                    "shipping rule (log-loss down, top-1 not worse).")
     else:
-        verdict = ("VERDICT: the nested model does NOT beat the flat champion. "
+        verdict = ("VERDICT: the nested model does NOT beat the flat prior. "
                    "The decomposition did not pay on held-out human picks; the "
-                   "flat model stays the champion.")
+                   "flat prior stays the baseline.")
     lines.append("\n" + verdict)
-    lines.append(f"(champion of record: human_prior top-1 {CHAMPION_TOP1})")
+    lines.append(f"(flat baseline of record: COLD_START_PRIOR / mock_prior.PRIOR "
+                 f"top-1 {FLAT_PRIOR_TOP1})")
     return "\n".join(lines), beat_top1, tie_top1, d_ll
 
 
 def _write_findings(report, beat_top1, tie_top1, d_ll):
-    headline = ("Nested BEATS flat champion on top-1." if beat_top1
+    headline = ("Nested BEATS the flat prior on top-1." if beat_top1
                 else "Nested ties top-1 and improves log-loss."
                 if (tie_top1 and d_ll < 0)
-                else "Nested does NOT beat the flat champion.")
+                else "Nested does NOT beat the flat prior.")
     body = (
         "# Nested (position-then-player) opponent model\n\n"
         f"**{headline}**\n\n"
         "Held out by draft, human picks only, standard errors clustered by "
         "draft, head-to-head delta paired by draft. The nested model is refit "
-        "leave-one-draft-out; the flat champion (`scoring/human_prior.py`, "
-        "`COLD_START_PRIOR`) is scored full-width on the identical picks, which "
-        "if anything flatters the champion since it has already seen some of "
+        "leave-one-draft-out; the served flat cold-start prior "
+        "(`draft_model.COLD_START_PRIOR`, i.e. `scoring/mock_prior.PRIOR` -- "
+        "NOT `scoring/human_prior.py`) is scored full-width on the identical "
+        "picks, which if anything flatters it since it has already seen some of "
         "them.\n\n"
         "Model: `scoring/nested_model.py` -- "
         "P(player) = P(position | team state) x P(player | position, board), "
