@@ -292,7 +292,7 @@ export default function DraftBoardGrid({ board, onOpenPlayer }: DraftBoardGridPr
                     isLabelled(cell.made_by) ? `board-cell-by-${cell.made_by}` : '',
                     rowClass.trim()]
                     .filter(Boolean).join(' ')}
-                  aria-label={`${cell.player.name}, ${cell.player.position}, pick ${cell.round}.${pickInRound}`
+                  aria-label={`${cell.player.name}, ${cell.player.position || 'unknown position'}, pick ${cell.round}.${pickInRound}`
                     + (isLabelled(cell.made_by) ? `, ${MAKER_LABEL[cell.made_by]}` : '')}
                   onClick={() => handleCellClick(cell)}
                   onMouseEnter={(e) => showPopover(cell, e)}
