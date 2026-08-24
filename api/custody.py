@@ -109,7 +109,7 @@ class CredentialTransportGuard:
     which costs nothing.
     """
 
-    def __init__(self, app, paths=None, store=None):
+    def __init__(self, app, paths=None):
         self.app = app
         self.paths = frozenset(paths or CREDENTIAL_BEARING_PATHS)
 
