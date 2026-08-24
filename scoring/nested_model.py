@@ -279,31 +279,37 @@ class NestedModel:
         self.within_ = dm.fit(Xw_list, chosen_within)
         return self
 
-    def predict_pick(self, design: NestedDesign, i: int) -> np.ndarray:
-        """The nested probability of every AVAILABLE candidate at pick i.
+    def predict_from(self, pos_x, within_X, cand_pos) -> np.ndarray:
+        """The nested probability of every candidate, from raw factor inputs.
 
-        Returns one vector over the pick's choice set, in board order, summing
-        to 1. For each position present on the board, the within factor gives a
-        distribution over that position's candidates; the position factor gives
-        the mass for the position; their product is the joint. Positions with
-        no candidate left on the board take no mass, so the joint is
+        THE ONE PLACE the nested reconstruction is written, so the FIT
+        (`predict_pick`, over a `NestedDesign`) and the SERVE
+        (`draft_sim`, over a live `SimPool`) cannot compute it two different
+        ways. Given the position factor's context vector `pos_x` (length
+        `position_model.FEATURE_NAMES`), the within factor's candidate matrix
+        `within_X` (`len(WITHIN_IDX)` columns, in board order) and each
+        candidate's position class index `cand_pos`, it returns one vector over
+        the choice set, in board order, summing to 1.
+
+        For each position present on the board the within factor gives a
+        distribution over that position's candidates and the position factor
+        gives the mass for the position; their product is the joint,
         re-normalized by the position mass that actually has somewhere to land
         -- the standard nested-logit reconstruction restricted to the available
-        set. Without that re-normalization the vector would sum to less than 1
-        whenever a whole position has been drafted out, and the log-loss would
-        be biased low for no modelled reason.
+        set. A candidate whose position is not one of the six (class index -1,
+        which a real pool never produces) matches no nest and takes zero mass.
         """
         pos_probs = self.position_.predict_proba(
-            design.pos_X[i:i + 1])[0]               # (6,)
-        cand_pos = design.cand_pos[i]
-        Xw = design.within_X[i]
+            np.asarray(pos_x, dtype=float).reshape(1, -1))[0]     # (6,)
+        cand_pos = np.asarray(cand_pos)
+        within_X = np.asarray(within_X, dtype=float)
         joint = np.zeros(len(cand_pos), dtype=float)
         available_mass = 0.0
         for q in range(len(POSITIONS)):
             mask = cand_pos == q
             if not mask.any():
                 continue
-            within = _softmax(Xw[mask] @ self.within_)   # sums to 1 over this pos
+            within = _softmax(within_X[mask] @ self.within_)  # sums to 1 over pos
             joint[mask] = pos_probs[q] * within
             available_mass += pos_probs[q]
         # `available_mass` is >0 as long as any candidate remains, which is
@@ -312,6 +318,114 @@ class NestedModel:
         if available_mass > 0:
             joint /= available_mass
         return joint
+
+    def predict_pick(self, design: NestedDesign, i: int) -> np.ndarray:
+        """The nested probability of every AVAILABLE candidate at pick i.
+
+        A thin wrapper over `predict_from` that reads the three factor inputs
+        off the fitted design. Sharing that one implementation with the serving
+        path is what makes fit/serve parity a property of the code rather than
+        of a test: the fit and the live room run the same arithmetic on the
+        same feature definitions.
+        """
+        return self.predict_from(design.pos_X[i:i + 1], design.within_X[i],
+                                 design.cand_pos[i])
+
+
+# --------------------------------------------------- the position factor, SERVED
+#
+# The position factor is fitted on `position_model.features_for(obs, settings)`,
+# a context vector read off a `PickObservation` whose `pool` is a pandas frame.
+# At SERVE time -- inside `draft_sim._run_draft`/`survival` rollouts -- there is
+# no such frame; there is a `SimPool` of numpy arrays and an `available` index.
+# `position_features_live` builds the SAME vector from those arrays, the exact
+# analogue of how `draft_sim._live_features` mirrors `draft_model.feature_matrix`
+# for the within factor. It is written line-for-line against `features_for` and
+# reads every scalar constant (`_SCARCITY_ROUNDS`, `_ABSENT_RANK`,
+# `_FLEX_ELIGIBLE`, `RUN_WINDOW`) off `position_model` rather than re-spelling
+# them, so the two cannot drift; `tests/test_draft_sim.py` asserts the two agree
+# on a shared fixture, the same guard the within factor already carries.
+
+
+def cand_pos_codes(positions) -> np.ndarray:
+    """Each candidate's position as a class index into `POSITIONS`, -1 if none.
+
+    The label the within factor groups on and the position factor's classes,
+    read off the SimPool's `position` slice exactly as `design_from_observations`
+    reads it off `obs.pool["position"]`.
+    """
+    return np.array([_POS_INDEX.get(p, -1) for p in positions], dtype=int)
+
+
+def _board_rank_live(pool, available) -> np.ndarray:
+    """`position_model._board_rank` over a `SimPool` slice: ESPN rank where it
+    exists, dense market rank where not, `_ABSENT_RANK` where neither."""
+    n = len(available)
+    espn = getattr(pool, "espn_rank", None)
+    espn = (np.full(n, np.nan) if espn is None
+            else np.asarray(espn, dtype=float)[available])
+    adp = np.asarray(pool.market_rank, dtype=float)[available]
+    rank = np.where(np.isfinite(espn), espn, adp)
+    return np.where(np.isfinite(rank), rank, pm._ABSENT_RANK)
+
+
+def position_features_live(pool, available, overall_pick, roster, recent,
+                           settings, last_pick_at_pos=None) -> np.ndarray:
+    """`position_model.features_for`, SERVED from a `SimPool` + `available`.
+
+    One context vector, in `position_model.FEATURE_NAMES` order, byte-for-byte
+    the vector `features_for` builds for the same state. Every candidate at this
+    pick shares it -- it describes the drafting team and the board, not a
+    player. See the block comment above for why this mirror exists.
+    """
+    teams = max(int(settings.teams), 1)
+    rounds = max(int(settings.rounds), 1)
+    starters = settings.starters
+    roster = roster or {}
+
+    round_no = (overall_pick - 1) // teams + 1
+    pick_in_round = ((overall_pick - 1) % teams) / teams
+    timing = [round_no / rounds, pick_in_round, overall_pick / (teams * rounds)]
+
+    held = [roster.get(p, 0) / rounds for p in POSITIONS]
+    starters_left = [max(starters.get(p, 0) - roster.get(p, 0), 0)
+                     for p in POSITIONS]
+
+    total_held = sum(roster.values())
+    overflow = sum(max(roster.get(p, 0) - starters.get(p, 0), 0)
+                   for p in pm._FLEX_ELIGIBLE)
+    flex_used = min(settings.flex_slots, overflow)
+    flex_room = settings.flex_slots - flex_used
+    bench_used = max(0, total_held - sum(starters.values()) - flex_used)
+    bench_room = max(0, settings.bench - bench_used)
+
+    window = list(recent)[:pm.RUN_WINDOW]
+    room_run = [window.count(p) / pm.RUN_WINDOW for p in POSITIONS]
+
+    last_at = last_pick_at_pos or {}
+    seat_recent = []
+    for p in POSITIONS:
+        last = last_at.get(p)
+        if last is None:
+            seat_recent.append(0.0)
+        else:
+            last_round = (last - 1) // teams + 1
+            seat_recent.append(1.0 if (round_no - last_round) < pm.RUN_WINDOW
+                               else 0.0)
+
+    positions = pool.position[available]
+    rank = _board_rank_live(pool, available)
+    threshold = overall_pick + pm._SCARCITY_ROUNDS * teams
+    scarcity, push = [], []
+    for p in POSITIONS:
+        at_pos = rank[positions == p]
+        scarcity.append(float(np.sum(at_pos <= threshold)) / teams)
+        best = float(at_pos.min()) if at_pos.size else pm._ABSENT_RANK
+        push.append((overall_pick - best) / teams)
+
+    vec = (timing + held + starters_left + [flex_room, bench_room]
+           + room_run + seat_recent + scarcity + push)
+    return np.asarray(vec, dtype=float)
 
 
 def score_pick(prob: np.ndarray, chosen: int):

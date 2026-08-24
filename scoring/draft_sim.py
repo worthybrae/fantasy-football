@@ -39,6 +39,7 @@ from scoring.draft_model import (COLD_START_PRIOR, EARLY_ROUNDS, FEATURE_NAMES,
                                  position_groups,
                                  pool_signal_features, roster_shape_features)
 from scoring.player_history import assert_no_column_collision, attributes_as_of
+from scoring import nested_model as nm
 
 # Re-exported, not redefined. `slots_left_at_pos` counts the FLEX slots a
 # team has left, and that column is built on the FITTING side too, so the
@@ -724,6 +725,67 @@ def _live_features(pool, available, overall_pick, roster, recent, settings,
     return X
 
 
+def _nested_scores(nested, pool, cand, overall_pick, counts, recent, settings,
+                   last_pick):
+    """log P(candidate) under the nested opponent model, over the set `cand`.
+
+    THE SERVING SIDE OF FIT/SERVE PARITY. The within factor reads exactly the
+    `_live_features` matrix the flat model is served from -- which
+    `tests/test_draft_sim.py` already pins equal to `draft_model.feature_matrix`
+    -- sliced to `nm.WITHIN_IDX`; the position factor reads
+    `nm.position_features_live`, pinned equal to `position_model.features_for`;
+    and `nested.predict_from` is the SAME reconstruction `NestedModel.predict_pick`
+    runs in `pipeline.measure_nested`. So the probability vector this returns on
+    a given board+roster state equals the one the model was measured with.
+
+    Returned as a log so the caller's existing max-shifted softmax + cap/floor
+    masking (`_sample_from_scores`) applies to the nested model unchanged: a
+    capped position is set to -inf and re-normalized out exactly as it is for a
+    flat score, which for a probability is "drop this candidate and renormalize
+    the rest" -- the right thing. `cand` is the FULL available board (not a
+    cap-filtered subset), because the nested factors' scarcity/dropoff columns
+    are read off what is actually still on the board, which is the state the fit
+    saw; the caps constrain the OUTPUT here, not the model's view of the board.
+    """
+    Xw = _live_features(pool, cand, overall_pick, counts, recent, settings,
+                        last_pick)[:, nm.WITHIN_IDX]
+    pos_x = nm.position_features_live(pool, cand, overall_pick, counts, recent,
+                                      settings, last_pick)
+    cand_pos = nm.cand_pos_codes(pool.position[cand])
+    probs = nested.predict_from(pos_x, Xw, cand_pos)
+    # A floor rather than a bare log so a zero-probability candidate (only a
+    # positionless one, which a real pool never holds) is a finite very-negative
+    # score the max-shift can subtract, not a -inf that would poison it.
+    return np.log(np.maximum(probs, 1e-300))
+
+
+def _sample_from_scores(scores, available, pool, counts, caps, settings,
+                        turns_left, rng):
+    """Sample one pick from per-candidate `scores`, applying the roster cap and
+    the must-fill floor exactly as `survival`'s flat path does.
+
+    Factored out so the nested opponent branches in `_run_draft` and `survival`
+    share ONE copy of this masking rather than two that agree today. The flat
+    paths are deliberately left inline and untouched: they must stay
+    byte-for-byte identical when the nested model is off.
+    """
+    for j, idx in enumerate(available):
+        pos = pool.position[idx]
+        if counts.get(pos, 0) >= caps.get(pos, 99):
+            scores[j] = -np.inf
+    must_fill = _must_fill_mask(pool, available, counts, settings, turns_left)
+    if must_fill is not None and np.isfinite(scores[must_fill]).any():
+        scores[~must_fill] = -np.inf
+    finite = np.isfinite(scores)
+    if not finite.any():
+        return int(available[0])
+    shifted = scores - scores[finite].max()
+    weights = np.where(finite, np.exp(shifted), 0.0)
+    total = weights.sum()
+    return (int(available[0]) if total <= 0
+            else int(rng.choice(available, p=weights / total)))
+
+
 # Positions a FLEX slot never meaningfully absorbs, so a second backup can
 # never enter the starting lineup and is pure dead weight. QB is literally
 # flex-ineligible; TE is eligible on paper and essentially never started
@@ -1228,7 +1290,7 @@ def _seed_rosters(pool, settings, taken_order):
 
 
 def _run_draft(pool, settings, slot_managers, my_slot, taken, betas, rng,
-               forced=None, taken_order=None, *, record=None) -> dict:
+               forced=None, taken_order=None, *, record=None, nested=None) -> dict:
     """Simulate the remainder of one snake draft and return every slot's
     roster, as `{slot: {"counts": {position: n, ...}, "indices": [pool
     index, ...], "last_pick": {position: overall_pick, ...}}}`.
@@ -1298,51 +1360,69 @@ def _run_draft(pool, settings, slot_managers, my_slot, taken, betas, rng,
                     turns_left=turns_left[offset])
         else:
             beta = betas.get(slot_managers.get(slot))
-            if beta is None:
-                # A zeros beta makes every score 0, so the softmax below is
-                # uniform: this opponent drafts the ENTIRE remaining pool at
-                # equal odds, ignoring ADP, need and position entirely. That
-                # is not "unmodeled" -- it is an actively wrong, confident
-                # model of a fantasy manager, and it is silent: nothing here
-                # would ever surface a fallback that fires. It is also the
-                # common case, not a rare one -- `slot_managers.get(slot)` is
-                # `None` for any slot ESPN hasn't published a draft order
-                # for, which is every slot until ESPN sets one, and `betas`
-                # is `{}` for any league with no draft history to fit
-                # (api/live.py's `build_session` builds it as `{m:
-                # fits.get(m, pooled) for m in fits if m != "__pooled__"}`,
-                # which is empty at cold start since fit_all then returns
-                # only `__pooled__`). COLD_START_PRIOR is the fix: a real,
-                # measured "drafts like the market" prior (see its docstring
-                # at scoring/draft_model.py), so an unresolvable opponent
-                # follows ADP instead of drafting at random.
-                beta = COLD_START_PRIOR
-            legal = available[_legal_mask(pool, available, roster["counts"], caps)]
-            # The roster floor, applied on top of the fit rather than inside
-            # it: once an opponent's remaining picks have run down to their
-            # unfilled starter slots, those slots are what the picks are for.
-            # Without it no modelled opponent ever drafted a defense at all
-            # -- 7 of 8 simulated teams finished with an empty DST slot, and
-            # `pos_DST` is fitted on a `draft_picks` table containing zero
-            # DST rows. The whole argument, with the measurements, is in
-            # `_must_fill_mask`'s docstring; it returns None (leaving `legal`
-            # exactly as the fit left it) for every pick where the constraint
-            # does not bind, which measures as everything before round 14.
-            must_fill = _must_fill_mask(pool, legal, roster["counts"],
-                                        settings, turns_left[offset])
-            if must_fill is not None:
-                legal = legal[must_fill]
-            if len(legal) == 0:
-                choice = int(available[0])      # no legal player exists at all
+            if beta is None and nested is not None:
+                # The nested opponent, selected in place of the flat cold-start
+                # prior for any seat with no personal fit (which at cold start
+                # is every seat). Scored over the FULL available board for
+                # fit/serve parity, then masked for caps and the roster floor
+                # by the same `_sample_from_scores` the flat `survival` path
+                # uses -- see `_nested_scores`. The mixture is over positions
+                # WITHIN this one seat's pick, sampled once; no cross-seat
+                # sampling is introduced (survival() semantics, constraint 4).
+                scores = _nested_scores(
+                    nested, pool, available, overall_pick, roster["counts"],
+                    recent, settings, roster["last_pick"])
+                choice = _sample_from_scores(
+                    scores, available, pool, roster["counts"], caps, settings,
+                    turns_left[offset], rng)
+                # Falls through to the shared bookkeeping below, exactly like
+                # the flat branch: `choice` is all this branch has to produce.
             else:
-                X = _live_features(pool, legal, overall_pick, roster["counts"],
-                                   recent, settings, roster["last_pick"])
-                scores = X @ beta
-                # `scores.max()` is one of `scores` itself, so it always
-                # contributes exp(0) == 1 -- weights.sum() is always >= 1,
-                # never zero, so no zero-division guard is needed here.
-                weights = np.exp(scores - scores.max())
-                choice = int(rng.choice(legal, p=weights / weights.sum()))
+                if beta is None:
+                    # A zeros beta makes every score 0, so the softmax below is
+                    # uniform: this opponent drafts the ENTIRE remaining pool at
+                    # equal odds, ignoring ADP, need and position entirely. That
+                    # is not "unmodeled" -- it is an actively wrong, confident
+                    # model of a fantasy manager, and it is silent: nothing here
+                    # would ever surface a fallback that fires. It is also the
+                    # common case, not a rare one -- `slot_managers.get(slot)` is
+                    # `None` for any slot ESPN hasn't published a draft order
+                    # for, which is every slot until ESPN sets one, and `betas`
+                    # is `{}` for any league with no draft history to fit
+                    # (api/live.py's `build_session` builds it as `{m:
+                    # fits.get(m, pooled) for m in fits if m != "__pooled__"}`,
+                    # which is empty at cold start since fit_all then returns
+                    # only `__pooled__`). COLD_START_PRIOR is the fix: a real,
+                    # measured "drafts like the market" prior (see its docstring
+                    # at scoring/draft_model.py), so an unresolvable opponent
+                    # follows ADP instead of drafting at random.
+                    beta = COLD_START_PRIOR
+                legal = available[_legal_mask(pool, available, roster["counts"], caps)]
+                # The roster floor, applied on top of the fit rather than inside
+                # it: once an opponent's remaining picks have run down to their
+                # unfilled starter slots, those slots are what the picks are for.
+                # Without it no modelled opponent ever drafted a defense at all
+                # -- 7 of 8 simulated teams finished with an empty DST slot, and
+                # `pos_DST` is fitted on a `draft_picks` table containing zero
+                # DST rows. The whole argument, with the measurements, is in
+                # `_must_fill_mask`'s docstring; it returns None (leaving `legal`
+                # exactly as the fit left it) for every pick where the constraint
+                # does not bind, which measures as everything before round 14.
+                must_fill = _must_fill_mask(pool, legal, roster["counts"],
+                                            settings, turns_left[offset])
+                if must_fill is not None:
+                    legal = legal[must_fill]
+                if len(legal) == 0:
+                    choice = int(available[0])      # no legal player exists at all
+                else:
+                    X = _live_features(pool, legal, overall_pick, roster["counts"],
+                                       recent, settings, roster["last_pick"])
+                    scores = X @ beta
+                    # `scores.max()` is one of `scores` itself, so it always
+                    # contributes exp(0) == 1 -- weights.sum() is always >= 1,
+                    # never zero, so no zero-division guard is needed here.
+                    weights = np.exp(scores - scores.max())
+                    choice = int(rng.choice(legal, p=weights / weights.sum()))
         gone[choice] = True
         pos = pool.position[choice]
         rosters[slot]["counts"][pos] = rosters[slot]["counts"].get(pos, 0) + 1
@@ -1363,12 +1443,13 @@ def _my_value(pool, rosters, my_slot, settings) -> float:
 
 
 def rollout(pool, settings, slot_managers, my_slot, taken, betas, rng,
-            forced=None, taken_order=None) -> float:
+            forced=None, taken_order=None, nested=None) -> float:
     """Simulate the remainder of one snake draft and return my end-of-draft
     roster_value. See `_run_draft` for the full resume contract, including
-    what `taken_order` is for."""
+    what `taken_order` is for. `nested`, when given, is the nested opponent
+    model used for cold-start seats (see `_run_draft`)."""
     rosters = _run_draft(pool, settings, slot_managers, my_slot, taken, betas,
-                         rng, forced, taken_order=taken_order)
+                         rng, forced, taken_order=taken_order, nested=nested)
     return _my_value(pool, rosters, my_slot, settings)
 
 
@@ -1701,7 +1782,7 @@ def _candidate_indices(pool, available, avail_pct, n_candidates) -> list:
 def search_pick(pool, settings, slot_managers, my_slot, taken, betas,
                 n_rollouts: int = DEFAULT_ROLLOUTS,
                 n_candidates: int = DEFAULT_CANDIDATES, seed: int = 0,
-                taken_order=None, avail_pct=None):
+                taken_order=None, avail_pct=None, nested=None):
     """Expected end-of-draft roster value for each candidate at my next pick.
 
     Candidates come from `_candidate_indices`: market rank and VOR, among the
@@ -1733,7 +1814,8 @@ def search_pick(pool, settings, slot_managers, my_slot, taken, betas,
     if avail_pct is None:
         avail_pct = survival(pool, settings, slot_managers, my_slot, taken,
                              betas, n_rollouts=n_rollouts, seed=seed,
-                             taken_order=taken_order)["avail_pct"].to_numpy()
+                             taken_order=taken_order,
+                             nested=nested)["avail_pct"].to_numpy()
     candidates = _candidate_indices(pool, available, np.asarray(avail_pct),
                                     n_candidates)
 
@@ -1743,7 +1825,8 @@ def search_pick(pool, settings, slot_managers, my_slot, taken, betas,
         for i in range(n_rollouts):
             rosters = _run_draft(pool, settings, slot_managers, my_slot, taken,
                                  betas, rng=np.random.default_rng([seed, i]),
-                                 forced=idx, taken_order=taken_order)
+                                 forced=idx, taken_order=taken_order,
+                                 nested=nested)
             values.append(_my_value(pool, rosters, my_slot, settings))
             applied += int(idx in rosters[my_slot]["indices"])
         values = np.array(values)
@@ -1764,7 +1847,7 @@ def search_pick(pool, settings, slot_managers, my_slot, taken, betas,
 def survival(pool, settings, slot_managers, my_slot, taken, betas,
              n_rollouts: int = DEFAULT_ROLLOUTS, seed: int = 0,
              taken_order=None, on_the_clock: bool = False,
-             horizon: int = 0):
+             horizon: int = 0, nested=None):
     """Probability each player is still available when my measured turn
     arrives -- my next turn by default, or the first one `horizon` opponent
     picks away.
@@ -1868,53 +1951,68 @@ def survival(pool, settings, slot_managers, my_slot, taken, betas,
             if len(available) == 0:
                 break
             beta = betas.get(slot_managers.get(slot))
-            if beta is None:
-                # Same fallback and the same reason as `_run_draft` above:
-                # zeros made the softmax uniform, so an unresolved opponent
-                # drafted the whole remaining pool at equal odds. This is
-                # what turned into the live bug -- pick 22 of an 8-team mock,
-                # 9 opponent picks before the owner's next turn, and EVERY
-                # available player (Derrick Henry and Josh Jacobs included)
-                # came back at 94-98% survival, because uniform draws give
-                # each of ~249 available players survival ~= 1 - 9/249 =
-                # 96.4% regardless of how good he is. `expected_best_next`
-                # then equalled each position's own best player,
-                # `gain.gain_now` collapsed to 0 for every position leader,
-                # and the top-3 board was a QB, a kicker and a TE at 0 --
-                # pandas' unstable sort deciding the order among six tied
-                # zeros, not the model. COLD_START_PRIOR makes the fallback
-                # follow the market instead of drafting at random.
-                beta = COLD_START_PRIOR
-            X = _live_features(pool, available, offset + 1, rosters[slot],
-                               recent, settings, last_picks[slot])
-            scores = X @ beta
-            for j, idx in enumerate(available):
-                pos = pool.position[idx]
-                if rosters[slot].get(pos, 0) >= caps.get(pos, 99):
-                    scores[j] = -np.inf
-            # The same roster floor `_run_draft` applies, and it has to be
-            # here too or the two disagree about the same opponents: this
-            # loop IS what "will he still be there" is counted from, so an
-            # opponent who never drafts a defense here hands every defense a
-            # survival of 1.000 and a `gain_now` of exactly 0.0000 at every
-            # pick of the draft (measured -- see `_must_fill_mask`).
-            # Re-checked against `finite` rather than applied blind: a
-            # position at its cap is already -inf, and forcing the pick onto
-            # a set with no finite score left would leave the softmax below
-            # with nothing to sample.
-            must_fill = _must_fill_mask(pool, available, rosters[slot],
-                                        settings, turns_left[offset])
-            if must_fill is not None and np.isfinite(scores[must_fill]).any():
-                scores[~must_fill] = -np.inf
-            finite = np.isfinite(scores)
-            if not finite.any():
-                choice = int(available[0])
+            if beta is None and nested is not None:
+                # The nested opponent, in place of the flat cold-start prior,
+                # for the same seats `_run_draft` selects it for -- and it MUST
+                # be the same choice model here, because this loop is what "will
+                # he still be there" is counted from. Scored over the full
+                # available board for fit/serve parity, then masked for caps and
+                # the roster floor by `_sample_from_scores`, which is exactly the
+                # masking the flat branch below runs.
+                scores = _nested_scores(nested, pool, available, offset + 1,
+                                        rosters[slot], recent, settings,
+                                        last_picks[slot])
+                choice = _sample_from_scores(scores, available, pool,
+                                             rosters[slot], caps, settings,
+                                             turns_left[offset], rng)
             else:
-                shifted = scores - scores[finite].max()
-                weights = np.where(finite, np.exp(shifted), 0.0)
-                total = weights.sum()
-                choice = int(available[0]) if total <= 0 else \
-                    int(rng.choice(available, p=weights / total))
+                if beta is None:
+                    # Same fallback and the same reason as `_run_draft` above:
+                    # zeros made the softmax uniform, so an unresolved opponent
+                    # drafted the whole remaining pool at equal odds. This is
+                    # what turned into the live bug -- pick 22 of an 8-team mock,
+                    # 9 opponent picks before the owner's next turn, and EVERY
+                    # available player (Derrick Henry and Josh Jacobs included)
+                    # came back at 94-98% survival, because uniform draws give
+                    # each of ~249 available players survival ~= 1 - 9/249 =
+                    # 96.4% regardless of how good he is. `expected_best_next`
+                    # then equalled each position's own best player,
+                    # `gain.gain_now` collapsed to 0 for every position leader,
+                    # and the top-3 board was a QB, a kicker and a TE at 0 --
+                    # pandas' unstable sort deciding the order among six tied
+                    # zeros, not the model. COLD_START_PRIOR makes the fallback
+                    # follow the market instead of drafting at random.
+                    beta = COLD_START_PRIOR
+                X = _live_features(pool, available, offset + 1, rosters[slot],
+                                   recent, settings, last_picks[slot])
+                scores = X @ beta
+                for j, idx in enumerate(available):
+                    pos = pool.position[idx]
+                    if rosters[slot].get(pos, 0) >= caps.get(pos, 99):
+                        scores[j] = -np.inf
+                # The same roster floor `_run_draft` applies, and it has to be
+                # here too or the two disagree about the same opponents: this
+                # loop IS what "will he still be there" is counted from, so an
+                # opponent who never drafts a defense here hands every defense a
+                # survival of 1.000 and a `gain_now` of exactly 0.0000 at every
+                # pick of the draft (measured -- see `_must_fill_mask`).
+                # Re-checked against `finite` rather than applied blind: a
+                # position at its cap is already -inf, and forcing the pick onto
+                # a set with no finite score left would leave the softmax below
+                # with nothing to sample.
+                must_fill = _must_fill_mask(pool, available, rosters[slot],
+                                            settings, turns_left[offset])
+                if must_fill is not None and np.isfinite(scores[must_fill]).any():
+                    scores[~must_fill] = -np.inf
+                finite = np.isfinite(scores)
+                if not finite.any():
+                    choice = int(available[0])
+                else:
+                    shifted = scores - scores[finite].max()
+                    weights = np.where(finite, np.exp(shifted), 0.0)
+                    total = weights.sum()
+                    choice = int(available[0]) if total <= 0 else \
+                        int(rng.choice(available, p=weights / total))
             gone[choice] = True
             pos = pool.position[choice]
             rosters[slot][pos] = rosters[slot].get(pos, 0) + 1
@@ -2163,7 +2261,8 @@ def _assign_primaries(counts: dict) -> dict:
 
 def predict_board(pool, settings, slot_managers, my_slot, taken, betas,
                   n_rollouts: int = DEFAULT_ROLLOUTS, seed: int = 0,
-                  alternates: int = 2, taken_order=None) -> pd.DataFrame:
+                  alternates: int = 2, taken_order=None,
+                  nested=None) -> pd.DataFrame:
     """Who the model thinks goes at every pick of the draft.
 
     Counts, across `n_rollouts` full drafts, which player each overall pick
@@ -2196,7 +2295,7 @@ def predict_board(pool, settings, slot_managers, my_slot, taken, betas,
         record = []
         _run_draft(pool, settings, slot_managers, my_slot, taken, betas,
                    rng=np.random.default_rng([seed, i]),
-                   taken_order=taken_order, record=record)
+                   taken_order=taken_order, record=record, nested=nested)
         for overall_pick, idx in record:
             counts.setdefault(overall_pick, {})
             counts[overall_pick][idx] = counts[overall_pick].get(idx, 0) + 1

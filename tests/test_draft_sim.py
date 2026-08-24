@@ -932,6 +932,102 @@ def test_live_features_matches_feature_matrix_on_a_late_round_pick():
     np.testing.assert_allclose(actual, expected)
 
 
+# --- Fit/serve parity for the NESTED opponent model. The nested prediction as
+# SERVED inside `_run_draft`/`survival` rollouts must equal the one FITTED and
+# measured in `pipeline.measure_nested`, on the same board+roster state, to
+# floating-point tolerance. If this fails the integration is not done -- a
+# silent mismatch here would degrade every live nested recommendation while the
+# whole suite still looks green. Two mirrors carry the parity: the within factor
+# reuses `_live_features` (pinned equal to `feature_matrix` above), and the
+# position factor uses `position_features_live` (pinned equal to `features_for`
+# here); `NestedModel.predict_from` is the one reconstruction both sides run.
+
+from scoring import nested_model as nm
+from scoring import position_model as pm
+from scoring.draft_sim import _nested_scores
+
+
+def _fixed_nested_model(seed=0):
+    """A `NestedModel` with fixed, arbitrary factor weights of the right shapes.
+
+    Parity does not depend on the weights being GOOD -- only on the fit and the
+    serve applying the SAME weights to the SAME features -- so a valid fitted
+    position classifier over random labels plus a fixed within vector is enough,
+    and it keeps the test off any corpus."""
+    rng = np.random.default_rng(seed)
+    d_pos = len(pm.FEATURE_NAMES)
+    Xpos = rng.standard_normal((240, d_pos))
+    ypos = rng.integers(0, len(pm.POSITIONS), size=240)
+    model = nm.NestedModel()
+    model.position_ = pm.MultinomialLogistic().fit(Xpos, ypos)
+    model.within_ = rng.standard_normal(len(nm.WITHIN_IDX))
+    return model
+
+
+@pytest.mark.parametrize("overall_pick,late", [(5, False), (50, True)])
+def test_position_features_live_matches_features_for(overall_pick, late):
+    pool, available, roster, recent, obs_pool, last_pick = _parity_fixture()
+    last_pick = last_pick if late else {}
+    obs = PickObservation(season=2024, overall_pick=overall_pick, manager="m",
+                          chosen=0, pool=obs_pool, roster=roster,
+                          recent=recent, last_pick_at_pos=last_pick)
+    expected = pm.features_for(obs, S)
+    actual = nm.position_features_live(pool, available, overall_pick, roster,
+                                       recent, S, last_pick)
+    np.testing.assert_allclose(actual, expected)
+
+
+@pytest.mark.parametrize("overall_pick,late", [(5, False), (50, True)])
+def test_nested_prediction_is_identical_fit_and_serve(overall_pick, late):
+    """THE GATE: the per-candidate nested probability vector computed through
+    the serving path equals the one computed through the fit/measurement path,
+    to floating-point tolerance, for a fixed board + roster state."""
+    pool, available, roster, recent, obs_pool, last_pick = _parity_fixture()
+    last_pick = last_pick if late else {}
+    model = _fixed_nested_model()
+    obs = PickObservation(season=2024, overall_pick=overall_pick, manager="m",
+                          chosen=0, pool=obs_pool, roster=roster,
+                          recent=recent, last_pick_at_pos=last_pick)
+
+    # FIT path: exactly what `nested_model.design_from_observations` +
+    # `predict_pick` feed the model in `pipeline.measure_nested`.
+    pos_x_fit = pm.features_for(obs, S)
+    within_fit = feature_matrix(obs, S)[:, nm.WITHIN_IDX]
+    cand_pos_fit = np.array([pm._POS_INDEX[p]
+                             for p in obs.pool["position"].to_numpy()])
+    p_fit = model.predict_from(pos_x_fit, within_fit, cand_pos_fit)
+
+    # SERVE path: exactly what `_nested_scores` computes inside the rollouts,
+    # exp()'d back from the log-scores it hands the sampler.
+    p_serve = np.exp(_nested_scores(model, pool, available, overall_pick,
+                                    roster, recent, S, last_pick))
+
+    assert p_serve.shape == (len(available),)
+    np.testing.assert_allclose(p_serve.sum(), 1.0)
+    np.testing.assert_allclose(p_serve, p_fit, rtol=0, atol=1e-12)
+
+
+def test_run_draft_and_survival_accept_a_nested_opponent():
+    """The nested model threads through the rollout call sites and produces a
+    legal draft and a real survival distribution -- caps and the roster floor
+    still bind, and the mixture is over positions within each seat's own pick."""
+    settings, pool = _two_round_league(), _qb_then_dst_pool()
+    model = _fixed_nested_model()
+    n = len(pool.player_id)
+    rosters = _run_draft(pool, settings, {}, 1, np.zeros(n, dtype=bool), {},
+                         np.random.default_rng(3), taken_order=[], nested=model)
+    # Every seat drafted exactly two legal players; the DST cap (1) holds.
+    for slot in (1, 2):
+        assert sum(rosters[slot]["counts"].values()) == 2
+        assert rosters[slot]["counts"].get("DST", 0) <= 1
+    frame = survival(pool, settings, {}, 1, np.zeros(n, dtype=bool), {},
+                     n_rollouts=64, seed=7, taken_order=[], on_the_clock=True,
+                     horizon=0, nested=model)
+    avail = frame["avail_pct"].to_numpy()
+    assert ((avail >= 0.0) & (avail <= 1.0)).all()
+    assert avail.min() < 1.0        # somebody is genuinely taken before my turn
+
+
 # --- Roster caps (property 4): K and DST capped at 1, QB at most 3, imposed
 # as a mask rather than learned. rollout()'s public interface only returns a
 # float -- it does not expose per-manager roster composition -- so a direct
