@@ -1028,6 +1028,105 @@ def test_run_draft_and_survival_accept_a_nested_opponent():
     assert avail.min() < 1.0        # somebody is genuinely taken before my turn
 
 
+# --- Fit/serve parity for the HYBRID opponent model, and the routing that
+# makes it the hybrid. The hybrid serves through the SAME `_nested_scores` +
+# `predict_serve` path the nested model does, so the parity argument above
+# carries: the served vector must equal the fit-side vector the model was
+# measured with -- the FLAT softmax in the early bucket, the NESTED
+# reconstruction from mid on -- to floating point. And the route must actually
+# route: early is the flat vector and NOT the nested one, mid/late the reverse.
+
+from scoring import hybrid_model as hyb
+from scoring.draft_model import _round_bucket
+
+
+def _fixed_hybrid(seed=0):
+    """A `HybridModel` over a fixed flat vector and the fixed nested model.
+
+    Same principle as `_fixed_nested_model`: parity does not care that the
+    weights are good, only that fit and serve apply the SAME ones to the SAME
+    features, so an arbitrary fixed flat beta plus the fixed nested factors is
+    enough and keeps the test off any corpus."""
+    rng = np.random.default_rng(seed + 100)
+    flat_beta = rng.standard_normal(len(FEATURE_NAMES))
+    return hyb.HybridModel(flat_beta, _fixed_nested_model(seed))
+
+
+@pytest.mark.parametrize("overall_pick,late", [(5, False), (50, True)])
+def test_hybrid_prediction_is_identical_fit_and_serve(overall_pick, late):
+    """THE HYBRID GATE: the per-candidate vector the serving path computes for
+    the hybrid equals its intended fit-side vector -- flat softmax in the early
+    bucket, nested reconstruction mid/late -- routed by the exact round bucket,
+    to floating-point tolerance."""
+    pool, available, roster, recent, obs_pool, last_pick = _parity_fixture()
+    last_pick = last_pick if late else {}
+    model = _fixed_hybrid()
+    obs = PickObservation(season=2024, overall_pick=overall_pick, manager="m",
+                          chosen=0, pool=obs_pool, roster=roster,
+                          recent=recent, last_pick_at_pos=last_pick)
+
+    # FIT path, routed by the same bucket the hybrid routes on.
+    X_fit = feature_matrix(obs, S)
+    if _round_bucket(overall_pick, S.teams) == "early":
+        p_fit = nm._softmax(X_fit @ model.flat_beta)
+    else:
+        pos_x_fit = pm.features_for(obs, S)
+        cand_pos_fit = np.array([pm._POS_INDEX[p]
+                                 for p in obs.pool["position"].to_numpy()])
+        p_fit = model.nested.predict_from(pos_x_fit, X_fit[:, nm.WITHIN_IDX],
+                                          cand_pos_fit)
+
+    # SERVE path: exactly what the rollouts hand the sampler, exp()'d back.
+    p_serve = np.exp(_nested_scores(model, pool, available, overall_pick,
+                                    roster, recent, S, last_pick))
+
+    assert p_serve.shape == (len(available),)
+    np.testing.assert_allclose(p_serve.sum(), 1.0)
+    np.testing.assert_allclose(p_serve, p_fit, rtol=0, atol=1e-12)
+
+
+def test_hybrid_routes_flat_early_and_nested_late():
+    """The route is the content: early the hybrid IS the flat model, mid/late it
+    IS the nested model, and the two are not the same vector -- so the routing
+    is doing real work, not returning one model under two names."""
+    pool, available, roster, recent, obs_pool, last_pick = _parity_fixture()
+    model = _fixed_hybrid()
+
+    # pick 5 -> round 1 -> early -> flat; pick 50 -> round 7 -> mid -> nested.
+    assert _round_bucket(5, S.teams) == "early"
+    assert _round_bucket(50, S.teams) != "early"
+
+    flat_only = nm._softmax(
+        _live_features(pool, available, 5, roster, recent, S, {})
+        @ model.flat_beta)
+    nested_only = np.exp(_nested_scores(model.nested, pool, available, 50,
+                                        roster, recent, S, last_pick))
+    hybrid_early = np.exp(_nested_scores(model, pool, available, 5, roster,
+                                         recent, S, {}))
+    hybrid_late = np.exp(_nested_scores(model, pool, available, 50, roster,
+                                        recent, S, last_pick))
+
+    np.testing.assert_allclose(hybrid_early, flat_only, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(hybrid_late, nested_only, rtol=0, atol=1e-12)
+    # The whole point: routing changes the answer.
+    assert not np.allclose(hybrid_early, hybrid_late)
+
+
+def test_cold_start_hybrid_builds_from_artifact_and_serves():
+    """The shipped cold-start hybrid loads from scoring/nested_prior.py (the
+    feature-order asserts in cold_start_nested pass) and threads through the
+    rollout call sites, producing a legal draft."""
+    settings, pool = _two_round_league(), _qb_then_dst_pool()
+    model = hyb.cold_start_hybrid()
+    assert model.flat_beta.shape == (len(FEATURE_NAMES),)
+    n = len(pool.player_id)
+    rosters = _run_draft(pool, settings, {}, 1, np.zeros(n, dtype=bool), {},
+                         np.random.default_rng(3), taken_order=[], nested=model)
+    for slot in (1, 2):
+        assert sum(rosters[slot]["counts"].values()) == 2
+        assert rosters[slot]["counts"].get("DST", 0) <= 1
+
+
 # --- Roster caps (property 4): K and DST capped at 1, QB at most 3, imposed
 # as a mask rather than learned. rollout()'s public interface only returns a
 # float -- it does not expose per-manager roster composition -- so a direct

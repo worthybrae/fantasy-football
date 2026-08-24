@@ -40,6 +40,32 @@ from scoring.draft_model import (COLD_START_PRIOR, EARLY_ROUNDS, FEATURE_NAMES,
                                  pool_signal_features, roster_shape_features)
 from scoring.player_history import assert_no_column_collision, attributes_as_of
 from scoring import nested_model as nm
+from scoring import hybrid_model as hm
+
+# The opponent model a league with NO per-manager history simulates its seats
+# with. "hybrid" is the measured best predictor (flat early, nested mid/late --
+# scoring/hybrid_model.py); "flat" keeps the flat COLD_START_PRIOR every seat
+# used before, the selectable fallback. The default is the module-level name so
+# a flip lives in one place.
+DEFAULT_COLD_START_OPPONENT = "hybrid"
+
+
+def cold_start_opponent(kind: str | None = None):
+    """The opponent model for a league with no history, or None for the flat path.
+
+    `None`/"hybrid" -> a `hybrid_model.HybridModel`, threaded as `nested=` into
+    the rollouts so it serves every seat whose beta is None (every opponent seat
+    at cold start). "flat" -> None, which leaves the caller on the existing flat
+    cold-start prior (every seat falls back to `COLD_START_PRIOR`). Anything else
+    is a caller error, refused rather than silently defaulted.
+    """
+    kind = kind or DEFAULT_COLD_START_OPPONENT
+    if kind == "flat":
+        return None
+    if kind == "hybrid":
+        return hm.cold_start_hybrid()
+    raise ValueError(f"unknown cold-start opponent model {kind!r}; "
+                     "expected 'hybrid' or 'flat'")
 
 # Re-exported, not redefined. `slots_left_at_pos` counts the FLEX slots a
 # team has left, and that column is built on the FITTING side too, so the
@@ -729,30 +755,33 @@ def _nested_scores(nested, pool, cand, overall_pick, counts, recent, settings,
                    last_pick):
     """log P(candidate) under the nested opponent model, over the set `cand`.
 
-    THE SERVING SIDE OF FIT/SERVE PARITY. The within factor reads exactly the
+    THE SERVING SIDE OF FIT/SERVE PARITY. The model reads exactly the
     `_live_features` matrix the flat model is served from -- which
     `tests/test_draft_sim.py` already pins equal to `draft_model.feature_matrix`
-    -- sliced to `nm.WITHIN_IDX`; the position factor reads
-    `nm.position_features_live`, pinned equal to `position_model.features_for`;
-    and `nested.predict_from` is the SAME reconstruction `NestedModel.predict_pick`
-    runs in `pipeline.measure_nested`. So the probability vector this returns on
-    a given board+roster state equals the one the model was measured with.
+    -- and the position vector `nm.position_features_live`, pinned equal to
+    `position_model.features_for`. `predict_serve` is the SAME reconstruction
+    the model runs in `pipeline.measure_nested`, so the probability vector this
+    returns on a given board+roster state equals the one the model was measured
+    with. `nested` may be a `nested_model.NestedModel` OR a
+    `hybrid_model.HybridModel`; both expose `predict_serve` and this code does
+    not care which -- the hybrid routes flat/nested by round INSIDE it, off the
+    `overall_pick`/`teams` handed in here.
 
     Returned as a log so the caller's existing max-shifted softmax + cap/floor
-    masking (`_sample_from_scores`) applies to the nested model unchanged: a
-    capped position is set to -inf and re-normalized out exactly as it is for a
-    flat score, which for a probability is "drop this candidate and renormalize
-    the rest" -- the right thing. `cand` is the FULL available board (not a
-    cap-filtered subset), because the nested factors' scarcity/dropoff columns
-    are read off what is actually still on the board, which is the state the fit
-    saw; the caps constrain the OUTPUT here, not the model's view of the board.
+    masking (`_sample_from_scores`) applies to the model unchanged: a capped
+    position is set to -inf and re-normalized out exactly as it is for a flat
+    score, which for a probability is "drop this candidate and renormalize the
+    rest" -- the right thing. `cand` is the FULL available board (not a
+    cap-filtered subset), because the factors' scarcity/dropoff columns are read
+    off what is actually still on the board, which is the state the fit saw; the
+    caps constrain the OUTPUT here, not the model's view of the board.
     """
-    Xw = _live_features(pool, cand, overall_pick, counts, recent, settings,
-                        last_pick)[:, nm.WITHIN_IDX]
+    X = _live_features(pool, cand, overall_pick, counts, recent, settings,
+                       last_pick)
     pos_x = nm.position_features_live(pool, cand, overall_pick, counts, recent,
                                       settings, last_pick)
     cand_pos = nm.cand_pos_codes(pool.position[cand])
-    probs = nested.predict_from(pos_x, Xw, cand_pos)
+    probs = nested.predict_serve(X, pos_x, cand_pos, overall_pick, settings.teams)
     # A floor rather than a bare log so a zero-probability candidate (only a
     # positionless one, which a real pool never holds) is a finite very-negative
     # score the max-shift can subtract, not a -inf that would poison it.
@@ -2109,7 +2138,8 @@ def _drafted_state(conn, pool):
 
 
 def run_sim(conn, my_slot: int, slot_managers: dict,
-            n_rollouts: int = DEFAULT_ROLLOUTS, seed: int = 0) -> str:
+            n_rollouts: int = DEFAULT_ROLLOUTS, seed: int = 0,
+            opponent_model: str | None = None) -> str:
     from scoring import league as league_mod
     from scoring.board import build_board
     from scoring.draft_model import fit_all
@@ -2119,6 +2149,10 @@ def run_sim(conn, my_slot: int, slot_managers: dict,
     pool = build_pool(conn, board, settings)
 
     fits = fit_all(conn, settings)
+    # No per-manager history to tell the seats apart -- `fit_all` returned only
+    # the pooled market prior (draft_model.cold_start_fits). This is the mock /
+    # first-connect case, and the case the HYBRID opponent is the default for.
+    cold_start = list(fits.keys()) == ["__pooled__"]
     # This used to reject a fit with no per-manager entries, on the reasoning
     # that "no fitted opponent" meant every beta defaulted to zeros -- a
     # uniform-random draft, a confident wrong answer. That reasoning is stale.
@@ -2186,11 +2220,22 @@ def run_sim(conn, my_slot: int, slot_managers: dict,
             "manager. ESPN leaves the draft order unset until it publishes "
             "one, so assign it in the rail (or PUT /api/draft-order) before "
             "simulating.")
-    # An unrecognized name is a legitimate case -- a manager who joined this
-    # year has no history to fit -- so they draft like the league average
-    # rather than at random.
-    for slot, manager in slot_managers.items():
-        betas.setdefault(manager, pooled)
+    # THE COLD-START OPPONENT. With no per-manager history the seats are the
+    # HYBRID by default (flat early, nested mid/late -- the measured best
+    # predictor). It is threaded as `nested=` into the rollouts, where it fires
+    # for exactly the seats whose beta is None -- which at cold start is every
+    # opponent seat, since `betas` carries no per-manager fit. So those seats
+    # are LEFT out of `betas` here (no `setdefault` to pooled) precisely so the
+    # `beta is None` hybrid branch takes them. `opponent_model="flat"` (or a
+    # league WITH history) keeps the old flat cold-start prior: every seat falls
+    # back to pooled and `nested` stays None.
+    nested = cold_start_opponent(opponent_model) if cold_start else None
+    if nested is None:
+        # An unrecognized name is a legitimate case -- a manager who joined this
+        # year has no history to fit -- so they draft like the league average
+        # rather than at random.
+        for slot, manager in slot_managers.items():
+            betas.setdefault(manager, pooled)
 
     reaching = sorted(m for m, beta in betas.items() if beta[_REACH] > 0)
     if reaching:
@@ -2206,14 +2251,16 @@ def run_sim(conn, my_slot: int, slot_managers: dict,
     # chance of getting out of the ranking, and computing it once means that
     # costs nothing beyond the sim_survival table we were writing anyway.
     avail = survival(pool, settings, slot_managers, my_slot, taken, betas,
-                     n_rollouts=n_rollouts, seed=seed, taken_order=taken_order)
+                     n_rollouts=n_rollouts, seed=seed, taken_order=taken_order,
+                     nested=nested)
     results = search_pick(pool, settings, slot_managers, my_slot, taken, betas,
                           n_rollouts=n_rollouts, seed=seed,
                           taken_order=taken_order,
-                          avail_pct=avail["avail_pct"].to_numpy())
+                          avail_pct=avail["avail_pct"].to_numpy(),
+                          nested=nested)
     cells = predict_board(pool, settings, slot_managers, my_slot, taken, betas,
                           n_rollouts=n_rollouts, seed=seed,
-                          taken_order=taken_order)
+                          taken_order=taken_order, nested=nested)
 
     run_id = f"{my_slot}-{n_rollouts}-{seed}-{len(taken_order)}"
     results.insert(0, "run_id", run_id)
