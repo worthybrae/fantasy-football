@@ -230,3 +230,137 @@ def build_adp(conn) -> dict:
 def adp_data(conn) -> dict:
     """`build_adp`, once per CACHE_SECONDS, shared by every page."""
     return market._cached("seo-adp", lambda: build_adp(conn))
+
+
+# ---------------------------------------------------------------------------
+# Rendering
+# ---------------------------------------------------------------------------
+
+_env = None
+_env_lock = threading.Lock()
+
+
+def _templates():
+    global _env
+    with _env_lock:
+        if _env is None:
+            from jinja2 import Environment, FileSystemLoader, select_autoescape
+            _env = Environment(loader=FileSystemLoader(str(TEMPLATES)),
+                               autoescape=select_autoescape(["html"]))
+        return _env
+
+
+def render(name: str, **ctx) -> str:
+    ctx.setdefault("site", SITE)
+    ctx.setdefault("positions", POSITIONS)
+    return _templates().get_template(name).render(**ctx)
+
+
+def _provenance(data: dict) -> str:
+    if not data["drafts"]:
+        return "No drafts recorded yet."
+    when = data["updated"].strftime("%b %-d, %Y") if data["updated"] else "today"
+    return (f"From {data['drafts']} real ESPN mock drafts "
+            f"({data['teams']}-team PPR, {data['rounds']} rounds), updated {when}.")
+
+
+def _crumbs(*items) -> dict:
+    """`BreadcrumbList` structured data from (name, path) pairs."""
+    return {"@context": "https://schema.org", "@type": "BreadcrumbList",
+            "itemListElement": [
+                {"@type": "ListItem", "position": i, "name": name, "item": SITE + path}
+                for i, (name, path) in enumerate(items, start=1)]}
+
+
+def round_players(data: dict, n: int) -> list:
+    """Who goes in round `n`: everyone whose usual range crosses it, most
+    often first, then by ADP."""
+    teams = data["teams"]
+    first, last = (n - 1) * teams + 1, n * teams
+    hits = [p for p in data["players"]
+            if p["round_mode"] == n or (p["p10"] <= last and p["p90"] >= first)]
+    return sorted(hits, key=lambda p: (p["round_mode"] != n, p["adp"]))
+
+
+def _missing(path: str):
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(render("adp_missing.html", title="Not found – ESPN Draft Assist",
+                               description="No such page.", path=path, noindex=True),
+                        status_code=404)
+
+
+def register_seo_routes(app, conn=None):
+    """The crawlable site: `/adp`, its player, round and position pages, and
+    `/sitemap.xml`. Register before `api/static.register_spa`."""
+    from fastapi.responses import HTMLResponse, Response
+
+    def data():
+        return adp_data(conn)
+
+    def index_page(position: str | None):
+        d = data()
+        players = d["players"] if position is None else [
+            p for p in d["players"] if p["position"] == position]
+        season = d["updated"].year if d["updated"] else datetime.now().year
+        shape = f"{d['teams']}-team PPR" if d["drafts"] else "PPR"
+        if position is None:
+            heading = f"ESPN Mock Draft ADP {season} ({shape})"
+            path = "/adp"
+            desc = (f"Average draft position of every player in {d['drafts']} real ESPN "
+                    f"mock drafts ({shape}): ADP, typical range, and how often each is taken.")
+            crumbs = _crumbs(("ADP", "/adp"))
+        else:
+            heading = f"{position} ADP – ESPN mock drafts {season}"
+            path = f"/adp/{position.lower()}"
+            desc = (f"Where every {position} goes in {d['drafts']} real ESPN mock drafts "
+                    f"({shape}): ADP, range, and position rank.")
+            crumbs = _crumbs(("ADP", "/adp"), (position, path))
+        return HTMLResponse(render(
+            "adp_index.html", title=f"{heading} – ESPN Draft Assist", description=desc,
+            path=path, heading=heading, provenance=_provenance(d), players=players,
+            rounds=d["rounds"], position=position, breadcrumbs=crumbs))
+
+    @app.get("/adp", response_class=HTMLResponse)
+    def adp_index():
+        return index_page(None)
+
+    @app.get("/adp/round/{n}", response_class=HTMLResponse)
+    def adp_round(n: int):
+        d = data()
+        if not d["drafts"] or n < 1 or n > d["rounds"]:
+            return _missing(f"/adp/round/{n}")
+        teams = d["teams"]
+        first, last = (n - 1) * teams + 1, n * teams
+        players = round_players(d, n)
+        usual = [p["name"] for p in players if p["round_mode"] == n][:4]
+        desc = (f"Who goes in round {n} (picks {first}–{last}) of an ESPN mock draft, "
+                f"from {d['drafts']} recorded drafts"
+                + (f": {', '.join(usual)}." if usual else "."))
+        return HTMLResponse(render(
+            "adp_round.html", title=f"Round {n} of an ESPN mock draft – who goes there – ESPN Draft Assist",
+            description=desc, path=f"/adp/round/{n}", n=n, first=first, last=last,
+            players=players, rounds=d["rounds"], provenance=_provenance(d),
+            breadcrumbs=_crumbs(("ADP", "/adp"), (f"Round {n}", f"/adp/round/{n}"))))
+
+    @app.get("/adp/{key}", response_class=HTMLResponse)
+    def adp_player(key: str):
+        if key.upper() in POSITIONS:
+            return index_page(key.upper())
+        d = data()
+        p = d["by_slug"].get(key)
+        if p is None:
+            return _missing(f"/adp/{key}")
+        i = p["rank"] - 1
+        near = [q for q in d["players"][max(0, i - 4): i + 5] if q is not p]
+        pct = int(round(p["share"] * 100))
+        desc = (f"{p['name']} ADP {p['adp']:.1f} in {d['drafts']} real ESPN mock drafts: "
+                f"usually picks {p['p10']}–{p['p90']}, round {p['round_mode']}, "
+                f"taken in {pct}% of drafts, {p['position']}{p['pos_rank']}.")
+        return HTMLResponse(render(
+            "adp_player.html", title=f"{p['name']} ADP – ESPN mock drafts {d['updated'].year if d['updated'] else ''} – ESPN Draft Assist",
+            description=desc, path=f"/adp/{p['slug']}", p=p, drafts=d["drafts"],
+            teams=d["teams"], rounds=d["rounds"], picks_total=d["teams"] * d["rounds"],
+            peak=max(p["hist"]) or 1, near=near, headshot=p["headshot"],
+            provenance=_provenance(d),
+            breadcrumbs=_crumbs(("ADP", "/adp"), (p["position"], f"/adp/{p['position'].lower()}"),
+                                (p["name"], f"/adp/{p['slug']}"))))

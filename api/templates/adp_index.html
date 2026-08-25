@@ -1,0 +1,32 @@
+{# api/templates/adp_index.html #}
+{% extends "base.html" %}
+{% block body %}
+{% if position %}<div class="crumbs"><a href="/adp">ADP</a> › {{ position }}</div>{% endif %}
+<h1>{{ heading }}</h1>
+<p class="prov">{{ provenance }}</p>
+{% if not players %}
+<p>No drafts recorded yet. The farm records ESPN mock drafts every day; check back tomorrow.</p>
+{% else %}
+<table>
+<thead><tr><th class="n">#</th><th>Player</th><th>Pos</th><th>Team</th><th class="n">ADP</th><th class="n">Range</th><th class="n">Drafted</th><th class="n">{{ 'Pos rank' }}</th></tr></thead>
+<tbody>
+{% for p in players %}
+<tr>
+  <td class="n">{{ p.rank }}</td>
+  <td><a href="/adp/{{ p.slug }}">{{ p.name | safe }}</a></td>
+  <td><span class="pos">{{ p.position }}</span></td>
+  <td>{{ p.team or '—' }}</td>
+  <td class="n">{{ '%.1f' % p.adp }}</td>
+  <td class="n">{{ p.p10 }}–{{ p.p90 }}</td>
+  <td class="n">{{ (p.share * 100) | round | int }}%</td>
+  <td class="n">{{ p.position }}{{ p.pos_rank }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+{% endif %}
+<h2>By round</h2>
+<div class="links">{% for n in range(1, rounds + 1) %}<a href="/adp/round/{{ n }}">Round {{ n }}</a>{% endfor %}</div>
+<h2>By position</h2>
+<div class="links">{% for pos in positions %}<a href="/adp/{{ pos | lower }}">{{ pos }}</a>{% endfor %}</div>
+{% endblock %}

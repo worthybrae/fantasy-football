@@ -1,0 +1,32 @@
+{# api/templates/adp_player.html #}
+{% extends "base.html" %}
+{% block body %}
+<div class="crumbs"><a href="/adp">ADP</a> › <a href="/adp/{{ p.position | lower }}">{{ p.position }}</a> › {{ p.name | safe }}</div>
+<div class="head">
+  {% if p.headshot %}<img src="{{ p.headshot }}" alt="" width="72" height="72">{% endif %}
+  <div>
+    <h1>{{ p.name | safe }} ADP in ESPN mock drafts</h1>
+    <p class="prov"><span class="pos">{{ p.position }}</span> {{ p.team or '' }} · {{ provenance }}</p>
+  </div>
+</div>
+<div class="figs">
+  <div class="fig"><div class="k">ADP</div><div class="v">{{ '%.1f' % p.adp }}</div></div>
+  <div class="fig"><div class="k">Usual range</div><div class="v">picks {{ p.p10 }}<small>–</small>{{ p.p90 }}</div></div>
+  <div class="fig"><div class="k">Most often</div><div class="v">round {{ p.round_mode }}</div></div>
+  <div class="fig"><div class="k">Drafted in</div><div class="v">{{ (p.share * 100) | round | int }}%<small> of drafts</small></div></div>
+  <div class="fig"><div class="k">Position rank</div><div class="v">{{ p.position }}{{ p.pos_rank }}</div></div>
+  <div class="fig"><div class="k">ESPN's own ADP</div><div class="v">{% if p.espn_adp is not none %}{{ '%.1f' % p.espn_adp }}{% else %}—{% endif %}</div></div>
+</div>
+<p>In {{ drafts }} recorded ESPN mock drafts, {{ p.name | safe }} was taken {{ p.taken }} times, on average at pick {{ '%.1f' % p.adp }} (overall rank {{ p.rank }}, {{ p.position }}{{ p.pos_rank }}). Eight drafts in ten took him between picks {{ p.p10 }} and {{ p.p90 }}; the earliest was pick {{ p.low }} and the latest pick {{ p.high }}.{% if p.espn_adp is not none %} ESPN's published ADP has him at {{ '%.1f' % p.espn_adp }}.{% endif %}</p>
+<h2>Where he goes, pick by pick</h2>
+<div class="chart">
+<svg viewBox="0 0 {{ picks_total * 6 }} 120" role="img" aria-label="How many drafts took {{ p.name | safe }} at each overall pick">
+{% for count in p.hist %}{% if count %}<rect x="{{ loop.index0 * 6 }}" y="{{ 100 - (100 * count / peak) | round }}" width="5" height="{{ (100 * count / peak) | round }}" fill="#ffb454"><title>Pick {{ loop.index }}: {{ count }}</title></rect>{% endif %}{% endfor %}
+{% for n in range(1, rounds + 1) %}<text x="{{ (n - 1) * teams * 6 + 2 }}" y="116" font-size="10" fill="#565b69" font-family="ui-monospace,monospace">R{{ n }}</text>{% endfor %}
+</svg>
+</div>
+{% if near %}
+<h2>Goes around</h2>
+<div class="near">{% for q in near %}<a href="/adp/{{ q.slug }}"><b>{{ '%.1f' % q.adp }}</b>{{ q.name | safe }} <span class="pos">{{ q.position }}</span></a>{% endfor %}</div>
+{% endif %}
+{% endblock %}

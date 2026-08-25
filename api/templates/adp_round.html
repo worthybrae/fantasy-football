@@ -1,0 +1,24 @@
+{# api/templates/adp_round.html #}
+{% extends "base.html" %}
+{% block body %}
+<div class="crumbs"><a href="/adp">ADP</a> › Round {{ n }}</div>
+<h1>Round {{ n }} of an ESPN mock draft</h1>
+<p class="prov">Picks {{ first }}–{{ last }} · {{ provenance }}</p>
+{% if not players %}<p>No player has gone in round {{ n }} often enough to say.</p>{% else %}
+<table>
+<thead><tr><th>Player</th><th>Pos</th><th class="n">ADP</th><th class="n">Range</th><th>In this round</th></tr></thead>
+<tbody>
+{% for p in players %}
+<tr>
+  <td><a href="/adp/{{ p.slug }}">{{ p.name | safe }}</a></td>
+  <td><span class="pos">{{ p.position }}</span></td>
+  <td class="n">{{ '%.1f' % p.adp }}</td>
+  <td class="n">{{ p.p10 }}–{{ p.p90 }}</td>
+  <td>{% if p.round_mode == n %}usually{% else %}sometimes{% endif %}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+{% endif %}
+<div class="links">{% if n > 1 %}<a href="/adp/round/{{ n - 1 }}">← Round {{ n - 1 }}</a>{% endif %}{% if n < rounds %}<a href="/adp/round/{{ n + 1 }}">Round {{ n + 1 }} →</a>{% endif %}</div>
+{% endblock %}

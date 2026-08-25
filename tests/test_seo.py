@@ -141,3 +141,70 @@ def test_build_adp_survives_a_missing_board(corpus):
     data = seo.build_adp(None)
     star = data["by_slug"]["star"]          # the id itself, as the archive does
     assert star["name"] == "star" and star["team"] is None and star["espn_adp"] is None
+
+
+# -- the pages ---------------------------------------------------------------
+
+def _client(board):
+    app = FastAPI()
+    seo.register_seo_routes(app, conn=board)
+    return TestClient(app)
+
+
+def test_the_index_lists_every_player_with_provenance(corpus, board):
+    r = _client(board).get("/adp")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/html")
+    body = r.text
+    assert "<title>ESPN Mock Draft ADP 2026 (4-team PPR)" in body
+    assert "10 real ESPN mock drafts" in body and "Aug 24, 2026" in body
+    assert 'href="/adp/dandre-swift"' in body and "Amon-Ra St. Brown" in body
+    assert '<link rel="canonical" href="https://espnfantasydraft.com/adp"' in body
+    assert "<script" not in body.replace('<script type="application/ld+json">', "")
+
+
+def test_a_player_page_states_his_figures(corpus, board):
+    body = _client(board).get("/adp/amon-ra-st-brown").text
+    assert "<title>Amon-Ra St. Brown ADP" in body
+    assert "2.9" in body                       # the ADP
+    assert "picks 2" in body and "4" in body   # the range
+    assert "round 1" in body.lower()
+    assert "5.5" in body                       # ESPN's own ADP beside it
+    assert '"@type": "BreadcrumbList"' in body
+    assert "<svg" in body                       # the distribution, drawn
+    assert 'href="/adp/dandre-swift"' in body   # a neighbour by ADP
+
+
+def test_a_player_page_is_the_same_for_a_slug_collision(corpus, board):
+    c = _client(board)
+    assert "twin_a" not in c.get("/adp/josh-allen").text
+    assert c.get("/adp/josh-allen-2").status_code == 200
+
+
+def test_round_and_position_pages_filter(corpus, board):
+    c = _client(board)
+    r1 = c.get("/adp/round/1").text
+    assert "D'Andre Swift" in r1 and "Once Guy" not in r1
+    assert 'href="/adp/round/2"' in r1
+    rb = c.get("/adp/rb").text
+    assert "D'Andre Swift" in rb and "Josh Allen" not in rb
+    assert "<title>RB ADP" in rb
+
+
+def test_unknown_pages_are_404_and_noindex(corpus, board):
+    c = _client(board)
+    for path in ("/adp/nobody-here", "/adp/round/17", "/adp/round/0", "/adp/ol"):
+        r = c.get(path)
+        assert r.status_code == 404, path
+        assert '<meta name="robots" content="noindex">' in r.text
+
+
+def test_an_empty_corpus_still_serves_the_index(tmp_path, monkeypatch, board):
+    path = tmp_path / "empty.duckdb"
+    dl.corpus_conn(str(path)).close()
+    monkeypatch.setattr(market.dl, "CORPUS_PATH", str(path))
+    market._CACHE.clear()
+    c = _client(board)
+    r = c.get("/adp")
+    assert r.status_code == 200 and "No drafts recorded yet" in r.text
+    assert c.get("/adp/dandre-swift").status_code == 404
