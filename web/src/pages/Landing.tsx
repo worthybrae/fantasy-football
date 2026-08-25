@@ -605,7 +605,14 @@ export default function Landing() {
           {/* The reading room for drafts already played. It lost its place in
               the top bar when the room took that bar over, and this is where
               it belonged anyway: a side route, not part of the pitch. */}
-          <Link to="/mocks" className="lp-bar-link">See mock drafts</Link>.
+          <Link to="/mocks" className="lp-bar-link">See mock drafts</Link>
+          {' or '}
+          {/* A plain anchor, not Link: /adp is rendered by FastAPI from the
+              corpus and is not a route this app's router knows. It also
+              wants a real page load so the crawler follows it. Until this
+              link existed the ADP pages were orphans -- served, sitemapped,
+              and reachable only by typing the address. */}
+          <a href="/adp" className="lp-bar-link">ADP from those drafts</a>.
         </span>
       </footer>
 

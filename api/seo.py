@@ -124,21 +124,45 @@ def _espn_adp_by_player(conn, ids: dict) -> dict:
         return {}
 
 
-def _team_fallback_from_espn(conn) -> dict:
-    """gsis_id -> team from `espn_adp` through the crosswalk, for players the
-    depth charts do not carry (a rookie in August)."""
+def _team_fallback_from_espn(conn, ids: dict | None = None) -> dict:
+    """gsis_id -> team from `espn_adp`, for players the depth charts do not
+    carry (a rookie in August). Crosswalk first, then name and position --
+    the same two steps `_espn_adp_by_player` takes, because the crosswalk
+    misses exactly the players the depth charts miss: a rookie has no
+    `sleeper_ids` row either, and printing an em dash for the team of a
+    player ESPN's own board names is a gap for no reason.
+
+    `ids` maps player_id -> (name, position), and is what the second step
+    needs; without it only the crosswalk runs."""
     if conn is None:
         return {}
     try:
         espn = read_table(conn, "espn_adp")
-        sleeper = read_table(conn, "sleeper_ids")
-        if espn.empty or sleeper.empty or "team" not in espn.columns:
+        if espn.empty or "team" not in espn.columns:
             return {}
-        joined = espn.merge(sleeper.dropna(subset=["gsis_id", "espn_id"])[["gsis_id", "espn_id"]],
-                            on="espn_id")
-        return {str(r.gsis_id): str(r.team) for r in joined.itertuples() if r.team == r.team and r.team}
+        sleeper = read_table(conn, "sleeper_ids")
+        out: dict = {}
+        if not sleeper.empty and {"gsis_id", "espn_id"}.issubset(sleeper.columns):
+            joined = espn.merge(sleeper.dropna(subset=["gsis_id", "espn_id"])[["gsis_id", "espn_id"]],
+                                on="espn_id")
+            out = {str(r.gsis_id): str(r.team) for r in joined.itertuples()
+                   if r.team == r.team and r.team}
+        if ids and {"espn_name", "position"}.issubset(espn.columns):
+            from scoring.profile import _norm_name
+            by_name = {}
+            for r in espn.itertuples():
+                if r.team == r.team and r.team:
+                    by_name.setdefault((_norm_name(str(r.espn_name)), str(r.position)),
+                                       str(r.team))
+            for pid, (name, pos) in ids.items():
+                if pid not in out:
+                    hit = by_name.get((_norm_name(name), pos))
+                    if hit is not None:
+                        out[pid] = hit
+        return out
     except Exception:      # noqa: BLE001 -- a board that cannot be read costs
-        # a fallback team, not the page.
+        # a fallback team, not the page. The name step below `read_table` is
+        # as much "reading the board" as the read itself.
         return {}
 
 
@@ -191,7 +215,6 @@ def build_adp(conn) -> dict:
     if missing:
         names.update(market._board_names(conn, missing))
     teams_by = _teams_by_player(conn)
-    espn_team = _team_fallback_from_espn(conn)
 
     players = []
     for pid, taken in picks.items():
@@ -214,7 +237,7 @@ def build_adp(conn) -> dict:
             "name": name,
             "headshot": headshot,
             "position": positions.get(pid) or "",
-            "team": teams_by.get(pid) or espn_team.get(pid),
+            "team": teams_by.get(pid),
             "adp": round(mean(ordered), 1),
             "median": float(median(ordered)),
             "p10": _percentile(ordered, 0.10),
@@ -228,13 +251,17 @@ def build_adp(conn) -> dict:
         })
 
     players.sort(key=lambda p: (p["adp"], -p["taken"], p["player_id"]))
-    espn = _espn_adp_by_player(conn, {p["player_id"]: (p["name"], p["position"]) for p in players})
+    ids = {p["player_id"]: (p["name"], p["position"]) for p in players}
+    espn = _espn_adp_by_player(conn, ids)
+    espn_team = _team_fallback_from_espn(conn, ids)
     pos_seen: Counter = Counter()
     for i, p in enumerate(players, start=1):
         p["rank"] = i
         pos_seen[p["position"]] += 1
         p["pos_rank"] = pos_seen[p["position"]]
         p["espn_adp"] = espn.get(p["player_id"])
+        if not p["team"]:
+            p["team"] = espn_team.get(p["player_id"])
 
     # Slugs: a collision takes -2, -3 in player_id order, so two players
     # with one name keep the same addresses from one snapshot to the next.
@@ -310,6 +337,61 @@ def _crumbs(*items) -> dict:
                 for i, (name, path) in enumerate(items, start=1)]}
 
 
+def _index_faq(data: dict) -> list:
+    """The questions somebody arriving from a search for this page's own
+    query still has, answered in the page's own figures. Rendered as
+    `<details>` and, alongside, as `FAQPage` structured data.
+
+    The index alone. Repeating one FAQ across the six position pages would
+    make them near-duplicates of each other and of the index, which is the
+    thin-content pattern the share floor in `build_adp` already guards
+    against on the player pages."""
+    drafts = data["drafts"]
+    teams, rounds = data["teams"], data["rounds"]
+    corpus = (f"{drafts} ESPN mock drafts this site recorded"
+              if drafts else "the ESPN mock drafts this site records")
+    return [
+        ("What does ADP mean?",
+         "Average draft position: the average pick number a player was taken "
+         f"at, across every draft he appeared in. In {corpus}, a player with "
+         "an ADP of 24.0 went around the 24th pick on average. Sometimes "
+         "earlier, sometimes later, which is what the range column shows."),
+        ("Where do these numbers come from?",
+         f"From {corpus}. These are real drafts, played out pick by pick, "
+         "not projections and not an average of other sites' rankings. Every "
+         "draft counted here is one this site watched from the inside."),
+        ("What does the range column mean?",
+         "The 10th to the 90th percentile of his picks: eight drafts in ten "
+         "took him somewhere between those two numbers. A narrow range means "
+         "the room agrees on him; a wide one means he is a reach for some "
+         "drafters and a steal for others."),
+        (f"Why {teams}-team PPR?" if drafts else "Which league shape is this?",
+         f"That is the shape ESPN's public mock draft lobby runs: {teams} "
+         f"teams, {rounds} rounds, PPR scoring. Draft position moves with "
+         "league size, so mixing shapes into one number would blur all of "
+         "them. Every figure on these pages comes from that one shape."),
+        ("Is this ESPN's own ADP?",
+         "No. ESPN publishes its own average draft position, drawn from real "
+         "leagues; each player page shows it beside the mock figure so you "
+         "can see where the two disagree. Mock drafters and league drafters "
+         "do not behave the same way, and the gap is often the interesting "
+         "part."),
+        ("How often does this update?",
+         "Daily. New mock drafts are recorded continuously and every page "
+         "here is rebuilt from the full corpus, so the count in the line "
+         "under the heading goes up over the course of a season."),
+    ]
+
+
+def _faq_schema(faq: list) -> dict:
+    """`FAQPage` structured data from (question, answer) pairs."""
+    return {"@context": "https://schema.org", "@type": "FAQPage",
+            "mainEntity": [
+                {"@type": "Question", "name": q,
+                 "acceptedAnswer": {"@type": "Answer", "text": a}}
+                for q, a in faq]}
+
+
 def round_players(data: dict, n: int) -> list:
     """Who goes in round `n`: everyone whose usual range crosses it, most
     often first, then by ADP."""
@@ -329,7 +411,12 @@ def _missing(path: str):
 
 def register_seo_routes(app, conn=None):
     """The crawlable site: `/adp`, its player, round and position pages, and
-    `/sitemap.xml`. Register before `api/static.register_spa`."""
+    `/sitemap.xml`. Register before `api/static.register_spa`.
+
+    Every route answers HEAD as well as GET. FastAPI's `@app.get` registers
+    the one method -- unlike Starlette's own `Route`, which adds HEAD next to
+    GET -- so a HEAD to a page that GET serves fine came back 405. Crawlers
+    mostly use GET, but link previewers and uptime checks use HEAD."""
     from fastapi.responses import HTMLResponse, Response
 
     def data():
@@ -348,22 +435,42 @@ def register_seo_routes(app, conn=None):
             desc = (f"Average draft position of every player in {d['drafts']} real ESPN "
                     f"mock drafts ({shape}): ADP, typical range, and how often each is taken.")
             crumbs = _crumbs(("ADP", "/adp"))
+            # Prose, on the one page here meant to answer the bare ADP query.
+            # A table by itself gives a reader arriving cold nothing to read
+            # and a search engine nothing to match beyond player names.
+            intro = (
+                f"Average draft position for every player taken in {d['drafts']} "
+                "ESPN mock drafts, recorded pick by pick as they were played. "
+                "These are not projections and not a blend of other sites' "
+                "rankings: each number below is where ESPN drafters actually "
+                "took him, and how far apart they disagreed."
+                if d["drafts"] else
+                "Average draft position for every player taken in the ESPN mock "
+                "drafts this site records, pick by pick, as they are played.")
+            faq = _index_faq(d)
         else:
             heading = f"{position} ADP – ESPN mock drafts {season}"
             path = f"/adp/{position.lower()}"
             desc = (f"Where every {position} goes in {d['drafts']} real ESPN mock drafts "
                     f"({shape}): ADP, range, and position rank.")
             crumbs = _crumbs(("ADP", "/adp"), (position, path))
+            intro = (
+                f"Where every {position} went in {d['drafts']} real ESPN mock "
+                f"drafts ({shape}), ordered by average draft position. The range "
+                "column is the 10th to the 90th percentile of his picks."
+                if d["drafts"] else None)
+            faq = None
         return HTMLResponse(render(
             "adp_index.html", title=f"{heading} – ESPN Draft Assist", description=desc,
             path=path, heading=heading, provenance=_provenance(d), players=players,
-            rounds=d["rounds"], position=position, positions=present, breadcrumbs=crumbs))
+            rounds=d["rounds"], position=position, positions=present, breadcrumbs=crumbs,
+            intro=intro, faq=faq, faq_schema=_faq_schema(faq) if faq else None))
 
-    @app.get("/adp", response_class=HTMLResponse)
+    @app.api_route("/adp", methods=["GET", "HEAD"], response_class=HTMLResponse)
     def adp_index():
         return index_page(None)
 
-    @app.get("/adp/round/{n}", response_class=HTMLResponse)
+    @app.api_route("/adp/round/{n}", methods=["GET", "HEAD"], response_class=HTMLResponse)
     def adp_round(n: int):
         d = data()
         if not d["drafts"] or n < 1 or n > d["rounds"]:
@@ -381,7 +488,7 @@ def register_seo_routes(app, conn=None):
             players=players, rounds=d["rounds"], provenance=_provenance(d),
             breadcrumbs=_crumbs(("ADP", "/adp"), (f"Round {n}", f"/adp/round/{n}"))))
 
-    @app.get("/adp/{key}", response_class=HTMLResponse)
+    @app.api_route("/adp/{key}", methods=["GET", "HEAD"], response_class=HTMLResponse)
     def adp_player(key: str):
         if key.upper() in POSITIONS:
             return index_page(key.upper())
@@ -404,7 +511,7 @@ def register_seo_routes(app, conn=None):
             breadcrumbs=_crumbs(("ADP", "/adp"), (p["position"], f"/adp/{p['position'].lower()}"),
                                 (p["name"], f"/adp/{p['slug']}"))))
 
-    @app.get("/sitemap.xml")
+    @app.api_route("/sitemap.xml", methods=["GET", "HEAD"])
     def sitemap():
         d = data()
         stamp = d["updated"].isoformat() if d["updated"] else None

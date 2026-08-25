@@ -362,6 +362,11 @@ export default function MockDrafts() {
             {liveCount > 0 ? `${liveCount} live · ` : ''}{drafts.length} room{drafts.length === 1 ? '' : 's'}
           </span>
         )}
+        {/* Where these same drafts end up once they are counted. A plain
+            anchor, not Link: /adp is rendered by FastAPI from the corpus and
+            is not a route this app's router knows. */}
+        <span className="draft-topbar-sep" aria-hidden="true" />
+        <a className="draft-tab" href="/adp">ADP</a>
         <span className="draft-topbar-spacer" />
         {/* The only control on the page. It exists because the list stops
             polling once nothing is live (see the effect above): without it

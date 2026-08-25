@@ -17,6 +17,7 @@
 <meta name="twitter:card" content="summary">
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 {% if breadcrumbs %}<script type="application/ld+json">{{ breadcrumbs | tojson }}</script>{% endif %}
+{% if faq_schema %}<script type="application/ld+json">{{ faq_schema | tojson }}</script>{% endif %}
 <style>
 :root{--bg-0:#0a0b0e;--bg-1:#121319;--bg-2:#1b1d25;--border:#262932;--text-1:#e8eaef;--text-2:#98a0b0;--text-3:#565b69;--accent:#ffb454;--ok:#0ca30c;--fail:#d03b3b;--radius:3px;--mono:'JetBrains Mono',ui-monospace,'SFMono-Regular',Menlo,Consolas,monospace}
 *{box-sizing:border-box}
@@ -41,7 +42,7 @@ td.n,th.n{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-
 .figs{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin:18px 0}
 .fig{background:var(--bg-1);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px}
 .fig .k{font-family:var(--mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3)}
-.fig .v{font-family:var(--mono);font-size:24px;color:var(--text-1);margin-top:2px}
+.fig .v{font-family:var(--mono);font-size:24px;color:var(--text-1);margin-top:2px;white-space:nowrap}
 .fig .v small{font-size:13px;color:var(--text-2)}
 .head{display:flex;align-items:center;gap:16px}
 .head img{width:72px;height:72px;border-radius:50%;object-fit:cover;background:var(--bg-2)}
@@ -52,6 +53,14 @@ td.n,th.n{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-
 .near a b{font-family:var(--mono);font-weight:500;color:var(--accent);margin-right:6px}
 .links{display:flex;flex-wrap:wrap;gap:8px 14px;font-size:13px;margin-top:8px}
 .links a{color:var(--text-2)}
+.intro{max-width:66ch;margin:0 0 22px;color:var(--text-2)}
+.faq{max-width:66ch}
+.faq details{border-bottom:1px solid var(--border);padding:10px 0}
+.faq summary{cursor:pointer;color:var(--text-1);font-size:14px;list-style:none}
+.faq summary::-webkit-details-marker{display:none}
+.faq summary::before{content:'+';font-family:var(--mono);color:var(--accent);margin-right:8px}
+.faq details[open] summary::before{content:'\2212'}
+.faq p{margin:8px 0 2px 18px;font-size:14px}
 .ask{margin-top:40px;padding:20px;background:var(--bg-1);border:1px solid var(--border);border-radius:var(--radius)}
 .ask p{margin:0 0 12px;color:var(--text-2)}
 footer{max-width:960px;margin:0 auto;padding:0 20px 32px;font-size:12px;color:var(--text-3)}

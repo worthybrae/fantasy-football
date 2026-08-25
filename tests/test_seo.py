@@ -393,3 +393,58 @@ def test_the_pages_are_reachable_with_the_spa_mounted(corpus, board, tmp_path):
     assert "D'Andre Swift" in html.unescape(c.get("/adp").text)
     assert c.get("/sitemap.xml").headers["content-type"].startswith("application/xml")
     assert c.get("/mocks").text == "<html>spa</html>"
+
+
+def test_every_page_answers_a_head_request(corpus, board):
+    """FastAPI's `@app.get` registers GET alone, so a HEAD arrived as a 405
+    with an empty body while the same URL served a page to GET. Crawlers
+    mostly use GET, but link previewers and uptime checks use HEAD, and a
+    405 there reads as a broken URL."""
+    c = _client(board)
+    for path in ("/adp", "/adp/dandre-swift", "/adp/round/1", "/adp/rb",
+                 "/sitemap.xml"):
+        r = c.head(path)
+        assert r.status_code == 200, f"HEAD {path} -> {r.status_code}"
+
+
+def test_a_head_request_to_an_unknown_page_is_still_404(corpus, board):
+    assert _client(board).head("/adp/nobody").status_code == 404
+
+
+def test_the_index_explains_itself_in_prose_and_an_faq(corpus, board):
+    """The index is the page meant to rank for the ADP query, and a bare
+    table gives a search engine nothing to read. The prose states the shape
+    the figures come from; the FAQ carries `FAQPage` structured data."""
+    body = _client(board).get("/adp").text
+    assert "average draft position" in body.lower()
+    assert '"@type": "FAQPage"' in body or '"@type":"FAQPage"' in body
+    assert "<details" in body
+
+
+def test_a_position_page_does_not_repeat_the_index_faq(corpus, board):
+    """Six position pages carrying the same FAQ markup as the index is the
+    duplicate-content pattern the whole exercise is trying to avoid."""
+    body = _client(board).get("/adp/rb").text
+    assert "FAQPage" not in body
+
+
+def test_a_team_falls_back_to_espns_by_name_when_the_crosswalk_misses(corpus, board):
+    """`late` has no depth-chart row and no `sleeper_ids` row -- a rookie in
+    August, whose team the crosswalk cannot reach. ESPN's board carries him
+    by name, and the ADP fallback beside this one already matches that way,
+    so the team should follow the same two steps rather than print an
+    em dash."""
+    board.execute("INSERT INTO espn_adp VALUES (777, 'Late Guy', 'WR', 'NYJ', 88.0)")
+    d = seo.build_adp(board)
+    late = next(p for p in d["players"] if p["player_id"] == "late")
+    assert late["team"] == "NYJ"
+
+
+def test_a_depth_chart_team_still_beats_espns(corpus, board):
+    """The depth charts are the fresher source; ESPN's board is the fallback,
+    not an override. `star` is CHI on the newest depth-chart row and CHI on
+    ESPN's board too, so give ESPN a different team to tell them apart."""
+    board.execute("UPDATE espn_adp SET team = 'SEA' WHERE espn_id = 4259545")
+    d = seo.build_adp(board)
+    star = next(p for p in d["players"] if p["player_id"] == "star")
+    assert star["team"] == "CHI"
