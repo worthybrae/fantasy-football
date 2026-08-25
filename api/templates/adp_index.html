@@ -5,7 +5,9 @@
 <h1>{{ heading }}</h1>
 <p class="prov">{{ provenance }}</p>
 {% if not players %}
-<p>No drafts recorded yet. The farm records ESPN mock drafts every day; check back tomorrow.</p>
+{% if position %}<p>No {{ position }} has gone in these drafts often enough to have a draft position yet.</p>
+{% else %}<p>No drafts recorded yet. The farm records ESPN mock drafts every day; check back tomorrow.</p>
+{% endif %}
 {% else %}
 <table>
 <thead><tr><th class="n">#</th><th>Player</th><th>Pos</th><th>Team</th><th class="n">ADP</th><th class="n">Range</th><th class="n">Drafted</th><th class="n">{{ 'Pos rank' }}</th></tr></thead>

@@ -246,7 +246,7 @@ def _templates():
         if _env is None:
             from jinja2 import Environment, FileSystemLoader, select_autoescape
             _env = Environment(loader=FileSystemLoader(str(TEMPLATES)),
-                               autoescape=select_autoescape(["html"]))
+                               autoescape=select_autoescape(["html", "xml"]))
         return _env
 
 
@@ -301,6 +301,7 @@ def register_seo_routes(app, conn=None):
         d = data()
         players = d["players"] if position is None else [
             p for p in d["players"] if p["position"] == position]
+        present = sorted({p["position"] for p in d["players"]}, key=POSITIONS.index)
         season = d["updated"].year if d["updated"] else datetime.now().year
         shape = f"{d['teams']}-team PPR" if d["drafts"] else "PPR"
         if position is None:
@@ -318,7 +319,7 @@ def register_seo_routes(app, conn=None):
         return HTMLResponse(render(
             "adp_index.html", title=f"{heading} – ESPN Draft Assist", description=desc,
             path=path, heading=heading, provenance=_provenance(d), players=players,
-            rounds=d["rounds"], position=position, breadcrumbs=crumbs))
+            rounds=d["rounds"], position=position, positions=present, breadcrumbs=crumbs))
 
     @app.get("/adp", response_class=HTMLResponse)
     def adp_index():

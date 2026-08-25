@@ -193,6 +193,19 @@ def test_round_and_position_pages_filter(corpus, board):
     assert "<title>RB ADP" in rb
 
 
+def test_an_empty_position_page_says_so_and_is_not_linked(corpus, board):
+    """K goes undrafted in the fixture. Its page exists (the dispatch
+    whitelist is POSITIONS) but says so in its own words rather than
+    borrowing the empty-corpus line, and the index does not link it."""
+    c = _client(board)
+    k = c.get("/adp/k")
+    assert k.status_code == 200
+    assert "No K has gone in these drafts often enough" in k.text
+    assert "No drafts recorded yet" not in k.text
+    index = c.get("/adp").text
+    assert 'href="/adp/rb"' in index and 'href="/adp/k"' not in index
+
+
 def test_unknown_pages_are_404_and_noindex(corpus, board):
     c = _client(board)
     for path in ("/adp/nobody-here", "/adp/round/17", "/adp/round/0", "/adp/ol"):
