@@ -11,6 +11,7 @@ import { useDocumentMeta } from '../lib/documentMeta'
 import SetupWizard, { ACCOUNT_CHANNEL, CHANNEL_ACK, CHANNEL_CONNECTED } from '../components/SetupWizard'
 import ConnectScreen from '../components/ConnectScreen'
 import Benefits from '../components/Benefits'
+import Explainer from '../components/Explainer'
 import DemoRoom from '../components/DemoRoom'
 import Welcome from '../components/Welcome'
 import Dashboard, { previewingSignedOut } from '../components/Dashboard'
@@ -591,14 +592,11 @@ export default function Landing() {
           shape the room draws it, and arrives as it is scrolled to. */}
       <Benefits onNeedAccount={() => setAskedAt((n) => n + 1)} />
 
-      {/* NO "HOW IT WORKS" AND NO PRICING. Both were written for a page
-          whose first screen was a headline; the first screen is now the
-          product itself, and a reader who has watched a live draft rank
-          itself does not need four steps and a price table between them and
-          the button. The steps are not lost -- "Get started" opens the setup
-          wizard, which walks them one at a time and watches for the click --
-          and the price is on the card, under the button, where somebody is
-          actually deciding. */}
+      {/* The page in plain words, for readers and crawlers alike: the only
+          <h1>, and the FAQ (also FAQPage structured data). Below the room
+          and the drawn figures, which make the case faster for anyone who
+          watched them. */}
+      <Explainer onStart={toSetup} />
 
       <footer className="lp-foot">
         <span>

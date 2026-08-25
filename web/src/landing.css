@@ -2900,3 +2900,75 @@ button.wr-seat:focus-visible {
   font-size: var(--text-sm);
   color: var(--text-3);
 }
+
+/* -- the explainer: the page in words, and the FAQ ------------------------ */
+
+.xp {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 48px 24px 32px;
+}
+
+.xp-h1 {
+  margin: 0 0 20px;
+  font-size: 26px;
+  line-height: 1.25;
+  font-weight: 600;
+  color: var(--text-1);
+  letter-spacing: -0.01em;
+}
+
+.xp-body p {
+  margin: 0 0 14px;
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--text-2);
+}
+
+.xp-h2 {
+  margin: 32px 0 10px;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.xp-faq {
+  margin: 0;
+  border-top: 1px solid var(--border);
+}
+
+.xp-q {
+  border-bottom: 1px solid var(--border);
+}
+
+.xp-q > summary {
+  cursor: pointer;
+  padding: 12px 0;
+  font-size: 15px;
+  color: var(--text-1);
+  list-style: none;
+}
+
+.xp-q > summary::-webkit-details-marker { display: none; }
+
+.xp-q > summary::before {
+  content: '+';
+  display: inline-block;
+  width: 18px;
+  color: var(--accent);
+  font-family: var(--font-mono);
+}
+
+.xp-q[open] > summary::before { content: '–'; }
+
+.xp-q > p {
+  margin: 0 0 14px 18px;
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--text-2);
+}
+
+.xp-cta {
+  margin-top: 28px;
+}
