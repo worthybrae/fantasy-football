@@ -378,10 +378,15 @@ def _board_payload(record: dict, picks: list, board, slot: int | None) -> dict:
                 "last_ppg": None,
                 "last_points": None,
                 # The room draws this as the pick's move against the market.
-                # Same arithmetic `api/live.py` does: where the market had him,
-                # against where he actually went.
+                # The SAME arithmetic `api/live.py` does, in the same order:
+                # where he actually went minus where the market had him, so
+                # a positive number is a player who FELL (a steal) and a
+                # negative one a player taken early (a reach). This was
+                # written the other way round for a while, and every arrow
+                # on the demo rail pointed the wrong way until the ticker's
+                # tooltip printed both numbers beside the verdict.
                 "value": (None if _num(getattr(source, "market_rank", None)) is None
-                          else round(_num(getattr(source, "market_rank", None)) - overall)),
+                          else round(overall - _num(getattr(source, "market_rank", None)))),
             },
             # Nobody is named. A public mock's seats are strangers, and the
             # farm's own seat is not worth pointing at.

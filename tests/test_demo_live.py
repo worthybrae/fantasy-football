@@ -492,3 +492,19 @@ def test_ranked_rows_carry_the_whole_live_candidate_contract(monkeypatch):
     # figure the on-the-clock cards show reads the real gap to the other RB.
     assert rows[0]["gain_next"] == pytest.approx(0.0)
     assert rows[0]["edge_next"] == pytest.approx(20.0)
+
+
+def test_a_pick_that_fell_past_its_adp_is_a_positive_value():
+    """Same sign as `api/live.py`: overall minus market rank, so a player the
+    market had at 21 who went 31st is +10 -- a steal, drawn green with an up
+    arrow. For a while this was written the other way round, and every arrow
+    on the demo rail pointed the wrong way; the ticker's tooltip, which prints
+    both numbers beside the verdict, is what made it visible."""
+    import pandas as pd
+    board = pd.DataFrame([{"player_id": "p", "name": "George Pickens", "position": "WR",
+                           "team": "DAL", "market_rank": 21.0, "proj_points": 200.0}])
+    picks = [{"player_id": "p", "pick_no": 31, "slot": 2}]
+    payload = demo._board_payload({"teams": 8}, picks, board, None)
+    cell = payload["cells"][0]
+    assert cell["overall"] == 31 and cell["player"]["market_rank"] == 21
+    assert cell["player"]["value"] == 10
