@@ -1,5 +1,6 @@
-import { useState, useSyncExternalStore, type ReactNode } from 'react'
+import { useEffect, useState, useSyncExternalStore, type ReactNode } from 'react'
 import { Logo } from './Logo'
+import { fetchMarketOverview, type MarketOverview } from '../api'
 import './mobileGate.css'
 
 // The whole app is desktop only, and this says so instead of breaking.
@@ -45,9 +46,26 @@ export default function MobileGate({ children }: { children: ReactNode }) {
   return <GatePage />
 }
 
+// The count is the archive's own, the same number the desktop page prints
+// exactly, floored to the thousand and given a plus: it grows on its own and
+// never says more than is true. No count, no line -- a placeholder figure
+// would be the one thing on this page a reader could check and find wrong.
+function corpusLine(o: MarketOverview): string | null {
+  if (o.picks < 1000) return null
+  const picks = Math.floor(o.picks / 1000) * 1000
+  return `${picks.toLocaleString()}+ picks watched across ${o.drafts.toLocaleString()} real ESPN drafts`
+}
+
 function GatePage() {
   const url = `${window.location.origin}/`
   const [sent, setSent] = useState<'idle' | 'copied' | 'shown'>('idle')
+  const [overview, setOverview] = useState<MarketOverview | null>(null)
+  useEffect(() => {
+    let live = true
+    fetchMarketOverview().then((o) => { if (live) setOverview(o) }, () => {})
+    return () => { live = false }
+  }, [])
+  const corpus = overview ? corpusLine(overview) : null
 
   async function send() {
     // The share sheet is the phone's own way of getting something to a
@@ -82,6 +100,7 @@ function GatePage() {
         draft. There is nothing it can do from a phone &mdash; but here is what
         it looks like there.
       </p>
+      {corpus && <p className="mg-corpus">{corpus}</p>}
 
       <figure className="mg-figure">
         <video

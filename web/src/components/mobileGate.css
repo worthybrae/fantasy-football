@@ -41,6 +41,19 @@
   text-wrap: pretty;
 }
 
+/* What the recommendation is priced from, in the accent because it is the
+   one claim on the page, and the one a reader takes back to the thread. */
+.mg-corpus {
+  margin-top: -2px;
+  max-width: 30ch;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1.45;
+  color: var(--accent);
+  text-wrap: balance;
+}
+
 .mg-figure {
   margin: 12px 0 4px;
   width: 100%;
