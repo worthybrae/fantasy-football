@@ -310,7 +310,7 @@ export default function Welcome({ onStart, live = false, askedAt = 0 }: {
         <span className="wc-mark">
           <Logo size={22} />
         </span>
-        <h1 className="wc-title" id="wc-title">ESPN Draft Assist</h1>
+        <h2 className="wc-title" id="wc-title">ESPN Draft Assist</h2>
         {askedAt > 0 && (
           // Why they are looking at this card, said before the pitch: they
           // reached for the archive and were sent here instead.
