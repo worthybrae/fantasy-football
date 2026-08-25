@@ -2,7 +2,7 @@
 # One-time setup: make setup && make refresh
 # Draft night:    make up   (then open http://localhost:5173)
 
-.PHONY: setup refresh api web up test build image deploy-data farm-secret espn-import fit-managers fit-prior score-ladder espn-ladder sim mock-backfill farm-mocks corpus-report
+.PHONY: setup refresh api web up test build image deploy-data farm-secret logs logs-farm logs-errors espn-import fit-managers fit-prior score-ladder espn-ladder sim mock-backfill farm-mocks corpus-report
 
 setup: ## create venv, install python + web deps
 	python3 -m venv .venv
@@ -139,6 +139,23 @@ deploy-data: ## pack the databases the deployed volume needs into deploy/
 	@ls -lh deploy/
 	@echo
 	@echo "Upload these to the volume's /app/data -- see README, 'Putting the data there'."
+
+logs: ## stream the deployment's logs (Ctrl-C stops)
+	# One-time setup: `railway login`, then `railway link` in this directory.
+	# The farm prints what it is doing -- which room, how many seats were
+	# taken, whether ESPN accepted the login -- so this is the direct answer
+	# to "is the farm working", rather than inferring it from an endpoint.
+	railway logs -d
+
+logs-farm: ## the deployment's farm lines only, last 200
+	# `-n` disables streaming and fetches history, which is what you want
+	# after the fact. The farm's own output is already credential-scrubbed by
+	# pipeline/redact.py before it is printed, so this is safe to paste.
+	railway logs -d -n 200 | grep -Ei "room|farm|joined|espn|login|draft" || \
+		echo "no farm lines in the last 200 -- try `make logs` and watch live"
+
+logs-errors: ## the deployment's errors, last 200
+	railway logs -d -n 200 --filter "@level:error" || true
 
 farm-secret: ## print the FARM_ESPN_STATE_B64 value to paste into the host's variables
 	# The farm's ESPN login, packed for an environment variable. It is a

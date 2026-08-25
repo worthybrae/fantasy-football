@@ -260,6 +260,7 @@ means moving the mutable tables to Postgres first.
 | `RUN_REFRESH_ON_BOOT` | `1` | Set by the image. The server refreshes its own data |
 | `REFRESH_MAX_AGE_HOURS` | `24` | How stale the oldest source may get first |
 | `RUN_FARM` | `1` | **Off by default.** Needs the login variable below |
+| `FARM_CONCURRENCY` | `1` | How many drafts at once. Six matches a full local setup; capped at 8 |
 | `FARM_ESPN_STATE_B64` | `make farm-secret` | The farm's ESPN login. A live session — host's variable store only |
 | `STRIPE_SECRET_KEY` | `rk_live_…` | **Off by default.** Absent, every draft is free — see Charging for it |
 | `STRIPE_PRICE_ID` | `price_…` | The $9.99 price, made in the Stripe Dashboard |
@@ -374,6 +375,16 @@ no shell and no file transfer. The variable deliberately **overwrites** any
 file already on the volume, because a dead session sitting there is exactly
 the case this exists to fix. A bad or truncated value costs the farm and
 nothing else: the site still comes up, and the boot log says what was wrong.
+
+**How many at once.** `farm(n)` plays its drafts one after another, so being
+in six drafts at the same time means six processes, not a bigger `n` — which
+is exactly how a laptop does it, with several terminals. `FARM_CONCURRENCY`
+spawns that many supervised children; `pipeline/farm_claims.py` keeps them
+out of each other's rooms with an atomic claim file per league. It defaults
+to 1 so switching the farm on never silently multiplies this deployment's
+traffic to ESPN, and is capped at 8 — the cap is about how a single address
+holding a dozen public mock seats looks, not about memory (each farm is a
+~60 MB process).
 
 Two things to know before switching it on:
 

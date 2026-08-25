@@ -221,7 +221,11 @@ export default function WaitingRoom({ leagueId, season, onJoin }: {
           </div>
           <ul className="wr-seats">
             {(room?.seats ?? []).map((seat) => {
-              const isPicked = seat.team_id === picked
+              // A selection only means something while there is a seat to
+              // take: once one is ours, "Yours" is the whole story and a
+              // second chip saying "Selected" beside it would read as two
+              // seats.
+              const isPicked = mine === null && seat.team_id === picked
               const openSeat = !seat.taken && mine === null && !room?.in_progress
               const Tag = openSeat ? 'button' : 'div'
               return (

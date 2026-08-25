@@ -3,6 +3,24 @@ import math
 import threading
 import uuid
 
+# FIRST, before anything reads a variable. `api.billing` and
+# `pipeline.credentials` both decide what they are at import time from the
+# environment, so a `.env` loaded after them is a `.env` that did nothing.
+# No-op without the file, which is every deployment -- see api/env.py.
+#
+# AND NEVER UNDER PYTEST. A suite whose behaviour depends on whether the
+# person running it happens to keep a Stripe key in a file is a suite that
+# passes on one machine and fails on another; with a real key present, every
+# test that touches the lobby would start writing a billing database into the
+# repository. The tests that exercise this loader call it directly with their
+# own path.
+import os
+
+from api.env import load_env_file
+
+if "PYTEST_CURRENT_TEST" not in os.environ:
+    load_env_file()
+
 import pandas as pd
 from fastapi import Body, FastAPI, HTTPException, Query
 from pipeline.db import get_conn, read_table, write_table, DEFAULT_PATH

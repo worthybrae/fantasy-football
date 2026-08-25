@@ -131,7 +131,7 @@ def test_the_farm_is_its_own_switch(monkeypatch):
     monkeypatch.setenv(jobs.FARM_ENV, "1")
     started = []
     jobs.start_jobs(_Conn([]), spawn=lambda name, fn: started.append(name))
-    assert started == ["farm"]
+    assert started == ["farm-1"]
 
 
 def test_both_switches_start_both(monkeypatch):
@@ -139,7 +139,7 @@ def test_both_switches_start_both(monkeypatch):
     monkeypatch.setenv(jobs.FARM_ENV, "1")
     started = []
     jobs.start_jobs(_Conn([]), spawn=lambda name, fn: started.append(name))
-    assert started == ["refresh", "farm"]
+    assert started == ["refresh", "farm-1"]
 
 
 def test_a_farm_pass_that_throws_does_not_kill_the_loop():
@@ -207,3 +207,124 @@ def test_no_farm_means_no_login_is_written(monkeypatch):
                         lambda *a, **k: written.append(1) or True)
     jobs.start_jobs(_Conn([]), spawn=lambda name, fn: None)
     assert written == []
+
+
+def test_six_farms_means_six_processes(monkeypatch):
+    """Parity with a developer's laptop, which runs several `mock_farm`
+    processes in several terminals. `farm(n)` plays its n drafts one after
+    another, so being in six drafts at once means six processes -- not a
+    bigger n. `farm_claims` keeps them out of each other's rooms."""
+    monkeypatch.delenv(jobs.REFRESH_ENV, raising=False)
+    monkeypatch.setenv(jobs.FARM_ENV, "1")
+    monkeypatch.setenv(jobs.FARM_CONCURRENCY_ENV, "6")
+    started = []
+    jobs.start_jobs(_Conn([]), spawn=lambda name, fn: started.append(name))
+    assert started == [f"farm-{i}" for i in range(1, 7)]
+
+
+def test_concurrency_defaults_to_one(monkeypatch):
+    """Switching the farm on must not silently multiply this deployment's
+    traffic to ESPN. One unless asked."""
+    monkeypatch.delenv(jobs.REFRESH_ENV, raising=False)
+    monkeypatch.delenv(jobs.FARM_CONCURRENCY_ENV, raising=False)
+    monkeypatch.setenv(jobs.FARM_ENV, "1")
+    started = []
+    jobs.start_jobs(_Conn([]), spawn=lambda name, fn: started.append(name))
+    assert started == ["farm-1"]
+
+
+def test_zero_still_runs_one(monkeypatch):
+    """A zero would read in a settings page as "farming" and behave as "not
+    farming" -- the worst combination, because nothing looks wrong."""
+    monkeypatch.delenv(jobs.REFRESH_ENV, raising=False)
+    monkeypatch.setenv(jobs.FARM_ENV, "1")
+    monkeypatch.setenv(jobs.FARM_CONCURRENCY_ENV, "0")
+    started = []
+    jobs.start_jobs(_Conn([]), spawn=lambda name, fn: started.append(name))
+    assert started == ["farm-1"]
+
+
+def test_an_extra_digit_is_clamped(monkeypatch):
+    """60 instead of 6. The cap is about ESPN, not about this machine: one
+    address holding sixty seats in a public mock lobby is the shape of thing
+    that gets an account looked at."""
+    monkeypatch.delenv(jobs.REFRESH_ENV, raising=False)
+    monkeypatch.setenv(jobs.FARM_ENV, "1")
+    monkeypatch.setenv(jobs.FARM_CONCURRENCY_ENV, "60")
+    started = []
+    jobs.start_jobs(_Conn([]), spawn=lambda name, fn: started.append(name))
+    assert len(started) == jobs.MAX_FARM_CONCURRENCY
+
+
+def test_the_farm_waits_for_data(monkeypatch):
+    """MEASURED IN PRODUCTION, on the first deploy. A fresh volume has an
+    empty nfl.duckdb; the farm snapshots it before the refresh has written
+    anything and reports `board built: 0 pool players, 0 selectable`. The
+    snapshot is taken once per process, so it never recovers -- it keeps
+    joining real ESPN rooms it cannot pick in and letting ESPN autodraft the
+    seat."""
+    import threading
+
+    monkeypatch.setenv(jobs.REFRESH_ENV, "1")
+    monkeypatch.setenv(jobs.FARM_ENV, "1")
+    monkeypatch.setattr("api.seed_state.write_state", lambda *a, **k: True)
+
+    threads = {}
+    jobs.start_jobs(_Conn([]), spawn=lambda name, fn: threads.setdefault(name, fn))
+
+    farmed = []
+    monkeypatch.setattr(jobs, "farm_once",
+                        lambda **k: farmed.append(1) or True)
+    runner = threading.Thread(target=threads["farm-1"], daemon=True)
+    runner.start()
+    runner.join(timeout=0.3)
+
+    # Still blocked: no refresh has completed, so there is nothing to farm
+    # against and the loop has not called farm_once even once.
+    assert farmed == []
+
+
+def test_no_refresh_configured_means_no_waiting(monkeypatch):
+    """An instance whose data arrived some other way -- an upload, a restored
+    volume -- has nothing to wait for, and blocking forever on a refresh that
+    was never switched on would be a farm that silently never runs."""
+    monkeypatch.delenv(jobs.REFRESH_ENV, raising=False)
+    monkeypatch.setenv(jobs.FARM_ENV, "1")
+    monkeypatch.setattr("api.seed_state.write_state", lambda *a, **k: True)
+
+    threads = {}
+    jobs.start_jobs(_Conn([]), spawn=lambda name, fn: threads.setdefault(name, fn))
+
+    calls = []
+
+    def once(**k):
+        calls.append(1)
+        raise SystemExit  # break the endless loop after one pass
+
+    monkeypatch.setattr(jobs, "farm_once", once)
+    try:
+        threads["farm-1"]()
+    except SystemExit:
+        pass
+    assert calls == [1]
+
+
+def test_a_failed_refresh_still_releases_the_farm(monkeypatch):
+    """Holding the farm back forever because one source 500'd would be a
+    worse failure than farming on yesterday's board -- the volume still has
+    whatever the last successful refresh wrote."""
+    import threading
+
+    ready = threading.Event()
+    monkeypatch.setattr(jobs, "should_refresh", lambda *a, **k: True)
+    monkeypatch.setattr(jobs, "time", type("T", (), {"sleep": staticmethod(
+        lambda s: (_ for _ in ()).throw(SystemExit))})())
+
+    def boom():
+        raise RuntimeError("nflverse is having a day")
+
+    try:
+        jobs._refresh_loop(_Conn([]), 24, ready)
+    except SystemExit:
+        pass
+    assert ready.is_set()

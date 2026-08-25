@@ -54,6 +54,27 @@ FARM_ENV = "RUN_FARM"
 FARM_BATCH_ENV = "FARM_DRAFTS_PER_PASS"
 DEFAULT_FARM_BATCH = 1
 
+# HOW MANY DRAFTS AT ONCE. Not the same question as the batch above: `farm(n)`
+# plays its n drafts one after another ("ONE SESSION PER PROCESS"), so
+# concurrency comes from running several processes, exactly as a developer
+# does locally with several terminals.
+#
+# `pipeline.farm_claims` is what makes that safe -- an atomic O_CREAT|O_EXCL
+# claim per room, so two farms never sit in the same draft -- and the account
+# side is settled: one ESPN account can hold seats in several drafts at once
+# (see mock_farm.farm's own docstring, which reports it confirmed).
+#
+# Defaults to one, so switching the farm on does not silently multiply this
+# deployment's traffic to ESPN. Raise it to match what the corpus needs.
+FARM_CONCURRENCY_ENV = "FARM_CONCURRENCY"
+DEFAULT_FARM_CONCURRENCY = 1
+
+# The ceiling, and it is about ESPN rather than about this machine. Each farm
+# is a ~60 MB process, so the memory is cheap; what is not cheap is a single
+# datacenter IP holding a dozen seats in a public mock lobby, which is the
+# shape of behaviour that gets an account looked at.
+MAX_FARM_CONCURRENCY = 8
+
 # How long the farm waits after a pass that recorded nothing. ESPN's mock
 # lobby is empty at 4am and full at 8pm, so a run that finds no joinable room
 # is an ordinary outcome and not an error -- it just should not be retried in
@@ -153,10 +174,18 @@ def _run_refresh() -> None:
     refresh.main()
 
 
-def _refresh_loop(conn, max_age_hours: float) -> None:
+def _refresh_loop(conn, max_age_hours: float, ready=None) -> None:
     while True:
         failed = []
         refresh_once(conn, max_age_hours, on_error=failed.append)
+        # THE FARM IS WAITING ON THIS. Set after the first pass whatever the
+        # outcome: a refresh that failed still leaves whatever data was
+        # already on the volume, and holding the farm back forever because
+        # one source 500'd would be a worse failure than farming on
+        # yesterday's board. Set once; `Event.set` on an already-set event is
+        # a no-op.
+        if ready is not None:
+            ready.set()
         time.sleep(ERROR_BACKOFF_SECONDS if failed else POLL_SECONDS)
 
 
@@ -229,7 +258,27 @@ def farm_once(run=None, batch: int = DEFAULT_FARM_BATCH, on_error=None) -> bool:
     return True
 
 
-def _farm_loop(batch: int) -> None:
+def _farm_loop(batch: int, ready=None) -> None:
+    """Farm forever, but not before there is a board to farm with.
+
+    THE RACE THIS EXISTS FOR, measured in production on the first deploy.
+    A fresh volume has an empty `nfl.duckdb`. The farm starts, finds the
+    file locked by this very process, and takes the snapshot copy that
+    `mock_farm.open_board_db` is designed to fall back to -- except the file
+    it copies has nothing in it yet, because the refresh is still running.
+    The log line is exact:
+
+        board built: 0 pool players, 0 selectable
+
+    and the snapshot is taken ONCE PER PROCESS, so that farm never recovers.
+    It goes on joining real ESPN rooms it cannot pick in, letting ESPN
+    autodraft the seat, for as long as the container lives.
+
+    Waiting costs one refresh at the start of a deployment's life. Not
+    waiting costs every room joined before the data lands.
+    """
+    if ready is not None:
+        ready.wait()
     while True:
         ok = farm_once(batch=batch)
         time.sleep(FARM_IDLE_SECONDS if not ok else 0)
@@ -255,15 +304,41 @@ def start_jobs(conn, spawn=None) -> list:
     if _on(FARM_ENV):
         from api.seed_state import write_state
         write_state()
+
+    # The gate between the two jobs. Set when there is data worth farming
+    # against -- see `_farm_loop` for the production failure that made this
+    # necessary. With no refresh configured it is open from the start: this
+    # instance's data came from somewhere else and is not this loop's to
+    # wait for.
+    ready = threading.Event()
+    if not _on(REFRESH_ENV):
+        ready.set()
+
     if _on(REFRESH_ENV):
         max_age = _hours(MAX_AGE_ENV, DEFAULT_MAX_AGE_HOURS)
-        launch("refresh", lambda: _refresh_loop(conn, max_age))
+        launch("refresh", lambda: _refresh_loop(conn, max_age, ready))
         started.append("refresh")
     if _on(FARM_ENV):
         batch = int(_hours(FARM_BATCH_ENV, DEFAULT_FARM_BATCH))
-        launch("farm", lambda: _farm_loop(batch))
-        started.append("farm")
+        for i in range(_concurrency()):
+            # Numbered, because the whole point is that there are several and
+            # a log line has to say which one is speaking.
+            name = f"farm-{i + 1}"
+            launch(name, lambda b=batch: _farm_loop(b, ready))
+            started.append(name)
     return started
+
+
+def _concurrency() -> int:
+    """How many farms to run, clamped.
+
+    Clamped at both ends rather than trusted: a zero would switch the farm on
+    and then run none of it, which reads in a settings page as "farming" and
+    behaves as "not farming"; and an accidental extra digit would put this
+    deployment in ninety mock drafts at once from one address.
+    """
+    want = int(_hours(FARM_CONCURRENCY_ENV, DEFAULT_FARM_CONCURRENCY))
+    return max(1, min(want, MAX_FARM_CONCURRENCY))
 
 
 def _on(name: str) -> bool:
