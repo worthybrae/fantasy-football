@@ -568,9 +568,9 @@
 }
 
 /* THE PAGE'S ONE BUTTON, wherever it appears -- under the ask, at the foot of
-   the benefits, in the footer. It had no base rule at all: every `.lp-cta` on
-   the page was rendering as a browser default button, with only a
-   focus-visible outline and a size override in the footer to its name. */
+   the benefits. It had no base rule at all: every `.lp-cta` on the page was
+   rendering as a browser default button, with only a focus-visible outline
+   to its name. */
 .lp-cta {
   padding: 12px 22px;
   border: 1px solid var(--accent-border);
@@ -699,12 +699,6 @@
   left: clamp(20px, 6vw, 88px);
   right: clamp(20px, 6vw, 88px);
   border-top: 1px solid var(--border);
-}
-
-.lp-foot .lp-cta {
-  margin-left: auto;
-  padding: 9px 20px;
-  font-size: var(--text-base);
 }
 
 /* -- "connecting your ESPN account" ------------------------------------

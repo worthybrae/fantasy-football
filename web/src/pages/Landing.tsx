@@ -607,7 +607,6 @@ export default function Landing() {
               it belonged anyway: a side route, not part of the pitch. */}
           <Link to="/mocks" className="lp-bar-link">See mock drafts</Link>.
         </span>
-        <button className="lp-cta" onClick={toSetup}>Try a mock draft</button>
       </footer>
 
       {/* The guided setup, over everything. Rendered last so it stacks
