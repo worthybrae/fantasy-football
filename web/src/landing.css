@@ -942,6 +942,7 @@
   font: inherit;
   font-size: var(--text-sm);
   font-weight: 700;
+  white-space: nowrap;
   cursor: pointer;
 }
 
@@ -972,6 +973,7 @@
   color: var(--text-2);
   font: inherit;
   font-size: var(--text-sm);
+  white-space: nowrap;
   cursor: pointer;
 }
 
@@ -1051,6 +1053,36 @@
   height: 7px;
 }
 
+/* The name is the door to the league page: text-coloured until hovered, so
+   the card does not read as a wall of links. */
+.db-league-link {
+  color: inherit;
+  text-decoration: none;
+}
+
+.db-league-link:hover,
+.db-league-link:focus-visible {
+  color: var(--accent);
+}
+
+/* Beside the draft-room button: the quiet way into the league itself,
+   which is open whether or not the room is. */
+.db-league-view {
+  flex: 0 0 auto;
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  text-decoration: none;
+}
+
+.db-league-view:hover,
+.db-league-view:focus-visible {
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
 /* "8 teams · Snake", read as a label rather than a sentence. */
 .db-league-format {
   min-width: 0;
@@ -1086,14 +1118,19 @@
 }
 
 .db-league-foot {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
   margin-top: auto;
   min-width: 0;
 }
 
-/* The way in, across the whole foot of the card. */
+/* The way in, across the foot of the card, with the league's own door
+   beside it. */
 .db-go.db-league-go {
+  flex: 1 1 auto;
   align-self: stretch;
-  width: 100%;
+  min-width: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1363,12 +1400,6 @@
   white-space: nowrap;
   font-size: var(--text-sm);
   color: var(--text-3);
-}
-
-/* Your rooms, ahead of the lobby's. A gap below rather than a rule: it is
-   the same list, with yours at the front. */
-.ml-seated {
-  margin-bottom: var(--space-3);
 }
 
 /* A seated room that is picking lights its card the way a live league does. */

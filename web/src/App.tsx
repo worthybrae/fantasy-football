@@ -4,6 +4,7 @@ import DraftRoom from './pages/DraftRoom'
 import MockDrafts from './pages/MockDrafts'
 import Market from './pages/Market'
 import ArchiveData from './pages/ArchiveData'
+import LeaguePage from './pages/LeaguePage'
 import Live from './pages/Live'
 import WaitingRoomPage from './pages/WaitingRoomPage'
 import MobileGate from './components/MobileGate'
@@ -46,6 +47,9 @@ export default function App() {
             joining navigates to / with the token in the hash, the same door
             the bookmarklet uses. */}
         <Route path="/room/:leagueId" element={<WaitingRoomPage />} />
+        {/* One of your leagues, as a place: what it is, when it drafts, the
+            way in -- and where its report cards and profiles will live. */}
+        <Route path="/league/:leagueId" element={<LeaguePage />} />
       </Routes>
     </MobileGate>
   )

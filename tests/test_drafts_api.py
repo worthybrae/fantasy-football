@@ -340,3 +340,131 @@ def test_no_chosen_seat_still_means_any_open_seat(monkeypatch):
     TestClient(app, client=("127.0.0.1", 50000)).post("/api/espn/mock-join", json={"leagueId": "999"})
 
     assert seen[0][1] == [{"teamId": -1}]
+
+
+# -- rooms in progress: how far along each one is ---------------------------
+#
+# The Home page's mock cards say "round 3 · pick 21" for a room you are
+# drafting in. That comes from the same public room read the waiting room
+# uses, counted rather than listed, and asked for in one request for every
+# room on the page.
+
+
+def _drafting_body(teams=8, rounds=16, made=21):
+    picks = []
+    for n in range(teams * rounds):
+        # ESPN pre-populates every slot; the ones made carry a player id and
+        # the rest the -1 placeholder (pipeline/espn_league._is_real_pick).
+        picks.append({"id": n, "playerId": 1000 + n if n < made else -1})
+    return json.dumps({
+        "draftDetail": {"inProgress": True, "drafted": False, "picks": picks},
+        "settings": {"draftSettings": {
+            "date": 1_787_608_890_000, "type": "SNAKE", "timePerSelection": 30,
+            "pickOrder": list(range(1, teams + 1)),
+        }},
+        "teams": [{"id": n, "name": f"Team {n}", "owners": [f"{{OWNER-{n}}}"]}
+                  for n in range(1, teams + 1)],
+    })
+
+
+def test_progress_reads_each_room_s_shape_and_state(monkeypatch):
+    monkeypatch.setattr(drafts, "saved_session", lambda *a, **k: None)
+    drafts_api._PROGRESS.clear()
+    fetch = _fetcher({
+        "leagues/111": (200, _drafting_body(teams=8, rounds=16, made=21)),
+        "leagues/222": (200, _drafting_body(teams=10, rounds=15, made=0)),
+    })
+    body = _client(fetch).get("/api/espn/rooms/progress?ids=111,222").json()
+
+    # ESPN's read knows the room's shape and state, but names no player
+    # until the draft is over (see the farm test below), so the count and
+    # the round are unknown from here rather than "0, round 1".
+    assert body["rooms"]["111"] == {
+        "picks_made": None, "picks_total": 128, "teams": 8, "rounds": 16,
+        "round": None, "pick_in_round": None, "in_progress": True, "drafted": False,
+    }
+    assert body["rooms"]["222"]["picks_total"] == 150
+    assert body["rooms"]["222"]["teams"] == 10
+
+
+def test_progress_skips_a_room_espn_will_not_read(monkeypatch):
+    """One dead room must not cost the page the other ten."""
+    monkeypatch.setattr(drafts, "saved_session", lambda *a, **k: None)
+    drafts_api._PROGRESS.clear()
+    fetch = _fetcher({"leagues/111": (200, _drafting_body(made=5))})
+    body = _client(fetch).get("/api/espn/rooms/progress?ids=111,999").json()
+    assert set(body["rooms"]) == {"111"}
+
+
+def test_progress_asks_nothing_for_no_ids(monkeypatch):
+    monkeypatch.setattr(drafts, "saved_session", lambda *a, **k: None)
+    calls = []
+
+    def fetch(url, cookies, headers=None):
+        calls.append(url)
+        return 200, _drafting_body()
+    assert _client(fetch).get("/api/espn/rooms/progress?ids=").json() == {"rooms": {}}
+    assert _client(fetch).get("/api/espn/rooms/progress").json() == {"rooms": {}}
+    assert calls == []
+
+
+def test_progress_is_shared_between_readers_for_a_few_seconds(monkeypatch):
+    """Ten dashboards open on the same eleven rooms are eleven reads of ESPN
+    per window, not a hundred and ten."""
+    monkeypatch.setattr(drafts, "saved_session", lambda *a, **k: None)
+    drafts_api._PROGRESS.clear()
+    calls = []
+
+    def fetch(url, cookies, headers=None):
+        calls.append(url)
+        return 200, _drafting_body(made=5)
+    client = _client(fetch)
+    client.get("/api/espn/rooms/progress?ids=111")
+    client.get("/api/espn/rooms/progress?ids=111")
+    assert len(calls) == 1
+
+
+def test_progress_prefers_the_farm_s_own_count_of_a_room_it_sits_in(
+        monkeypatch, tmp_path):
+    """ESPN's public room read lists every slot but names no player until the
+    draft is over -- probed live: six rooms mid-draft, 0 picks each by that
+    read while the farm's files held 12 to 103. The farm hears the picks on
+    the socket and writes them as they land, so a room it sits in is
+    counted from its file, and the read is only for rooms it does not."""
+    import api.demo as demo
+    monkeypatch.setattr(drafts, "saved_session", lambda *a, **k: None)
+    monkeypatch.setattr(demo, "FARM_DIR", str(tmp_path))
+    drafts_api._PROGRESS.clear()
+    (tmp_path / "111.json").write_text(json.dumps({
+        "league_id": "111", "teams": 8, "rounds": 16,
+        "picks": [{"pick_no": n + 1} for n in range(37)],
+    }))
+    fetch = _fetcher({"leagues/111": (200, _drafting_body(made=0)),
+                      "leagues/222": (200, _drafting_body(made=0))})
+    body = _client(fetch).get("/api/espn/rooms/progress?ids=111,222").json()
+    assert body["rooms"]["111"]["picks_made"] == 37
+    assert body["rooms"]["111"]["round"] == 5
+    assert body["rooms"]["111"]["pick_in_round"] == 6
+    assert body["rooms"]["111"]["in_progress"] is True
+    # Not one the farm is in: ESPN's read, which cannot count mid-draft, so
+    # the round is honestly unknown rather than "round 1, pick 1".
+    assert body["rooms"]["222"]["picks_made"] is None
+    assert body["rooms"]["222"]["round"] is None
+    assert body["rooms"]["222"]["in_progress"] is True
+
+
+def test_progress_ignores_a_farm_file_that_has_gone_quiet(monkeypatch, tmp_path):
+    import os
+    import time as _time
+    import api.demo as demo
+    monkeypatch.setattr(drafts, "saved_session", lambda *a, **k: None)
+    monkeypatch.setattr(demo, "FARM_DIR", str(tmp_path))
+    drafts_api._PROGRESS.clear()
+    path = tmp_path / "111.json"
+    path.write_text(json.dumps({"league_id": "111", "teams": 8, "rounds": 16,
+                                "picks": [{"pick_no": 1}]}))
+    ago = _time.time() - demo.STALE_SECONDS - 1
+    os.utime(path, (ago, ago))
+    fetch = _fetcher({"leagues/111": (200, _drafting_body(made=0))})
+    body = _client(fetch).get("/api/espn/rooms/progress?ids=111").json()
+    assert body["rooms"]["111"]["picks_made"] is None

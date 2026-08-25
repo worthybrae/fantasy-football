@@ -64,6 +64,18 @@ CACHE_SECONDS = 120.0
 _CACHE: dict = {}
 _CACHE_LOCK = threading.Lock()
 
+# How long one room's progress -- picks made, round, whose turn -- stands
+# before ESPN is asked again. The Home page polls this for every room its
+# reader is drafting in, on the lobby's own 12s clock, and a farm sitting in
+# eleven rooms at once is eleven public reads a window; this keeps that at
+# eleven whether one dashboard is open or ten. Under the pick clock (30s in
+# every lobby room observed), so a card is never more than one pick behind.
+PROGRESS_SECONDS = 8.0
+# How many rooms one request may ask after. Generous for a person (nobody
+# drafts in forty rooms), a bound for a URL somebody types.
+PROGRESS_MAX_IDS = 40
+_PROGRESS: dict = {}
+
 
 def _cached(key, build):
     """`build()`, memoised per key for CACHE_SECONDS.
@@ -425,6 +437,89 @@ def register_draft_routes(app, store=None, fetch=None, post=None):
             "my_team_id": mine,
             "seats": seats,
         }
+
+    @app.get("/api/espn/rooms/progress")
+    def rooms_progress(ids: str = ""):
+        """How far along each of these rooms is: picks made, round, pick.
+
+        THE HOME PAGE'S LIVE CARDS, in one request. A room you are drafting
+        in says "round 3 · pick 6" rather than a countdown, and that number
+        moves every thirty seconds, so the page asks for all of its rooms
+        together on the poll it already runs for the lobby.
+
+        TWO SOURCES, AND THE FARM'S COMES FIRST. ESPN's public room read
+        (`fetch_room`, the one the waiting room draws) lists every slot but
+        names no player until the draft is OVER -- probed live against six
+        rooms mid-draft: 0 picks each by that read, while the farm's files
+        held 12 to 103. The picks travel on the draft socket, and the farm is
+        on it: a room it sits in is counted from the file it writes on every
+        pick (`mock_farm`, the same file the landing page's hero reads). A
+        room the farm is not in gets ESPN's read for its shape and state, and
+        an honest `None` for the count rather than "round 1, pick 1".
+
+        No session, none sent upstream -- the read is public. A room ESPN
+        will not read is left out rather than failing the request: one
+        torn-down room must not blank ten live cards.
+        """
+        import os
+        from api import demo as hero
+        wanted = [i.strip() for i in ids.split(",") if i.strip()][:PROGRESS_MAX_IDS]
+        out = {}
+        for league_id in wanted:
+            now = time.monotonic()
+            with _CACHE_LOCK:
+                hit = _PROGRESS.get(league_id)
+            if hit is not None and hit[0] > now:
+                if hit[1] is not None:
+                    out[league_id] = hit[1]
+                continue
+            row = None
+            path = os.path.join(hero.FARM_DIR, f"{league_id}.json")
+            try:
+                fresh = time.time() - os.stat(path).st_mtime <= hero.STALE_SECONDS
+            except OSError:
+                fresh = False
+            record = hero._record(path) if fresh else None
+            if record and int(record.get("teams") or 0):
+                teams = int(record["teams"])
+                rounds = int(record.get("rounds") or 0) or None
+                made = len(record.get("picks") or [])
+                total = teams * rounds if rounds else None
+                row = {
+                    "picks_made": made,
+                    "picks_total": total,
+                    "teams": teams,
+                    "rounds": rounds,
+                    # The pick that is UP, in round terms: 37 made means the
+                    # 38th is on the clock, the sixth of round five.
+                    "round": made // teams + 1,
+                    "pick_in_round": made % teams + 1,
+                    "in_progress": total is None or made < total,
+                    "drafted": total is not None and made >= total,
+                }
+            else:
+                try:
+                    payload = lobby_rooms.fetch_room(league_id, CURRENT_SEASON, fetch=fetch)
+                    detail = payload.get("draftDetail") or {}
+                    picks = detail.get("picks") or []
+                    teams = len(payload.get("teams") or [])
+                    row = {
+                        "picks_made": None,
+                        "picks_total": len(picks) or None,
+                        "teams": teams,
+                        "rounds": (len(picks) // teams) if teams else None,
+                        "round": None,
+                        "pick_in_round": None,
+                        "in_progress": bool(detail.get("inProgress")),
+                        "drafted": bool(detail.get("drafted")),
+                    }
+                except Exception:      # noqa: BLE001 -- unreadable is "no answer"
+                    row = None
+            with _CACHE_LOCK:
+                _PROGRESS[league_id] = (now + PROGRESS_SECONDS, row)
+            if row is not None:
+                out[league_id] = row
+        return {"rooms": out}
 
     @app.post("/api/espn/mock-join")
     def mock_join(body: MockJoinBody, request: Request, response: Response):
