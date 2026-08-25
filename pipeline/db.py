@@ -18,6 +18,10 @@ LEAGUE_TABLES = frozenset({
     "league", "draft_picks", "draft_teams", "draft_order",
     "manager_profiles", "manager_tendencies", "drafted",
     "sim_board", "sim_results", "sim_survival",
+    # How each season ended (pipeline/espn_league.parse_standings) and the
+    # stored league reports built on it (api/reports.py). Both are one
+    # league's business and nobody else's.
+    "league_standings", "league_reports",
 })
 UNIVERSAL_TABLES = frozenset({
     "weekly", "snap_counts", "depth_charts", "players", "schedules",

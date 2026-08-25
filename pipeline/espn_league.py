@@ -122,6 +122,55 @@ def parse_draft_teams(payload: dict, season: int) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["season", "team_id", "manager", "slot"])
 
 
+STANDINGS_COLUMNS = ["season", "team_id", "manager", "team_name", "wins", "losses",
+                     "ties", "points_for", "points_against", "playoff_seed",
+                     "final_rank"]
+
+
+def _rank_or_none(value):
+    # ESPN reports 0 for a seed or a final rank it has not decided yet (a
+    # season in progress). Zero is not a rank; store the absence.
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
+
+
+def parse_standings(payload: dict, season: int) -> pd.DataFrame:
+    """One row per team: how the season ended, from the `mTeam` view.
+
+    `record.overall` is the regular season; `rankCalculatedFinal` is the
+    playoff-resolved finish (1 is the champion). The manager resolves the
+    same way `parse_draft_teams` resolves it so the two tables agree on the
+    name a person is known by across seasons.
+    """
+    members = {m.get("id"): m.get("displayName")
+               for m in (payload.get("members") or [])}
+    rows = []
+    for t in payload.get("teams") or []:
+        owners = t.get("owners") or []
+        manager = next((members[o] for o in owners if members.get(o)), None)
+        overall = ((t.get("record") or {}).get("overall")) or {}
+        rows.append({
+            "season": season, "team_id": t.get("id"),
+            "manager": manager or t.get("name"),
+            "team_name": t.get("name"),
+            "wins": overall.get("wins"), "losses": overall.get("losses"),
+            "ties": overall.get("ties"),
+            "points_for": overall.get("pointsFor"),
+            "points_against": overall.get("pointsAgainst"),
+            "playoff_seed": _rank_or_none(t.get("playoffSeed")),
+            "final_rank": _rank_or_none(t.get("rankCalculatedFinal")),
+        })
+    df = pd.DataFrame(rows, columns=STANDINGS_COLUMNS)
+    for col in ("wins", "losses", "ties", "playoff_seed", "final_rank"):
+        df[col] = df[col].astype("Int64")
+    for col in ("points_for", "points_against"):
+        df[col] = df[col].astype("Float64")
+    return df
+
+
 def parse_player_directory(payload) -> pd.DataFrame:
     # The season player endpoint returns a bare list; the league views nest it
     # under "players". Accept either so one parser serves both.
@@ -234,7 +283,7 @@ def import_seasons(conn, league_id: str, current_season: int, fetch,
     must raise on a missing season; two consecutive misses end the walk, which
     tolerates one gap year without running to `max_back` on every import.
     """
-    picks, teams, leagues, directories = [], [], [], []
+    picks, teams, leagues, directories, standings = [], [], [], [], []
     seasons, misses = [], 0
     for season in range(current_season, current_season - max_back, -1):
         # Only a missing season (404 -> FileNotFoundError) counts as a
@@ -275,8 +324,10 @@ def import_seasons(conn, league_id: str, current_season: int, fetch,
         seasons.append(season)
         picks.append(parse_draft_picks(payload, season))
         teams.append(parse_draft_teams(payload, season))
+        standings.append(parse_standings(payload, season))
         leagues.append({"season": season,
-                        "settings_json": league_mod.to_json(settings)})
+                        "settings_json": league_mod.to_json(settings),
+                        "name": (payload.get("settings") or {}).get("name")})
         directory = parse_player_directory(players_payload)
         directory["season"] = season
         directories.append(directory)
@@ -291,6 +342,7 @@ def import_seasons(conn, league_id: str, current_season: int, fetch,
 
     write_table(conn, "draft_picks", all_picks)
     write_table(conn, "draft_teams", pd.concat(teams, ignore_index=True))
+    write_table(conn, "league_standings", pd.concat(standings, ignore_index=True))
     write_table(conn, "league", pd.DataFrame(leagues))
     return {"seasons": seasons, "picks": len(all_picks)}
 

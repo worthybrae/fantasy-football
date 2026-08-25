@@ -19,7 +19,8 @@ def test_table_split_is_complete_and_disjoint():
     assert LEAGUE_TABLES == frozenset({
         "league", "draft_picks", "draft_teams", "draft_order",
         "manager_profiles", "manager_tendencies", "drafted",
-        "sim_board", "sim_results", "sim_survival"})
+        "sim_board", "sim_results", "sim_survival",
+        "league_standings", "league_reports"})
 
 
 def test_default_league_resolves_to_the_existing_database():

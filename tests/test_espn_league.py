@@ -359,3 +359,61 @@ def test_a_season_whose_only_picks_are_defenses_still_counts_as_drafted():
     from pipeline.espn_league import _is_real_pick
     picks = [{"overallPickNumber": i, "playerId": -(16000 + i)} for i in range(1, 9)]
     assert any(_is_real_pick(p) for p in picks)
+
+
+STANDINGS_PAYLOAD = {
+    "settings": {"name": "The Big League"},
+    "teams": [
+        {"id": 3, "name": "Team Alpha", "owners": ["{AAA}"], "draftDayPickOrder": 1,
+         "playoffSeed": 1, "rankCalculatedFinal": 2,
+         "record": {"overall": {"wins": 10, "losses": 4, "ties": 0,
+                                "pointsFor": 1800.5, "pointsAgainst": 1600.25}}},
+        # No owner, still in progress: manager falls back to the team name,
+        # seed and final rank are 0 and must store as NULL.
+        {"id": 7, "name": "Team Bravo", "owners": [], "draftDayPickOrder": 2,
+         "playoffSeed": 0, "rankCalculatedFinal": 0,
+         "record": {"overall": {"wins": 0, "losses": 0, "ties": 0,
+                                "pointsFor": 0.0, "pointsAgainst": 0.0}}},
+        # No record at all: every number null, row still present.
+        {"id": 9, "name": "Team Charlie", "owners": ["{BBB}"]},
+    ],
+    "members": [
+        {"id": "{AAA}", "displayName": "worthy"},
+        {"id": "{BBB}", "displayName": "dan"},
+    ],
+}
+
+
+def test_parse_standings_reads_record_seed_and_final_rank():
+    from pipeline.espn_league import parse_standings
+    df = parse_standings(STANDINGS_PAYLOAD, 2024)
+    assert list(df.columns) == [
+        "season", "team_id", "manager", "team_name", "wins", "losses", "ties",
+        "points_for", "points_against", "playoff_seed", "final_rank"]
+    alpha = df[df["team_id"] == 3].iloc[0]
+    assert alpha["manager"] == "worthy" and alpha["team_name"] == "Team Alpha"
+    assert (alpha["wins"], alpha["losses"], alpha["ties"]) == (10, 4, 0)
+    assert alpha["points_for"] == 1800.5 and alpha["points_against"] == 1600.25
+    assert alpha["playoff_seed"] == 1 and alpha["final_rank"] == 2
+    bravo = df[df["team_id"] == 7].iloc[0]
+    assert bravo["manager"] == "Team Bravo"
+    assert pd.isna(bravo["playoff_seed"]) and pd.isna(bravo["final_rank"])
+    charlie = df[df["team_id"] == 9].iloc[0]
+    assert pd.isna(charlie["wins"]) and pd.isna(charlie["points_for"])
+
+
+def test_import_seasons_writes_standings_and_league_name(tmp_path):
+    def fetch(url):
+        if "2025" not in url:
+            raise FileNotFoundError(url)
+        if "/players?" in url:
+            return []
+        return {**DRAFT_PAYLOAD, **STANDINGS_PAYLOAD, **ESPN_SETTINGS,
+                "settings": {**ESPN_SETTINGS["settings"], "name": "The Big League"}}
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    import_seasons(conn, "99", current_season=2026, fetch=fetch)
+    standings = read_table(conn, "league_standings")
+    assert set(standings["team_id"]) == {3, 7, 9}
+    assert standings["season"].unique().tolist() == [2025]
+    league = read_table(conn, "league")
+    assert league.iloc[0]["name"] == "The Big League"
