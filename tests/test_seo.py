@@ -17,8 +17,11 @@ def corpus(tmp_path, monkeypatch):
     """Ten drafts, 4 teams x 2 rounds (8 picks each), so shares are round
     numbers. `star` goes first in every draft; `mid` goes 2nd, 3rd or 4th
     (picks 2,3,4,2,3,4,2,3,4,2 -- mean 2.9); `late` is taken in two drafts
-    (20%); `once` in one (10%, still above MIN_SHARE's 2%). `twin_a` and
-    `twin_b` share a display name to exercise slug collisions."""
+    (20%); `once` is taken in the last draft only (10%, still above
+    MIN_SHARE's 2%). `twin_a` and `twin_b` share a display name to exercise
+    slug collisions. `ghost` is taken in every draft (TE) but never gets a
+    name in the `board` fixture -- an unresolved name, to prove such a
+    player gets no page."""
     path = tmp_path / "corpus.duckdb"
     conn = dl.corpus_conn(str(path))
     for i in range(10):
@@ -27,12 +30,19 @@ def corpus(tmp_path, monkeypatch):
             " recorded_at, teams, rounds, my_slot, scoring_json, settings_json,"
             " human_seats) VALUES (?, 'mock', '1', 2026, ?::TIMESTAMP, 4, 2,"
             " NULL, NULL, NULL, 3)", [f"d{i}", f"2026-08-24 {i:02d}:00:00"])
-        picks = [("star", 1), ("mid", 2 + (i % 3)), ("twin_a", 5), ("twin_b", 6)]
+        picks = [("star", 1), ("mid", 2 + (i % 3)), ("twin_a", 5), ("twin_b", 6),
+                 ("ghost", 8)]
         if i < 2:
             picks.append(("late", 7))
-        if i == 0:
-            picks.append(("once", 8))
+        if i == 9:
+            picks.append(("once", 7))
         for pid, pick_no in picks:
+            if pid == "ghost":
+                position = "TE"
+            elif pid in ("star", "mid"):
+                position = "RB"
+            else:
+                position = "WR"
             conn.execute(
                 "INSERT INTO draft_log_pick (draft_id, pick_no, round, slot,"
                 " owner_key, is_anonymous, player_id, position, adp_rank,"
@@ -40,7 +50,7 @@ def corpus(tmp_path, monkeypatch):
                 " clock_seconds) VALUES (?, ?, ?, ?, 'o', FALSE, ?, ?, 1.0,"
                 " 100.0, FALSE, TRUE, 5.0, 30.0)",
                 [f"d{i}", pick_no, (pick_no - 1) // 4 + 1, (pick_no - 1) % 4 + 1,
-                 pid, "RB" if pid in ("star", "mid") else "WR"])
+                 pid, position])
     conn.close()
     monkeypatch.setattr(market.dl, "CORPUS_PATH", str(path))
     market._CACHE.clear()
@@ -50,7 +60,15 @@ def corpus(tmp_path, monkeypatch):
 
 @pytest.fixture
 def board():
-    """The universal tables the pages read names, teams and ESPN's ADP from."""
+    """The universal tables the pages read names, teams and ESPN's ADP from.
+
+    `ghost` (a player in the `corpus` fixture) has a row with no name: found,
+    but unresolved, which is the case under test. A row is deliberate here
+    rather than no row at all -- an id `_names` has never heard of falls
+    through to `_board_names`, which builds a real board from this
+    connection's (deliberately incomplete) tables, and that is a much
+    heavier, unrelated code path with warnings of its own to earn on every
+    test that shares this fixture."""
     conn = duckdb.connect(":memory:")
     conn.execute("CREATE TABLE players (gsis_id VARCHAR, display_name VARCHAR,"
                  " headshot VARCHAR)")
@@ -61,6 +79,7 @@ def board():
         ("once", "Once Guy", None),
         ("twin_a", "Josh Allen", None),
         ("twin_b", "Josh Allen", None),
+        ("ghost", None, None),
     ])
     conn.execute("CREATE TABLE depth_charts (dt DATE, gsis_id VARCHAR, team VARCHAR)")
     conn.executemany("INSERT INTO depth_charts VALUES (?, ?, ?)", [
@@ -97,6 +116,7 @@ def test_build_adp_places_every_player_by_average_pick(corpus, board):
     assert str(data["updated"]) == "2026-08-24"
     ranked = [p["player_id"] for p in data["players"]]
     assert ranked[:2] == ["star", "mid"]
+    assert "ghost" not in ranked   # a row in `players`, but no resolved name
     star = data["by_slug"]["dandre-swift"]
     assert star["adp"] == 1.0 and star["taken"] == 10 and star["share"] == 1.0
     assert star["round_mode"] == 1 and star["rank"] == 1 and star["pos_rank"] == 1
@@ -114,6 +134,53 @@ def test_build_adp_resolves_name_team_and_espn_adp(corpus, board):
     assert star["espn_adp"] == 61.0         # through the sleeper crosswalk
     mid = seo.build_adp(board)["by_slug"]["amon-ra-st-brown"]
     assert mid["espn_adp"] == 5.5           # by name, no crosswalk row
+
+
+def test_build_adp_drops_a_headshot_that_is_not_a_plain_https_url(corpus, board):
+    board.execute("UPDATE players SET headshot = 'javascript:alert(1)' WHERE gsis_id = 'late'")
+    data = seo.build_adp(board)
+    late = data["by_slug"]["late-guy"]
+    assert late["headshot"] is None
+    body = _client(board).get(f"/adp/{late['slug']}").text
+    assert "javascript:" not in body
+    assert "<img" not in body
+
+
+def test_build_adp_counts_autodrafted_and_the_farms_own_seat(tmp_path, monkeypatch, board):
+    """ADP is where a player GOES, not what a human chose -- unlike
+    `market._human_picks_sql()`, which excludes autodrafted picks and picks
+    made by the farm's own seat (`slot == my_slot`) for its behavioural
+    questions. A separate tmp corpus, so the shared fixture's numbers above
+    are untouched."""
+    path = tmp_path / "every_pick_counts.duckdb"
+    conn = dl.corpus_conn(str(path))
+    for i in range(5):
+        conn.execute(
+            "INSERT INTO draft_log (draft_id, source, league_id, season,"
+            " recorded_at, teams, rounds, my_slot, scoring_json, settings_json,"
+            " human_seats) VALUES (?, 'mock', '1', 2026, ?::TIMESTAMP, 4, 2,"
+            " 2, NULL, NULL, 3)", [f"a{i}", f"2026-08-24 {i:02d}:00:00"])
+        # `star`: autodrafted. `mid`: taken by slot 2, which is `my_slot` --
+        # the farm's own seat -- but not itself autodrafted.
+        conn.execute(
+            "INSERT INTO draft_log_pick (draft_id, pick_no, round, slot,"
+            " owner_key, is_anonymous, player_id, position, adp_rank,"
+            " proj_points, autodrafted, had_owner, seconds_to_pick,"
+            " clock_seconds) VALUES (?, 1, 1, 1, 'o', FALSE, 'star', 'RB', 1.0,"
+            " 100.0, TRUE, TRUE, 5.0, 30.0)", [f"a{i}"])
+        conn.execute(
+            "INSERT INTO draft_log_pick (draft_id, pick_no, round, slot,"
+            " owner_key, is_anonymous, player_id, position, adp_rank,"
+            " proj_points, autodrafted, had_owner, seconds_to_pick,"
+            " clock_seconds) VALUES (?, 2, 1, 2, 'o', FALSE, 'mid', 'RB', 1.0,"
+            " 100.0, FALSE, TRUE, 5.0, 30.0)", [f"a{i}"])
+    conn.close()
+    monkeypatch.setattr(market.dl, "CORPUS_PATH", str(path))
+    market._CACHE.clear()
+    data = seo.build_adp(board)
+    taken = {p["player_id"]: p["taken"] for p in data["players"]}
+    assert taken["star"] == 5      # autodrafted, still counted
+    assert taken["mid"] == 5       # the farm's own seat, still counted
 
 
 def test_build_adp_gives_colliding_names_distinct_slugs(corpus, board):
@@ -138,10 +205,14 @@ def test_build_adp_with_no_drafts_is_empty_not_an_error(tmp_path, monkeypatch, b
     assert data["players"] == [] and data["drafts"] == 0 and data["updated"] is None
 
 
-def test_build_adp_survives_a_missing_board(corpus):
+def test_build_adp_skips_a_player_whose_name_does_not_resolve(corpus):
+    """With no board connection nothing resolves a name, so nobody is
+    publishable -- not even under a raw id like `star`. The corpus is still
+    read: `drafts` reflects it, there just isn't a page for anyone."""
     data = seo.build_adp(None)
-    star = data["by_slug"]["star"]          # the id itself, as the archive does
-    assert star["name"] == "star" and star["team"] is None and star["espn_adp"] is None
+    assert data["players"] == []
+    assert data["by_slug"] == {}
+    assert data["drafts"] == 10
 
 
 # -- the pages ---------------------------------------------------------------
@@ -257,6 +328,43 @@ def test_an_empty_corpus_sitemap_has_only_the_static_pages(tmp_path, monkeypatch
     locs = [u.find("s:loc", ns).text for u in root.findall("s:url", ns)]
     assert locs == ["https://espnfantasydraft.com/", "https://espnfantasydraft.com/mocks",
                     "https://espnfantasydraft.com/adp"]
+
+
+def test_an_unrecognized_position_does_not_500_adp_or_the_sitemap(tmp_path, monkeypatch, board):
+    """A position outside the six in `POSITIONS` (or a NULL, read back as
+    `""`) used to blow up `sorted(..., key=POSITIONS.index)` with a
+    ValueError. `/adp` and `/sitemap.xml` must still answer, and the
+    unrecognized position gets no position page -- but the player himself,
+    resolved by name, still gets his own."""
+    board.execute("INSERT INTO players VALUES ('fb', 'Fulton Reese', NULL)")
+    path = tmp_path / "fb.duckdb"
+    conn = dl.corpus_conn(str(path))
+    for i in range(10):
+        conn.execute(
+            "INSERT INTO draft_log (draft_id, source, league_id, season,"
+            " recorded_at, teams, rounds, my_slot, scoring_json, settings_json,"
+            " human_seats) VALUES (?, 'mock', '1', 2026, ?::TIMESTAMP, 4, 2,"
+            " NULL, NULL, NULL, 3)", [f"fb{i}", f"2026-08-24 {i:02d}:00:00"])
+        conn.execute(
+            "INSERT INTO draft_log_pick (draft_id, pick_no, round, slot,"
+            " owner_key, is_anonymous, player_id, position, adp_rank,"
+            " proj_points, autodrafted, had_owner, seconds_to_pick,"
+            " clock_seconds) VALUES (?, 1, 1, 1, 'o', FALSE, 'fb', 'FB', 1.0,"
+            " 100.0, FALSE, TRUE, 5.0, 30.0)", [f"fb{i}"])
+    conn.close()
+    monkeypatch.setattr(market.dl, "CORPUS_PATH", str(path))
+    market._CACHE.clear()
+    c = _client(board)
+    assert c.get("/adp").status_code == 200
+    r = c.get("/sitemap.xml")
+    assert r.status_code == 200
+    root = ET.fromstring(r.text)
+    ns = {"s": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+    locs = [u.find("s:loc", ns).text for u in root.findall("s:url", ns)]
+    assert "https://espnfantasydraft.com/adp/fb" not in locs
+    fb_slug = seo.slug("Fulton Reese")
+    assert f"https://espnfantasydraft.com/adp/{fb_slug}" in locs
+    assert c.get(f"/adp/{fb_slug}").status_code == 200
 
 
 def test_the_pages_are_reachable_with_the_spa_mounted(corpus, board, tmp_path):

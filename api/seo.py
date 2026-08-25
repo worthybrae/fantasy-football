@@ -68,12 +68,15 @@ def _teams_by_player(conn) -> dict:
         return {}
     try:
         dc = read_table(conn, "depth_charts")
-    except Exception:      # noqa: BLE001 -- a board that cannot be read costs teams
+        if dc.empty or not {"gsis_id", "team", "dt"}.issubset(dc.columns):
+            return {}
+        latest = dc.dropna(subset=["gsis_id"]).sort_values("dt").drop_duplicates("gsis_id", keep="last")
+        return {str(r.gsis_id): str(r.team) for r in latest.itertuples() if r.team == r.team and r.team}
+    except Exception:      # noqa: BLE001 -- a board that cannot be read costs teams,
+        # not the page: everything after `read_table` is pandas work on data
+        # that came from the board, and a board with a surprising shape
+        # should cost teams the same way a board that will not open does.
         return {}
-    if dc.empty or not {"gsis_id", "team", "dt"}.issubset(dc.columns):
-        return {}
-    latest = dc.dropna(subset=["gsis_id"]).sort_values("dt").drop_duplicates("gsis_id", keep="last")
-    return {str(r.gsis_id): str(r.team) for r in latest.itertuples() if r.team}
 
 
 def _espn_adp_by_player(conn, ids: dict) -> dict:
@@ -85,29 +88,31 @@ def _espn_adp_by_player(conn, ids: dict) -> dict:
     try:
         espn = read_table(conn, "espn_adp")
         sleeper = read_table(conn, "sleeper_ids")
-    except Exception:      # noqa: BLE001
+        if espn.empty or "espn_adp" not in espn.columns:
+            return {}
+        from scoring.profile import _norm_name
+        out: dict = {}
+        if not sleeper.empty and {"gsis_id", "espn_id"}.issubset(sleeper.columns):
+            xwalk = sleeper.dropna(subset=["gsis_id", "espn_id"]).drop_duplicates("espn_id")
+            joined = espn.merge(xwalk[["gsis_id", "espn_id"]], on="espn_id")
+            for r in joined.itertuples():
+                if r.espn_adp == r.espn_adp:
+                    out[str(r.gsis_id)] = float(r.espn_adp)
+        by_name = {}
+        if {"espn_name", "position"}.issubset(espn.columns):
+            for r in espn.itertuples():
+                if r.espn_adp == r.espn_adp:
+                    by_name.setdefault((_norm_name(str(r.espn_name)), str(r.position)), float(r.espn_adp))
+        for pid, (name, pos) in ids.items():
+            if pid not in out:
+                hit = by_name.get((_norm_name(name), pos))
+                if hit is not None:
+                    out[pid] = hit
+        return out
+    except Exception:      # noqa: BLE001 -- a board that cannot be read costs
+        # ESPN's own ADP, not the page; the merge and the two itertuples
+        # loops below are as much "reading the board" as `read_table` is.
         return {}
-    if espn.empty or "espn_adp" not in espn.columns:
-        return {}
-    from scoring.profile import _norm_name
-    out: dict = {}
-    if not sleeper.empty and {"gsis_id", "espn_id"}.issubset(sleeper.columns):
-        xwalk = sleeper.dropna(subset=["gsis_id", "espn_id"]).drop_duplicates("espn_id")
-        joined = espn.merge(xwalk[["gsis_id", "espn_id"]], on="espn_id")
-        for r in joined.itertuples():
-            if r.espn_adp == r.espn_adp:
-                out[str(r.gsis_id)] = float(r.espn_adp)
-    by_name = {}
-    if {"espn_name", "position"}.issubset(espn.columns):
-        for r in espn.itertuples():
-            if r.espn_adp == r.espn_adp:
-                by_name.setdefault((_norm_name(str(r.espn_name)), str(r.position)), float(r.espn_adp))
-    for pid, (name, pos) in ids.items():
-        if pid not in out:
-            hit = by_name.get((_norm_name(name), pos))
-            if hit is not None:
-                out[pid] = hit
-    return out
 
 
 def _team_fallback_from_espn(conn) -> dict:
@@ -118,13 +123,14 @@ def _team_fallback_from_espn(conn) -> dict:
     try:
         espn = read_table(conn, "espn_adp")
         sleeper = read_table(conn, "sleeper_ids")
-    except Exception:      # noqa: BLE001
+        if espn.empty or sleeper.empty or "team" not in espn.columns:
+            return {}
+        joined = espn.merge(sleeper.dropna(subset=["gsis_id", "espn_id"])[["gsis_id", "espn_id"]],
+                            on="espn_id")
+        return {str(r.gsis_id): str(r.team) for r in joined.itertuples() if r.team == r.team and r.team}
+    except Exception:      # noqa: BLE001 -- a board that cannot be read costs
+        # a fallback team, not the page.
         return {}
-    if espn.empty or sleeper.empty or "team" not in espn.columns:
-        return {}
-    joined = espn.merge(sleeper.dropna(subset=["gsis_id", "espn_id"])[["gsis_id", "espn_id"]],
-                        on="espn_id")
-    return {str(r.gsis_id): str(r.team) for r in joined.itertuples() if r.team == r.team and r.team}
 
 
 def _empty() -> dict:
@@ -138,6 +144,11 @@ def build_adp(conn) -> dict:
     included -- because the question is where a player GOES, not what
     people think. The archive filters those out for its behavioural
     questions; ADP is the other kind of question.
+
+    A player whose name never resolves gets no page: not an h1 reading
+    "adp_kansas_city_defense", just nobody at that slot. He is still read
+    out of the corpus and counted toward `total`, so a cold board costs
+    pages, never the drafts count.
     """
     corpus = market._corpus()
     try:
@@ -178,16 +189,21 @@ def build_adp(conn) -> dict:
         share = len(taken) / total
         if share < MIN_SHARE:
             continue
+        entry = names.get(pid)
+        name = entry.get("name") if entry else None
+        if not name:
+            continue
+        headshot = entry.get("headshot")
+        if not (isinstance(headshot, str) and headshot.startswith("https://")):
+            headshot = None
         ordered = sorted(taken)
-        entry = names.get(pid) or {}
-        name = entry.get("name") or pid
         hist = [0] * (teams * rounds)
         for p in ordered:
             hist[p - 1] += 1
         players.append({
             "player_id": pid,
             "name": name,
-            "headshot": entry.get("headshot"),
+            "headshot": headshot,
             "position": positions.get(pid) or "",
             "team": teams_by.get(pid) or espn_team.get(pid),
             "adp": round(mean(ordered), 1),
@@ -227,9 +243,22 @@ def build_adp(conn) -> dict:
             "teams": teams, "rounds": rounds, "updated": updated}
 
 
+_adp_lock = threading.Lock()
+
+
 def adp_data(conn) -> dict:
-    """`build_adp`, once per CACHE_SECONDS, shared by every page."""
-    return market._cached("seo-adp", lambda: build_adp(conn))
+    """`build_adp`, once per CACHE_SECONDS, shared by every page.
+
+    Serialized here, not just inside `market._cached`: that lock only
+    guards its own dict, not the `build()` call, so two callers racing a
+    cold cache -- the warm thread below and the first real request, or two
+    requests that both land before either finishes -- can both end up
+    inside `build_adp` at once, running raw queries on connections that are
+    not safe to share across threads mid-query. This lock means the second
+    caller waits and gets the first caller's answer from cache instead.
+    """
+    with _adp_lock:
+        return market._cached("seo-adp", lambda: build_adp(conn))
 
 
 # ---------------------------------------------------------------------------
@@ -301,7 +330,7 @@ def register_seo_routes(app, conn=None):
         d = data()
         players = d["players"] if position is None else [
             p for p in d["players"] if p["position"] == position]
-        present = sorted({p["position"] for p in d["players"]}, key=POSITIONS.index)
+        present = [pos for pos in POSITIONS if pos in {p["position"] for p in d["players"]}]
         season = d["updated"].year if d["updated"] else datetime.now().year
         shape = f"{d['teams']}-team PPR" if d["drafts"] else "PPR"
         if position is None:
@@ -372,7 +401,7 @@ def register_seo_routes(app, conn=None):
         stamp = d["updated"].isoformat() if d["updated"] else None
         urls = ["/", "/mocks", "/adp"]
         if d["drafts"]:
-            present = sorted({p["position"] for p in d["players"]}, key=POSITIONS.index)
+            present = [pos for pos in POSITIONS if pos in {p["position"] for p in d["players"]}]
             urls += [f"/adp/{pos.lower()}" for pos in present]
             urls += [f"/adp/round/{n}" for n in range(1, d["rounds"] + 1)]
             urls += [f"/adp/{p['slug']}" for p in d["players"]]
@@ -383,3 +412,18 @@ def register_seo_routes(app, conn=None):
                 SITE, path, f"<lastmod>{stamp}</lastmod>" if stamp else ""))
         body.append("</urlset>")
         return Response(content="\n".join(body), media_type="application/xml")
+
+    # A sitemap of 232 URLs does not get crawled one at a time -- it gets
+    # crawled in a burst, and a cold `build_adp` (~2s, and it can trigger a
+    # board build besides) must not be the price whichever request in that
+    # burst happens to land first. Warm it once, off the request thread, at
+    # registration time; `adp_data`'s own lock means a real request racing
+    # this thread waits for the same answer rather than building its own.
+    def _warm():
+        try:
+            adp_data(conn)
+        except Exception:      # noqa: BLE001 -- a failed warm just means the
+            # first request pays for `build_adp` itself, same as before.
+            pass
+
+    threading.Thread(target=_warm, name="seo-adp-warm", daemon=True).start()
