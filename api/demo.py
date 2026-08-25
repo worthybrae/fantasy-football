@@ -227,36 +227,88 @@ def _pick_of(record: dict) -> int:
 # is zero, and a hero built on that would be advertising the product at its
 # least useful moment. Measured on a live farm draft: round 14 offered "Cameron
 # Dicker, +2" as its best available.
+#
+# This is where a room is PICKED UP from. Where it is put down is below.
 INTERESTING_ROUNDS = 8
 
 # And not the first pick either: an empty board is eight empty columns and a
 # recommendation nobody has had to make a decision against yet.
 WARMED_UP_PICKS = 4
 
+# The round at which the page leaves the room it has been showing and moves
+# to another. Later than `INTERESTING_ROUNDS` on purpose: a room is chosen
+# while it is interesting and then STAYED WITH, because a reader watching a
+# draft is watching a story -- these eight teams, this roster filling up --
+# and the story survives a couple of rounds of the board thinning out better
+# than it survives being swapped for a different draft mid-sentence. The room
+# is left the moment it enters this round.
+HANDOFF_ROUND = 10
+
+# The room the page is currently showing, by league id. This is what keeps
+# the page on one draft: the farm sits in a hundred rooms at once and they
+# run neck and neck, so "the furthest along" is a different room after
+# nearly every pick in the building. Without a memory the hero was a
+# slideshow of strangers -- measured: it changed rooms on most picks.
+#
+# Process-local, seeded from the last persisted answer at startup (see
+# `register_demo_routes`) so a restart is not itself a jump.
+_SHOWING: dict = {}
+_SHOWING_LOCK = threading.Lock()
+
+
+def _round_of(record: dict) -> int:
+    """The round the room is in now, one-based; 0 for a record with no teams."""
+    teams = int(record.get("teams") or 0)
+    return _pick_of(record) // teams + 1 if teams else 0
+
+
+def _unfinished(record: dict) -> bool:
+    total = int(record.get("teams") or 0) * int(record.get("rounds") or 0)
+    return bool(total) and _pick_of(record) < total
+
+
+def _worth_staying_in(record: dict) -> bool:
+    """Whether the room the page is on is still the room to be on."""
+    return _unfinished(record) and _round_of(record) < HANDOFF_ROUND
+
 
 def _liveliest(records: list):
     """The room a stranger should be shown.
 
-    Preference order, and each step is about what the reader sees rather than
-    about the data: a room in its middle rounds (real players, real prices),
-    furthest along among those; failing that, any unfinished room, so the page
-    shows something true rather than nothing.
+    THE ROOM ALREADY ON SCREEN, if it is still worth watching -- see
+    `_SHOWING`. Otherwise, a fresh choice, and each step of it is about what
+    the reader sees rather than about the data: a room in its middle rounds
+    (real players, real prices), furthest along among those; failing that,
+    any unfinished room, so the page shows something true rather than
+    nothing. The choice is remembered, and the next call defers to it.
     """
-    def unfinished(record):
-        total = int(record.get("teams") or 0) * int(record.get("rounds") or 0)
-        return bool(total) and _pick_of(record) < total
-
     def in_the_interesting_part(record):
-        teams = int(record.get("teams") or 0)
         made = _pick_of(record)
-        if not teams or made < WARMED_UP_PICKS:
+        if not int(record.get("teams") or 0) or made < WARMED_UP_PICKS:
             return False
-        return made // teams + 1 <= INTERESTING_ROUNDS
+        return _round_of(record) <= INTERESTING_ROUNDS
 
-    live = [r for r in records if unfinished(r)]
-    good = [r for r in live if in_the_interesting_part(r)]
-    pool = good or live
-    return max(pool, key=_pick_of) if pool else None
+    with _SHOWING_LOCK:
+        showing = _SHOWING.get("league_id")
+        if showing is not None:
+            for record in records:
+                if (str(record.get("league_id")) == showing
+                        and _worth_staying_in(record)):
+                    return record
+
+        live = [r for r in records if _unfinished(r)]
+        good = [r for r in live if in_the_interesting_part(r)]
+        pool = good or live
+        chosen = max(pool, key=_pick_of) if pool else None
+        # Remembered only when it is a room the page will stay in. A room
+        # past the handoff round, shown because nothing better exists, is
+        # re-chosen every call so that a better one can take over the moment
+        # it appears.
+        if chosen is not None and _worth_staying_in(chosen):
+            _SHOWING["league_id"] = str(chosen.get("league_id"))
+        else:
+            _SHOWING.pop("league_id", None)
+        return chosen
 
 
 def _board_frame(conn):
@@ -740,7 +792,9 @@ def _moment(record: dict) -> tuple:
     teams = int(record.get("teams") or 0)
     picks = record.get("picks") or []
     made = len(picks)
-    if not teams or made // teams + 1 <= INTERESTING_ROUNDS:
+    # Live up to the handoff round, not the interesting one: a room the page
+    # stayed in past round eight (see `_liveliest`) is shown where it is.
+    if not teams or made // teams + 1 < HANDOFF_ROUND:
         return made, True
     return min(made, teams * 3), False
 
@@ -1153,6 +1207,9 @@ def _build(conn, now: float | None = None) -> dict:
         # the archive being replayed at the pace its picks were really made.
         # The room's status pill says so in as many words.
         "mode": mode,
+        # Which room this is. Read back at startup so a restarted server
+        # carries on showing the room it was showing -- see `_SHOWING`.
+        "league_id": str(record.get("league_id") or ""),
         # Whether the picks above are where that room is RIGHT NOW, or an
         # earlier round of it. The page says which; see `_moment`.
         "live_moment": live_moment,
@@ -1508,6 +1565,9 @@ def register_demo_routes(app, conn=None):
     stamp = time.time()
     restored = _restore(stamp)
     if restored is not None:
+        if restored.get("league_id"):
+            with _SHOWING_LOCK:
+                _SHOWING.setdefault("league_id", str(restored["league_id"]))
         mark = time.monotonic()
         with _LOCK:
             # Identity `None` so it matches nothing: this is served

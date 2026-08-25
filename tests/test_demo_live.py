@@ -6,6 +6,7 @@ cached board dies, and the pick clock the countdown is drawn from -- plus
 the rule that neither is ever guessed at.
 """
 import json
+import os
 import time
 from unittest import mock
 
@@ -93,10 +94,11 @@ def test_the_shown_room_is_left_when_it_reaches_the_handoff_round(farm):
     """Stay through round nine; the moment the room enters round ten, move
     to the best of the others."""
     teams = 8
-    _write(farm, _room(league_id="111", picks=teams * 9 - 1, teams=teams))
+    _write(farm, _room(league_id="111", picks=teams * 7, teams=teams))
     _write(farm, _room(league_id="222", picks=20, teams=teams))
     assert demo._identity(time.time())[0] == "111"
-    # Last pick of round nine: still round nine, still ours.
+    # Last pick of round nine: still round nine, still ours -- though a
+    # fresh choice would not have picked a room this deep.
     _write(farm, _room(league_id="111", picks=teams * 9 - 1, teams=teams))
     assert demo._identity(time.time())[0] == "111"
     # Round ten begins.
@@ -125,11 +127,12 @@ def test_a_room_that_finished_is_left(farm):
 
 
 def test_a_room_that_went_quiet_is_left(farm):
-    _write(farm, _room(league_id="111", picks=20))
+    path = _write(farm, _room(league_id="111", picks=20))
     _write(farm, _room(league_id="222", picks=10))
     assert demo._identity(time.time())[0] == "111"
-    _write(farm, _room(league_id="222", picks=11))
-    assert demo._identity(time.time() + demo.STALE_SECONDS + 1)[0] == "222"
+    ago = time.time() - demo.STALE_SECONDS - 1
+    os.utime(path, (ago, ago))
+    assert demo._identity(time.time())[0] == "222"
 
 
 def test_dir_revision_notices_any_write(farm):
