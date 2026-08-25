@@ -10,7 +10,7 @@ from pipeline.espn_league import (EspnClient, import_seasons, parse_league_id,
 from scoring.board import _ADP_POSITION_ALIASES, _ADP_TEAM_ALIASES
 from scoring.config import CURRENT_SEASON
 
-_HISTORIC_ADP_COLUMNS = ["season", "adp_name", "position", "team", "adp_rank"]
+HISTORIC_ADP_COLUMNS = ["season", "adp_name", "position", "team", "adp_rank"]
 
 
 def normalize_historic_adp(df: pd.DataFrame) -> pd.DataFrame:
@@ -38,6 +38,43 @@ def normalize_historic_adp(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def historic_adp_frames(seasons, fetch_adp=None, skip=()) -> list:
+    """One normalized, ranked `historic_adp` frame per season in `seasons`.
+
+    Shared by the command-line importer (`main`, below) and the background
+    per-league import (`pipeline.league_history.import_history`) so both
+    draw ADP through the exact same rule -- normalized once by
+    `normalize_historic_adp`, ranked by `adp_rank` within the season. Two
+    copies of this loop would silently drift the day one of them changes
+    the ranking and the other doesn't.
+
+    A season in `skip` (already on disk, for the per-league importer that
+    only tops up what is missing) is left out entirely. A season whose feed
+    fails -- or answers with nothing to rank -- is warned about and left
+    out too, rather than handed to DuckDB as a frame whose dtypes were
+    never inferred from real data.
+    """
+    fetch = fetch_adp if fetch_adp is not None else sources.fetch_adp
+    skip = set(skip)
+    frames = []
+    for season in seasons:
+        if season in skip:
+            continue
+        try:
+            df = fetch(season)
+        except Exception as exc:      # noqa: BLE001 -- one missing year
+            print(f"  WARN historic ADP {season}: {exc}")
+            continue
+        if df.empty:
+            continue
+        df = normalize_historic_adp(df)
+        df = df.sort_values("adp").reset_index(drop=True)
+        df["adp_rank"] = df.index + 1
+        df["season"] = season
+        frames.append(df[HISTORIC_ADP_COLUMNS])
+    return frames
+
+
 def main(argv: list[str]) -> int:
     if len(argv) < 2:
         print("usage: python -m pipeline.import_league <league-url-or-id>")
@@ -49,18 +86,7 @@ def main(argv: list[str]) -> int:
 
     # Historical ADP is what makes "reach" measurable: a pick only means
     # something against where the market had that player THAT year.
-    frames = []
-    for season in summary["seasons"]:
-        try:
-            df = sources.fetch_adp(season)
-        except Exception as e:
-            print(f"  WARN historic ADP {season}: {e}")
-            continue
-        df = normalize_historic_adp(df)
-        df = df.sort_values("adp").reset_index(drop=True)
-        df["adp_rank"] = df.index + 1
-        df["season"] = season
-        frames.append(df[_HISTORIC_ADP_COLUMNS])
+    frames = historic_adp_frames(summary["seasons"])
     if frames:
         rows = pd.concat(frames, ignore_index=True)
         write_table(conn, "historic_adp", rows)

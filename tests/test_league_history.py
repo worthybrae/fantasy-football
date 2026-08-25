@@ -73,6 +73,36 @@ def test_import_history_writes_into_the_leagues_own_file(tmp_path):
     assert read_table(get_conn(universal), "draft_picks").empty
 
 
+def test_import_history_only_fetches_adp_for_missing_seasons(tmp_path):
+    """A season already in `historic_adp` is not re-fetched on the next import."""
+    from pipeline.league_history import import_history
+    universal = str(tmp_path / "nfl.duckdb")
+    get_conn(universal).close()
+    root = str(tmp_path / "leagues")
+    league_id = "77"
+
+    def adp_row(name, team, adp):
+        return pd.DataFrame([{"adp_name": name, "position": "WR", "team": team, "adp": adp}])
+
+    import_history(
+        league_id, {}, fetch=_raw_fetch([2025]), current_season=2026,
+        universal_path=universal, root=root,
+        adp_fetch=lambda season: adp_row("Justin Jefferson", "MIN", 1.5))
+
+    calls = []
+
+    def recording_adp_fetch(season):
+        calls.append(season)
+        return adp_row("CeeDee Lamb", "DAL", 2.0)
+
+    summary = import_history(
+        league_id, {}, fetch=_raw_fetch([2025, 2024]), current_season=2026,
+        universal_path=universal, root=root, adp_fetch=recording_adp_fetch)
+    assert summary["seasons"] == [2025, 2024]
+    # 2025 was already on disk from the first import; only 2024 is new.
+    assert calls == [2024]
+
+
 def test_import_history_survives_a_missing_adp_year(tmp_path):
     from pipeline.league_history import import_history
     universal = str(tmp_path / "nfl.duckdb")

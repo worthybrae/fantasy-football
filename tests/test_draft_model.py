@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from pipeline.db import get_conn, write_table
-from pipeline.import_league import _HISTORIC_ADP_COLUMNS, normalize_historic_adp
+from pipeline.import_league import HISTORIC_ADP_COLUMNS, normalize_historic_adp
 from scoring.draft_model import (FEATURE_NAMES, PickObservation,
                                   build_observations, feature_matrix)
 from scoring import league
@@ -71,7 +71,7 @@ def _seed_kdst(tmp_path):
     adp = normalize_historic_adp(raw).sort_values("adp").reset_index(drop=True)
     adp["adp_rank"] = adp.index + 1
     adp["season"] = 2025
-    write_table(conn, "historic_adp", adp[_HISTORIC_ADP_COLUMNS])
+    write_table(conn, "historic_adp", adp[HISTORIC_ADP_COLUMNS])
     return conn
 
 

@@ -22,11 +22,10 @@ from pathlib import Path
 
 import pandas as pd
 
-from pipeline import sources
 from pipeline.db import DEFAULT_PATH, get_conn, read_table, record_freshness, write_table
 from pipeline.espn_drafts import KONA, http_fetch
 from pipeline.espn_league import PLAYERS_FILTER, import_seasons
-from pipeline.import_league import _HISTORIC_ADP_COLUMNS, normalize_historic_adp
+from pipeline.import_league import historic_adp_frames
 from pipeline.leagues import LEAGUES_ROOT, league_db_path, provision_league
 from scoring.config import CURRENT_SEASON
 
@@ -79,7 +78,6 @@ def import_history(league_id: str, cookies: dict, fetch=None,
     decides whether that is a log line or an error.
     """
     raw = fetch if fetch is not None else http_fetch()
-    fetch_adp = adp_fetch if adp_fetch is not None else sources.fetch_adp
     path = provision_league(league_id, universal_path, root=root)
     conn = get_conn(path)
     try:
@@ -87,23 +85,7 @@ def import_history(league_id: str, cookies: dict, fetch=None,
         existing = read_table(conn, "historic_adp")
         have = set(existing["season"]) if not existing.empty else set()
         frames = [existing] if not existing.empty else []
-        for season in summary["seasons"]:
-            if season in have:
-                continue
-            try:
-                df = fetch_adp(season)
-            except Exception as exc:      # noqa: BLE001 -- one missing year
-                print(f"  WARN historic ADP {season}: {exc}")
-                continue
-            if df.empty:
-                # An empty feed has nothing to rank -- skip rather than hand
-                # DuckDB a frame whose dtypes were never inferred from data.
-                continue
-            df = normalize_historic_adp(df)
-            df = df.sort_values("adp").reset_index(drop=True)
-            df["adp_rank"] = df.index + 1
-            df["season"] = season
-            frames.append(df[_HISTORIC_ADP_COLUMNS])
+        frames.extend(historic_adp_frames(summary["seasons"], fetch_adp=adp_fetch, skip=have))
         if frames:
             rows = pd.concat(frames, ignore_index=True)
             write_table(conn, "historic_adp", rows)
