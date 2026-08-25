@@ -978,6 +978,34 @@ a.draft-tab {
 .pick-ticker-adp.is-steal { color: var(--ok); }
 .pick-ticker-adp.is-reach { color: var(--fail); }
 
+/* The pick's hover panel (PickTicker.tsx). Shares `.avail-th-tip`'s box;
+   these are only its three lines. The head is the verdict, in the inline
+   arrow's own colour, so the word and the glyph it explains agree. */
+.pick-ticker-tip-head {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-bottom: 3px;
+}
+
+.pick-ticker-tip-head.is-steal { color: var(--ok); }
+.pick-ticker-tip-head.is-reach { color: var(--fail); }
+.pick-ticker-tip-head.is-flat { color: var(--text-3); }
+
+.pick-ticker-tip-note {
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--text-2);
+}
+
+.pick-ticker-tip-line {
+  font-size: 11px;
+  color: var(--text-1);
+}
+
+.pick-ticker-tip-dim { color: var(--text-3); }
+
 .pick-ticker-item.is-mine .pick-ticker-team {
   color: var(--accent);
 }
@@ -1788,7 +1816,8 @@ button.roster-row:focus-visible {
    that would give `fixed` a closer containing block. Left/top arrive as
    inline styles, computed by AvailableList's own `positionTip` off the
    header's rect and the panel's own measured size. */
-.avail-th-tip {
+.avail-th-tip,
+.pick-ticker-tip {
   position: fixed;
   z-index: 60;
   width: max-content;
