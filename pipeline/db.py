@@ -27,6 +27,11 @@ UNIVERSAL_TABLES = frozenset({
     # Universal for the same reason `adp` is: what a book prices Gibbs at to
     # lead the league in rushing does not depend on whose league is reading it.
     "player_futures",
+    # ESPN's projected stat lines, every season since 2018
+    # (pipeline/espn_projections.py). Universal for the same reason
+    # `espn_adp` is: what ESPN projects Swift to carry is one fact, not one
+    # per league. It is the projected column on the profile's usage card.
+    "espn_projections",
     # ESPN's per-week D/ST stat lines (pipeline/sources.fetch_espn_dst).
     # Universal for the same reason `weekly` is: what the Broncos defense did
     # in week 4 is the same fact in every league. The LEAGUE-specific half is

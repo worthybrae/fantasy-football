@@ -498,6 +498,12 @@ def test_refresh_runs_both_news_jobs_and_stamps_them_into_meta(tmp_path, monkeyp
         if attr.startswith("fetch_"):
             monkeypatch.setattr(refresh.sources, attr,
                                 lambda *a, **k: pd.DataFrame({"x": [1]}))
+    # The projections pull lives in its own module, not `sources`, so the
+    # loop above does not reach it. Stubbed by name -- a refresh that fetched
+    # nine seasons from ESPN inside a unit test would be the regression this
+    # assertion exists to catch.
+    monkeypatch.setattr(refresh.espn_projections, "fetch_all",
+                        lambda *a, **k: pd.DataFrame({"season": [2026]}))
     monkeypatch.setattr(news, "news_pool", lambda c: _pool())
     monkeypatch.setattr(news, "http_fetch",
                         lambda *a, **k: _fetch_from({
@@ -510,6 +516,13 @@ def test_refresh_runs_both_news_jobs_and_stamps_them_into_meta(tmp_path, monkeyp
     assert len(read_table(conn, "player_status")) == len(_pool())
     meta = set(read_table(conn, "meta")["source"])
     assert {"player_news", "player_status"} <= meta
+    # The usage card's projected column is fed by this table and nothing
+    # else, and a deployment is refreshed by this function and nothing else:
+    # for the first weeks the pull was a hand-run script, and production
+    # served every profile with the column missing.
+    assert list(read_table(conn, "espn_projections")["season"]) == [2026]
+    assert "espn_projections" in meta
+    assert "espn_projections" in db.UNIVERSAL_TABLES
     # Both are classified, which is what stops provisioning treating an
     # unclassified table as universal by accident.
     assert {"player_news", "player_status"} <= db.UNIVERSAL_TABLES

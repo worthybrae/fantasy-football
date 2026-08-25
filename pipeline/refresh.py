@@ -1,7 +1,7 @@
 """Refresh all data sources into DuckDB. Run: python -m pipeline.refresh"""
 import sys
 import pandas as pd
-from pipeline import news, sources
+from pipeline import espn_projections, news, sources
 from pipeline.db import get_conn, read_table, record_freshness, write_table
 from scoring.config import CURRENT_SEASON, HISTORY_SEASONS, RECENCY_WEIGHTS
 
@@ -62,6 +62,15 @@ def main() -> int:
         "cbs_ranks": lambda: _fetch_multi_format(
             sources.fetch_cbs, FORMATS_BY_SOURCE["cbs_ranks"]),
         "espn_adp": lambda: sources.fetch_espn_adp(CURRENT_SEASON),  # PPR-only; not format-aware
+        # ESPN's projected stat lines -- the carries, targets and yards
+        # behind `espn_adp`'s one points number -- which the profile's usage
+        # card prints as its projected column. Every season since 2018, not
+        # just this one: write_table replaces the whole table, and the
+        # history is what research/experiments benchmark our own model
+        # against. Nine paced requests, ~12s. This was a hand-run script for
+        # its first weeks, which is why a deployment refreshed by
+        # api/jobs.py alone served the card with the column missing.
+        "espn_projections": lambda: espn_projections.fetch_all(),
         # ESPN's own per-week D/ST stat lines -- the only source of team-defense
         # rows anywhere in this pipeline, since nflverse `weekly` carries
         # individual defenders and no defense. Scoped to the board's scoring

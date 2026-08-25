@@ -5342,16 +5342,14 @@ button.roster-row:focus-visible {
   gap: 3px;
   padding-top: var(--space-2);
   border-top: 1px solid var(--border);
-  /* The block TAKES the rest of the card and spreads its rows through it,
-     rather than clumping at the top or being shoved to the floor. Both were
-     tried: at the top it left a dead band under the last market, and pinned
-     to the bottom (`margin-top: auto`) it left the same band above the
-     hairline instead -- a card with a hole punched in the middle. Spread,
-     one to four markets each get a share of whatever height the row's
-     tallest card sets, which is the only version where the space reads as
-     rhythm rather than as absence. */
-  flex: 1 1 auto;
-  justify-content: space-between;
+  /* The rows sit at their own height under the hairline, and whatever the
+     card has left over is left over -- the same as the O-line card beside
+     Usage, or any card in a row with a taller neighbour. This block used to
+     grow into the card and `space-between` its rows through it, on the
+     theory that the space would read as rhythm; with the two markets most
+     players have, it read as a heading, a row and a row each marooned in
+     forty pixels of nothing. Empty card under a list is ordinary; a list
+     pulled apart is not. */
 }
 
 /* Five tracks: the market, its bar, the chance, and the two ranks. Grid

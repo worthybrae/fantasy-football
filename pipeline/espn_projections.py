@@ -32,6 +32,7 @@ import pandas as pd
 import requests
 
 from pipeline.sources import ESPN_URL, UA, _ESPN_POS
+from scoring.config import CURRENT_SEASON
 
 # ESPN's stat ids. Verified against a published ESPN player card (Bijan
 # Robinson, 2026): 287 CAR / 1372 YDS / 8 TD / 76 REC / 708 YDS / 3 TD /
@@ -86,7 +87,7 @@ def fetch_projections(season: int, limit: int = 700) -> pd.DataFrame:
 def fetch_all(seasons=None, pause: float = 1.2) -> pd.DataFrame:
     """Every season we can get. Paced, because this is somebody's API and a
     backfill asks for nine years at once."""
-    seasons = seasons or range(FIRST_SEASON, 2027)
+    seasons = seasons or range(FIRST_SEASON, CURRENT_SEASON + 1)
     frames = []
     for season in seasons:
         try:
