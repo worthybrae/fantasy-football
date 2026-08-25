@@ -66,6 +66,24 @@ td.n,th.n{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-
 footer{max-width:960px;margin:0 auto;padding:0 20px 32px;font-size:12px;color:var(--text-3)}
 footer a{color:var(--text-2)}
 </style>
+{# Google tag (gtag.js). These pages are otherwise script-free by design --
+   see the design doc -- and this stays the one exception: it is guarded on
+   hostname, appended asynchronously, and nothing on the page waits for it.
+   Without it every ADP page, which is most of what a search engine sees of
+   this site, would be invisible in analytics. #}
+<script>
+if (location.hostname === 'espnfantasydraft.com') {
+  var s = document.createElement('script')
+  s.async = true
+  s.src = 'https://www.googletagmanager.com/gtag/js?id=G-YP3EKCMQJJ'
+  document.head.appendChild(s)
+  window.dataLayer = window.dataLayer || []
+  function gtag(){dataLayer.push(arguments)}
+  window.gtag = gtag
+  gtag('js', new Date())
+  gtag('config', 'G-YP3EKCMQJJ')
+}
+</script>
 </head>
 <body>
 <header class="bar">

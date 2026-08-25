@@ -244,7 +244,12 @@ def test_the_index_lists_every_player_with_provenance(corpus, board):
     assert 'href="/adp/dandre-swift"' in body
     assert "Amon-Ra St. Brown" in html.unescape(body)
     assert '<link rel="canonical" href="https://espnfantasydraft.com/adp"' in body
-    assert "<script" not in body.replace('<script type="application/ld+json">', "")
+    # These pages carry no application JavaScript: nothing to hydrate, nothing
+    # the content waits on. What is allowed is structured data, which is not
+    # code, and the one analytics tag, which appends its own script node and
+    # blocks nothing. Anything else appearing here is a regression.
+    assert body.count("<script") == 3, "an unexpected script reached the page"
+    assert body.count('<script type="application/ld+json">') == 2
 
 
 def test_a_player_page_states_his_figures(corpus, board):
@@ -448,3 +453,20 @@ def test_a_depth_chart_team_still_beats_espns(corpus, board):
     d = seo.build_adp(board)
     star = next(p for p in d["players"] if p["player_id"] == "star")
     assert star["team"] == "CHI"
+
+
+def test_the_analytics_tag_is_on_the_server_rendered_pages(corpus, board):
+    """The ADP pages are most of what a search engine sees of this site, and
+    they are not the SPA -- a tag in `web/index.html` alone would leave every
+    one of them uncounted."""
+    c = _client(board)
+    for path in ("/adp", "/adp/dandre-swift", "/adp/round/1", "/adp/rb"):
+        body = c.get(path).text
+        assert "G-YP3EKCMQJJ" in body, f"no analytics tag on {path}"
+
+
+def test_analytics_does_not_fire_off_the_production_hostname(corpus, board):
+    """A local dev server, a vite preview and this suite's own screenshot runs
+    would otherwise report themselves as traffic."""
+    body = _client(board).get("/adp").text
+    assert "location.hostname === 'espnfantasydraft.com'" in body
