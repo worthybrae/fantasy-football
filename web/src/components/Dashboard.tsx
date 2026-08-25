@@ -68,6 +68,10 @@ function byUrgency(a: UpcomingDraft, b: UpcomingDraft): number {
   return Date.parse(a.draft_at) - Date.parse(b.draft_at)
 }
 
+function isMock(league: UpcomingDraft): boolean {
+  return (league.name ?? '').toLowerCase().includes('mock')
+}
+
 /** The league's shape -- "8 teams · Snake" -- for the card's top-right. The
  *  team name is not here: it is yours, and it goes under the league's name
  *  where a possessive belongs, not in the corner with the format. */
@@ -92,12 +96,20 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
   // the bar says nothing rather than "0 mock rooms open".
   const [roomCount, setRoomCount] = useState<number | null>(null)
 
-  // TWO LISTS, NOT ONE SORTED ONE. "Drafting now" and "drafting on Sunday"
-  // are different questions -- one is something to do this minute, the other
-  // is something to plan around -- and a single column ordered by urgency
-  // made the reader find the boundary themselves every time it moved.
-  const live = leagues.filter((l) => l.live)
-  const upcoming = leagues.filter((l) => !l.live).sort(byUrgency)
+  // TWO ROWS: LEAGUES, THEN MOCKS. A mock room you have taken a seat in
+  // arrives in the same ESPN list as your real leagues, but it is a different
+  // kind of thing -- free, disposable, one of a hundred like it -- and it
+  // belongs with the lobby it came from, in the lobby's own card, rather
+  // than between your leagues wearing a league's card. Mock is read off the
+  // name because ESPN's payload carries no flag (its lobby leagues are all
+  // named "... Mock"); a real league that happens to have mock in its name
+  // lands in the mock row, nothing worse.
+  const real = leagues.filter((l) => !isMock(l))
+  const mocks = leagues.filter(isMock)
+  // Live first, then soonest: one list, because a reader has two or three
+  // of these and the boundary between "now" and "Sunday" is the live dot.
+  const live = real.filter((l) => l.live)
+  const upcoming = real.filter((l) => !l.live).sort(byUrgency)
   const soonest = upcoming[0] ?? null
   const soonestSeconds = soonest === null
     ? null : secondsUntil(soonest.draft_at, Date.now())
@@ -137,22 +149,22 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
         <span className="draft-topbar-title"><Logo /> ESPN Draft Assist</span>
         <span className="draft-topbar-sep" aria-hidden="true" />
         {/* THE SAME TAB STRIP THE ROOM HAS, in the same slot, carrying this
-            page's two views. Drafts is where a signed-in reader lands and is
+            page's views. Home is where a signed-in reader lands and is
             marked active on arrival -- the strip states which view you are in
             rather than offering one nameless page and a link off it, which is
             what "Archive on its own" was.
 
-            Drafts links to `/` rather than doing nothing, so the active tab
+            Home links to `/` rather than doing nothing, so the active tab
             behaves like a tab: clicking it reloads the view you are in, and
             arriving here from the archive lands on it already selected. */}
         <nav className="draft-topbar-tabs" aria-label="Views">
-          <Link className="draft-tab is-active" to="/" aria-current="page">Drafts</Link>
+          <Link className="draft-tab is-active" to="/" aria-current="page">Home</Link>
           <Link className="draft-tab" to="/archive">Data</Link>
           <Link className="draft-tab" to="/live">Live</Link>
         </nav>
         <span className="draft-topbar-sep" aria-hidden="true" />
         <span className="draft-topbar-league">
-          {leagues.length === 1 ? '1 league' : `${leagues.length} leagues`}
+          {real.length === 1 ? '1 league' : `${real.length} leagues`}
           {roomCount !== null && ` · ${roomCount} mock rooms open`}
         </span>
         <span className="draft-topbar-spacer" />
@@ -165,29 +177,29 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
           column their error belongs to. */}
       {error !== null && <p className="db-error">{error}</p>}
 
-      {/* THREE SECTIONS, STACKED, EACH A ROW OF CARDS. They were three fixed
+      {/* TWO SECTIONS, STACKED, EACH A ROW OF CARDS. They were three fixed
           columns, which is the wrong shape for what they hold: a reader has
-          two or three live rooms, a handful of scheduled drafts and twenty-odd
-          open mock rooms, so two columns ran dry a fifth of the way down while
-          the third scrolled past the fold. Stacked, each section is exactly as
-          tall as it needs to be and every card gets the full width of the page
-          to be legible in -- which is also what stops a league name being cut
-          off mid-word.
+          a handful of leagues and twenty-odd open mock rooms, so two columns
+          ran dry a fifth of the way down while the third scrolled past the
+          fold. Stacked, each section is exactly as tall as it needs to be
+          and every card gets the full width of the page to be legible in --
+          which is also what stops a league name being cut off mid-word.
 
-          One card shape throughout: a clock, what the draft is, and the way
-          in. What changes between sections is what the clock says. */}
+          One card shape per row: a clock, what the draft is, and the way in.
+          A league that is drafting now leads the row with the live dot where
+          its clock would be; the rest follow by how soon. */}
       <div className="db-secs">
         <section className="db-sec">
           <div className="db-sec-head">
             <h2 className="db-sec-title">
               {live.length > 0 && <span className="db-dot" aria-hidden="true" />}
-              Drafting now
+              Leagues
             </h2>
-            {live.length > 0 && <span className="mono db-sec-count">{live.length}</span>}
+            {real.length > 0 && <span className="mono db-sec-count">{real.length}</span>}
           </div>
 
-          {live.length === 0 ? (
-            <p className="db-empty">No room of yours is picking right now.</p>
+          {real.length === 0 ? (
+            <p className="db-empty">No leagues on this account.</p>
           ) : (
             <ul className="db-cards">
               {live.map((league) => (
@@ -219,22 +231,6 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
                   </button>
                 </li>
               ))}
-            </ul>
-          )}
-        </section>
-
-        <section className="db-sec">
-          <div className="db-sec-head">
-            <h2 className="db-sec-title">Upcoming drafts</h2>
-            {upcoming.length > 0 && (
-              <span className="mono db-sec-count">{upcoming.length}</span>
-            )}
-          </div>
-
-          {upcoming.length === 0 ? (
-            <p className="db-empty">Nothing on your ESPN calendar.</p>
-          ) : (
-            <ul className="db-cards">
               {upcoming.map((league) => {
                 const count = countdownTo(secondsUntil(league.draft_at, now))
                 return (
@@ -263,55 +259,32 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
                         two days out comes back 502 (api/drafts.py's
                         draft_token) -- so the control is shown but never
                         clickable here, and the moment ESPN opens the room
-                        the poll moves the card up to Drafting now, where the
-                        live button is.
+                        the poll moves the card to the front of the row,
+                        where the live button is.
 
-                        Two locks, told apart by money. A REAL league's draft
-                        is the paid feature, so its button wears the gold and
-                        the dollar mark -- the one thing on this page allowed
-                        to look like a prize. A lobby mock is free, so its
-                        button is the same lock without the price. Mock is
-                        read off the name because ESPN's payload carries no
-                        flag (its lobby leagues are all named "... Mock");
-                        a real league that happens to have mock in its name
-                        loses the gold, nothing more. */}
+                        A REAL league's draft is the paid feature, so its
+                        button wears the gold and the dollar mark -- the one
+                        thing on this page allowed to look like a prize. The
+                        paywall lives INSIDE the room (DraftRoom): a reader
+                        gets the board, the clock and the ranking before
+                        being asked for anything, which is a better place to
+                        ask than a list of leagues they have not seen this
+                        tool work on yet. */}
                     <div className="db-league-foot">
-                      {(league.name ?? '').toLowerCase().includes('mock') ? (
-                        // A mock's waiting room already exists before the
-                        // draft does -- seats, countdown, who is in -- so
-                        // the card opens it rather than sitting locked. The
-                        // draft itself still starts on ESPN's clock; the
-                        // waiting room hands the reader in when it does.
-                        <button
-                          type="button"
-                          className="db-go db-league-go db-go-view"
-                          onClick={() => onOpenRoom(league.league_id)}
-                        >
-                          View the room
-                        </button>
-                      ) : (
-                        // Locked because ESPN has not opened the room, and
-                        // for no other reason. The paywall lives INSIDE the
-                        // room now (DraftRoom): a reader gets the board, the
-                        // clock and the ranking before being asked for
-                        // anything, which is a better place to ask than a
-                        // list of leagues they have not seen this tool work
-                        // on yet.
-                        <button
-                          type="button"
-                          className="db-go db-league-go db-go-paid"
-                          disabled
-                          title="The room opens when ESPN starts the draft."
-                        >
-                          <span className="db-paid-coin" aria-hidden="true">
-                            <svg viewBox="0 0 24 24">
-                              <line x1="12" y1="3" x2="12" y2="21" />
-                              <path d="M16.5 6.5H10a3 3 0 0 0 0 6h4a3 3 0 0 1 0 6H7" />
-                            </svg>
-                          </span>
-                          Enter the room
-                        </button>
-                      )}
+                      <button
+                        type="button"
+                        className="db-go db-league-go db-go-paid"
+                        disabled
+                        title="The room opens when ESPN starts the draft."
+                      >
+                        <span className="db-paid-coin" aria-hidden="true">
+                          <svg viewBox="0 0 24 24">
+                            <line x1="12" y1="3" x2="12" y2="21" />
+                            <path d="M16.5 6.5H10a3 3 0 0 0 0 6h4a3 3 0 0 1 0 6H7" />
+                          </svg>
+                        </span>
+                        Enter the room
+                      </button>
                     </div>
                   </li>
                 )
@@ -320,7 +293,14 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
           )}
         </section>
 
-        <MockLobby onOpen={onOpenRoom} now={now} onCount={setRoomCount} />
+        <MockLobby
+          onOpen={onOpenRoom}
+          seated={mocks}
+          onEnter={join}
+          joining={joining}
+          now={now}
+          onCount={setRoomCount}
+        />
       </div>
     </main>
   )

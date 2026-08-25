@@ -188,7 +188,7 @@ export default function WaitingRoom({ leagueId, season, onJoin }: {
             meta and the countdown pill on this same bar. Drafts stays the
             active tab -- a waiting room is part of getting into a draft. */}
         <nav className="draft-topbar-tabs" aria-label="Views">
-          <Link className="draft-tab is-active" to="/" aria-current="page">Drafts</Link>
+          <Link className="draft-tab is-active" to="/" aria-current="page">Home</Link>
           <Link className="draft-tab" to="/archive">Data</Link>
           <Link className="draft-tab" to="/live">Live</Link>
         </nav>

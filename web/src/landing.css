@@ -982,7 +982,7 @@
 }
 
 /* -- YOUR LEAGUES (Dashboard.tsx) ---------------------------------------
-   The cards in Drafting now and Upcoming drafts. Same `.db-card` base as
+   The cards in the Leagues row. Same `.db-card` base as
    the lobby's cards, but these are the two or three rooms that are yours,
    so each one gets room to breathe and one clear hierarchy: when, then
    what, then whose, then the way in across the whole foot of the card. */
@@ -1327,11 +1327,56 @@
   }
 }
 
-.ml-tier {
+/* The corner of a card you are seated in. Quiet while the room waits --
+   the same small caps the tier badge used to wear -- and the page's live
+   dot in the accent once it is picking, set exactly as the leagues row
+   says "Drafting now", so live means one thing on this page. */
+.ml-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   font-size: 9.5px;
+  font-weight: 700;
   color: var(--text-3);
+}
+
+.ml-mark.is-live {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: var(--accent);
+}
+
+.ml-mark.is-live .db-dot {
+  width: 7px;
+  height: 7px;
+}
+
+/* A seated room the lobby no longer lists has no seat count to draw; your
+   team's name stands where the pips would. */
+.ml-team {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+
+/* Your rooms, ahead of the lobby's. A gap below rather than a rule: it is
+   the same list, with yours at the front. */
+.ml-seated {
+  margin-bottom: var(--space-3);
+}
+
+/* A seated room that is picking lights its card the way a live league does. */
+.db-card.is-live {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: linear-gradient(160deg,
+              color-mix(in srgb, var(--accent) 11%, var(--bg-1)) 0%,
+              var(--bg-1) 55%);
 }
 
 /* -- states ------------------------------------------------------------- */

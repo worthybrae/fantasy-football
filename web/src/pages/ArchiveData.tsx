@@ -84,7 +84,7 @@ export default function ArchiveData() {
         <Link to="/" className="draft-topbar-title"><Logo /> ESPN Draft Assist</Link>
         <span className="draft-topbar-sep" aria-hidden="true" />
         <nav className="draft-topbar-tabs" aria-label="Views">
-          <Link className="draft-tab" to="/">Drafts</Link>
+          <Link className="draft-tab" to="/">Home</Link>
           <Link className="draft-tab is-active" to="/archive" aria-current="page">Data</Link>
           <Link className="draft-tab" to="/live">Live</Link>
         </nav>

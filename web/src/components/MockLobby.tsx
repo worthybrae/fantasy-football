@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { fetchMockRooms, type MockRoom } from '../api'
-import { countdownTo } from '../lib/countdown'
+import { fetchMockRooms, type MockRoom, type UpcomingDraft } from '../api'
+import { countdownTo, secondsUntil } from '../lib/countdown'
 
 // ESPN's public mock-draft lobby, as rooms you can take a seat in.
 //
@@ -12,7 +12,11 @@ import { countdownTo } from '../lib/countdown'
 // which is the whole difference between "go and do this on ESPN" and a button.
 //
 // NOT the same thing as /mocks, which is the boards the farm has already
-// played and recorded. These are rooms nobody has drafted in yet.
+// played and recorded. These are rooms nobody has drafted in yet -- plus,
+// pinned at the front, the ones YOU have a seat in: drafting now first, then
+// waiting to start, then everything open. Same card for all three, because
+// they are the same kind of thing at three moments; what changes is the
+// corner mark and the button.
 
 // The lobby turns over fast -- rooms fill, rooms start, new ones appear every
 // few minutes -- and the seat counts on these cards move while somebody is
@@ -118,6 +122,26 @@ function shapeLabel(room: MockRoom): string {
     .filter(Boolean).join(' ')
 }
 
+/** The same label for a room you are seated in, from ESPN's league record
+ *  (teams, draft type) plus the lobby's own row for scoring when the lobby
+ *  still lists it. A room the lobby has dropped -- full, or already
+ *  drafting -- knows two things about itself and says two. */
+function seatedLabel(league: UpcomingDraft, room: MockRoom | undefined): string {
+  return [league.teams ? `${league.teams}-team` : null,
+          room?.scoring ?? null,
+          league.draft_type ? league.draft_type.toLowerCase() : null]
+    .filter(Boolean).join(' ') || league.name || 'Mock draft'
+}
+
+// Live first, then soonest to start, then the ones with no date at all.
+function bySeatUrgency(a: UpcomingDraft, b: UpcomingDraft): number {
+  if (a.live !== b.live) return a.live ? -1 : 1
+  if (a.draft_at === null || b.draft_at === null) {
+    return a.draft_at === b.draft_at ? 0 : (a.draft_at === null ? 1 : -1)
+  }
+  return Date.parse(a.draft_at) - Date.parse(b.draft_at)
+}
+
 // THE FILTERS ARE BUILT FROM WHAT IS OPEN, not from a list of everything ESPN
 // has ever served. The lobby at 3am is a different lobby from the one at 8pm --
 // sizes come and go, auctions appear in batches -- and a pill for a shape no
@@ -150,10 +174,21 @@ function optionsFor(rooms: MockRoom[], facet: Facet): string[] {
     : values.sort()
 }
 
-export default function MockLobby({ onOpen, now, onCount }: {
+export default function MockLobby({ onOpen, seated, onEnter, joining, now, onCount }: {
   /** Opens the room's waiting room -- seats, countdown, who is in. Nothing is
    *  committed by looking: the seat is taken there, by clicking one. */
   onOpen: (leagueId: string) => void
+  /** The mock rooms this account already holds a seat in, from the same
+   *  ESPN league list the leagues row is drawn from. Pinned ahead of the
+   *  lobby, and never filtered out: a room you are in is not a room you
+   *  are choosing between. */
+  seated: UpcomingDraft[]
+  /** Walk into a seated room that is drafting: mints the token and opens
+   *  the board, exactly as a league's "Enter the room" does. */
+  onEnter: (league: UpcomingDraft) => void
+  /** Which room a mint is in flight for, so its button says so and the
+   *  others wait. Owned by the page: one join at a time across both rows. */
+  joining: string | null
   /** The page's own clock (Dashboard owns the single interval). */
   now: number
   /** How many rooms this read found, for the top bar to state. Reported up
@@ -222,11 +257,25 @@ export default function MockLobby({ onOpen, now, onCount }: {
     return () => clearInterval(id)
   }, [read])
 
-  const shown = useMemo(() => (rooms ?? []).filter((room) =>
+  // The lobby's row for each seated room, if it still has one: that is where
+  // the seat count lives, and ESPN's league record carries none.
+  const byId = useMemo(() => {
+    const map = new Map<string, MockRoom>()
+    for (const room of rooms ?? []) map.set(room.league_id, room)
+    return map
+  }, [rooms])
+  const pinned = useMemo(() => [...seated].sort(bySeatUrgency), [seated])
+  const seatedIds = useMemo(() => new Set(seated.map((l) => l.league_id)), [seated])
+
+  // A room you are seated in is drawn once, at the front -- not again in the
+  // lobby's own order as a room to consider joining.
+  const others = useMemo(() => (rooms ?? []).filter((room) =>
+    !seatedIds.has(room.league_id)), [rooms, seatedIds])
+  const shown = useMemo(() => others.filter((room) =>
     FACETS.every((facet) => {
       const want = filters[facet]
       return want === null || facetValue(room, facet) === want
-    })), [rooms, filters])
+    })), [others, filters])
 
   const pages = Math.max(1, Math.ceil(shown.length / PAGE_SIZE))
   // A filter that shortens the list can leave a reader on a page that no
@@ -241,16 +290,19 @@ export default function MockLobby({ onOpen, now, onCount }: {
     setPage(0)
   }, [])
 
-  const narrowed = rooms !== null && shown.length !== rooms.length
+  const narrowed = rooms !== null && shown.length !== others.length
 
   return (
     <section className="db-sec">
       <div className="db-sec-head">
-        <h2 className="db-sec-title">Open mock rooms</h2>
+        <h2 className="db-sec-title">
+          {pinned.some((l) => l.live) && <span className="db-dot" aria-hidden="true" />}
+          Mock drafts
+        </h2>
         {rooms !== null && (
           <span className="mono db-sec-count">
-            {narrowed ? `${shown.length} of ${rooms.length}`
-              : total > rooms.length ? `${rooms.length} of ${total}`
+            {narrowed ? `${shown.length} of ${others.length}`
+              : total > rooms.length ? `${others.length} of ${total}`
                 : shown.length}
           </span>
         )}
@@ -269,14 +321,92 @@ export default function MockLobby({ onOpen, now, onCount }: {
         </span>
       </div>
 
+      {/* YOUR ROOMS FIRST. The lobby card, with the corner saying what the
+          lobby's cards leave blank: this one is yours, and whether it is
+          picking yet. Drafting now takes the page's live dot and the filled
+          button, because it is the one card here you can walk into this
+          minute; a seat still waiting keeps the quiet button that opens
+          the waiting room. Above the filters and outside the pager, since
+          neither is a way of choosing between rooms you are already in. */}
+      {pinned.length > 0 && (
+        <ul className="db-cards ml-seated">
+          {pinned.map((league) => {
+            const room = byId.get(league.league_id)
+            const count = league.live ? null
+              : countdownTo(secondsUntil(league.draft_at, now))
+            const open = room && room.league_size !== null
+              ? Math.max(0, room.league_size - room.teams_joined) : null
+            return (
+              <li className={`db-card${league.live ? ' is-live' : ''}`} key={league.league_id}>
+                <div className="db-card-top">
+                  <span className={`mono db-card-when${league.live ? ' is-live' : ''}${count?.imminent ? ' is-soon' : ''}`}>
+                    {league.live ? 'Now' : count?.text ?? '—'}
+                  </span>
+                  {league.live ? (
+                    <span className="ml-mark is-live">
+                      <span className="db-dot" aria-hidden="true" />
+                      Drafting now
+                    </span>
+                  ) : (
+                    <span className="ml-mark">Your seat</span>
+                  )}
+                </div>
+                <p className="db-card-name">{seatedLabel(league, room)}</p>
+                <div className="db-card-foot">
+                  {room ? (
+                    <span className="ml-seat-line">
+                      <Seats room={room} change={changes.get(room.league_id) ?? null} />
+                      <span className="mono ml-count">
+                        <span className="ml-count-in">{room.teams_joined} in</span>
+                        {open !== null && (
+                          <>
+                            <span className="ml-count-sep" aria-hidden="true">·</span>
+                            <span className={`ml-count-open${open === 0 ? ' is-full' : ''}`}>
+                              {open === 0 ? 'full' : `${open} open`}
+                            </span>
+                          </>
+                        )}
+                      </span>
+                    </span>
+                  ) : (
+                    // Off the lobby's list -- full, or already picking -- so
+                    // the seats are not knowable from here. Your own team's
+                    // name is what there is to say instead.
+                    <span className="ml-seat-line ml-team">{league.team_name}</span>
+                  )}
+                  {league.live ? (
+                    <button
+                      type="button"
+                      className="db-go"
+                      onClick={() => onEnter(league)}
+                      disabled={joining !== null || !league.team_id}
+                    >
+                      {joining === league.league_id ? 'Joining…' : 'Enter draft'}
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="db-join"
+                      onClick={() => onOpen(league.league_id)}
+                    >
+                      View room
+                    </button>
+                  )}
+                </div>
+              </li>
+            )
+          })}
+        </ul>
+      )}
+
       {/* One row of pills per thing worth narrowing by, each built from the
           rooms actually open right now (see optionsFor). A pill toggles: a
           second click on the active one is how a reader clears it, which is
           also why there is no "All" pill to hunt for. */}
-      {rooms !== null && rooms.length > 0 && (
+      {others.length > 0 && (
         <div className="ml-filters">
           {FACETS.map((facet) => {
-            const options = optionsFor(rooms, facet)
+            const options = optionsFor(others, facet)
             // Nothing to choose between is not a filter: one value means every
             // open room shares it, and a pill that can only be on is furniture.
             if (options.length < 2) return null
@@ -300,8 +430,8 @@ export default function MockLobby({ onOpen, now, onCount }: {
       )}
 
       {rooms === null ? (
-        <p className="db-empty">Reading ESPN’s lobby…</p>
-      ) : rooms.length === 0 ? (
+        pinned.length === 0 && <p className="db-empty">Reading ESPN’s lobby…</p>
+      ) : others.length === 0 ? (
         // Both cases at once, and deliberately: ESPN unreachable and a lobby
         // between batches look identical to a reader, and both are fixed by
         // the same thing, which is waiting a minute.
@@ -323,9 +453,6 @@ export default function MockLobby({ onOpen, now, onCount }: {
                     <span className={`mono db-card-when${count?.imminent ? ' is-soon' : ''}`}>
                       {count?.text ?? '—'}
                     </span>
-                    {room.experience && (
-                      <span className="ml-tier">{room.experience.toLowerCase()}</span>
-                    )}
                   </div>
                   <p className="db-card-name">{shapeLabel(room) || 'Mock draft'}</p>
                   <div className="db-card-foot">

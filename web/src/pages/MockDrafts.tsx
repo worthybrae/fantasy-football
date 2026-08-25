@@ -351,7 +351,7 @@ export default function MockDrafts() {
             down on the way from the archive to one of its boards. Archive
             is the one lit: this is its reading room. */}
         <nav className="draft-topbar-tabs" aria-label="Views">
-          <Link className="draft-tab" to="/">Drafts</Link>
+          <Link className="draft-tab" to="/">Home</Link>
           <Link className="draft-tab is-active" to="/archive" aria-current="page">Data</Link>
           <Link className="draft-tab" to="/live">Live</Link>
         </nav>
