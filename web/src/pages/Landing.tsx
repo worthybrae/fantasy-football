@@ -7,7 +7,7 @@ import { connectEspnAccount, connectWithToken, fetchConnectProgress, fetchLiveSt
          type ConnectProgress, type LiveState, type TokenConnectParams,
          type UpcomingDrafts } from '../api'
 import { readAccount, rememberAccount } from '../lib/accountCache'
-import SetupWizard, { ACCOUNT_CHANNEL } from '../components/SetupWizard'
+import SetupWizard, { ACCOUNT_CHANNEL, CHANNEL_ACK, CHANNEL_CONNECTED } from '../components/SetupWizard'
 import ConnectScreen from '../components/ConnectScreen'
 import Benefits from '../components/Benefits'
 import DemoRoom from '../components/DemoRoom'
@@ -16,6 +16,32 @@ import Dashboard, { previewingSignedOut } from '../components/Dashboard'
 // This page's own stylesheet, not App.css: see the header comment in it for
 // why, and for why every class below is `lp-` prefixed.
 import '../landing.css'
+
+// How long the popup waits for a wizard to claim its connect before deciding
+// there is no wizard and settling in as the app. A BroadcastChannel hop is
+// milliseconds; the margin is for a wizard tab the browser has throttled.
+const ACK_GRACE_MS = 1500
+
+function announceConnect(): void {
+  if (!('BroadcastChannel' in window)) return
+  let channel: BroadcastChannel
+  try {
+    channel = new BroadcastChannel(ACCOUNT_CHANNEL)
+  } catch {
+    return
+  }
+  const settle = window.setTimeout(() => channel.close(), ACK_GRACE_MS)
+  channel.onmessage = (event: MessageEvent) => {
+    if (event.data !== CHANNEL_ACK) return
+    window.clearTimeout(settle)
+    channel.close()
+    if (!window.opener) return
+    try {
+      window.close()
+    } catch { /* a browser that will not let a popup close itself */ }
+  }
+  channel.postMessage(CHANNEL_CONNECTED)
+}
 
 // The front door, and the bookmarklet onboarding.
 //
@@ -218,9 +244,22 @@ export default function Landing() {
           // Tell any tab sitting on the setup wizard that the click landed.
           // The wizard confirms with its own probe -- this only collapses
           // the seconds it would otherwise spend waiting on the next poll.
-          try {
-            new BroadcastChannel(ACCOUNT_CHANNEL).postMessage('connected')
-          } catch { /* no BroadcastChannel here; the wizard's poll covers it */ }
+          //
+          // Then listen for its answer. This window is the popup the
+          // bookmarklet opened from ESPN, and if a wizard is out there, the
+          // user is mid-setup with the app already open in a tab: a second
+          // copy of it in a second window is the thing they did not ask for
+          // and cannot tell from the first. A wizard that hears the announce
+          // acks; an ack within the grace period means "the tab you started
+          // in has this now", and this window gets out of the way. Silence
+          // means no wizard -- the bookmark clicked on its own, with the app
+          // closed -- and this window IS the app, so it stays.
+          //
+          // `window.opener` is the guard on closing at all: only a window
+          // something else opened may close itself, and only that window is
+          // a duplicate. A tab the user navigated here by hand has no opener
+          // and never closes.
+          announceConnect()
         })
         .catch((e) => setError(e instanceof Error ? e.message : String(e)))
         .finally(() => setConnecting(false))

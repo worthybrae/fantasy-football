@@ -25,10 +25,31 @@ import { previewingSignedOut } from './Dashboard'
 // step one has completed the setup, whatever page of it they were looking
 // at, and holding them to the script would be the wizard refusing to notice
 // its own success.
+//
+// The channel is two-way. The popup the bookmarklet opens is a second copy
+// of this app in a second WINDOW, and left alone it stays open as a second
+// dashboard next to the tab the user was reading -- two Draft Assistants and
+// nothing saying which is the real one. So when the popup announces its
+// connect, this wizard answers `ack`, and a popup that hears an ack closes
+// itself (pages/Landing.tsx). No wizard listening -- the bookmark clicked
+// with the app shut -- means no ack, and the popup stays as the app, which
+// is the right answer then.
+//
+// Every step is shown as well as told: a short looping recording of the real
+// thing happening in a real browser, because two of the three steps happen
+// in the browser's own chrome (the bookmarks bar, the drop onto it) where no
+// amount of prose lands as fast as seeing the cursor do it. The clips are
+// screen recordings, not Playwright's -- Playwright records the viewport and
+// never the chrome. scripts/encode_setup_clips.sh turns a fresh recording
+// into the webm + poster pair each step names.
 
 // The channel Landing's session-connect posts on when a bookmarklet popup
 // lands an account. One name, both ends -- see the post in pages/Landing.tsx.
 export const ACCOUNT_CHANNEL = 'draft-assistant-account'
+// What travels on it. The popup says CONNECTED once its POST has landed; a
+// wizard that hears it says ACK; a popup that hears ACK closes.
+export const CHANNEL_CONNECTED = 'connected'
+export const CHANNEL_ACK = 'ack'
 
 const POLL_MS = 2500
 
@@ -77,6 +98,38 @@ function Spinner() {
     <svg className="sw-spin" viewBox="0 0 24 24" aria-hidden="true">
       <path d="M12 3a9 9 0 0 1 9 9" />
     </svg>
+  )
+}
+
+// A reader who has asked the OS for less motion gets the poster frame, not
+// a looping video. Read once: it is a system setting, and the wizard lives
+// for a couple of minutes.
+function prefersReducedMotion(): boolean {
+  return typeof window !== 'undefined' && !!window.matchMedia
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+}
+
+// One step's recording. `name` is the pair of files in web/public
+// (`setup-<name>.webm`, `setup-<name>.jpg`); `label` is what a screen
+// reader gets instead of the pixels, so it has to say what HAPPENS in the
+// clip, not what it is. Muted and looping, so it reads as an illustration
+// rather than a player -- there is nothing to play, pause or seek.
+function StepClip({ name, label, ratio }: { name: string; label: string; ratio: string }) {
+  const still = prefersReducedMotion()
+  return (
+    <figure className="sw-clip" style={{ aspectRatio: ratio }}>
+      <video
+        className="sw-clip-video"
+        src={`/setup-${name}.webm`}
+        poster={`/setup-${name}.jpg`}
+        autoPlay={!still}
+        muted
+        loop
+        playsInline
+        preload={still ? 'none' : 'auto'}
+        aria-label={label}
+      />
+    </figure>
   )
 }
 
@@ -132,10 +185,14 @@ export default function SetupWizard({ onClose, onConnected, onDone }: SetupWizar
     // The popup's tab announcing the connect it just landed. Answer by
     // probing NOW rather than trusting the message with the state itself:
     // the server is the authority on whether this browser holds the cookie.
+    // And answer the popup itself: the ack is what lets it close instead of
+    // staying open as a second dashboard (see the header comment).
     let channel: BroadcastChannel | null = null
     if ('BroadcastChannel' in window) {
       channel = new BroadcastChannel(ACCOUNT_CHANNEL)
-      channel.onmessage = () => {
+      channel.onmessage = (event: MessageEvent) => {
+        if (event.data !== CHANNEL_CONNECTED) return
+        channel?.postMessage(CHANNEL_ACK)
         window.clearTimeout(timer)
         if (!doneRef.current) probe()
       }
@@ -171,6 +228,16 @@ export default function SetupWizard({ onClose, onConnected, onDone }: SetupWizar
 
   useEffect(() => {
     primaryRef.current?.focus()
+  }, [step])
+
+  // The click lands in ANOTHER window, and the popup it opened closes
+  // itself -- so the user is looking at ESPN when this tab finishes. The
+  // tab's title is the one thing of this page they can see from there.
+  useEffect(() => {
+    if (step !== 'done') return
+    const was = document.title
+    document.title = `✓ Connected · ${was}`
+    return () => { document.title = was }
   }, [step])
 
   const back = useCallback(() => {
@@ -223,6 +290,8 @@ export default function SetupWizard({ onClose, onConnected, onDone }: SetupWizar
                 <p className="sw-copy sw-copy-dim">
                   It is only a bookmark. Nothing runs until you click it.
                 </p>
+                <StepClip name="bar" ratio="960 / 336"
+                          label="The bookmarks bar appearing under the address bar after the shortcut is pressed." />
                 <div className="sw-actions">
                   <button ref={primaryRef} type="button" className="sw-next"
                           onClick={() => setStep('install')}>
@@ -242,6 +311,10 @@ export default function SetupWizard({ onClose, onConnected, onDone }: SetupWizar
                   {canDrag && <span className="sw-chip-hint">← drag this to your bookmarks bar</span>}
                 </div>
                 <BookmarkCopy idPrefix="sw" />
+                {canDrag && (
+                  <StepClip name="drag" ratio="850 / 550"
+                            label="The Draft Assistant chip being dragged from this card up onto the bookmarks bar, where it lands as a bookmark." />
+                )}
                 <div className="sw-actions">
                   <button type="button" className="sw-back" onClick={back}>Back</button>
                   <button ref={primaryRef} type="button" className="sw-next"
@@ -257,14 +330,21 @@ export default function SetupWizard({ onClose, onConnected, onDone }: SetupWizar
                 <p className="sw-cap">Step 3 of 3</p>
                 <h2 className="sw-title" id="sw-title">Click the bookmark on ESPN.</h2>
                 <p className="sw-copy">
-                  Open ESPN fantasy and sign in. Any page works. Click{' '}
-                  <span className="sw-chip-mini">🏈 Draft Assistant</span> on
-                  your bookmarks bar. Keep this window open.
+                  Open ESPN fantasy — any page, as long as you’re signed in.
+                  Click <span className="sw-chip-mini">🏈 Draft Assistant</span> on
+                  your bookmarks bar.
+                </p>
+                <p className="sw-copy sw-copy-dim">
+                  A small Draft Assistant window pops up for a moment; that’s
+                  the connection. Come back here — this tab notices the click
+                  and finishes on its own.
                 </p>
                 <a className="sw-espn" href="https://fantasy.espn.com/"
                    target="_blank" rel="noopener noreferrer">
                   Open ESPN fantasy ↗
                 </a>
+                <StepClip name="click" ratio="960 / 576"
+                          label="On an ESPN fantasy page, the Draft Assistant bookmark is clicked and a small Draft Assistant window opens." />
                 {/* The wizard's whole promise, in one honest row: it is
                     watching, and it will finish itself. */}
                 <p className="sw-listen" role="status" aria-live="polite">
