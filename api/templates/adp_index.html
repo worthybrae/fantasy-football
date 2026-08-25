@@ -13,7 +13,7 @@
 {% for p in players %}
 <tr>
   <td class="n">{{ p.rank }}</td>
-  <td><a href="/adp/{{ p.slug }}">{{ p.name | safe }}</a></td>
+  <td><a href="/adp/{{ p.slug }}">{{ p.name }}</a></td>
   <td><span class="pos">{{ p.position }}</span></td>
   <td>{{ p.team or '—' }}</td>
   <td class="n">{{ '%.1f' % p.adp }}</td>

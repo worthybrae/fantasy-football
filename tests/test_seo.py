@@ -1,5 +1,6 @@
 # tests/test_seo.py
 """The pages a search engine reads: ADP from the corpus, rendered as HTML."""
+import html
 import xml.etree.ElementTree as ET
 
 import duckdb
@@ -158,7 +159,8 @@ def test_the_index_lists_every_player_with_provenance(corpus, board):
     body = r.text
     assert "<title>ESPN Mock Draft ADP 2026 (4-team PPR)" in body
     assert "10 real ESPN mock drafts" in body and "Aug 24, 2026" in body
-    assert 'href="/adp/dandre-swift"' in body and "Amon-Ra St. Brown" in body
+    assert 'href="/adp/dandre-swift"' in body
+    assert "Amon-Ra St. Brown" in html.unescape(body)
     assert '<link rel="canonical" href="https://espnfantasydraft.com/adp"' in body
     assert "<script" not in body.replace('<script type="application/ld+json">', "")
 
@@ -183,10 +185,10 @@ def test_a_player_page_is_the_same_for_a_slug_collision(corpus, board):
 
 def test_round_and_position_pages_filter(corpus, board):
     c = _client(board)
-    r1 = c.get("/adp/round/1").text
+    r1 = html.unescape(c.get("/adp/round/1").text)
     assert "D'Andre Swift" in r1 and "Once Guy" not in r1
     assert 'href="/adp/round/2"' in r1
-    rb = c.get("/adp/rb").text
+    rb = html.unescape(c.get("/adp/rb").text)
     assert "D'Andre Swift" in rb and "Josh Allen" not in rb
     assert "<title>RB ADP" in rb
 

@@ -10,7 +10,7 @@
 <tbody>
 {% for p in players %}
 <tr>
-  <td><a href="/adp/{{ p.slug }}">{{ p.name | safe }}</a></td>
+  <td><a href="/adp/{{ p.slug }}">{{ p.name }}</a></td>
   <td><span class="pos">{{ p.position }}</span></td>
   <td class="n">{{ '%.1f' % p.adp }}</td>
   <td class="n">{{ p.p10 }}–{{ p.p90 }}</td>
