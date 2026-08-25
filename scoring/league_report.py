@@ -130,18 +130,6 @@ def historical_picks(conn, season: int) -> pd.DataFrame:
     adp = adp[adp["season"] == season].copy()
     if picks.empty or adp.empty:
         return pd.DataFrame(columns=PICK_COLUMNS)
-    # `last_pick` bounds how far past the draft's own reach a market rank can
-    # sit before it stops meaning anything (the kicker/defense rule
-    # `pick_value` implements) -- but for a HISTORICAL pick, unlike a live
-    # cell, `market_rank` always names a player who really was drafted, so
-    # the number that bounds it has to be this season's own ADP universe,
-    # not the number of rounds this particular league happened to draft.
-    # A shallow league (this test's 7 rounds) can easily hand its last pick
-    # to a player whose consensus rank sits past its own pick count -- a
-    # real late reach, not a phantom kicker who was never in play -- so
-    # capping at `picks["overall_pick"].max()` would null out exactly the
-    # signal this column exists to show.
-    season_adp_max = float(adp["adp_rank"].max())
     adp = adp.assign(position=adp["position"].replace(_ADP_POSITION_ALIASES))
     adp = adp.assign(key=_match_keys(adp, "adp_name"))
     adp = adp[adp["key"].notna()].sort_values("adp_rank").drop_duplicates("key")
@@ -156,7 +144,16 @@ def historical_picks(conn, season: int) -> pd.DataFrame:
     settings = settings_for(conn, season)
     teams = int(settings.teams) or int(picks["team_id"].nunique())
     picks["round"] = ((picks["overall_pick"].astype(int) - 1) // teams) + 1
-    last_pick = max(int(picks["overall_pick"].max()), season_adp_max)
+    # The draft's OWN last pick, not the widest ADP rank in play -- the
+    # kicker/defense rule (`api/live.py:1177-1178`, ported in `pick_value`)
+    # exists precisely to null a market rank that sits past what this draft
+    # ever reached. Bounding at the ADP column's own max instead would make
+    # the rule unreachable here: every `market_rank` value comes from that
+    # same column, so nothing could ever exceed it. A late, shallow league
+    # can genuinely hand its final pick to a player the market never expected
+    # to go that early -- that pick is supposed to grade as ungraded, not as
+    # an enormous reach.
+    last_pick = int(picks["overall_pick"].max())
     return _with_verdicts(picks, teams, last_pick)
 
 

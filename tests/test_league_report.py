@@ -102,7 +102,12 @@ def test_historical_picks_join_adp_and_names(tmp_path):
     assert first["value"] == pytest.approx(0.0)      # rank floors at 1 for pick 1
     t1 = picks[picks["team_id"] == 1]
     assert (t1["value"].iloc[1:] == 10).all()
-    assert set(picks[picks["team_id"] == 8]["verdict"]) == {"reach"}
+    # Team 8's final pick (overall 56) has seeded ADP rank 66 -- past this
+    # draft's own last pick (56) -- so it exercises the past-the-last-pick
+    # null rule end to end: null value, null verdict, not a giant reach.
+    t8_last = picks[(picks["team_id"] == 8) & (picks["overall_pick"] == 56)].iloc[0]
+    assert pd.isna(t8_last["value"]) and pd.isna(t8_last["verdict"])
+    assert set(picks[picks["team_id"] == 8]["verdict"].dropna()) == {"reach"}
 
 
 def test_historical_picks_is_empty_without_adp_for_that_season(tmp_path):
@@ -161,7 +166,11 @@ def test_draft_grades_rank_teams(tmp_path):
     assert top["worst_pick"]["value"] == pytest.approx(0.0)
     assert top["shape"]["positions"] == {"WR": 4, "RB": 3}
     assert top["shape"]["first_round"]["QB"] is None
-    assert grades[-1]["reaches"] == _settings(2024).rounds
+    # Team 8's final pick is past the draft's own last pick (see
+    # test_historical_picks_join_adp_and_names) and so is ungraded, not a
+    # reach: one fewer graded pick and one fewer reach than a full sweep.
+    assert grades[-1]["reaches"] == _settings(2024).rounds - 1
+    assert grades[-1]["graded_picks"] == _settings(2024).rounds - 1
 
 
 def test_draft_grades_with_no_gradeable_picks():
