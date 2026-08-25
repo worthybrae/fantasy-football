@@ -2517,7 +2517,7 @@ def register_live_routes(app, conn, db_path):
                 # still open -- never nowhere.
                 progress.fail("socket", str(exc),
                               hint="Go back to your ESPN draft tab and click "
-                                   "the Draft Assistant bookmark again -- it "
+                                   "the ESPN Draft Assist bookmark again -- it "
                                    "mints a fresh token.")
 
         thread = threading.Thread(target=pump, daemon=True)
@@ -3505,7 +3505,7 @@ def register_live_routes(app, conn, db_path):
         if not (body.leagueId and body.teamId and body.swid and body.token):
             progress.fail(
                 "token", "the bookmarklet sent an incomplete token",
-                hint="Open your ESPN draft room and click the Draft Assistant "
+                hint="Open your ESPN draft room and click the ESPN Draft Assist "
                      "bookmark from inside it, not from another tab.")
             raise HTTPException(
                 status_code=422,
@@ -3519,7 +3519,7 @@ def register_live_routes(app, conn, db_path):
         except (TypeError, ValueError):
             progress.fail(
                 "token", f"team id {body.teamId!r} is not a number",
-                hint="Open your ESPN draft room and click the Draft Assistant "
+                hint="Open your ESPN draft room and click the ESPN Draft Assist "
                      "bookmark from inside it, not from another tab.")
             raise HTTPException(status_code=422, detail="teamId must be numeric")
         progress.ok("token", f"team {team_id} · season {body.season or '?'}")

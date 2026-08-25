@@ -90,7 +90,7 @@ export function bookmarkAnchor(describedBy?: string): string {
   return "<a class='lp-bookmark' title='Drag me to your bookmarks bar' "
     + described
     + "onclick='return false' href='" + bookmarkletFor(window.location.origin) + "'>"
-    + "<span aria-hidden='true'>🏈</span>&nbsp;Draft&nbsp;Assistant</a>"
+    + "<span aria-hidden='true'>🏈</span>&nbsp;ESPN&nbsp;Draft&nbsp;Assist</a>"
 }
 
 // ---------------------------------------------------------------------------
@@ -219,7 +219,7 @@ export function BookmarkCopy({ idPrefix }: { idPrefix: string }) {
 // told they cannot use.
 export const NO_DRAG_LINE = (
   <>
-    Draft Assistant is a <strong>bookmark that you drag to your browser’s
+    ESPN Draft Assist is a <strong>bookmark that you drag to your browser’s
     bookmarks bar</strong>. Setup needs a desktop browser.
   </>
 )

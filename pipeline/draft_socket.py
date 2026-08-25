@@ -387,7 +387,7 @@ def run_socket_listener(listener, league_id, team_id, swid, token,
             if empty_reconnects >= MAX_EMPTY_RECONNECTS:
                 raise RuntimeError(
                     "could not reconnect to the draft socket -- the draft "
-                    "token may have expired; click the Draft Assistant bookmark "
+                    "token may have expired; click the ESPN Draft Assist bookmark "
                     f"again to mint a fresh one ({exc})") from exc
             if _wait_or_stopped(stop_event, RECONNECT_BACKOFF_SECONDS):
                 return
@@ -437,7 +437,7 @@ def run_socket_listener(listener, league_id, team_id, swid, token,
             if empty_reconnects >= MAX_EMPTY_RECONNECTS:
                 raise RuntimeError(
                     "the draft socket kept dropping without any data -- the "
-                    "draft token may have expired; click the Draft Assistant "
+                    "draft token may have expired; click the ESPN Draft Assist "
                     "bookmark again to mint a fresh one")
         if _wait_or_stopped(stop_event, RECONNECT_BACKOFF_SECONDS):
             return

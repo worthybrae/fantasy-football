@@ -313,7 +313,7 @@ export default function SetupWizard({ onClose, onConnected, onDone }: SetupWizar
                 <BookmarkCopy idPrefix="sw" />
                 {canDrag && (
                   <StepClip name="drag" ratio="850 / 550"
-                            label="The Draft Assistant chip being dragged from this card up onto the bookmarks bar, where it lands as a bookmark." />
+                            label="The ESPN Draft Assist chip being dragged from this card up onto the bookmarks bar, where it lands as a bookmark." />
                 )}
                 <div className="sw-actions">
                   <button type="button" className="sw-back" onClick={back}>Back</button>
@@ -331,11 +331,11 @@ export default function SetupWizard({ onClose, onConnected, onDone }: SetupWizar
                 <h2 className="sw-title" id="sw-title">Click the bookmark on ESPN.</h2>
                 <p className="sw-copy">
                   Open ESPN fantasy — any page, as long as you’re signed in.
-                  Click <span className="sw-chip-mini">🏈 Draft Assistant</span> on
+                  Click <span className="sw-chip-mini">🏈 ESPN Draft Assist</span> on
                   your bookmarks bar.
                 </p>
                 <p className="sw-copy sw-copy-dim">
-                  A small Draft Assistant window pops up for a moment; that’s
+                  A small ESPN Draft Assist window pops up for a moment; that’s
                   the connection. Come back here — this tab notices the click
                   and finishes on its own.
                 </p>
@@ -344,7 +344,7 @@ export default function SetupWizard({ onClose, onConnected, onDone }: SetupWizar
                   Open ESPN fantasy ↗
                 </a>
                 <StepClip name="click" ratio="960 / 576"
-                          label="On an ESPN fantasy page, the Draft Assistant bookmark is clicked and a small Draft Assistant window opens." />
+                          label="On an ESPN fantasy page, the ESPN Draft Assist bookmark is clicked and a small ESPN Draft Assist window opens." />
                 {/* The wizard's whole promise, in one honest row: it is
                     watching, and it will finish itself. */}
                 <p className="sw-listen" role="status" aria-live="polite">

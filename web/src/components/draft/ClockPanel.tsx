@@ -162,7 +162,7 @@ export default function ClockPanel({
             the page that actually hands the bookmarklet over, since App.tsx
             routes one way and nothing else here leaves the room. */}
         <p className="clock-down-message">
-          Click the Draft Assistant bookmarklet again in your ESPN draft tab to
+          Click the ESPN Draft Assist bookmarklet again in your ESPN draft tab to
           reconnect, or <Link to="/">go back to setup</Link>.
         </p>
       </div>

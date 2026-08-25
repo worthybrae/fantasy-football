@@ -458,7 +458,7 @@ function Failed({ progress, error, onRetry, onBack }: ConnectScreenProps) {
             <li>
               <span className="mono cs-step-n">2</span>
               <span>
-                Click the <strong>🏈 Draft Assistant</strong> bookmark again. It mints a
+                Click the <strong>🏈 ESPN Draft Assist</strong> bookmark again. It mints a
                 fresh token.
               </span>
             </li>
