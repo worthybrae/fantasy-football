@@ -221,7 +221,24 @@ export const CellTip = memo(function CellTip(
   }, [playerId])
 
   if (failed) return <div className="ctip-empty">Could not load this player.</div>
-  if (!data) return <div className="ctip-empty">Loading…</div>
+  if (!data) {
+    // A SKELETON OF THE THING BEING FETCHED, not the word "Loading". Every
+    // panel this tip can open is a row of bars over a baseline (see
+    // `.ctip-chart`), so five bars filling in place say "the chart is coming"
+    // in the shape it is coming in -- and, because they move, say it without
+    // a reader having to read anything. The static word sat in an otherwise
+    // motionless box and was indistinguishable from a tooltip that had given
+    // up. The sentence still exists for a screen reader, which cannot see the
+    // bars at all.
+    return (
+      <div className="ctip-loading" role="status">
+        <span className="sr-only">Loading this player…</span>
+        {[0, 1, 2, 3, 4].map((i) => (
+          <span className="ctip-skel" key={i} aria-hidden="true" />
+        ))}
+      </div>
+    )
+  }
   const Body = BODIES[kind]
   return <Body data={data} settings={settings} />
 })

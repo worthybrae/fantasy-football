@@ -1565,6 +1565,56 @@ def test_team_line_quality_serves_the_rank_and_its_four_components(tmp_path):
     assert oline["experience"] == 8.0                   # 2026 - 2018
 
 
+def test_team_line_quality_names_the_five_it_rates(tmp_path):
+    """The rating is an average; these are what it averages. A line ranked
+    21st because one tackle has missed a quarter of his career is a different
+    fact for a manager than a line ranked 21st because all five are rookies,
+    and the score alone cannot tell those apart.
+
+    Field order, not depth-chart order: a reader who knows what a right
+    tackle is finds five rows faster when they are where he expects them.
+    """
+    conn = _seed_card_fixture(tmp_path, snaps=_card_snap_counts(),
+                              depth=_card_depth_charts(),
+                              players=_card_players_with_line())
+    starters = build_profile(conn, "big")["oline"]["starters"]
+
+    assert [s["position"] for s in starters] == ["LT", "LG", "C", "RG", "RT"]
+    assert all(s["name"] for s in starters)
+    one = starters[0]
+    # The count `availability` is the ratio of, carried beside it so the card
+    # can print either.
+    assert one["games"] is not None and one["games_possible"] is not None
+    assert 0.0 <= one["availability"] <= 1.0
+    # And his place among the league's other starters at the same slot, which
+    # is what the card prints: a share means nothing until a reader knows
+    # whether 68% is an ordinary tackle or the third-worst in football. One
+    # team in the fixture, so every man is 1st of 1 at his own slot -- what
+    # this pins is that the pair travels together and is placed WITHIN the
+    # slot, not across all five.
+    assert one["avail_rank"] == 1 and one["avail_rank_of"] == 1
+    assert all((s["avail_rank"] is None) == (s["avail_rank_of"] is None)
+               for s in starters)
+
+
+def test_line_starters_are_empty_rather_than_absent_without_a_units_frame(tmp_path):
+    """`units` is optional: an existing caller that does not pass it, and a
+    database that can rate a line but has no depth chart to name one, both
+    get the rating and an empty list -- never a missing key the card would
+    have to guard, and never a heading over five dashes."""
+    import pandas as pd
+
+    from scoring.oline import line_quality
+    from scoring.profile import team_line_quality
+    conn = _seed_card_fixture(tmp_path, snaps=_card_snap_counts(),
+                              depth=_card_depth_charts(),
+                              players=_card_players_with_line())
+    lq = line_quality(conn, 2026)
+    assert team_line_quality(lq, 2026, "DET", "WR")["starters"] == []
+    assert team_line_quality(lq, 2026, "DET", "WR",
+                             units=pd.DataFrame())["starters"] == []
+
+
 def test_a_defense_gets_no_offensive_line_because_it_would_mean_nothing(tmp_path):
     """A defense's own team's offensive line is a fact about the eleven
     players who leave the field when it comes on. A plausible-looking number
@@ -1653,7 +1703,8 @@ def test_a_defense_reaches_none_of_the_new_code_and_raises_in_none_of_it(tmp_pat
     # the whole dict on purpose -- a key appearing here means the new code DID
     # reach a defense, which is what this test exists to catch.
     assert p["bio"] == {"season": 2026, "birth_date": None, "rookie_season": None,
-                        "age": None, "nfl_season": None, "headshot": None}
+                        "age": None, "nfl_season": None, "height": None,
+                        "weight": None, "headshot": None}
     assert p["seasons"] == [] and p["game_log"] == [] and p["schedule"] == []
 
 

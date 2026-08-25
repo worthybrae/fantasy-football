@@ -106,9 +106,10 @@ def test_board_column_contract(tmp_path):
                 # would be worse than either alone.
                 "season_finishes",
                 # Week-to-week steadiness: the raw coefficient of variation
-                # and its within-position percentile among the players on THIS
-                # board, steadiest highest. Ranked against the board and not
-                # the whole weekly universe on purpose -- see `consistency`.
+                # and its within-position percentile among every measured
+                # player at that position, steadiest highest. The board ranks
+                # against the whole weekly universe rather than against
+                # itself -- the owner's call; see `consistency`.
                 "consistency_cv",
                 "consistency_pct",
                 # nflverse's photo url, carried on the board because the rail
@@ -125,6 +126,13 @@ def test_board_column_contract(tmp_path):
                 # numbers from the same raw espn_proj and must use the same
                 # factor. See scoring/board.projection_scale.
                 "proj_scale",
+                # ESPN's WEEK 1 projection, converted by that same proj_scale.
+                # Display only -- nothing ranks on it: the roster rail prints
+                # a week rather than a season total, because 18.4 reads
+                # against a Sunday a manager has watched and 323 does not.
+                # Null for a player ESPN does not project that week, which is
+                # a dash on the rail rather than a zero.
+                "proj_wk1",
                 "vor", "tier", "market_rank", "market_spread", "market_sources",
                 # espn_id rides onto the board so a live draft pick, which
                 # arrives as an ESPN player id and nothing else, resolves by
@@ -1401,6 +1409,10 @@ def test_consistency_ranks_against_the_supplied_pool_only():
     Here the two draftable backs sit at the steady end of a field padded with
     scrubs. Pooled with the scrubs they are 1st and 2nd of six and read as
     identical; against each other they separate.
+
+    The board passes no pool -- ranking against everyone measured is the
+    reading the owner asked for -- so this covers the parameter and the cost
+    of not using it, not what `build_board` does today.
     """
     from scoring.board import consistency
     rows = (_wk_rows("startable_a", 2025, [14, 16] * 5)     # cv 0.07

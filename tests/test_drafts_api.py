@@ -1,0 +1,321 @@
+"""The two routes that let a session join a draft, and the rule about whose."""
+import json
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+import api.drafts as drafts_api
+from pipeline import espn_drafts as drafts
+
+
+@pytest.fixture(autouse=True)
+def _clear_cache():
+    """The draft list is memoised per identity for two minutes. Tests that
+    change what ESPN says must not read the previous test's answer."""
+    drafts_api._CACHE.clear()
+    yield
+    drafts_api._CACHE.clear()
+
+
+def _fetcher(routes):
+    def fetch(url, cookies, headers=None):
+        for key, answer in routes.items():
+            if key in url:
+                return answer
+        return 404, ""
+    return fetch
+
+
+def _entry(league_id, *, name=None, team_id=4, complete=False,
+           date_ms=1_800_000_000_000):
+    return {"typeId": 9, "metaData": {"entry": {
+        "gameId": 1, "seasonId": 2026, "entryId": team_id,
+        "entryMetadata": {"teamName": "My team", "draftComplete": complete},
+        "groups": [{"groupId": league_id, "groupSize": 12,
+                    "groupName": name or f"League {league_id}",
+                    "draftDate": date_ms, "draftStatus": 1,
+                    "draftTypeName": "Snake"}]}}}
+
+
+def _profile(*entries):
+    return json.dumps({"preferences": list(entries)})
+
+
+def _client(fetch, store=None):
+    app = FastAPI()
+    drafts_api.register_draft_routes(app, store=store, fetch=fetch)
+    return TestClient(app)
+
+
+def _local(monkeypatch, swid="{ABC}", espn_s2="s2value"):
+    """Stand in for this machine's own saved ESPN login."""
+    monkeypatch.setattr(drafts, "saved_session", lambda *a, **k: (swid, espn_s2))
+
+
+def test_a_visitor_with_no_session_gets_an_answer_rather_than_a_401(monkeypatch):
+    """This is the probe the connect screen runs on load, and the ordinary
+    case is somebody who has connected nothing. A 401 here would be an error
+    in every console and a retry in every client."""
+    monkeypatch.setattr(drafts, "saved_session", lambda *a, **k: None)
+    body = _client(_fetcher({})).get("/api/espn/drafts").json()
+    assert body == {"connected": False, "leagues": []}
+
+
+def test_the_local_login_serves_the_owners_upcoming_drafts(monkeypatch):
+    _local(monkeypatch)
+    fetch = _fetcher({"fan.api": (200, _profile(
+        _entry("111", name="Home league", team_id=6),
+        _entry("222", name="Done", complete=True)))})
+    body = _client(fetch).get("/api/espn/drafts?season=2026").json()
+    assert body["connected"] is True and body["source"] == "local"
+    assert [lg["name"] for lg in body["leagues"]] == ["Home league"]
+    # ISO with a Z, so `new Date(...)` in the browser needs no date library.
+    assert body["leagues"][0]["draft_at"].endswith("Z")
+    # And the team, without which the row could not be a join button.
+    assert body["leagues"][0]["team_id"] == "6"
+
+
+def test_the_league_list_is_reused_rather_than_refetched(monkeypatch):
+    """One profile call plus one per league is a dozen round trips to ESPN for
+    a page that gets refreshed. Twice in a row must be one round."""
+    _local(monkeypatch)
+    calls = []
+    inner = _fetcher({"fan.api": (200, _profile(_entry("111", name="Home")))})
+
+    def counting(url, cookies, headers=None):
+        calls.append(url)
+        return inner(url, cookies, headers)
+
+    client = _client(counting)
+    client.get("/api/espn/drafts?season=2026")
+    first = len(calls)
+    client.get("/api/espn/drafts?season=2026")
+    assert len(calls) == first
+
+
+def test_an_expired_local_session_reads_as_signed_out(monkeypatch):
+    """ESPN rejecting the session is not an error to show, it is a state: the
+    answer is "not connected", which puts the user back on the bookmarklet in
+    one round trip instead of retrying a dead login."""
+    _local(monkeypatch)
+    body = _client(_fetcher({"fan.api": (401, "")})).get("/api/espn/drafts").json()
+    assert body["connected"] is False and body["expired"] is True
+
+
+def test_the_token_is_minted_for_the_local_login(monkeypatch):
+    _local(monkeypatch)
+    fetch = _fetcher({"draftSecurity": (200, "8675309")})
+    body = _client(fetch).post("/api/espn/draft-token", json={
+        "leagueId": "111", "teamId": "4", "season": "2026"}).json()
+    assert body["token"] == "8675309"
+    # The swid rides back because the connect it feeds needs it, and it is the
+    # SESSION's, never one the caller supplied.
+    assert body["swid"] == "{ABC}"
+
+
+def test_minting_needs_a_session_at_all(monkeypatch):
+    monkeypatch.setattr(drafts, "saved_session", lambda *a, **k: None)
+    response = _client(_fetcher({})).post("/api/espn/draft-token", json={
+        "leagueId": "111", "teamId": "4"})
+    assert response.status_code == 401
+
+
+def test_a_closed_draft_is_the_upstream_refusing_not_a_bad_request(monkeypatch):
+    """ESPN says no for reasons that are not the session -- the draft is not
+    open, the team is not ours. Blaming the caller's request would send a
+    reader looking for a bug in their own league id."""
+    _local(monkeypatch)
+    fetch = _fetcher({"draftSecurity": (404, "")})
+    response = _client(fetch).post("/api/espn/draft-token", json={
+        "leagueId": "111", "teamId": "4"})
+    assert response.status_code == 502
+
+
+class _NoSession:
+    """A store that resolves nothing -- an expired or forged custody cookie."""
+
+    def resolve(self, cookie, now=None):
+        return None
+
+
+def test_a_cookie_that_does_not_resolve_never_falls_back_to_the_owner(monkeypatch):
+    """THE BUG THIS EXISTS TO PREVENT. A visitor whose custody cookie has
+    expired must read as signed out -- if the fallback ran on a FAILED resolve
+    rather than only on no cookie at all, that visitor would be served the
+    machine owner's leagues and could join the owner's drafts."""
+    _local(monkeypatch)
+    # The plaintext allowance is what the guard below is normally refusing on;
+    # granted, the request reaches the resolve and proves the real point.
+    monkeypatch.setenv("ESPN_CUSTODY_ALLOW_PLAINTEXT_HTTP", "1")
+    client = _client(_fetcher({"fan.api": (200, _profile(_entry("111")))}),
+                     store=_NoSession())
+    client.cookies.set(drafts_api.cred.COOKIE_NAME, "not-a-real-session")
+    assert client.get("/api/espn/drafts").json() == {"connected": False,
+                                                     "leagues": []}
+
+
+def test_a_cookie_on_a_plaintext_wire_is_refused_before_any_of_this(monkeypatch):
+    """A cookie on the wire is a credential on the wire. The refusal is the
+    custody guard's, reached through these routes because they resolve through
+    it -- so the rule cannot be forgotten by a route that reads a session."""
+    _local(monkeypatch)
+    monkeypatch.delenv("ESPN_CUSTODY_ALLOW_PLAINTEXT_HTTP", raising=False)
+    client = _client(_fetcher({}), store=_NoSession())
+    client.cookies.set(drafts_api.cred.COOKIE_NAME, "anything")
+    response = client.get("/api/espn/drafts")
+    assert response.status_code >= 400
+    assert "plain HTTP" in response.json()["detail"]
+
+
+# -- taking a seat in an ESPN mock room --------------------------------------
+#
+# The lobby listing is public and cookie-free (api/lobby.py). This half is not:
+# a seat is taken as somebody, and the token that follows drives their draft.
+
+
+def _poster(answer, seen=None):
+    """Stand in for ESPN's invite POST. `answer` is the body it returns."""
+    def post(url, payload):
+        if seen is not None:
+            seen.append((url, payload))
+        return answer
+    return post
+
+
+def test_joining_a_mock_takes_the_seat_then_mints_for_it(monkeypatch):
+    """Two ESPN calls, in order, and the team id comes from the FIRST one --
+    ESPN assigns the seat, we never pick it."""
+    _local(monkeypatch)
+    seen = []
+    # A signed integer, like the real one (see espn_drafts.mint_draft_token).
+    fetch = _fetcher({"draftSecurity": (200, "-4429")})
+    app = FastAPI()
+    drafts_api.register_draft_routes(app, fetch=fetch,
+                                     post=_poster('[{"teamId": 5}]', seen))
+    body = TestClient(app).post("/api/espn/mock-join",
+                                json={"leagueId": "999"}).json()
+
+    assert body["teamId"] == "5"
+    assert body["token"] == "-4429"
+    assert body["leagueId"] == "999"
+    # The invite POST really was ESPN's invite POST, with the sentinel that
+    # means "any open seat".
+    assert "invites" in seen[0][0] and seen[0][1] == [{"teamId": -1}]
+
+
+def test_joining_a_mock_needs_a_session(monkeypatch):
+    """The listing is public; the seat is not. A visitor with nothing
+    connected gets a 401 rather than a room in somebody else's name."""
+    monkeypatch.setattr(drafts, "saved_session", lambda *a, **k: None)
+    app = FastAPI()
+    drafts_api.register_draft_routes(app, fetch=_fetcher({}),
+                                     post=_poster('[{"teamId": 5}]'))
+    assert TestClient(app).post("/api/espn/mock-join",
+                                json={"leagueId": "999"}).status_code == 401
+
+
+def test_a_room_that_filled_first_is_the_upstream_refusing(monkeypatch):
+    """The lobby moves in seconds: a room listed a moment ago can be full by
+    the time somebody clicks it. That is ESPN saying no, not a bad request,
+    and the reader is told so the list can be re-read."""
+    _local(monkeypatch)
+
+    def post(url, payload):
+        return '{"messages": ["League is full"]}'
+
+    app = FastAPI()
+    drafts_api.register_draft_routes(app, fetch=_fetcher({}), post=post)
+    response = TestClient(app).post("/api/espn/mock-join",
+                                    json={"leagueId": "999"})
+
+    assert response.status_code == 502
+    assert "999" in response.json()["detail"]
+
+
+# -- the waiting room: which seats are open, and taking a chosen one --------
+#
+# ESPN honours a specific `teamId` in the invite, not only the `-1` ("any open
+# seat") the farm has always sent -- probed live 2026-08-24 against an open
+# room: asked for seat 4 while seat 2 was also open, and ESPN assigned 4.
+
+
+def _room_body(open_seats=(4,), teams=4, in_progress=False,
+               date_ms=1_787_608_890_000, mine=None):
+    return json.dumps({
+        "draftDetail": {"inProgress": in_progress, "drafted": False,
+                        "picks": [{"id": n} for n in range(teams * 16)]},
+        "settings": {"draftSettings": {
+            "date": date_ms, "type": "SNAKE", "timePerSelection": 30,
+            "pickOrder": list(range(1, teams + 1)),
+        }},
+        # ESPN pre-populates the whole pick list before a room drafts, which
+        # is where the round count comes from.
+        "teams": [{
+            "id": n,
+            "name": f"Team {n}",
+            "owners": ([] if n in open_seats
+                       else ([mine] if mine and n == 1 else [f"{{OWNER-{n}}}"])),
+        } for n in range(1, teams + 1)],
+    })
+
+
+def test_the_room_reports_every_seat_and_which_one_is_yours(monkeypatch):
+    _local(monkeypatch, swid="{ABC}")
+    fetch = _fetcher({"leagues/999": (200, _room_body(open_seats=(3, 4), mine="{ABC}"))})
+    body = _client(fetch).get("/api/espn/mock-room/999").json()
+
+    assert [s["team_id"] for s in body["seats"]] == ["1", "2", "3", "4"]
+    assert [s["taken"] for s in body["seats"]] == [True, True, False, False]
+    # The seat this session owns, marked on the seat and named once at the top
+    # so the page does not have to hunt for it.
+    assert body["my_team_id"] == "1"
+    assert body["seats"][0]["mine"] is True
+    # What the countdown counts to, and the clock the room will run on.
+    assert body["draft_at"].endswith("Z")
+    assert body["clock_seconds"] == 30
+    assert body["in_progress"] is False
+    # The draft order, so each seat can say which picks it gets.
+    assert [s["slot"] for s in body["seats"]] == [1, 2, 3, 4]
+    # Rounds come from the pre-populated pick list, not from a roster count
+    # that includes an IR slot nobody drafts into.
+    assert body["rounds"] == 16
+
+
+def test_a_room_read_needs_no_session(monkeypatch):
+    """The directory is public and so is a room. A visitor with no session
+    still gets the seats -- they simply own none of them."""
+    monkeypatch.setattr(drafts, "saved_session", lambda *a, **k: None)
+    fetch = _fetcher({"leagues/999": (200, _room_body())})
+    body = _client(fetch).get("/api/espn/mock-room/999").json()
+
+    assert body["my_team_id"] is None
+    assert all(s["mine"] is False for s in body["seats"])
+
+
+def test_joining_a_chosen_seat_asks_espn_for_that_seat(monkeypatch):
+    _local(monkeypatch)
+    seen = []
+    fetch = _fetcher({"draftSecurity": (200, "-4429")})
+    app = FastAPI()
+    drafts_api.register_draft_routes(app, fetch=fetch,
+                                     post=_poster('[{"teamId": 7}]', seen))
+    body = TestClient(app).post("/api/espn/mock-join",
+                                json={"leagueId": "999", "teamId": "7"}).json()
+
+    assert seen[0][1] == [{"teamId": 7}]
+    assert body["teamId"] == "7"
+
+
+def test_no_chosen_seat_still_means_any_open_seat(monkeypatch):
+    """The sentinel is what the farm sends and what a reader who does not care
+    which seat they get should still send."""
+    _local(monkeypatch)
+    seen = []
+    fetch = _fetcher({"draftSecurity": (200, "-4429")})
+    app = FastAPI()
+    drafts_api.register_draft_routes(app, fetch=fetch,
+                                     post=_poster('[{"teamId": 2}]', seen))
+    TestClient(app).post("/api/espn/mock-join", json={"leagueId": "999"})
+
+    assert seen[0][1] == [{"teamId": -1}]

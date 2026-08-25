@@ -24,15 +24,44 @@ interface RosterPanelProps {
   // (see the `s.player &&` check below), which is also why it must not look
   // clickable.
   onOpenPlayer?: (player: RosterPlayer) => void
+  // Whose roster this is. Defaults to the room's own wording, because in the
+  // room it is always the reader's -- and is passed only by the landing
+  // page's live demo, where the roster belongs to whichever seat is on the
+  // clock in somebody else's draft. A panel captioned "My roster" over a
+  // stranger's team is the kind of small lie that makes a reader doubt every
+  // number beside it.
+  label?: string
 }
 
-export default function RosterPanel({ slots, onOpenPlayer }: RosterPanelProps) {
+// WEEK 1, NOT THE SEASON. A season total is a number nobody has a feel for --
+// 323 is good, 297 is fine, and only a reader who already knows the scale can
+// tell them apart -- where 18.4 reads against a Sunday every manager in the
+// league has watched. It is ESPN's projection for week 1, converted into this
+// league's scoring by the board (`scoring/board.week_projections`).
+//
+// One decimal, because a week's scoring is decided in decimals: rounding 18.4
+// and 17.6 to 18 apiece would erase the only difference the column has to
+// show. A dash for a player ESPN does not project that week -- a printed 0.0
+// would be a claim that he will not score.
+function weekProj(player: RosterPlayer): string {
+  const value = player.wk1_points
+  return value === null || value === undefined ? '—' : value.toFixed(1)
+}
+
+export default function RosterPanel({ slots, onOpenPlayer,
+                                     label = 'My roster' }: RosterPanelProps) {
   const filled = slots.filter((s) => s.player !== null).length
 
   return (
     <div className="roster-panel">
       <div className="roster-panel-head">
-        <span className="draft-cap">My roster</span>
+        <span className="draft-cap">{label}</span>
+        {/* What the column of numbers IS. It used to be an unlabelled season
+            total, which a reader could only identify by its size; a week's
+            points and a season's differ by a factor of seventeen, so the
+            caption is the difference between "18.4" meaning something and
+            meaning nothing. */}
+        <span className="roster-panel-week">wk 1</span>
         <span className="roster-panel-count mono">{filled} / {slots.length}</span>
       </div>
       <ul className="roster-panel-list">
@@ -58,8 +87,8 @@ export default function RosterPanel({ slots, onOpenPlayer }: RosterPanelProps) {
                   <span className={`roster-row-slot mono${bench ? ' roster-row-slot-bench' : ''}`}>{s.slot}</span>
                   {posBadge(player.position)}
                   <span className="roster-row-name">{player.name}</span>
-                  <span className="roster-row-proj mono">
-                    {player.proj_points !== null ? Math.round(player.proj_points) : '—'}
+                  <span className="roster-row-proj mono" title="ESPN's week 1 projection, in this league's scoring">
+                    {weekProj(player)}
                   </span>
                 </button>
               ) : (
@@ -69,8 +98,8 @@ export default function RosterPanel({ slots, onOpenPlayer }: RosterPanelProps) {
                     <>
                       {posBadge(player.position)}
                       <span className="roster-row-name">{player.name}</span>
-                      <span className="roster-row-proj mono">
-                        {player.proj_points !== null ? Math.round(player.proj_points) : '—'}
+                      <span className="roster-row-proj mono" title="ESPN's week 1 projection, in this league's scoring">
+                        {weekProj(player)}
                       </span>
                     </>
                   ) : (

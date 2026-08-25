@@ -219,6 +219,74 @@ Vite proxies `/api` to the backend. Re-run `make refresh` any time you want
 newer stats/ADP — the API reads straight from the DuckDB file, so a restart
 isn't required for the underlying data, only for picking up schema changes.
 
+## Deploying it
+
+Everything above assumes one person on one machine. This section is for the
+other case: a hosted deployment other people connect their ESPN accounts to.
+
+**One service, not two.** The API process serves the built frontend as well
+(`api/static.py`). That is not a packaging preference — the credential cookie
+is `SameSite=Lax`, so a frontend on its own domain would stop sending it, and
+every route that reads a stored ESPN session would quietly see an anonymous
+visitor. One origin keeps the cookie as written.
+
+**One replica, not more.** DuckDB takes a single-writer lock per file, so a
+second instance cannot open the database the first one holds. This is the same
+lock that stops `make fit-prior` running while the API is up. Scaling out
+means moving the mutable tables to Postgres first.
+
+### First deploy (Railway)
+
+1. Create a service from this repository. `railway.toml` selects the
+   Dockerfile; no build configuration is needed.
+2. Attach a volume mounted at `/data`. The image expects both databases there
+   (`DRAFT_DB_PATH`, `ESPN_CUSTODY_DB_PATH`), and without a volume they are
+   written into the container's own filesystem and lost on every redeploy.
+3. Set the variables below.
+4. Deploy. The healthcheck (`/api/landing/status`) answers 200 against an
+   empty database, so the service goes healthy before any data is uploaded.
+   The site will be up and honestly empty.
+5. Put the data on the volume — see below.
+
+| Variable | Value | Why |
+| --- | --- | --- |
+| `ESPN_CUSTODY_KEYS` | generated, see above | Without it, nothing can store or read a credential |
+| `ESPN_CUSTODY_TRUST_FORWARDED_PROTO` | `1` | **Required behind Railway.** See below |
+| `DRAFT_DB_PATH` | `/data/nfl.duckdb` | Set by the image; override only to move it |
+| `ESPN_CUSTODY_DB_PATH` | `/data/custody/custody.duckdb` | Same |
+
+`ESPN_CUSTODY_TRUST_FORWARDED_PROTO` is the one that will waste an evening if
+it is missed. Railway terminates TLS at its edge and forwards plain HTTP to
+the container, so the credential guard sees `http://` and refuses every
+connect as insecure transport — a 400 with a message about plaintext, on a
+site that is plainly served over HTTPS. The switch is off by default because
+`X-Forwarded-Proto` is forgeable when nothing overwrites it; a proxy that does
+overwrite it is exactly the case it exists for.
+
+### Putting the data there
+
+```bash
+make deploy-data     # writes deploy/*.gz — stop `make up` first
+```
+
+Two databases, and they are not the same kind of thing:
+
+- **`nfl.duckdb`** is rebuildable. Running `python -m pipeline.refresh` on the
+  server is usually better than uploading, because it pulls current stats
+  rather than shipping this morning's.
+- **`draft_corpus.duckdb`** is not. It is hundreds of mock drafts harvested
+  over hours by `make farm-mocks`, and the archive page is empty without it.
+  Upload it once, then again after any farm run worth keeping.
+
+Both files gzip to about a quarter of their size, which is worth doing over a
+volume connection.
+
+### What stays on your machine
+
+`make farm-mocks` and the auto-refit daemon are not part of the deployment.
+They write DuckDB files, and on the web host they would contend for the same
+write lock the API holds. Run them locally, then upload the corpus.
+
 ## How scoring works
 
 Every player gets five raw factors, each normalized to a 0–100 percentile

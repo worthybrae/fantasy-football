@@ -681,6 +681,10 @@ def test_state_carries_the_pick_clock_league_settings_and_my_roster(tmp_path):
     assert body["my_roster"] == [{
         "player_id": "p1", "name": "A Star", "position": "WR",
         "proj_points": session.board_by_id["p1"]["proj_points"],
+        # What the rail actually prints: ESPN's week-1 projection, already in
+        # this league's scoring. None on a board built without one -- a dash
+        # on the rail, never a zero.
+        "wk1_points": session.board_by_id["p1"].get("proj_wk1"),
     }]
 
 
@@ -784,8 +788,7 @@ def test_recompute_tells_the_ranking_how_many_picks_i_have_left(tmp_path, monkey
                         lambda *a, **k: ({4: {"counts": {}}}, []))
     monkeypatch.setattr("api.live.survival", _fake_survival_frame)
 
-    def capture(pool, settings, taken, counts, survive, turns_left=None,
-                plan_bias=None):
+    def capture(pool, settings, taken, counts, survive, turns_left=None):
         seen["turns_left"] = turns_left
         return _fake_candidates_frame("x")
 
@@ -4416,200 +4419,103 @@ def test_the_app_publishes_the_running_sessions_league_settings(tmp_path):
     conn.close()
 
 
-def _plan_app(tmp_path):
-    """An app plus the `state` its routes read, so a test can install a plan
-    without running the four-second simulation that produces one."""
-    from fastapi import FastAPI
-    from pipeline.db import get_conn
-    app = FastAPI()
-    path = str(tmp_path / "plan.duckdb")
-    state, _ = register_live_routes(app, get_conn(path), path)
-    return app, state
+# ---------------------------------------------------------------------------
+# naming a player the board does not carry (api.live.identify_players)
+# ---------------------------------------------------------------------------
 
 
-def test_plan_endpoint_reports_inactive_before_a_session(tmp_path):
-    from fastapi.testclient import TestClient
-    app, _ = _plan_app(tmp_path)
-    assert TestClient(app).get("/api/live/plan").json() == {
-        "active": False, "pending": False, "plan": None}
+def _identity_db():
+    """The two identity tables and nothing else, in memory."""
+    import duckdb
+    conn = duckdb.connect(":memory:")
+    conn.execute("CREATE TABLE players (gsis_id VARCHAR, display_name VARCHAR, "
+                 "headshot VARCHAR)")
+    conn.execute("INSERT INTO players VALUES ('00-1', 'Evan Engram', "
+                 "'http://x/e.png'), ('00-2', 'No Weekly Rows', NULL)")
+    conn.execute("CREATE TABLE weekly (player_id VARCHAR, player_display_name "
+                 "VARCHAR, position VARCHAR, recent_team VARCHAR, season "
+                 "INTEGER, week INTEGER)")
+    conn.execute("INSERT INTO weekly VALUES "
+                 "('00-1', 'Evan Engram', 'TE', 'JAX', 2024, 17), "
+                 "('00-1', 'Evan Engram', 'TE', 'DEN', 2025, 3), "
+                 "('00-3', 'Roster Table Missed Him', 'WR', 'NYJ', 2025, 1)")
+    return conn
 
 
-def test_plan_endpoint_is_pending_while_the_first_plan_is_building(tmp_path):
-    """A session with no plan yet must read as "wait", never as an error and
-    never as an empty plan. The room reserves no space for it until it
-    arrives, so the two have to be distinguishable."""
-    from fastapi.testclient import TestClient
-    app, state = _plan_app(tmp_path)
-    state["session"] = _live_session()
-    body = TestClient(app).get("/api/live/plan").json()
-    assert body["active"] is True and body["pending"] is True
-    assert body["plan"] is None and body["error"] is None
+def test_a_player_off_the_board_is_named_from_the_identity_tables():
+    from api.live import clear_identity_cache, identify_players
+    clear_identity_cache()
+
+    found = identify_players(_identity_db(), ["00-1", "00-2", "00-3", "nobody"])
+
+    # The team is the one he last played for, not the first row in the table.
+    assert found["00-1"] == {"name": "Evan Engram", "headshot": "http://x/e.png",
+                             "position": "TE", "team": "DEN"}
+    # A name and a face, with no weekly rows to place him: half an identity
+    # beats an id.
+    assert found["00-2"]["name"] == "No Weekly Rows"
+    assert found["00-2"]["position"] is None
+    # And the other way round -- nflverse adds its roster table on its own
+    # schedule, so `weekly` alone has to be enough to name somebody.
+    assert found["00-3"]["name"] == "Roster Table Missed Him"
+    assert found["00-3"]["team"] == "NYJ"
+    # Nothing invented for an id neither table knows.
+    assert "nobody" not in found
 
 
-def test_plan_endpoint_spreads_the_plan_at_the_top_level(tmp_path):
-    """The room reads `rounds_plan` and `cliffs` straight off the response
-    body. Nesting them under a `plan` key would be a silent contract break --
-    the fetch still succeeds and the tab renders empty."""
-    from fastapi.testclient import TestClient
-    app, state = _plan_app(tmp_path)
-    state["session"] = _live_session()
-    state["plan"] = {
-        "my_slot": 2, "teams": 8, "rounds": 15, "n_drafts": 120,
-        "as_of_pick": 17,
-        "rounds_plan": [{"round": 1, "pick": 2, "is_past": True,
-                         "actual": "RB",
-                         "positions": [{"position": "RB", "pct": 100}]}],
-        "cliffs": [{"round": 1, "pick": 2,
-                    "by_position": {"QB": 0.0, "RB": 86.4,
-                                    "WR": 85.1, "TE": 0.0}}],
-        "best_available": [],
-    }
-    state["plan_as_of_pick"] = 17
-    body = TestClient(app).get("/api/live/plan").json()
-    assert body["pending"] is False and body["active"] is True
-    assert body["my_slot"] == 2 and body["rounds"] == 15
-    assert body["rounds_plan"][0]["actual"] == "RB"
-    assert body["cliffs"][0]["by_position"]["RB"] == 86.4
-    # Its own pick count, not the ranking's -- the two workers run on
-    # different clocks and are expected to disagree mid-draft.
-    assert body["as_of_pick"] == 17
+def test_an_id_nothing_knows_is_not_re_queried_every_poll():
+    """/api/live/board is polled every couple of seconds for a whole draft."""
+    from api.live import clear_identity_cache, identify_players
+    clear_identity_cache()
+    inner = _identity_db()
+    calls = {"n": 0}
+
+    class Counting:
+        """DuckDB's own connection will not take a patched `execute` (the
+        attribute is read-only), so the count is kept out here."""
+
+        def execute(self, *args, **kwargs):
+            calls["n"] += 1
+            return inner.execute(*args, **kwargs)
+
+    conn = Counting()
+    identify_players(conn, ["00-1", "nobody"])
+    identify_players(conn, ["00-1", "nobody"])
+
+    assert calls["n"] == 1
 
 
-def test_plan_and_ranking_keep_separate_pick_counts(tmp_path):
-    """`state["as_of_pick"]` captions the candidate list; the plan carries
-    its own. A plan four seconds behind must never be labelled with the
-    ranking's fresher number."""
-    from fastapi.testclient import TestClient
-    app, state = _plan_app(tmp_path)
-    state["session"] = _live_session()
-    state["as_of_pick"] = 31            # ranking has moved on
-    state["plan"] = {"my_slot": 2, "as_of_pick": 17, "rounds_plan": [],
-                     "cliffs": [], "best_available": []}
-    state["plan_as_of_pick"] = 17
-    assert TestClient(app).get("/api/live/plan").json()["as_of_pick"] == 17
+def test_a_broken_identity_lookup_costs_the_names_and_nothing_else():
+    from api.live import clear_identity_cache, identify_players
+
+    class Broken:
+        def execute(self, *args, **kwargs):
+            raise RuntimeError("no such table: players")
+
+    clear_identity_cache()
+    assert identify_players(Broken(), ["00-1"]) == {}
 
 
-def _plan_for(my_slot=2, rounds=None):
-    return {"my_slot": my_slot, "rounds_plan": rounds if rounds is not None else [
-        {"round": 1, "pick": 2, "is_past": True, "actual": "RB",
-         "positions": [{"position": "RB", "pct": 100}]},
-        {"round": 2, "pick": 15, "is_past": False, "actual": None,
-         "positions": [{"position": "WR", "pct": 70},
-                       {"position": "RB", "pct": 30}]},
-        {"round": 3, "pick": 18, "is_past": False, "actual": None,
-         "positions": [{"position": "TE", "pct": 94}]},
-    ]}
-
-
-def test_plan_bias_selects_the_round_i_am_about_to_fill():
-    from api.live import _plan_bias_for_round
-    plan = _plan_for()
-    # One pick made -> I am filling round 2.
-    assert _plan_bias_for_round(plan, 2, 1) == {"WR": 0.7, "RB": 0.3}
-    # Two made -> round 3.
-    assert _plan_bias_for_round(plan, 2, 2) == {"TE": 0.94}
-
-
-def test_plan_bias_refuses_a_plan_built_for_another_slot():
-    """Reconnecting as a different team leaves the previous session's plan in
-    `state` for the several seconds a new one takes. A plan is slot-specific
-    in a way the candidate list is not, so steering the new team's board with
-    the old team's plan is worse than not steering it at all."""
-    from api.live import _plan_bias_for_round
-    assert _plan_bias_for_round(_plan_for(my_slot=7), 2, 1) is None
-    assert _plan_bias_for_round(None, 2, 1) is None
-    assert _plan_bias_for_round({}, 2, 1) is None
-
-
-def test_plan_bias_ignores_a_round_already_played():
-    """An `is_past` entry is a record of what happened, not a recommendation.
-    Its 100% is certainty about the past; steering by it would push the board
-    toward repeating a pick already made."""
-    from api.live import _plan_bias_for_round
-    assert _plan_bias_for_round(_plan_for(), 2, 0) is None
-
-
-def test_plan_bias_is_none_past_the_end_of_the_plan():
-    from api.live import _plan_bias_for_round
-    assert _plan_bias_for_round(_plan_for(), 2, 9) is None
-    empty = _plan_for(rounds=[{"round": 1, "pick": 2, "is_past": False,
-                               "actual": None, "positions": []}])
-    assert _plan_bias_for_round(empty, 2, 0) is None
-
-
-def test_plan_bias_tolerates_a_plan_that_lags_the_draft():
-    """The plan worker is ~4s and the ranking worker ~1s, so the plan is
-    routinely a pick or two behind. That staleness must not disable the
-    steer: "round 3 goes to a tight end" does not stop being the plan's
-    claim because two other teams picked since it was built. The join is on
-    round number and nothing else."""
-    from api.live import _plan_bias_for_round
-    stale = _plan_for()
-    stale["as_of_pick"] = 4           # built long before the current pick
-    assert _plan_bias_for_round(stale, 2, 2) == {"TE": 0.94}
-
-
-def _plan_routes(tmp_path):
-    from fastapi import FastAPI
-    from pipeline.db import get_conn
-    path = str(tmp_path / "throttle.duckdb")
-    app = FastAPI()
-    state, _ = register_live_routes(app, get_conn(path), path)
-    return app, state
-
-
-def test_plan_rebuilds_on_my_own_picks_and_once_a_round_otherwise():
-    """The plan was rebuilt on every pick -- 128 builds of a 120-draft
-    simulation per draft, each ~2.5s, competing under the GIL with every HTTP
-    request the room makes. The ranking has `ranking_wanted` to protect it; a
-    player profile has nothing, and a profile is what the user clicks while
-    the clock is running."""
-    from api.live import plan_is_worth_rebuilding as worth
+def test_an_off_board_cell_carries_the_name_and_no_ranks():
+    from api.live import _board_cell
     from scoring.draft_sim import snake_slots
 
-    s = _live_session()
-    st, me = s.settings, s.my_slot
-    snake = snake_slots(st.teams, st.rounds)
-    mine = [i + 1 for i, slot in enumerate(snake) if slot == me]
+    cell = _board_cell("00-1", 5, 8, snake_slots(8, 16), {},
+                       {"00-1": {"name": "Evan Engram", "position": "TE",
+                                 "team": "DEN", "headshot": "http://x/e.png"}})
 
-    # No plan yet always builds -- "stale" is meaningless before there is one.
-    assert worth(st, me, None, 0) is True
-
-    # My own pick just landed: rebuild, however recent the last plan.
-    for pick in mine[:4]:
-        assert worth(st, me, pick - 1, pick) is True, pick
-
-    # Somebody else's pick, inside the same round: skip.
-    others = [p for p in range(1, st.teams * 2) if p not in mine]
-    skipped = [p for p in others if not worth(st, me, p - 1, p)]
-    assert skipped, "the throttle must actually skip somebody else's picks"
-
-    # A full round elapsing rebuilds regardless of whose pick it was.
-    for p in others[:4]:
-        assert worth(st, me, p - st.teams, p) is True, p
+    assert cell["player"]["name"] == "Evan Engram"
+    assert cell["player"]["position"] == "TE"
+    assert cell["player"]["overall_rank"] is None
+    assert cell["player"]["market_rank"] is None
+    assert cell["player"]["value"] is None
 
 
-def test_plan_throttle_never_skips_more_than_a_round():
-    """The staleness bound is the whole safety argument: a throttle that can
-    skip indefinitely is a plan that silently stops tracking the draft."""
-    from api.live import plan_is_worth_rebuilding as worth
-    s = _live_session()
-    st, me = s.settings, s.my_slot
-    for previous in range(0, st.teams * st.rounds - st.teams):
-        stalest = max(p for p in range(previous, previous + st.teams + 1)
-                      if not worth(st, me, previous, p))
-        assert stalest - previous < st.teams, (previous, stalest)
+def test_a_cell_for_a_player_nothing_can_name_still_draws():
+    from api.live import _board_cell
+    from scoring.draft_sim import snake_slots
 
+    cell = _board_cell("who-is-this", 5, 8, snake_slots(8, 16), {}, {})
 
-def test_plan_endpoint_still_serves_a_throttled_plan(tmp_path):
-    """Throttling must not make the endpoint report `pending` forever: a plan
-    that is a few picks old is still a plan, and the room shows it with its
-    own `as_of_pick` caption."""
-    from fastapi.testclient import TestClient
-    app, state = _plan_routes(tmp_path)
-    state["session"] = _live_session()
-    state["plan"] = {"my_slot": 2, "as_of_pick": 17, "rounds_plan": [],
-                     "cliffs": [], "best_available": []}
-    state["plan_as_of_pick"] = 17
-    body = TestClient(app).get("/api/live/plan").json()
-    assert body["pending"] is False and body["as_of_pick"] == 17
+    assert cell["player"]["name"] == "who-is-this"
+    assert cell["player"]["headshot"] is None

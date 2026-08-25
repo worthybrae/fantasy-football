@@ -24,7 +24,7 @@ from scoring.profile_cache import (RANK_MIN_GAMES, _table_columns,
                                    snap_share_by_season)
 from scoring.ppr import compute_ppr_points, normalize_rules, prices_kicking
 from scoring.similarity import (_age_in_season, player_season_features,
-                                find_twins, value_neighbors)
+                                find_twins, similar_players, value_neighbors)
 
 _KDST_POSITIONS = {"K", "DST"}
 
@@ -1127,7 +1127,99 @@ def snap_share_by_game(conn, crosswalk: pd.DataFrame, snap_columns,
             for _, r in rows.iterrows() if not pd.isna(r["offense_pct"])}
 
 
-def team_line_quality(lq: pd.DataFrame, season: int, team, position) -> dict | None:
+# The line in the order it stands on the field, which is not the order the
+# depth chart happens to list it in. A reader who knows what a right tackle
+# is reads five rows faster when they are where he expects them.
+_LINE_ORDER = {"Left Tackle": 0, "Left Guard": 1, "Center": 2,
+               "Right Guard": 3, "Right Tackle": 4}
+
+# Left Tackle -> LT. Spelled here rather than on the card because it is the
+# same shortening the depth chart already does, and a card that invented its
+# own would disagree with the one beside it.
+_LINE_ABBR = {"Left Tackle": "LT", "Left Guard": "LG", "Center": "C",
+              "Right Guard": "RG", "Right Tackle": "RT"}
+
+
+def _line_starters(units: pd.DataFrame | None, team) -> list:
+    """The five men, in field order, each with what is known about him.
+
+    The rating above them is an average; these are what it averages. A line
+    ranked 21st because one tackle has missed a quarter of his career is a
+    different fact for a manager than a line ranked 21st because all five are
+    rookies, and the score alone cannot tell those apart.
+
+    Each man also carries his PLACE among the league's other starters at the
+    same slot -- 9th of 32 left tackles -- on availability, the same figure
+    the team's own `availability` averages. A share is a fact about him and a
+    place is a fact about him against the league, and the second is the one a
+    reader can act on: 68% means nothing until you know whether 68% is a
+    healthy tackle or the third-worst in football.
+
+    Ranked WITHIN THE SLOT rather than across all 160 starters, because the
+    slots are not one population -- centres miss fewer games than tackles --
+    and a single table would have read a durable centre as ordinary and a
+    durable right tackle as exceptional for the same number.
+
+    Empty (never None) when the database has no units frame or no row for
+    this team: the card draws the rating and stops, rather than a heading
+    over five dashes.
+    """
+    if units is None or units.empty or "team" not in units.columns:
+        return []
+    rows = units[units["team"] == team]
+    if rows.empty:
+        return []
+    # `min` so two men with identical availability share the better place
+    # rather than both landing on the average of two -- the same convention
+    # `_proj_pos_finish` uses for a projected finish. Ranked over the men the
+    # frame can actually place: a starter with no availability at all (a
+    # rookie with no snaps) is not last, he is unranked, and counting him in
+    # the denominator would make everyone else's place a little too flattering.
+    ranks, rank_of = {}, {}
+    if {"position", "availability"}.issubset(units.columns):
+        priced = units[units["availability"].notna()]
+        if not priced.empty:
+            by_slot = priced.groupby("position")["availability"]
+            placed = by_slot.rank(ascending=False, method="min")
+            sizes = by_slot.transform("size")
+            ranks = dict(zip(priced.index, placed))
+            rank_of = dict(zip(priced.index, sizes))
+    out = []
+    for _, r in rows.iterrows():
+        pos = r.get("position")
+        out.append({
+            "position": _LINE_ABBR.get(pos, pos),
+            "name": r.get("player_name"),
+            # Career share of his team's games, the same 0-1 the team's own
+            # `availability` averages -- so a row and the total over it are
+            # in one unit.
+            "availability": _round_or_none(r.get("availability"), 3),
+            "snap_share": _round_or_none(r.get("snap_share_last_season"), 3),
+            "games": (None if pd.isna(r.get("games_played"))
+                      else int(r["games_played"])),
+            "games_possible": (None if pd.isna(r.get("team_games_possible"))
+                               else int(r["team_games_possible"])),
+            "seasons": (None if pd.isna(r.get("seasons_in_league"))
+                        else int(r["seasons_in_league"])),
+            # His place among the league's other starters at this slot, and
+            # how many of them there are to be placed among. Both None
+            # together -- a place with no field to be placed in is not a
+            # fact, and the card prints a dash for either.
+            "avail_rank": (None if r.name not in ranks or pd.isna(ranks[r.name])
+                           else int(ranks[r.name])),
+            "avail_rank_of": (None if r.name not in rank_of
+                              or pd.isna(rank_of[r.name])
+                              else int(rank_of[r.name])),
+            "order": _LINE_ORDER.get(pos, 9),
+        })
+    out.sort(key=lambda p: p["order"])
+    for p in out:
+        del p["order"]
+    return out
+
+
+def team_line_quality(lq: pd.DataFrame, season: int, team, position,
+                      units: pd.DataFrame | None = None) -> dict | None:
     """The team's offensive line, ranked against the other 31.
 
     `scoring/oline.py` has been built, tested and unused since it was
@@ -1167,6 +1259,18 @@ def team_line_quality(lq: pd.DataFrame, season: int, team, position) -> dict | N
         "availability": _round_or_none(r["availability_raw"], 3),
         "returning": _round_or_none(r["returning_raw"], 3),
         "experience": _round_or_none(r["experience_raw"], 1),
+        # Experience is mean SEASONS, not a share -- the only one of the four
+        # with no full mark of its own, so the card cannot draw it against
+        # 100% the way it draws the other three. Its normalized form (a
+        # percentile among the 32 lines, `normalize_within_position`) is
+        # served beside it for exactly that: the meter fills to where the
+        # line places, and the number beside it stays in years.
+        "experience_pct": _round_or_none(r["experience_n"], 1),
+        # The five the four numbers above are computed over. Optional
+        # argument, empty list when it is not passed, so every existing
+        # caller (and every database that cannot name a line) keeps the
+        # shape it already had.
+        "starters": _line_starters(units, team),
     }
 
 
@@ -1183,6 +1287,9 @@ def player_bio(players: pd.DataFrame, player_id: str, season: int) -> dict:
     born in the middle of a season, the first is the honest one. (Jahmyr
     Gibbs, born 2002-03-20: 23 through the whole of 2025, 24 through 2026.)
 
+    `height` (inches) and `weight` (pounds) come straight off the row and are
+    None wherever the column or the value is missing.
+
     `nfl_season` is 1-BASED -- a rookie year is his 1st NFL season, not his
     0th -- from `players.rookie_season`, the same column `oline._experience`
     counts service time off. Gibbs' rookie season is 2023, so 2025 is his
@@ -1197,7 +1304,7 @@ def player_bio(players: pd.DataFrame, player_id: str, season: int) -> dict:
     zeros: "age 0" is a claim, "age unknown" is the truth.
     """
     out = {"season": int(season), "birth_date": None, "rookie_season": None,
-           "age": None, "nfl_season": None}
+           "age": None, "nfl_season": None, "height": None, "weight": None}
     if players.empty or "gsis_id" not in players.columns:
         return out
     hit = players[players["gsis_id"] == player_id]
@@ -1212,6 +1319,19 @@ def player_bio(players: pd.DataFrame, player_id: str, season: int) -> dict:
     if rookie is not None and not pd.isna(rookie):
         out["rookie_season"] = int(rookie)
         out["nfl_season"] = int(season) - int(rookie) + 1
+    # Height in inches and weight in pounds, off nflverse's own columns --
+    # the same two `similar_players` already scores on, read from the same
+    # table, so the header cannot state a body the comparables disagree with.
+    #
+    # Coerced rather than cast: a `players` table refreshed before these
+    # columns existed has neither (`row.get` gives None), and a nflverse
+    # release that serves height as "6-2" instead of 74 gives a string that
+    # `int()` would raise on. Both land as None, which is the header printing
+    # what it has instead of failing over a fact it can do without.
+    for key in ("height", "weight"):
+        value = pd.to_numeric(row.get(key), errors="coerce")
+        if pd.notna(value):
+            out[key] = int(value)
     return out
 
 
@@ -1702,8 +1822,14 @@ def build_profile(conn, player_id: str, weights: dict | None = None,
         # them above and keys its cache on them -- so both the distance the
         # twins are matched on and the `next_ppg` they are reported with are
         # this league's points.
+        # Thirty rather than the function's own five. The card pages through
+        # them ten at a time, and the cost of the extra twenty-five is a
+        # longer `head()` on a frame that has already been scored and sorted
+        # -- the distance over every player-season at his position is the
+        # work, and that is done either way. Age matching usually leaves far
+        # fewer than thirty anyway; this is a ceiling, not a quota.
         twins = (find_twins(wk_mine, player_id, players=players,
-                            season_features=frames.season_features)
+                            season_features=frames.season_features, top_n=30)
                  if not frames.weekly_empty else None)
         similar = (_enrich_twins(twins, board) if twins is not None
                    else value_neighbors(board, player_id))
@@ -1813,6 +1939,14 @@ def build_profile(conn, player_id: str, weights: dict | None = None,
         "schedule": weekly_difficulty(schedules, prior, header["team"],
                                       header["position"], rules),
         "similar": similar,
+        # Who else is on the shelf, as opposed to `similar` above, which is
+        # what has happened before. Scored over this year's board at his own
+        # position -- projection, last season's stat line, age and build --
+        # so the rows can be ranked against each other. See
+        # `scoring.similarity.similar_players`.
+        "similar_players": similar_players(
+            board, player_id, season_features=frames.season_features,
+            players=frames.players, season=frames.draft_season),
         "bio": bio,
         # Same three-aggregate contract as `season_summaries` above: the pool
         # and the features frame both come out of the cache priced under this
@@ -1822,7 +1956,8 @@ def build_profile(conn, player_id: str, weights: dict | None = None,
                    comparable_cohort(frames.comp_pool, frames.season_features,
                                      player_id, bio["rookie_season"])),
         "oline": team_line_quality(frames.line_quality, frames.draft_season,
-                                   header["team"], header["position"]),
+                                   header["team"], header["position"],
+                                   units=frames.line_units),
         # Last, and a list -- empty for a player nobody wrote about, and for
         # every defense (pipeline/news.py runs no query for a DST: "Denver
         # Defense" as a search phrase returns whatever the newspaper wrote

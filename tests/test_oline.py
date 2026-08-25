@@ -364,3 +364,30 @@ def test_reconcile_still_refuses_a_close_call(tmp_path):
     a lie told every week rather than a gap admitted once."""
     mapping = oline.reconcile_pfr_to_gsis(_seed_reconciliation(tmp_path))
     assert "SmitJo02" not in set(mapping["pfr_player_id"])
+
+
+def test_experience_drops_an_implausible_career_rather_than_capping_it(tmp_path):
+    """A career longer than any lineman has actually had is not a durable
+    veteran, it is a join that landed on the wrong man: the depth chart
+    carries a gsis_id, and for a rookie who shares his name with a player
+    from the nineties it is sometimes that player's. Indianapolis' 2026
+    right tackle read as 34 seasons and dragged his line's mean from under
+    three to nine.
+
+    NaN, not a clip: capping would put a plausible 22 on a man who has played
+    none, which is the same lie in a quieter voice. `line_quality`'s
+    normalization already treats a missing part as neutral.
+    """
+    from scoring.oline import _MAX_CAREER, _experience
+
+    conn = get_conn(str(tmp_path / "exp.duckdb"))
+    write_table(conn, "players", pd.DataFrame([
+        {"gsis_id": "real", "rookie_season": 2020},
+        {"gsis_id": "rookie", "rookie_season": 2026},
+        {"gsis_id": "ghost", "rookie_season": 1992},
+    ]))
+    out = _experience(conn, 2026).set_index("gsis_id")["seasons_in_league"]
+    assert out["real"] == 6
+    assert out["rookie"] == 0
+    assert pd.isna(out["ghost"]), "34 seasons is an identity error, not a career"
+    assert _MAX_CAREER >= 21, "Jason Peters played 21; the guard must clear him"

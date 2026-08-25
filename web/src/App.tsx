@@ -2,6 +2,10 @@ import { Route, Routes } from 'react-router-dom'
 import Landing from './pages/Landing'
 import DraftRoom from './pages/DraftRoom'
 import MockDrafts from './pages/MockDrafts'
+import Market from './pages/Market'
+import ArchiveData from './pages/ArchiveData'
+import Live from './pages/Live'
+import WaitingRoomPage from './pages/WaitingRoomPage'
 import './App.css'
 
 // Two of these three routes are one path through the app: the landing page
@@ -23,6 +27,19 @@ export default function App() {
       <Route path="/" element={<Landing />} />
       <Route path="/draft" element={<DraftRoom />} />
       <Route path="/mocks" element={<MockDrafts />} />
+      {/* The draft archive: what hundreds of recorded drafts do from a given
+          seat. Signed in only -- the page itself offers the way in when the
+          API answers 403. */}
+      <Route path="/archive" element={<Market />} />
+      {/* The rows the archive is counted from, as a table. Same gate. */}
+      <Route path="/archive/data" element={<ArchiveData />} />
+      {/* Watch a live mock draft, from any page's tab strip. */}
+      <Route path="/live" element={<Live />} />
+      {/* A mock room before it starts: its seats, its countdown, the seat
+          you take. A route so the URL names the room and refresh keeps it;
+          joining navigates to / with the token in the hash, the same door
+          the bookmarklet uses. */}
+      <Route path="/room/:leagueId" element={<WaitingRoomPage />} />
     </Routes>
   )
 }

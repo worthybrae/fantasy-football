@@ -7,7 +7,10 @@ import type { PlayerStatus } from './payload'
 const SEVERE = ['out', 'ir', 'pup', 'nfi', 'susp', 'doubtful']
 const WATCH = ['questionable', 'probable', 'dtd', 'day-to-day']
 
-function tone(status: string): string {
+// Exported because the header's own mark (PlayerProfile's `InjuryMark`)
+// reads severity off the same strings. Two lists would be two answers to
+// "how bad is this", drawn six inches apart on the same card.
+export function injuryTone(status: string): string {
   const s = status.toLowerCase()
   if (SEVERE.some((k) => s.includes(k))) return 'is-bad'
   if (WATCH.some((k) => s.includes(k))) return 'is-accent'
@@ -29,7 +32,7 @@ export default function InjuryStatus({ status }: { status: PlayerStatus }) {
     .join(' — ')
   return (
     <span className="pp-injury">
-      <span className={`pp-injury-pill ${tone(status.injury_status)}`}>
+      <span className={`pp-injury-pill ${injuryTone(status.injury_status)}`}>
         {status.injury_status}
       </span>
       {detail !== '' && <span className="pp-injury-detail">{detail}</span>}

@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { connectWithToken, fetchConnectProgress, fetchLiveState,
-         type ConnectProgress, type LiveState, type TokenConnectParams } from '../api'
-import { BOOKMARKLET } from '../lib/bookmarklet'
-import { Logo } from '../components/Logo'
+import { connectEspnAccount, connectWithToken, fetchConnectProgress, fetchLiveState,
+         fetchUpcomingDrafts,
+         type ConnectProgress, type LiveState, type TokenConnectParams,
+         type UpcomingDrafts } from '../api'
+import { readAccount, rememberAccount } from '../lib/accountCache'
+import SetupWizard, { ACCOUNT_CHANNEL } from '../components/SetupWizard'
 import ConnectScreen from '../components/ConnectScreen'
-import ReadinessStrip from '../components/ReadinessStrip'
-import LobbyStrip from '../components/LobbyStrip'
-import HeroBoard from '../components/HeroBoard'
+import Benefits from '../components/Benefits'
+import DemoRoom from '../components/DemoRoom'
+import Welcome from '../components/Welcome'
+import Dashboard, { previewingSignedOut } from '../components/Dashboard'
 // This page's own stylesheet, not App.css: see the header comment in it for
 // why, and for why every class below is `lp-` prefixed.
 import '../landing.css'
@@ -55,188 +58,23 @@ function tokenFromHash(hash: string) {
   return { leagueId, teamId, swid, token, season: p.get('season') || '' }
 }
 
-// ---------------------------------------------------------------------------
-// Can this browser actually drag a link onto the bookmarks bar?
-// ---------------------------------------------------------------------------
-//
-// The hero's primary action is a drag target, and a drag target on a phone
-// is a button that does nothing: there is no bookmarks bar to drop it on and
-// no gesture that would reach one. So the page has to know, and it has to
-// know before first paint (a hero that swaps its main action a moment after
-// it renders is a layout shift on the most important block of the page).
-//
-// DELIBERATELY NOT A WIDTH TEST. Width answers a different question than the
-// one being asked. A desktop window dragged down to 700px still drags
-// perfectly; a 1366px-wide tablet cannot drag at all. Two capability facts
-// answer the real one:
-//
-//   'draggable' in a <div>  -- the HTML drag-and-drop API exists here.
-//   (hover: hover) and (pointer: fine) -- the browser's PRIMARY input is a
-//   precise pointer that can hover, which is what dragging something out of
-//   the page and onto the browser's own chrome requires. iPadOS reports
-//   (hover: none) and (pointer: coarse) no matter how wide the window is; a
-//   laptop reports fine/hover at 320px.
-//
-// A hybrid -- a touchscreen laptop, a tablet with a trackpad attached --
-// reports its primary input as fine/hover and gets the drag target, which is
-// the right answer: it has a mouse. Detaching that trackpad fires the change
-// event below and the hero switches over.
-//
-// When there is no matchMedia at all, the answer is "no". The fallback is a
-// working page with an honest sentence; the drag target is the branch that
-// breaks if it is shown to the wrong browser, so it is the branch that has
-// to be earned.
-const DRAG_QUERY = '(hover: hover) and (pointer: fine)'
-
-function canDragNow(): boolean {
-  if (typeof window === 'undefined' || !window.matchMedia) return false
-  if (!('draggable' in document.createElement('div'))) return false
-  return window.matchMedia(DRAG_QUERY).matches
+// The other thing the bookmarklet can deliver: the ESPN account session, from
+// a click anywhere on ESPN rather than inside a draft room. It rides in the
+// hash for the same reason the token does -- browsers do not send fragments
+// to servers, so it reaches this page without passing through an access log
+// on the way -- and this page hands it to the helper and wipes it from the
+// address bar in the same breath.
+function sessionFromHash(hash: string) {
+  const p = new URLSearchParams(hash.replace(/^#/, ''))
+  const swid = p.get('swid')
+  const s2 = p.get('s2')
+  if (!swid || !s2) return null
+  return { swid, s2 }
 }
 
-function useCanDrag(): boolean {
-  // Computed in the initialiser, not in an effect, so the first paint is
-  // already the right hero.
-  const [canDrag, setCanDrag] = useState(canDragNow)
-  useEffect(() => {
-    if (!window.matchMedia) return
-    const mq = window.matchMedia(DRAG_QUERY)
-    const sync = () => setCanDrag(canDragNow())
-    mq.addEventListener('change', sync)
-    return () => mq.removeEventListener('change', sync)
-  }, [])
-  return canDrag
-}
-
-// The bookmarklet as a real `javascript:` anchor.
-//
-// Present from first paint so a drag to the bookmarks bar copies IT, not
-// this page's URL -- setting the href after mount was too late, and the drag
-// grabbed localhost instead. React strips `javascript:` from href props, so
-// it is injected as raw HTML. The string has no single quotes (verified in
-// bookmarklet.ts, which also explains why it is comment-free and must not be
-// reformatted), so a single-quoted href is safe; onclick returns false so a
-// stray click does nothing -- it is a drag target, not a button.
-//
-// The football rides in the anchor's TEXT, as an emoji rather than the SVG
-// mark: a bookmark's title is the anchor's textContent, so an inline <svg>
-// would be dropped on the way to the bar and the label would arrive naked.
-// Nothing else may be added inside the anchor for the same reason.
-//
-// `describedBy` points at the copy hint beside it. The chip is the hero's
-// first tab stop and, by design, does nothing on Enter -- a click would run
-// the bookmarklet against this page rather than a draft. A keyboard reader
-// who is told only "Draft Assistant" and then gets silence has hit a dead
-// end; described by the hint, they are told the same thing the sighted
-// reader is, that the route for them is the copy button next along.
-//
-// An attribute, not content: `textContent` is what becomes the bookmark's
-// title, so this cannot disturb it the way an inner element would.
-function bookmarkAnchor(describedBy?: string): string {
-  const described = describedBy ? "aria-describedby='" + describedBy + "' " : ""
-  return "<a class='lp-bookmark' title='Drag me to your bookmarks bar' "
-    + described
-    + "onclick='return false' href='" + BOOKMARKLET + "'>"
-    + "<span aria-hidden='true'>🏈</span>&nbsp;Draft&nbsp;Assistant</a>"
-}
-
-// ---------------------------------------------------------------------------
-// The keyboard path for the chip above: not dragging it, copying it.
-// ---------------------------------------------------------------------------
-//
-// The anchor bookmarkAnchor() renders is a drag target and, deliberately,
-// nothing else -- its onclick returns false so neither a stray click nor an
-// Enter/Space on a focused chip does anything (see the comment on
-// bookmarkAnchor). That is correct for a mouse, where the chip is never
-// clicked, only dragged. It is a dead end for a keyboard: the chip is the
-// hero's first tab stop, Enter does nothing, and nothing on the page says
-// another route exists. Dragging is inherently mouse-only and that part
-// cannot be fixed -- but the dead end is not inherent, so this is the
-// button a keyboard user reaches instead. It copies the exact same
-// `javascript:` string, verbatim, so it can be pasted as a hand-made
-// bookmark's address.
-async function copyBookmarklet(): Promise<boolean> {
-  // The Clipboard API needs a secure context (https, or localhost -- both
-  // covered here) and can still reject (permission denied, an iframe
-  // without the right allow policy). Either way, fall through to the
-  // legacy path rather than surface that as the only route.
-  if (typeof navigator !== 'undefined' && navigator.clipboard && window.isSecureContext) {
-    try {
-      await navigator.clipboard.writeText(BOOKMARKLET)
-      return true
-    } catch {
-      /* fall through */
-    }
-  }
-  // document.execCommand('copy') needs no permission and no secure context,
-  // which is what makes it worth keeping as a fallback rather than just
-  // reporting failure. An off-screen, unfocusable-by-tab textarea holds the
-  // text just long enough to select and copy it, then is removed.
-  try {
-    const ta = document.createElement('textarea')
-    ta.value = BOOKMARKLET
-    ta.setAttribute('readonly', '')
-    ta.style.position = 'fixed'
-    ta.style.opacity = '0'
-    ta.style.left = '-9999px'
-    document.body.appendChild(ta)
-    ta.select()
-    const ok = document.execCommand('copy')
-    document.body.removeChild(ta)
-    return ok
-  } catch {
-    return false
-  }
-}
-
-// Rendered beside the chip everywhere it appears (the hero, and again in
-// the setup block). `idPrefix` keeps the two instances' ids from colliding
-// when both are on the page at once. The result is announced through
-// role="status"/aria-live so a screen reader hears it without focus ever
-// leaving the button -- the button's own label never changes.
-function BookmarkCopy({ idPrefix }: { idPrefix: string }) {
-  const [status, setStatus] = useState<'idle' | 'ok' | 'fail'>('idle')
-  const onCopy = useCallback(() => {
-    copyBookmarklet().then((ok) => setStatus(ok ? 'ok' : 'fail'))
-  }, [])
-  return (
-    <div className="lp-copy">
-      <button
-        type="button"
-        className="lp-copy-btn"
-        onClick={onCopy}
-        aria-describedby={`${idPrefix}-copy-hint`}
-      >
-        Copy install link
-      </button>
-      <p id={`${idPrefix}-copy-hint`} className="lp-copy-hint">
-        Can’t drag it? Copy the link, then create a bookmark and paste it as the address.
-      </p>
-      <span
-        className={
-          status === 'idle' ? 'lp-copy-status'
-            : status === 'ok' ? 'lp-copy-status is-ok' : 'lp-copy-status is-fail'
-        }
-        role="status"
-        aria-live="polite"
-      >
-        {status === 'ok' && 'Copied — paste it as a bookmark’s address.'}
-        {status === 'fail' && 'Couldn’t copy automatically — try dragging the chip instead.'}
-      </span>
-    </div>
-  )
-}
-
-// The one sentence a visitor who cannot drag gets instead of the chip. Said
-// once, in the hero, and again above the setup block's own drag target so
-// that scrolling down does not land them back on the thing they were just
-// told they cannot use.
-const NO_DRAG_LINE = (
-  <>
-    Draft Assistant installs as a <strong>bookmark you drag to your browser’s
-    bookmarks bar</strong>, so setting it up needs a desktop browser.
-  </>
-)
+// The chip, the drag test, the copy fallback and the no-drag sentence all
+// live in components/BookmarkChip.tsx, moved there verbatim when the setup
+// wizard became their second consumer.
 
 // ---------------------------------------------------------------------------
 // The page's content. Every number below is a real reading off this tool, and
@@ -266,75 +104,45 @@ const NO_DRAG_LINE = (
 // directions: the most valuable player on the board is the one it is
 // cheapest to wait on. Figures are rounded the way the room rounds them
 // (ConfirmPick.fmtSigned: signed, no decimals).
-const PROOF_ROWS = [
-  { pos: 'QB', name: 'Josh Allen', vor: '+76', gain: '+3', tone: 'bad', take: false },
-  { pos: 'RB', name: 'Omarion Hampton', vor: '+71', gain: '+8', tone: '', take: false },
-  { pos: 'TE', name: 'Trey McBride', vor: '+65', gain: '+11', tone: 'good', take: true },
-  { pos: 'WR', name: 'Rashee Rice', vor: '+57', gain: '+21', tone: 'good', take: true },
-]
+// PROOF_ROWS is gone with the panel it fed. It was four hand-measured rows
+// standing in for a draft board; the page renders a real one now (DemoRoom),
+// and a fabricated example beside a live board would be the weaker of the two
+// claiming equal weight.
 
 // Four things a ranked list structurally cannot tell you. Each `proof` is a
 // reading, not an adjective; `note` is the part that makes the reading mean
 // something, and in two cases it is the caveat rather than the boast.
-const FEATURES = [
-  {
-    n: '01',
-    title: 'It prices waiting, not just value',
-    body: 'Every board ranks players by how good they are. This one measures what '
-      + 'passing actually costs you — the gap between a player and the best one at '
-      + 'his position the model still expects to be there when you pick again.',
-    // Same row as the hero panel, same measurement.
-    proof: 'Josh Allen · +76 over replacement · +3 gain vs waiting',
-    note: 'the biggest number on the board, attached to the wrong pick',
-  },
-  {
-    n: '02',
-    title: 'It simulates the picks between now and your turn',
-    body: 'Value only means anything against what will survive. Every time a pick '
-      + 'lands, the draft ahead of you is run 400 times, opponent by opponent, out '
-      + 'to a turn far enough away for the difference to be real — and every player '
-      + 'is priced against the best one likely to still be on the board there.',
-    // api/live.py SURVIVAL_ROLLOUTS = 400, one survival() pass per recompute,
-    // and a recompute is queued on every pick the socket reports.
-    proof: '400 simulated runs a pick · every opponent modelled',
-    // The honest half. scoring/draft_model.cold_start_fits is what a league
-    // with no imported draft history gets, which is every first connect and
-    // every mock: one market-following model shared by all opponents. The
-    // per-manager fits only exist once the league's own past drafts are in
-    // (api/live.py's `history` stage says which of the two you got).
-    note: 'a market-following model for every opponent by default; a separate model '
-      + 'per manager once your league’s own past drafts are imported',
-  },
-  {
-    n: '03',
-    title: 'It knows consistency, not just averages',
-    body: 'Two backs average twenty points. One gives you twenty every week; the '
-      + 'other gives you five and then fifty. Consistency is scored per point of '
-      + 'production, so a big scorer is not punished for scoring, and ranked '
-      + 'against everyone else at the position.',
-    // scoring/profile_cache: 2025, 8-game qualifier. RB3 of 97 on points per
-    // game; coefficient-of-variation rank 28 of 95 (95, not 97, because two
-    // qualifying backs scored <= 0 a game and have no coefficient at all).
-    proof: 'Jahmyr Gibbs 2025 · RB3 of 97 by points a game · 28th steadiest of 95',
-    note: 'on raw week-to-week spread the same season ranks 97th of 97 — apparently '
-      + 'the most volatile back in the league',
-  },
-  {
-    n: '04',
-    title: 'It knows what seasons like this became',
-    body: 'For any player it finds every comparable season since 2016 — same '
-      + 'production, same point in a career — and shows what those players did the '
-      + 'year after. A projection is a guess. This is a record.',
-    // scoring/profile_cache.comparable_pool, Gibbs' 2025 at the +-3 ppg /
-    // +-1 year band; 2016 is scoring/config.HISTORY_SEASONS' floor. The 21.5
-    // is ESPN's own 2026 projection for him: 365.3 points over 17 games.
-    proof: '19 comparable seasons · median −2.8 points a game · 13 of 19 declined',
-    note: 'Gibbs’ own comparables, against the 21.5 a game ESPN projects for him',
-  },
-]
 
 export default function Landing() {
   const [gate, setGate] = useState<Gate>('idle')
+  // What the room is showing: a draft going on now, or one from the archive
+  // being replayed because none is. Held here for one reason -- the welcome
+  // card says "running now", and it must stop saying it when that stops
+  // being true.
+  const [mode, setMode] = useState<'live' | 'replay' | 'none'>('none')
+  // Bumped when something on the page needs an account it does not have --
+  // the archive button under the corpus band. The welcome card reads it and
+  // raises itself with the reason.
+  const [askedAt, setAskedAt] = useState(0)
+  // The account connect, which runs on its own clock: it is not a draft and
+  // has no progress screen. `connected` is a counter rather than a flag so
+  // the drafts card can be told to re-read (a key change) each time one
+  // lands, without this page holding the list itself.
+  const [connecting, setConnecting] = useState(false)
+  const [connected, setConnected] = useState(0)
+  // The ESPN account this browser can act as, and the leagues it holds.
+  // Seeded from this tab's last answer (lib/accountCache.ts) so a return to
+  // this page -- Archive -> Drafts, above all -- opens on the right page in
+  // its first frame. Null only when the tab has never been answered, and
+  // null paints NOTHING (see the render below): the pitch flashed at
+  // somebody signed in and then swapped for the dashboard is the exact
+  // stutter this state exists to prevent.
+  const [account, setAccount] = useState<UpcomingDrafts | null>(readAccount)
+  // The guided setup, open over the page. While it is up the dashboard is
+  // held back even once the account connects -- the wizard's own finished
+  // screen is showing the same fact, and the page swapping underneath it
+  // would yank the dialog's ground away mid-sentence.
+  const [wizard, setWizard] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [progress, setProgress] = useState<ConnectProgress | null>(null)
   const [live, setLive] = useState<LiveState | null>(null)
@@ -342,7 +150,6 @@ export default function Landing() {
   // Bumped by Retry. Every connect-owned piece of state is keyed off it, so a
   // retry starts from a blank screen rather than from the last one's rows.
   const [attempt, setAttempt] = useState(0)
-  const canDrag = useCanDrag()
   const navigate = useNavigate()
 
   // The token the bookmarklet delivered, kept for the whole session. It has
@@ -369,14 +176,38 @@ export default function Landing() {
   const ownRecordRef = useRef(false)
 
   useEffect(() => {
-    // Arrived from the bookmarklet? Keep the token and open the socket.
-    const params = tokenFromHash(window.location.hash)
+    // Arrived from the bookmarklet? It may carry two things, and they are
+    // independent: an account session to connect, and a draft to join.
+    const hash = window.location.hash
+    const params = tokenFromHash(hash)
+    const session = sessionFromHash(hash)
+    if (params || session) {
+      // FIRST, before either is used: out of the address bar. It should not
+      // sit there, be bookmarked, be screenshotted, or survive a refresh into
+      // a duplicate connect -- and one of these two values is an account.
+      window.history.replaceState(null, '', window.location.pathname)
+    }
+    if (session) {
+      // Connecting is not joining. It stores the session, hands this browser
+      // an httpOnly cookie and answers with the leagues -- which the drafts
+      // card picks up on its own poll, so nothing here has to hold the list.
+      setConnecting(true)
+      connectEspnAccount(session.swid, session.s2)
+        .then(() => {
+          setConnected((n) => n + 1)
+          // Tell any tab sitting on the setup wizard that the click landed.
+          // The wizard confirms with its own probe -- this only collapses
+          // the seconds it would otherwise spend waiting on the next poll.
+          try {
+            new BroadcastChannel(ACCOUNT_CHANNEL).postMessage('connected')
+          } catch { /* no BroadcastChannel here; the wizard's poll covers it */ }
+        })
+        .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+        .finally(() => setConnecting(false))
+    }
     if (params) {
       paramsRef.current = params
       setGate('connecting')
-      // Drop the token out of the address bar immediately -- it should not sit
-      // there, be bookmarked, or survive a refresh into a duplicate connect.
-      window.history.replaceState(null, '', window.location.pathname)
     }
   }, [])
 
@@ -456,13 +287,24 @@ export default function Landing() {
   // No token in the hash: this is the landing view. Still poll in case a
   // connect is already running from a click in another window -- then this
   // page can offer the board rather than pitch a tool already in use.
+  //
+  // A SESSION IS NOT A DRAFT. `active` and `token_received` only say a
+  // connect once happened in this server process: a token that was minted,
+  // used for nothing, and left behind reads as both for as long as the
+  // process lives. Measured on this deployment -- active, token_received,
+  // listener_alive false, stale, zero picks -- and the page was offering
+  // "your draft is synced, go to the board" over a session with no draft
+  // behind it and no listener attached. So the test is whether the thing is
+  // ALIVE: a listener on the socket, or picks that actually landed.
   useEffect(() => {
     if (gate !== 'idle') return
     let cancelled = false
     const poll = async () => {
       try {
         const state = await fetchLiveState()
-        if (!cancelled && (state.active || state.token_received)) setGate('live')
+        const running = state.active
+          && (state.listener_alive || state.draft_started || state.picks_made > 0)
+        if (!cancelled && running) setGate('live')
       } catch {
         /* helper not up yet; the page simply stays on the landing view */
       }
@@ -471,6 +313,50 @@ export default function Landing() {
     const id = setInterval(poll, 2500)
     return () => { cancelled = true; clearInterval(id) }
   }, [gate])
+
+  // WHO IS LOOKING, AND THEREFORE WHICH PAGE THIS IS. `/api/espn/drafts` is
+  // the authoritative answer and deliberately not the cheaper
+  // `/api/espn/custody` probe: a STORED session is not a WORKING one -- ESPN
+  // invalidates a cookie when the user signs out anywhere, and nothing local
+  // can see that happen. This endpoint finds out the only way anybody can, by
+  // asking ESPN, so a page that renders the dashboard is a page whose session
+  // was good a moment ago.
+  //
+  // Re-read on a slow poll as well as on a connect (`connected` counts those):
+  // the server caches for two minutes so this mostly costs nothing, and what
+  // it buys is a draft flipping to LIVE while somebody is looking at the page,
+  // which is the one moment this list most needs to be right.
+  useEffect(() => {
+    let cancelled = false
+    const read = async () => {
+      try {
+        const body = await fetchUpcomingDrafts()
+        rememberAccount(body)
+        if (!cancelled) setAccount(body)
+      } catch {
+        // The helper being down is not a signed-out session. Leave whatever
+        // is on screen alone rather than throwing a reader back to the pitch
+        // over one failed request.
+        if (!cancelled && account === null) setAccount({ connected: false, leagues: [] })
+      }
+    }
+    read()
+    const id = setInterval(read, 60_000)
+    return () => { cancelled = true; clearInterval(id) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connected])
+
+  // A join from the league list. The token was minted server-side rather than
+  // by a bookmarklet on an ESPN tab, and from here on nothing knows the
+  // difference: same params, same ref, same `connecting` gate, same progress
+  // screen and same Retry. That is the whole reason the mint is its own
+  // endpoint -- one connect path, two ways of getting a token to it.
+  const joinDraft = useCallback((params: TokenConnectParams) => {
+    paramsRef.current = params
+    setError(null)
+    setProgress(null)
+    setGate('connecting')
+  }, [])
 
   const retry = useCallback(() => {
     setError(null)
@@ -489,20 +375,13 @@ export default function Landing() {
   // There is no payment integration and no hosted signup, so a button that
   // implied either would be lying about what happens next. What actually
   // starts a draft -- free or paid, mock or real -- is the bookmarklet, and
-  // the honest thing a CTA can do is put it in front of you. The hero does
-  // that literally now (the bookmarklet IS its primary action); every other
-  // button on the page scrolls to the setup block, where the same chip sits
-  // above the three steps, and nothing else claims to happen.
-  //
-  // `smooth` only when the visitor has not asked for less motion; a page
-  // that ignores that preference to animate a scroll is the exact case the
-  // preference exists for.
-  const toSetup = useCallback(() => {
-    const el = document.getElementById('setup')
-    if (!el) return
-    const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
-    el.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'start' })
-  }, [])
+  // the honest thing a CTA can do is walk you through installing it. Every
+  // CTA opens the guided setup (SetupWizard): the same chip, the same three
+  // steps as the block further down the page, but one at a time and with the
+  // last step watching for the click and finishing itself. The setup block
+  // stays on the page as the readable reference for anyone who would rather
+  // scroll than be walked.
+  const toSetup = useCallback(() => setWizard(true), [])
 
   // The screen this whole task is about. It replaces the page rather than
   // sitting above it, and it stays up until the work is genuinely finished --
@@ -526,30 +405,49 @@ export default function Landing() {
     )
   }
 
+  // SIGNED IN IS A DIFFERENT PAGE, not the same page with a card on top.
+  // Somebody who has connected an account has already been sold; what they
+  // came back for is a list of drafts and a way into one. So the pitch, the
+  // demo room and the welcome card are not rendered at all here -- see
+  // Dashboard, which is the whole page for this reader.
+  //
+  // Below the connect screen deliberately: a connect in flight is a connect
+  // in flight whoever is signed in, and the progress screen owns the page
+  // while it runs.
+  // A mock room is a ROUTE now (/room/:leagueId, pages/WaitingRoomPage.tsx),
+  // not a view of this page: the URL names the room, refresh keeps it, and
+  // the back button leaves it. Its join navigates back here with the token
+  // in the hash -- the exact door the bookmarklet uses -- so this page still
+  // owns the one connect path.
+  if (account?.connected && !previewingSignedOut() && !wizard) {
+    return (
+      <Dashboard
+        leagues={account.leagues}
+        source={account.source ?? null}
+        onJoin={joinDraft}
+        onOpenRoom={(leagueId) => navigate(
+          `/room/${encodeURIComponent(leagueId)}`
+          + (account.season ? `?season=${account.season}` : ''))}
+      />
+    )
+  }
+
+  // Not yet known which of the two pages this is. An empty frame for the
+  // probe's round trip -- a local lookup for a stranger, so a few
+  // milliseconds; the server's cached league list for a returning reader --
+  // beats guessing wrong and swapping. Only ever seen on a tab's first visit:
+  // every later one is seeded from the last answer.
+  if (account === null) {
+    return <main className="lp" aria-busy="true" />
+  }
+
   return (
     <main className="lp">
-      <header className="lp-bar">
-        <span className="lp-mark">
-          <Logo size={17} />
-          Draft Assistant
-        </span>
-        <span className="lp-bar-price">
-          Mock drafts free · <span className="mono">$4.99</span> a real draft
-        </span>
-        {/* The only way into /mocks that isn't typing the URL: a reading room
-            for drafts already played, off to the side of the pitch rather
-            than in it. */}
-        <Link to="/mocks" className="lp-bar-link">See mock drafts</Link>
-      </header>
-
-      {gate === 'live' && (
-        <div className="lp-band lp-band-live">
-          <span>Your draft is synced.</span>
-          <button className="lp-band-action" onClick={() => navigate('/draft')}>
-            Go to the board
-          </button>
-        </div>
-      )}
+      {/* NO MARKETING BAR. The room below brings its own top bar -- wordmark,
+          tabs, league line, pick counter, status pill -- and two bars stacked
+          would put the product's chrome under an advertisement for it. The
+          price moved to the ask, where somebody is actually deciding, and the
+          /mocks link to the footer, where the other side routes live. */}
 
       {/* A failed connect no longer lands here as a one-line band. It keeps
           the connect screen, which can say which stage stopped, how far it
@@ -565,319 +463,84 @@ export default function Landing() {
         </div>
       )}
 
+      {/* The seconds between the bookmarklet delivering a session and the
+          probe coming back with the leagues it unlocked. Worth a line: it is
+          the one moment this page is about to become a different page, and
+          silence there reads as the click having failed. */}
+      {gate === 'idle' && connecting && (
+        <section className="lp-drafts">
+          <p className="lp-cap">Connecting your ESPN account…</p>
+        </section>
+      )}
+
       {/* -- the argument, and the proof of it, above the fold -- */}
-      <section className="lp-sec lp-hero">
-        {/* A synthetic draft board, drafting itself, behind everything in
-            this section. Decoration -- aria-hidden and pointer-events: none
-            -- and absolutely positioned, so it adds nothing to the layout
-            and shifts nothing when it mounts. See components/HeroBoard.tsx
-            for why it is DOM rather than a video, and landing.css for the
-            scrim that keeps every line of copy below at the contrast it had
-            before the board existed. */}
-        <HeroBoard />
+      {/* THE ROOM IS THE PAGE, and it is the first screen: a visitor lands
+          inside the product with a real ESPN mock draft running in it. No
+          headline above it, no lede explaining what they are about to see --
+          the room explains itself faster than a paragraph does, and a
+          paragraph would push it below the fold.
 
-        <div className="lp-hero-copy">
-          <p className="lp-cap lp-cap-accent">For ESPN fantasy leagues</p>
-          {/* Two sentences, two blocks rather than one string with a <br>:
-              `text-wrap: balance` balances a block, so with a line break
-              inside one block the second sentence broke after "who" and hung
-              two words on their own line. As separate blocks each sentence
-              balances itself, at every width. */}
-          <h1 className="lp-title">
-            <span>ESPN tells you who’s best.</span>
-            <span>This tells you who to take.</span>
-          </h1>
-          <p className="lp-lede">
-            Every draft board ranks players. None of them price what it costs to
-            wait. Draft Assistant replaces your ESPN draft room with one that
-            measures both — and simulates the picks between now and your next
-            turn to work out the difference.
-          </p>
-          {/* The hero's action. There is no signup and no download: what a
-              visitor actually has to do is move one object onto their
-              bookmarks bar, so that object is the primary action rather than
-              a button that scrolls to where it was hidden.
+          The pitch happens after: the ask is docked at the bottom of that
+          screen, and everything that argues the case is further down for
+          whoever wants it. */}
+      {/* `live` puts the way back to a running draft in the ROOM'S OWN top
+          bar, where the rest of this page's chrome lives. It used to be a
+          band across the top of the page, which pushed the whole room down
+          the moment it appeared and read as an alert about something that
+          had gone wrong. A link in the bar is the same offer without the
+          shove. */}
+      <DemoRoom onMode={setMode} live={gate === 'live'} />
 
-              Where it cannot be done, it is not offered. See `useCanDrag`
-              above for what is tested; the branch is decided before first
-              paint, so neither version arrives late. */}
-          <div className="lp-hero-act">
-            {canDrag ? (
-              <div className="lp-drag">
-                <p className="lp-cap lp-cap-accent lp-drag-cap">
-                  <span className="lp-drag-arrow" aria-hidden="true">↑</span>
-                  Drag this to your bookmarks bar
-                </p>
-                <div className="lp-drag-chip">
-                  <span dangerouslySetInnerHTML={{ __html: bookmarkAnchor('hero-copy-hint') }} />
-                  {/* The chip's onclick returns false on purpose (see
-                      bookmarkAnchor) -- it does nothing for a mouse click or a
-                      keyboard Enter alike. This is the route a keyboard user
-                      gets instead. See copyBookmarklet/BookmarkCopy above. */}
-                  <BookmarkCopy idPrefix="hero" />
-                </div>
-                <p className="lp-drag-note">
-                  Once, ever. Then click it in your ESPN draft room — a mock
-                  counts — and your board opens here, priced before the first pick.
-                </p>
-                <div className="lp-cta-row">
-                  <button className="lp-cta lp-cta-ghost" onClick={toSetup}>
-                    Try it in a mock draft
-                  </button>
-                  <span className="lp-cta-note">free, no account</span>
-                </div>
-              </div>
-            ) : (
-              <>
-                <p className="lp-nodrag-line">{NO_DRAG_LINE}</p>
-                <div className="lp-cta-row">
-                  <button className="lp-cta" onClick={toSetup}>Try it in a mock draft</button>
-                  <span className="lp-cta-note">free, no account</span>
-                </div>
-              </>
-            )}
-            {/* Renders nothing until ESPN's own lobby answers, and nothing at
-                all if it can't -- see LobbyStrip's module comment. */}
-            <LobbyStrip />
-          </div>
-        </div>
+      {/* The brand, and the way in. Over the room rather than instead of it,
+          and it never disappears -- dismissing moves it to the corner (see
+          Welcome). Rendered after the room so it stacks above without a
+          z-index argument. */}
+      <Welcome onStart={toSetup} live={mode === 'live'} askedAt={askedAt} />
 
-        {/* Not a screenshot and not an illustration: a board this tool
-            actually produced, with the state it was produced from written
-            underneath it. See PROOF_ROWS for the full measurement. */}
-        <aside className="lp-proof">
-          <div className="lp-proof-head">
-            <span className="lp-cap lp-cap-accent">Round 2, on the clock</span>
-            <span className="lp-proof-sub">what every other board says, against what this one says</span>
-          </div>
-          {PROOF_ROWS.map((r) => (
-            <div className={r.take ? 'lp-proof-row is-take' : 'lp-proof-row'} key={r.name}>
-              <span className="lp-proof-who">
-                <span className={`lp-pos lp-pos-${r.pos.toLowerCase()}`}>{r.pos}</span>
-                <span className="lp-proof-name">{r.name}</span>
-              </span>
-              <span className="lp-proof-fig">
-                <span className="lp-cap">Over replacement</span>
-                <span className="lp-proof-num mono">{r.vor}</span>
-              </span>
-              <span className="lp-proof-fig">
-                <span className="lp-cap">Gain vs waiting</span>
-                <span className={`lp-proof-num mono${r.tone ? ` is-${r.tone}` : ''}`}>{r.gain}</span>
-              </span>
-            </div>
-          ))}
-          <p className="lp-proof-foot">
-            Josh Allen is the most valuable player on that board and the
-            cheapest one to pass on. The next quarterback is nearly as good, and
-            across 400 simulated runs to the next turn Allen was still on the
-            board 93% of the time. Rashee Rice, worth nineteen points less, was
-            there 2% — so the tool takes Rice and lets Allen come back round.
-            <span className="lp-proof-src">
-              8-team PPR, my slot on the clock at pick 15, the first fourteen
-              picks gone in ESPN ADP order. Survival counted to pick 27, over
-              400 simulated drafts — the same numbers the room shows on the
-              night.
-            </span>
-          </p>
-        </aside>
-      </section>
+      {/* WHAT IT KNOWS, DRAWN. This was four cards of prose about the
+          model -- three hundred words a reader who has just watched the room
+          run itself is not going to read, every claim of which they had to
+          take on trust. Each panel now draws the thing it claims, in the
+          shape the room draws it, and arrives as it is scrolled to. */}
+      <Benefits onNeedAccount={() => setAskedAt((n) => n + 1)} />
 
-      {/* -- what a ranked list cannot do -- */}
-      <section className="lp-sec">
-        <div className="lp-lead">
-          <p className="lp-cap">What it knows that ESPN doesn’t</p>
-          <h2 className="lp-h2">Four things a rankings list structurally cannot tell you.</h2>
-        </div>
-        <div className="lp-grid">
-          {FEATURES.map((f) => (
-            <article className="lp-card" key={f.n}>
-              <div className="lp-card-head">
-                <span className="lp-card-n mono">{f.n}</span>
-                <h3 className="lp-card-title">{f.title}</h3>
-              </div>
-              <p className="lp-card-body">{f.body}</p>
-              <div className="lp-proof-line">
-                <p className="lp-proof-line-value mono">{f.proof}</p>
-                <p className="lp-proof-line-note">{f.note}</p>
-              </div>
-            </article>
-          ))}
-        </div>
-      </section>
-
-      {/* -- how it works, and the objection everyone has -- */}
-      <section className="lp-sec lp-split" id="setup">
-        <div className="lp-lead">
-          <p className="lp-cap">How it works</p>
-          <h2 className="lp-h2">One click from the draft room you’re already in.</h2>
-
-          {/* The same chip the hero hands over, kept here because this is
-              where the three steps explain what to do with it. On a browser
-              that cannot drag it, the honest line comes first rather than
-              letting someone who was just told they need a desktop land back
-              on the drag target -- the chip stays visible underneath it, for
-              anyone whose browser the test read wrong. See bookmarkAnchor
-              above for why this is raw HTML. */}
-          {!canDrag && <p className="lp-nodrag-line">{NO_DRAG_LINE}</p>}
-          <div className="lp-bookmark-row">
-            <span dangerouslySetInnerHTML={{ __html: bookmarkAnchor('setup-copy-hint') }} />
-            {canDrag && (
-              <span className="lp-bookmark-hint">← drag this to your bookmarks bar</span>
-            )}
-            <BookmarkCopy idPrefix="setup" />
-          </div>
-
-          {/* Numbered because this genuinely is a sequence: each step is only
-              possible once the one above it is done. */}
-          <ol className="lp-steps">
-            <li className="lp-step">
-              <span className="lp-step-n mono">1</span>
-              <span>
-                Drag the button above to your bookmarks bar. Once, ever — press{' '}
-                <kbd>⌘⇧B</kbd> / <kbd>Ctrl⇧B</kbd> first if the bar is hidden.
-              </span>
-            </li>
-            <li className="lp-step">
-              <span className="lp-step-n mono">2</span>
-              <span>
-                Open your ESPN draft room — a mock counts — and click{' '}
-                <strong>🏈 Draft&nbsp;Assistant</strong> there. Your board is built,
-                priced and ranked before the first pick lands.
-              </span>
-            </li>
-            <li className="lp-step">
-              <span className="lp-step-n mono">3</span>
-              <span>
-                Draft from the window it opens. Clock, board, roster and
-                recommendation in one place, and every pick you make is sent to
-                ESPN and counted only once ESPN confirms it.
-              </span>
-            </li>
-          </ol>
-        </div>
-
-        <div className="lp-trust">
-          <h2 className="lp-trust-head">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--ok)"
-                 strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M12 3l7.5 3v5.5c0 4.4-3.1 8.4-7.5 9.5-4.4-1.1-7.5-5.1-7.5-9.5V6z" />
-            </svg>
-            Your ESPN password never reaches this app
-          </h2>
-          <p>
-            There is no account to create and no password to hand over. The
-            bookmarklet runs on ESPN’s own page, where you are already signed in,
-            and asks ESPN for the draft token its own draft room uses. What
-            arrives here is that token plus the ids already sitting in your draft
-            room’s address bar — league, team, member, season. Your ESPN login
-            cookie stays in your browser.
-          </p>
-          <div className="lp-rule" />
-          <p>
-            That token is held for the draft, in a file only your own user can
-            read, and dropped twelve hours later. It is what lets a crash
-            mid-draft rejoin on its own instead of asking you for anything.
-          </p>
-          <div className="lp-rule" />
-          <p>
-            This window opens its own connection to ESPN’s draft socket, so draft
-            here rather than in ESPN’s room — one team drafting from two sessions
-            is a fight neither needs. Every pick goes back over that socket and
-            your league sees an ordinary draft.
-          </p>
-        </div>
-      </section>
-
-      {/* -- pricing -- */}
-      <section className="lp-sec">
-        <div className="lp-lead">
-          <p className="lp-cap">Pricing</p>
-          <h2 className="lp-h2">Practise for nothing. Pay once, for the draft that counts.</h2>
-        </div>
-        <div className="lp-plans">
-          <div className="lp-plan">
-            <div className="lp-plan-head">
-              <span className="lp-plan-name">Mock drafts</span>
-              <span className="lp-plan-price mono">Free</span>
-              <span className="lp-plan-unit">always</span>
-            </div>
-            <p className="lp-plan-blurb">
-              The whole tool, with nothing held back. As many as you like.
-            </p>
-            <ul className="lp-plan-items">
-              {['Every ranking and every recommendation',
-                'Full player cards, history and comparables',
-                'Picks sent to ESPN exactly as in a real draft'].map((t) => (
-                <li key={t}>
-                  <Tick />
-                  <span>{t}</span>
-                </li>
-              ))}
-            </ul>
-            <button className="lp-plan-btn" onClick={toSetup}>Start a mock draft</button>
-          </div>
-
-          <div className="lp-plan lp-plan-paid">
-            <div className="lp-plan-head">
-              <span className="lp-plan-name">Your real draft</span>
-              <span className="lp-plan-price mono">$4.99</span>
-              <span className="lp-plan-unit">per draft</span>
-            </div>
-            <p className="lp-plan-blurb">
-              One league, one draft night. No subscription, nothing to cancel.
-            </p>
-            <ul className="lp-plan-items">
-              {['Everything in mocks, on the night it counts',
-                'One price per draft, not per season',
-                'Still no account and no password'].map((t) => (
-                <li key={t}>
-                  <Tick />
-                  <span>{t}</span>
-                </li>
-              ))}
-            </ul>
-            <button className="lp-plan-btn" onClick={toSetup}>Use it for a real draft</button>
-          </div>
-        </div>
-        {/* Said plainly rather than left for someone to discover: there is no
-            payment integration in this build at all, so a page that implied a
-            charge would be describing software that does not exist. */}
-        <p className="lp-plans-note">
-          Payment isn’t switched on yet — nothing on this page can charge you,
-          and until it is, a real draft runs on the same free path a mock does.
-          Both buttons take you to the setup above.
-        </p>
-      </section>
+      {/* NO "HOW IT WORKS" AND NO PRICING. Both were written for a page
+          whose first screen was a headline; the first screen is now the
+          product itself, and a reader who has watched a live draft rank
+          itself does not need four steps and a price table between them and
+          the button. The steps are not lost -- "Get started" opens the setup
+          wizard, which walks them one at a time and watches for the click --
+          and the price is on the card, under the button, where somebody is
+          actually deciding. */}
 
       <footer className="lp-foot">
         <span>
           Not affiliated with ESPN. Works with any ESPN fantasy football league
           whose draft room you can open.
+          {' '}
+          {/* The reading room for drafts already played. It lost its place in
+              the top bar when the room took that bar over, and this is where
+              it belonged anyway: a side route, not part of the pitch. */}
+          <Link to="/mocks" className="lp-bar-link">See mock drafts</Link>.
         </span>
         <button className="lp-cta" onClick={toSetup}>Try a mock draft</button>
       </footer>
 
-      {/* An operator's panel, not part of the pitch: it reports whether this
-          machine's data has been refreshed and prints the command when it has
-          not. It renders nothing unless the helper answers, so a visitor never
-          sees it -- and whoever is running the helper still needs it on the one
-          night it matters. */}
-      <div className="lp-ops">
-        <ReadinessStrip />
-      </div>
+      {/* The guided setup, over everything. Rendered last so it stacks
+          without a z-index argument, exactly as Welcome does. `onConnected`
+          remembers the answer and seeds the page's own state, so the
+          dashboard is already painted behind the wizard's finished screen
+          the moment "See your drafts" closes it. */}
+      {wizard && (
+        <SetupWizard
+          onClose={() => setWizard(false)}
+          onConnected={(body) => {
+            rememberAccount(body)
+            setAccount(body)
+          }}
+          onDone={() => setWizard(false)}
+        />
+      )}
     </main>
-  )
-}
-
-/** The green check in the pricing lists. Inline because it is the only icon
- *  used more than once here, and a shared component beats six copies of the
- *  same path drifting apart. */
-function Tick() {
-  return (
-    <svg className="lp-tick" width="11" height="11" viewBox="0 0 24 24" fill="none"
-         stroke="var(--ok)" strokeWidth="3.4" strokeLinecap="round"
-         strokeLinejoin="round" aria-hidden="true">
-      <path d="M20 6L9 17l-5-5" />
-    </svg>
   )
 }

@@ -464,33 +464,58 @@ def test_the_guard_lets_an_ordinary_request_through_with_its_body_intact(
 def test_a_stranger_cannot_take_over_an_account_through_the_api(custody_env):
     """The same attack as the store test, driven the way it would really
     arrive: a POST naming the victim's public SWID and carrying the attacker's
-    own ESPN session."""
+    own ESPN session.
+
+    It fails for a different reason than it used to. The row is keyed on
+    HMAC(espn_s2) now, so naming somebody else's account does not point the
+    write at their row -- there is no name in the key to aim at. See
+    `CredentialStore.connect` for why the previous defence (making ESPN name
+    the owner) had to go: the endpoint it asked turned out to be public.
+    """
     victim = _connected(_client())
     assert victim.get("/api/espn/custody").json()["account_hint"] == "1122"
 
     attacker = TestClient(_app(), base_url="https://testserver")
     resp = attacker.post("/_connect",
                          json={"swid": FAKE_SWID, "espn_s2": OTHER_S2})
-    assert resp.status_code == 200          # they connected THEIR OWN account
+    assert resp.status_code == 200          # they stored THEIR OWN session
 
-    # The victim's browser is untouched and still points at their own account.
+    # The victim's browser is untouched and still resolves to their session.
     still = victim.get("/api/espn/custody").json()
     assert still["connected"] is True
     assert still["account_hint"] == "1122"
-    # And the attacker got their own row, not the victim's.
-    assert attacker.get("/api/espn/custody").json()["account_hint"] == "8888"
+    # Two rows, and the attacker's cookie reaches only their own.
     assert custody_env.counts()["credentials"] == 2
+    assert attacker.get("/api/espn/custody").json()["connected"] is True
 
 
-def test_a_session_espn_will_not_vouch_for_is_refused(custody_env):
-    """403, not 401: the caller is not being asked to authenticate to us, they
-    are being told the session they sent does not demonstrably belong to the
-    account they named."""
+def test_the_account_hint_is_what_was_claimed_not_a_verified_identity(custody_env):
+    """A caller can mislabel THEIR OWN row, and that is all.
+
+    Worth pinning because the hint reads like an identity and no longer is:
+    nothing verifies the SWID, so a connect that names somebody else's account
+    stores that name against its own session. The consequences stop there --
+    the row is still keyed by the secret, still only reachable with the cookie
+    minted for it, and the leagues it can actually read are ESPN's answer to
+    the SESSION, not to the label.
+    """
+    attacker = TestClient(_app(), base_url="https://testserver")
+    attacker.post("/_connect", json={"swid": FAKE_SWID, "espn_s2": OTHER_S2})
+    # Their own row wears the victim's name...
+    assert attacker.get("/api/espn/custody").json()["account_hint"] == "1122"
+    # ...and the victim, who has never connected, is unaffected: one row.
+    assert custody_env.counts()["credentials"] == 1
+
+
+def test_half_a_session_is_refused_at_the_api(custody_env):
+    """The refusal that is left. An empty secret would hash to a shared row id
+    and an empty swid cannot be sent to ESPN, so neither is stored -- and no
+    cookie is handed out for a credential that was never written."""
     client = TestClient(_app(), base_url="https://testserver")
-    resp = client.post("/_connect", json={"swid": FAKE_SWID,
-                                          "espn_s2": "AEBnot-a-real-session"})
-    assert resp.status_code == 403
-    assert "set-cookie" not in resp.headers
+    for body in ({"swid": FAKE_SWID, "espn_s2": ""}, {"swid": "", "espn_s2": OTHER_S2}):
+        resp = client.post("/_connect", json=body)
+        assert resp.status_code >= 400
+        assert "set-cookie" not in resp.headers
     assert custody_env.counts() == {"credentials": 0, "sessions": 0}
 
 

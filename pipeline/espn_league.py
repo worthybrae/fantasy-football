@@ -392,16 +392,19 @@ class EspnClient:
         page.goto(LOGIN_URL)
         # Poll the context's own cookie jar, and require BOTH cookies.
         #
-        # The obvious `page.wait_for_function` on `document.cookie` is wrong
-        # twice over. `espn_s2` is HttpOnly, so it never appears in
-        # `document.cookie` at all and waiting for it there waits forever.
-        # And `SWID` is set on page load, before anyone has signed in, so an
-        # `||` between the two returns instantly and saves an anonymous
-        # session -- which then fails later, at the socket, as "the saved
-        # ESPN login has expired", pointing at the wrong thing entirely.
+        # The obvious `page.wait_for_function` on `document.cookie` is wrong,
+        # though not for the reason this comment used to give. It claimed
+        # `espn_s2` is HttpOnly and therefore invisible to `document.cookie`;
+        # measured in a real browser, it is NOT HttpOnly and does appear
+        # there. What is still true is the half that actually matters here:
+        # `SWID` is set on page load, before anyone has signed in, so an `||`
+        # between the two returns instantly and saves an anonymous session --
+        # which then fails later, at the socket, as "the saved ESPN login has
+        # expired", pointing at the wrong thing entirely.
         #
-        # `context.cookies()` reads the real jar, HttpOnly included, so it
-        # can see the one cookie that actually proves the SSO flow finished.
+        # `context.cookies()` is kept regardless: it reads the real jar rather
+        # than a string the page happens to expose, so it stays correct if
+        # ESPN ever does set the flag this comment used to assume.
         deadline = time.monotonic() + LOGIN_TIMEOUT_SECONDS
         while True:
             names = {c["name"] for c in context.cookies()}

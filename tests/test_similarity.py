@@ -1,5 +1,6 @@
 import pandas as pd
-from scoring.similarity import player_season_features, find_twins, value_neighbors
+from scoring.similarity import (player_season_features, find_twins,
+                                similar_players, value_neighbors)
 
 def _wk(pid, name, season, games, rec, yds, tgt, team="AAA", pos="WR"):
     """games identical weekly lines for one player-season."""
@@ -224,3 +225,118 @@ def test_find_twins_ignores_rules_when_the_features_frame_is_supplied():
     supplied = find_twins(wk, "me", season_features=feats,
                           rules={"receiving_yards": 0.1})["players"][0]
     assert supplied["ppg"] == 14.0                           # the frame's, not the rules'
+
+
+# -- similar players (this year's board, not history) -----------------------
+
+def _board(rows):
+    """A board frame with the columns `similar_players` reads."""
+    return pd.DataFrame([{"player_id": r[0], "name": r[1], "position": r[2],
+                          "proj_points": r[3], "rank": i + 1,
+                          "market_rank": float(i + 1)}
+                         for i, r in enumerate(rows)])
+
+
+def _feats(rows):
+    """A season-features frame: (player_id, season, ppg, target_share)."""
+    return pd.DataFrame([{"player_id": p, "season": s, "ppg": ppg,
+                          "games": 16, "target_share": ts, "carry_share": 0.0,
+                          "yards_per_opp": 8.0, "td_per_opp": 0.05,
+                          "rec_pg": 4.0}
+                         for p, s, ppg, ts in rows])
+
+
+def test_similar_players_ranks_the_closest_first():
+    board = _board([("me", "Me", "WR", 200.0), ("near", "Near", "WR", 195.0),
+                    ("far", "Far", "WR", 80.0)])
+    feats = _feats([("me", 2025, 14.0, 0.25), ("near", 2025, 13.5, 0.24),
+                    ("far", 2025, 5.0, 0.08)])
+    out = similar_players(board, "me", season_features=feats, season=2026)
+    assert [p["player_id"] for p in out["players"]] == ["near", "far"]
+    assert out["players"][0]["similarity"] > out["players"][1]["similarity"]
+    # A percentage, not a distance: the card ranks rows against each other.
+    assert 0 < out["players"][0]["similarity"] <= 100
+
+
+def test_similar_players_stays_inside_the_position():
+    """A tight end is not "like" a running back in any sense a drafter can
+    use, however close the two players' numbers happen to land."""
+    board = _board([("me", "Me", "WR", 200.0), ("rb", "Back", "RB", 200.0)])
+    feats = _feats([("me", 2025, 14.0, 0.25), ("rb", 2025, 14.0, 0.25)])
+    out = similar_players(board, "me", season_features=feats, season=2026)
+    assert out["players"] == []
+
+
+def test_similar_players_uses_the_features_a_pair_shares():
+    """A rookie has no stat line. Compared on what he does have -- projection,
+    age, build -- he belongs on the card; compared on a projection ALONE he
+    does not, because one number in common is not a resemblance. Both halves
+    are MIN_SHARED_WEIGHT, and this pins the line between them."""
+    board = _board([("me", "Me", "WR", 200.0), ("rook", "Rookie", "WR", 198.0),
+                    ("vet", "Vet", "WR", 120.0)])
+    feats = _feats([("me", 2025, 14.0, 0.25), ("vet", 2025, 8.0, 0.15)])
+    bio = pd.DataFrame([
+        {"gsis_id": "me", "birth_date": "1999-03-01", "height": 73, "weight": 210},
+        {"gsis_id": "rook", "birth_date": "2003-03-01", "height": 74, "weight": 205},
+        {"gsis_id": "vet", "birth_date": "1996-03-01", "height": 71, "weight": 195},
+    ])
+    out = similar_players(board, "me", season_features=feats, players=bio,
+                          season=2026)
+    ids = [p["player_id"] for p in out["players"]]
+    assert "rook" in ids
+    assert all(p["similarity"] < 100 for p in out["players"])
+
+    # The same rookie with nothing but a projection to his name: dropped.
+    bare = similar_players(board, "me", season_features=feats, season=2026)
+    assert [p["player_id"] for p in bare["players"]] == ["vet"]
+
+
+def test_similar_players_scores_a_true_clone_at_100():
+    board = _board([("me", "Me", "WR", 200.0), ("clone", "Clone", "WR", 200.0),
+                    ("other", "Other", "WR", 60.0)])
+    feats = _feats([("me", 2025, 14.0, 0.25), ("clone", 2025, 14.0, 0.25),
+                    ("other", 2025, 4.0, 0.05)])
+    out = similar_players(board, "me", season_features=feats, season=2026)
+    assert out["players"][0]["player_id"] == "clone"
+    assert out["players"][0]["similarity"] == 100.0
+
+
+def test_similar_players_reads_height_and_weight_when_the_table_has_them():
+    """The columns arrived with a later import. Present, they are part of the
+    distance; absent, the card still works on everything else -- a database
+    refreshed before pipeline/sources.py started fetching them must not make
+    this raise."""
+    board = _board([("me", "Me", "WR", 200.0), ("big", "Big", "WR", 200.0),
+                    ("small", "Small", "WR", 200.0)])
+    feats = _feats([("me", 2025, 14.0, 0.25), ("big", 2025, 14.0, 0.25),
+                    ("small", 2025, 14.0, 0.25)])
+    bio = pd.DataFrame([{"gsis_id": "me", "height": 73, "weight": 210},
+                        {"gsis_id": "big", "height": 74, "weight": 215},
+                        {"gsis_id": "small", "height": 68, "weight": 170}])
+    out = similar_players(board, "me", season_features=feats, players=bio,
+                          season=2026)
+    assert [p["player_id"] for p in out["players"]] == ["big", "small"]
+    assert out["players"][0]["height"] == 74
+
+    thin = pd.DataFrame([{"gsis_id": "me"}, {"gsis_id": "big"},
+                         {"gsis_id": "small"}])
+    out2 = similar_players(board, "me", season_features=feats, players=thin,
+                           season=2026)
+    assert len(out2["players"]) == 2
+    assert out2["players"][0]["height"] is None
+
+
+def test_similar_players_ages_off_the_draft_season():
+    board = _board([("me", "Me", "WR", 200.0), ("peer", "Peer", "WR", 190.0)])
+    feats = _feats([("me", 2025, 14.0, 0.25), ("peer", 2025, 13.0, 0.24)])
+    bio = pd.DataFrame([{"gsis_id": "me", "birth_date": "1999-03-01"},
+                        {"gsis_id": "peer", "birth_date": "2001-03-01"}])
+    out = similar_players(board, "me", season_features=feats, players=bio,
+                          season=2026)
+    assert out["players"][0]["age"] == 25
+
+
+def test_similar_players_none_off_the_board():
+    board = _board([("me", "Me", "WR", 200.0)])
+    assert similar_players(board, "ghost", season_features=_feats([])) is None
+    assert similar_players(pd.DataFrame(), "me") is None

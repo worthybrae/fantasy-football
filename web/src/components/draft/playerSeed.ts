@@ -18,16 +18,22 @@ import type { ProfileSeed } from '../PlayerProfile'
 // duplicated from AvailableList.tsx/TopThree.tsx/ConfirmPick.tsx -- same
 // rule and same reason as posBadge is duplicated across four views here: a
 // three-line pure function isn't worth a shared module in this codebase.
-function fmtSigned(n: number | null): string {
-  if (n === null) return '—'
+// `null | undefined` rather than just null, and `== null` rather than
+// `=== null`: these read a JSON payload, and a field the server left out
+// arrives as undefined, which walks past a `=== null` guard and turns into
+// `NaN` here (or a throw at `.toFixed` below). See the seed builder's own
+// note -- this is a click handler, and a throw in one just makes the click
+// do nothing at all.
+function fmtSigned(n: number | null | undefined): string {
+  if (n == null) return '—'
   const r = Math.round(n)
   return r > 0 ? `+${r}` : `${r}`
 }
 
 // Same shape as AvailableList's own fmtRank -- one decimal only when the
 // consensus ADP isn't a whole number.
-function fmtRank(n: number | null): string {
-  if (n === null) return '—'
+function fmtRank(n: number | null | undefined): string {
+  if (n == null) return '—'
   return Number.isInteger(n) ? String(n) : n.toFixed(1)
 }
 
@@ -35,7 +41,7 @@ function fmtTier(tier: number | null | undefined): string {
   return tier === null || tier === undefined ? '—' : `T${tier}`
 }
 
-// Same rule as `.top3-figure.is-open` / `.confirm-figure.is-open` -- FLEX
+// Same rule as `.confirm-figure.is-open` -- FLEX
 // counts as a starting slot, `BENCH` and gain.py's `—` do not. (The
 // available table's own copy of this rule went with its Roster slot column.)
 function fillsIsOpenSlot(fills: string | null): boolean {
@@ -85,7 +91,11 @@ export function seedFromBoardPlayer(p: BoardPlayer, player: Player | undefined):
     bye: p.bye,
     rookie: player?.rookie ?? false,
     figures: [
-      { label: 'Proj/g', value: p.proj_ppg === null ? '—' : p.proj_ppg.toFixed(1) },
+      // `== null`, not `=== null`: a payload that omits the field entirely
+      // (api/demo.py did) sends `undefined`, and `undefined.toFixed(1)`
+      // throws inside whichever click handler called this -- which reads, to
+      // anyone using the room, as a pick that simply will not open.
+      { label: 'Proj/g', value: p.proj_ppg == null ? '—' : p.proj_ppg.toFixed(1) },
       { label: 'Over replacement', value: fmtSigned(p.vor) },
       { label: 'ADP', value: fmtRank(p.market_rank) },
       { label: 'vs ADP', value: fmtSigned(p.value) },

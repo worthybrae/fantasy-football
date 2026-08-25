@@ -45,7 +45,8 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-from api.live import _board_cell, _board_index, _attach_espn_proj
+from api.live import (_board_cell, _board_index, _attach_espn_proj,
+                      identify_players)
 from pipeline import draft_log as dl
 from pipeline import mock_farm as farm
 from scoring.board_cache import cached_build_board
@@ -224,6 +225,12 @@ def _board_response(conn, teams, rounds, my_slot, had_owner: dict,
 
     cells = []
     unresolved = 0
+    # Named before the loop, in one query: the board is a 250-player pool and
+    # a 16-round room draws from a much longer list than that (see
+    # `identify_players`). Only the ids the board misses are asked about.
+    named = identify_players(conn, [p[2] for p in picks
+                                    if p[2] is not None
+                                    and str(p[2]) not in by_id])
     for pick_no, slot, player_id, autodrafted in picks:
         slot = None if slot is None else int(slot)
         if player_id is None:
@@ -232,13 +239,18 @@ def _board_response(conn, teams, rounds, my_slot, had_owner: dict,
             # cell -- not even a fallback name, since the id itself is what is
             # missing.
             continue
-        cell = _board_cell(player_id, pick_no, teams, slots, by_id)
-        if str(player_id) not in by_id:
-            # Named by its raw id, everything else null -- `_board_cell`'s own
-            # documented fallback. Counted rather than passed over silently:
-            # a board rebuilt for a new season, or a crosswalk gap, would turn
-            # a page full of names into a page full of ids, and this is the
-            # number that says so out loud.
+        cell = _board_cell(player_id, pick_no, teams, slots, by_id, named)
+        if cell["player"]["name"] == str(player_id):
+            # Still named by its raw id: not on the board AND not in the
+            # identity tables either. Counted rather than passed over
+            # silently -- a board rebuilt for a new season, or a crosswalk
+            # gap, would turn a page full of names into a page full of ids,
+            # and this is the number that says so out loud.
+            #
+            # An off-board player who IS named (see `identify_players`) is
+            # not counted here any more: the cell reads "Evan Engram · TE ·
+            # DEN" with no ranks beside it, which is a complete answer to
+            # what that pick was, not a hole in the page.
             unresolved += 1
         cell["made_by"] = _made_by(slot, my_slot, had_owner.get(slot),
                                    autodrafted)

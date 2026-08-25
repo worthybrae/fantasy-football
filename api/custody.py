@@ -277,11 +277,23 @@ def establish_custody(request: Request, response: Response, swid: str,
     try:
         minted = _store(store).connect(
             swid, espn_s2, cookie=request.cookies.get(cred.COOKIE_NAME))
+    except ValueError as exc:
+        # 400: the request is malformed, not unauthorised. Half a session --
+        # an empty secret, an empty account id -- is the one thing the store
+        # still refuses outright, and it became a reachable outcome of this
+        # path when ownership verification stopped being one (see
+        # `CredentialStore.connect`). Caught here so it is an answer rather
+        # than a traceback: this handler holds an ESPN session, and an
+        # unhandled exception is the single path where a framework decides for
+        # itself what to print. `str(exc)` names the fields and no values.
+        raise HTTPException(status_code=400, detail=str(exc)) from None
     except OwnershipUnproven as exc:
-        # 403, not 401: the caller is not being asked to authenticate to US,
-        # they are being told the session they sent does not demonstrably
-        # belong to the account they named. `str(exc)` is written to be
-        # showable; it names no value and distinguishes no SWID.
+        # Kept, though nothing raises it today: the store no longer asks ESPN
+        # to vouch for a session, because the endpoint that once did is public
+        # and proves nothing. If a future verifier is added back, this is the
+        # answer it gets -- 403, not 401, because the caller is not being
+        # asked to authenticate to US, they are being told the session they
+        # sent does not demonstrably belong to the account they named.
         raise HTTPException(status_code=403, detail=str(exc)) from None
     except cred.CustodyUnavailable as exc:
         # 503, not 500: the code is fine and the request was fine; the

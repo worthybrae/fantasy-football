@@ -240,13 +240,23 @@ td:first-child {
    injury designation, which is a component of its own because the status
    line and the board's own rows both draw it.
 
-   Tone classes (`is-good`, `is-mid`, `is-bad`, `is-accent`) are scoped under
-   `.player-page` on purpose -- they are the two-word names most likely to
-   collide with something else in a 3,400-line stylesheet. */
+   Tone classes (`is-good`, `is-bad`, `is-accent`) are scoped rather than
+   global -- they are the two-word names most likely to collide with
+   something else in a 3,400-line stylesheet -- and they carry two scopes:
+   the popup, and the landing page's showcase, which renders those same
+   panels outside it. */
 
-.player-page .is-good { color: var(--ok); }
-.player-page .is-bad { color: var(--fail); }
-.player-page .is-accent { color: var(--accent); }
+/* SCOPED, AND `.bf-real` IS THE SECOND SCOPE. These four are the two-word
+   names most likely to collide in a stylesheet this size, which is why they
+   are not global -- but the landing page's showcase renders the popup's own
+   panels outside the popup, and without this a "+3.8" that is green in the
+   profile came out grey on the card. One list, both places. */
+.player-page .is-good,
+.bf-real .is-good { color: var(--ok); }
+.player-page .is-bad,
+.bf-real .is-bad { color: var(--fail); }
+.player-page .is-accent,
+.bf-real .is-accent { color: var(--accent); }
 
 /* -- the injury line --
 
@@ -490,6 +500,21 @@ td:first-child {
   flex-grow: 1;
 }
 
+/* A way OUT of the room, so it is styled as the quietest thing in the bar:
+   during a draft nothing up here should compete with the pick counter. */
+.draft-topbar-link {
+  margin-right: var(--space-3);
+  font-size: var(--text-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  text-decoration: none;
+}
+
+.draft-topbar-link:hover {
+  color: var(--text-1);
+}
+
 /* Connection health, not the recommendation -- this is "is the socket even
    listening," separate from ClockPanel's listener_error detail below it.
    Tone follows the same fixed --ok/--fail vocabulary as everywhere else in
@@ -585,16 +610,14 @@ td:first-child {
 }
 
 /* Lives in `.draft-topbar` now -- the `.draft-tabs` strip that used to wrap
-   these is gone, not merely restyled. Everything below is unchanged from
-   what that strip's tabs already looked like; the top bar supplies the
-   height and the background instead. */
+   these is gone, not merely restyled. The top bar supplies the height and
+   the background; these rules supply only the label and the lamp. */
 .draft-tab {
   display: flex;
   align-items: center;
   padding: 0 var(--space-5);
   background: none;
   border: 0;
-  border-bottom: 2px solid transparent;
   font: inherit;
   font-size: var(--text-sm);
   font-weight: 600;
@@ -602,16 +625,52 @@ td:first-child {
   text-transform: uppercase;
   color: var(--text-3);
   cursor: pointer;
+  transition: color 120ms ease;
 }
 
-.draft-tab:hover {
+/* A tab can be a link as well as a button -- the signed-in dashboard puts
+   Archive in this slot (Dashboard.tsx), since it has no views to switch
+   between and the archive is the other place a reader goes from there. Only
+   the browser's link underline needs killing; the rule above sets the rest,
+   filament included. */
+a.draft-tab {
+  text-decoration: none;
+}
+
+/* One step up the text ramp, not a second highlight -- the inactive tab is
+   the affordance's whole vocabulary here. */
+.draft-tab:hover:not(.is-active) {
   color: var(--text-2);
 }
 
+/* Keyboard gets a ring inside the tab's own box -- an outset one would cross
+   the top bar's bottom border. */
+.draft-tab:focus-visible {
+  outline: 1px solid var(--accent-border);
+  outline-offset: -4px;
+  color: var(--text-1);
+}
+
+/* THE ACTIVE TAB IS ITS OWN LETTERING AND NOTHING ELSE.
+   No fill, no underline, no glow: this bar is one unbroken surface and every
+   box drawn on it for the sake of two words was a rectangle sharing an edge
+   with nothing.
+
+   The weight stays at 600 in both states on purpose. Bolding the active tab
+   would widen its label by a pixel or two and shove the league line and the
+   pick counter sideways on every switch -- a bar that twitches under a
+   running clock. The separation is carried by lightness rather than weight:
+   amber against --text-3 is most of the ramp, so it does not read as hue
+   alone to anybody, and `aria-current` carries the state for screen
+   readers. */
 .draft-tab.is-active {
-  background: var(--bg-2);
   color: var(--accent);
-  border-bottom-color: var(--accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .draft-tab {
+    transition: none;
+  }
 }
 
 /* One element, not the two the old strip needed: `.draft-main-col` existed
@@ -1264,6 +1323,18 @@ button.pick-ticker-pick:hover {
   padding: var(--space-3) var(--space-4) var(--space-2);
 }
 
+/* Names the column of numbers on the right of every row. Pushed to sit with
+   them rather than with the title, because that is what it labels. */
+.roster-panel-week {
+  margin-left: auto;
+  margin-right: var(--space-3);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 9.5px;
+  font-weight: 700;
+  color: var(--text-3);
+}
+
 .roster-panel-count {
   font-size: var(--text-xs);
   color: var(--text-3);
@@ -1379,6 +1450,12 @@ button.roster-row:focus-visible {
   gap: var(--space-2);
   padding: var(--space-3) var(--space-4);
   border-bottom: 1px solid var(--border);
+  /* Wraps rather than overflows. The right end carries a nowrap key now
+     (`.avail-keys`), and on a narrow room it would otherwise push the
+     position pills off the edge of a bar that does not scroll. At the widths
+     this room is actually used at nothing wraps at all. */
+  flex-wrap: wrap;
+  row-gap: var(--space-2);
 }
 
 .avail-search {
@@ -1545,46 +1622,86 @@ button.roster-row:focus-visible {
   font-size: var(--text-sm);
 }
 
-/* The header that says it is not a control. `.avail-th-btn`'s siblings are
-   all buttons that reveal a caret on hover; this one is bare text, and the
-   suffix states outright what its silence implies. Sized and coloured down
-   so it reads as an annotation on the label rather than as a second label,
-   and nowrap for the same reason every other header here is: a two-line
-   header in this table is taller than three body rows. */
+/* The header that is not a control. `.avail-th-btn`'s siblings are all
+   buttons that reveal a caret on hover; this one is bare text, and the
+   default cursor plus the missing caret is the whole statement -- the "no
+   sort" annotation that used to sit beside the year is gone (see
+   AvailableList.tsx's own note). Nowrap for the same reason every other
+   header here is: a two-line header in this table is taller than three body
+   rows. */
 .avail-table th.avail-col-games {
   white-space: nowrap;
   cursor: default;
 }
 
-.avail-nosort {
-  margin-left: 5px;
-  font-size: 9px;
-  font-weight: 500;
-  letter-spacing: 0.02em;
-  text-transform: none;
-  color: var(--text-3);
-}
-
 /* No header may wrap. `Lasts to pick 13` in a 78px column stacked into four
    lines and made the header row taller than three body rows -- the horizon
-   moved to `.avail-horizon-note` and this keeps any future label from doing
-   the same thing again. */
+   left the header (it now lives only in the column's tooltip) and this keeps
+   any future label from doing the same thing again. */
 .avail-table th .avail-th-btn { white-space: nowrap; }
 
-/* The horizon note: pushed to the far right of the toolbar, where the
-   removed "hide players I can't start" toggle used to sit. */
-.avail-horizon-note {
+/* The toolbar's right end, where the removed "hide players I can't start"
+   toggle used to sit: what the rows that pulse mean. */
+.avail-keys {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
   margin-left: auto;
+}
+
+.avail-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
   font-size: var(--text-sm);
   color: var(--text-3);
   white-space: nowrap;
+  /* It carries a `title` (see AvailableList.tsx) -- the cursor is the only
+     thing that says so, since nothing here is focusable. */
+  cursor: help;
 }
 
-.avail-horizon-key {
-  font-family: var(--font-mono);
-  font-weight: 700;
-  color: var(--text-2);
+/* THE SWATCH BREATHES ON THE ROWS' OWN CLOCK. 2.4s, the same cycle
+   `avail-pulse` runs, so the key and the thing it is a key for are visibly
+   the same signal rather than two red things that happen to move. Deliberately
+   NOT sharing that keyframe: a row is a 32px band where 22% red is a clear
+   wash, and an 11px chip at the same alpha is a grey square. This is the same
+   colour said loudly enough to read at chip size.
+
+   Only `background-color` and `border-color`, both paint -- but this is ONE
+   element, not ~250 table rows, so the argument that shaped the row pulse
+   (see `avail-pulse`) does not bite here. */
+.avail-key-pulse {
+  width: 11px;
+  height: 11px;
+  flex: 0 0 auto;
+  border-radius: 3px;
+  border: 1px solid color-mix(in srgb, var(--fail) 55%, transparent);
+  background: color-mix(in srgb, var(--fail) 30%, transparent);
+  animation: avail-key-pulse 2.4s ease-in-out infinite;
 }
+
+@keyframes avail-key-pulse {
+  0%, 100% {
+    background-color: color-mix(in srgb, var(--fail) 24%, transparent);
+    border-color: color-mix(in srgb, var(--fail) 45%, transparent);
+  }
+  50% {
+    background-color: color-mix(in srgb, var(--fail) 78%, transparent);
+    border-color: var(--fail);
+  }
+}
+
+/* Same bargain the rows strike: hold near the cycle's midpoint rather than
+   drop the signal, so the key still looks like the rows it explains. */
+@media (prefers-reduced-motion: reduce) {
+  .avail-key-pulse {
+    animation: none;
+    background: color-mix(in srgb, var(--fail) 50%, transparent);
+    border-color: color-mix(in srgb, var(--fail) 70%, transparent);
+  }
+}
+
 .avail-col-btn { width: 78px; }
 
 /* Every header except the draft button's is a sortable control
@@ -1664,7 +1781,7 @@ button.roster-row:focus-visible {
   border-bottom: 1px dotted var(--text-3);
 }
 
-/* Fixed positioning (not absolute) is the point, same reasoning `.board-pop`
+/* Fixed positioning (not absolute) is the point, same reasoning `.board-peek`
    (DraftBoardGrid.tsx, see its own comment) already established for the
    main board's popover: it escapes `.draft-main`'s own scroll-region
    clipping entirely, since neither it nor any ancestor sets a transform
@@ -1693,13 +1810,17 @@ button.roster-row:focus-visible {
   pointer-events: none;
 }
 
-/* Rows aren't clickable in this table (the draft button is the only
-   action) -- overrides the global `tbody tr { cursor: pointer }`, which
-   exists for the main board's row-opens-a-drawer behavior and would
-   otherwise be a false affordance here. */
-.avail tbody tr {
+/* The whole row opens the profile (AvailableList.tsx), so the global
+   `tbody tr { cursor: pointer }` is the truth here and is left alone. Only
+   a taken row takes it back: that row is mid-fade and aria-hidden, and its
+   click handler returns early. */
+.avail tbody tr.avail-row-taken {
   cursor: default;
 }
+
+/* The name is still the one thing that LOOKS like the control, because it is
+   the one a Tab press reaches. The row's own hover tint (the global
+   `tbody tr:hover`) is what says the rest of it is clickable too. */
 
 .avail-name {
   font-size: var(--text-sm);
@@ -1966,27 +2087,527 @@ button.roster-row:focus-visible {
   flex-shrink: 0;
 }
 
-.top3-figures {
+/* -- the card's picture of the pick ------------------------------------- */
+
+/* The face, at the size of an identity rather than an icon. Three cards are
+   told apart in about a second under a clock, and a photograph does that
+   faster than a name. The ring is the position's hue, which is why the badge
+   can go when there is a photo. */
+.top3-shot {
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 2px solid;
+  background: var(--bg-2);
+  flex-shrink: 0;
+}
+
+.top3-id {
   display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* Position, team and bye on one quiet line under the name -- three facts
+   that identify him and none that argue for him. */
+.top3-sub {
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--text-3);
+}
+
+/* THE TWO NUMBERS THE PICK TURNS ON. Equal width, equal size, side by side:
+   they are the same kind of claim about the same decision, and giving either
+   of them more room would be an argument this card is not making. */
+.top3-heroes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-3);
-  margin-top: 9px;
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
 }
 
-.top3-figure {
-  font-size: var(--text-lg);
+.top3-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.top3-hero-num {
+  font-size: 30px;
   font-weight: 700;
+  line-height: 1;
   color: var(--text-1);
-  margin-top: 2px;
 }
 
-.top3-figure.is-open {
-  color: var(--accent);
+.top3-hero-num.is-up {
+  color: var(--ok-soft);
 }
 
-.top3-reason {
-  margin: var(--space-2) 0 0;
-  font-size: 11.5px;
+.top3-hero-num.is-down {
+  color: var(--fail-soft);
+}
+
+.top3-hero-unit {
+  margin-left: 2px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-3);
+}
+
+/* The proportion the dial used to draw, at 3px. It costs one line and keeps
+   "4%" from reading the same as "40%" at a glance. */
+.top3-hero-rule {
+  display: block;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--bg-2);
+  overflow: hidden;
+}
+
+.top3-hero-rule > span {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  min-width: 2px;
+}
+
+/* The table's RANK arc at hero scale, standing where the survival figure
+   stands on the waiting cards: same 30px line the number occupies, so the
+   two variants of the card do not differ in height by a pixel. Slots come
+   up from the table's 3px because this one IS the figure, not a cell. */
+.top3-hero-arc {
+  display: block;
+  height: 30px;
+}
+
+.top3-hero-arc .finish-arc {
+  height: 100%;
+}
+
+.top3-hero-arc .finish-arc-slot {
+  width: 8px;
+  border-radius: 2px;
+}
+
+.top3-hero-arc .finish-arc-bar {
+  border-radius: 2px;
+}
+
+.top3-hero-arc-none {
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--text-3);
+}
+
+.top3-hero-cap {
+  font-size: 10px;
+  line-height: 1.3;
+  color: var(--text-3);
+}
+
+/* -- his season, week by week --------------------------------------------- */
+
+/* The hover panel's own chart, at card scale. Eighteen columns in a 370px
+   card means each one is about half the width it gets in the panel, so the
+   numbers above the bars come down a point and the bars themselves lose a
+   third of their height -- the SHAPE of the row is the message here, and the
+   panel is still one hover away for anybody who wants to read the values. */
+.top3-season {
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+  /* Reserved, so three cards whose fetches land at different moments do not
+     shove the table under them about. */
+  min-height: 92px;
+}
+
+.top3-season .draft-cap {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  margin-bottom: 8px;
+}
+
+.top3-season-avg {
+  font-size: 9px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-3);
+}
+
+.top3-season .ctip-chart {
+  gap: 2px;
+}
+
+.top3-season .ctip-col {
+  min-width: 0;
+  flex: 1;
+}
+
+.top3-season .ctip-col-val {
+  font-size: 8px;
+}
+
+.top3-season .ctip-col-slot {
+  width: 100%;
+  height: 44px;
+}
+
+.top3-season .ctip-col-label {
+  font-size: 8px;
+}
+
+/* Nothing to draw yet, or nothing to draw at all. Same height either way. */
+.top3-season.is-empty {
+  display: flex;
+  align-items: center;
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+
+/* -- the chart behind a picture ------------------------------------------ */
+
+/* Anything on a card that opens one of the table's panels. No cursor change
+   at all: a pointer would make a row of meters look like four buttons under
+   a card whose only button is Draft, and the help cursor -- the question
+   mark -- reads as "this thing is confusing" rather than as "there is more
+   here". The panel itself is the affordance; it opens in 130ms. */
+.top3-hoverable {
+  display: inline-flex;
+  border-radius: 3px;
+}
+
+.top3-hoverable:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 3px;
+}
+
+/* The survival rule keeps a plain sentence: it is the one bar on the card
+   with no chart behind it -- the number is counted from rollouts, not from a
+   season log -- so there is nothing for a panel to draw. */
+.top3-tip {
+  position: relative;
+  display: inline-flex;
+  border-radius: 3px;
+}
+
+.top3-tip:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 2px;
+}
+
+/* Around the survival rule the wrapper has to be a block, or the 3px bar
+   becomes a zero-width flex item. The padding is the hover target -- three
+   pixels is not one -- and the negative margin gives it back, so nothing
+   below moves. */
+.top3-hero .top3-tip {
+  display: block;
+  width: 100%;
+  padding: 7px 0;
+  margin: -7px 0;
+}
+
+.top3-tip-box {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 5;
+  width: max-content;
+  max-width: 230px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  font-size: 10.5px;
   line-height: 1.4;
+  color: var(--text-1);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(3px);
+  transition: opacity 90ms ease, transform 90ms ease, visibility 0s linear 90ms;
+  pointer-events: none;
+}
+
+.top3-tip:hover .top3-tip-box,
+.top3-tip:focus-visible .top3-tip-box {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+  transition-delay: 0s;
+}
+
+/* The third card sits at the right edge of the room, so its box opens
+   leftward rather than off the screen. */
+.top3-grid > .top3-card:last-child .top3-tip-box {
+  left: auto;
+  right: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .top3-tip-box {
+    transition: none;
+    transform: none;
+  }
+}
+
+/* -- what kind of player he is ------------------------------------------- */
+
+.top3-meters {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+
+.top3-meter {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* Quieter than the captions in the bands above, because this row is the
+   card's footnote: three ratings and a market reference, read last or not at
+   all. At the caption size used elsewhere they were competing with the
+   figures they are subordinate to. */
+.top3-meter .draft-cap {
+  font-size: 8.5px;
+  letter-spacing: 0.07em;
+}
+
+.top3-meter-none {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+/* Where the market has him, at the weight of a footnote: it is the thing the
+   rest of the card is arguing with, not part of the argument. */
+.top3-market {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-3);
+  margin-left: auto;
+}
+
+/* Baseline-aligned with the meters' bars, and sized between them and the
+   figures above: the market is context, so it should be readable without
+   being the thing you read first. */
+.top3-market-val {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+/* How far past his price he already is -- the pick ticker's own figure, in
+   the ticker's own two tones, so a green triangle means the same thing in
+   the strip under the room and on the card above it. */
+.top3-market-move {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 1px;
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.top3-market-move.is-steal {
+  color: var(--ok-soft);
+}
+
+.top3-market-move.is-reach {
+  color: var(--fail-soft);
+}
+
+
+/* -- the board's hover card (BoardPeek.tsx) ------------------------------
+   A condensed player profile: the face, what he is projected to score, where
+   both markets had him, how last season went, and the room's three ratings.
+   It replaced a list of internal quantities -- overall rank, tier, VOR --
+   that a drafter has no feel for and did not ask about. */
+
+.board-peek {
+  position: fixed;
+  z-index: 50;
+  /* Set by the game log: eighteen columns with an opponent under each. Any
+     narrower and the chart is the thing that gives, and the chart is the
+     reason to hover. */
+  width: 340px;
+  padding: 12px 13px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+}
+
+.board-peek-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.board-peek-face {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--bg-1);
+  flex-shrink: 0;
+}
+
+.board-peek-badge {
+  flex-shrink: 0;
+}
+
+.board-peek-who {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.board-peek-name {
+  font-size: var(--text-md);
+  font-weight: 650;
+  color: var(--text-1);
+  line-height: 1.15;
+}
+
+.board-peek-sub {
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--text-3);
+}
+
+/* Top right, beside the name: what he scores and where that puts him among
+   his position. */
+.board-peek-top {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+/* The market and rank deltas, toned like every other steal/reach reading. */
+.board-peek-move.is-steal { color: var(--ok); }
+.board-peek-move.is-reach { color: var(--fail); }
+
+
+.board-peek-dot { color: var(--text-3); margin: 0 1px; }
+
+.board-peek-proj {
+  display: flex;
+  align-items: baseline;
+  gap: 2px;
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--text-1);
+}
+
+.board-peek-rank {
+  display: flex;
+  align-items: baseline;
+  gap: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.board-peek-unit {
+  font-size: 9px;
+  font-weight: 500;
+  color: var(--text-3);
+}
+
+/* The table's `games` panel, in a card two thirds its width: the columns
+   share the space instead of holding a 17px floor, and the values come down
+   a point. Nothing else about it changes. */
+.board-peek-log {
+  margin-top: 11px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.board-peek-log .ctip-chart {
+  gap: 2px;
+}
+
+.board-peek-log .ctip-col {
+  min-width: 0;
+  flex: 1;
+}
+
+.board-peek-log .ctip-col-val,
+.board-peek-log .ctip-col-label {
+  font-size: 8px;
+}
+
+.board-peek-log .ctip-col-slot {
+  width: 100%;
+  height: 46px;
+}
+
+.board-peek-log .ctip-head {
+  margin-bottom: 7px;
+}
+
+/* The foot: the three ratings on the left, the market at the far end. */
+.board-peek-foot {
+  display: flex;
+  align-items: flex-end;
+  gap: 14px;
+  margin-top: 11px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.board-peek-meter {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.board-peek-foot .draft-cap {
+  font-size: 8.5px;
+  letter-spacing: 0.07em;
+}
+
+.board-peek-market {
+  display: flex;
+  gap: 12px;
+  margin-left: auto;
+}
+
+.board-peek-mkt {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+.board-peek-mkt-val {
+  display: flex;
+  align-items: baseline;
+  gap: 3px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
   color: var(--text-2);
 }
 
@@ -2049,11 +2670,10 @@ button.roster-row:focus-visible {
   margin-top: 2px;
 }
 
-/* Same rule as `.top3-figure.is-open` -- an open starter/flex slot reads in
-   accent here too (folded-in review finding: this dialog's own Roster slot
-   figure was the one place still left plain). `.avail-fills.is-open` was
-   the third member of this set until the available table dropped that
-   column. */
+/* An open starter/flex slot reads in accent. The last member of a set that
+   had three: `.avail-fills.is-open` went when the available table dropped
+   that column, and `.top3-figure.is-open` went when the recommendation cards
+   stopped tabulating the roster slot and started drawing the pick instead. */
 .confirm-figure.is-open {
   color: var(--accent);
 }
@@ -2142,17 +2762,122 @@ button.roster-row:focus-visible {
   justify-content: center;
   padding: var(--space-4);
   background: rgba(10, 11, 14, 0.72);
-  backdrop-filter: blur(6px);
+  /* Enough to push the board back, not enough to erase it. At 6px the room
+     behind this was a smear, and what it costs is orientation: a reader
+     opening a profile mid-draft is still half-watching the rail and the
+     clock, and a scrim that dissolves them makes the popup feel like a
+     different screen rather than a card over the one he was on. The scrim's
+     own alpha does most of the separating; the blur only has to take the
+     edge off the text underneath. */
+  backdrop-filter: blur(3px);
 }
 
-/* Popup-sized, off the artboard: 534px of content inside 13px of padding
+/* The injury mark beside the name (PlayerProfile's `InjuryMark`). The card's
+   status band is drawn only for a player who HAS a designation now, so this
+   is what tells a reader there is one before he has read anything -- it has
+   to sit where the eye lands, which is the name.
+
+   Sized off the name's own line rather than set in pixels twice: it is
+   punctuation on that line, not a control beside it. Colour comes from the
+   severity classes `InjuryStatus` already scores, through `currentColor`, so
+   the triangle and the pill under it cannot disagree. */
+.pp-pop-injury-mark {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  color: var(--text-3);
+}
+
+.pp-pop-injury-mark.is-bad { color: var(--fail); }
+.pp-pop-injury-mark.is-accent { color: var(--accent); }
+
+.pp-pop-injury-mark > svg {
+  width: 15px;
+  height: 15px;
+}
+
+/* The photo and the mark on its corner. A fixed square, so the mark is in
+   the same place on every profile -- which is the point of moving it here
+   from the name line, where its position depended on the length of a name. */
+.pp-pop-face-wrap {
+  position: relative;
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+}
+
+/* Top right, half off the circle. Overlapping the edge rather than sitting
+   inside it: a photo is a face, and a mark laid over one is read as a mark
+   ON the picture -- against the panel behind it, it is a mark on the corner
+   of the object, which is what a status badge is everywhere else a reader
+   has seen one.
+
+   The ring is the panel's own colour, not a border: it punches the mark out
+   of whatever it overlaps, so a light jersey behind the triangle cannot make
+   the triangle disappear. */
+.pp-pop-face-wrap > .pp-pop-injury-mark {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: var(--bg-1);
+  box-shadow: 0 0 0 2px var(--bg-0);
+}
+
+/* Smaller in the corner than it was on the name line: there it was set
+   against 20px type, here against a 44px circle. */
+.pp-pop-face-wrap > .pp-pop-injury-mark > svg {
+  width: 11px;
+  height: 11px;
+}
+
+/* -- the popup's own type scale -------------------------------------------
+   Everything in this card is a step larger than it was. The sizes were set
+   when the panel was 562px wide and four cards had to fit across it; at 640
+   they were small because they had been, not because they needed to be, and
+   this is a card a manager reads under a clock.
+
+   Two of the three moves are here rather than at each rule. The tokens are
+   overridden for the subtree, which lifts every name, label and value that
+   takes `--text-xs` / `--text-sm` in one place; the chart classes are lifted
+   under `.player-page` only, because `.ctip-*` is shared with the board's
+   own hover panel, which sits over a dense table and is deliberately small.
+   The rest was a bump of the `.pp-pop-*` px sizes themselves, one step each.
+   */
+.player-page {
+  --text-xs: 12px;
+  --text-sm: 13px;
+}
+
+/* The card heads (HEALTH, FINISH, PER GAME...) and their notes. */
+.player-page .ctip-head {
+  font-size: 11px;
+}
+
+/* The value over a bar and the year under it. Same step as everything else,
+   and they move together: the pair is read as one label. */
+.player-page .ctip-col-val,
+.player-page .ctip-col-label {
+  font-size: 10px;
+}
+
+/* Popup-sized, off the artboard: 612px of content inside 13px of padding
    (`.player-page-embedded`) inside a 1px border. It was 1180px -- the width
    of the page this profile used to also be -- which made a card over a board
    into a second full-width screen, and stretched four season panels that are
-   sized by their own columns across a third of a monitor. */
+   sized by their own columns across a third of a monitor.
+   680 rather than the 562 that replaced it (640 for one revision, then a
+   step up again when every card's type grew): the rows are two and three cards
+   wide now (Vegas beside the market, Similar players under them, five
+   linemen in the O-line card), and at 562 the widest of them were
+   ellipsising names that are the whole point of the card. Still narrower
+   than half a 1440 monitor, which is the line this box exists to stay on. */
 .player-overlay-panel {
   position: relative;
-  width: min(562px, 100%);
+  width: min(680px, 100%);
   max-height: 100%;
   /* The panel is the scroll container, not the page and not
      `.player-page` -- see `.player-page-embedded`, which gives up the
@@ -2232,7 +2957,7 @@ button.roster-row:focus-visible {
   /* Percentages resolve against the overlay, i.e. the viewport. The 96px is
      clearance for the close control at the top right, doubled so the banner
      stays centred rather than drifting off it. */
-  max-width: min(560px, calc(100% - 96px));
+  max-width: min(678px, calc(100% - 96px));
   padding: var(--space-2) var(--space-3);
   border: 1px solid var(--accent-border);
   border-radius: var(--radius);
@@ -2250,8 +2975,7 @@ button.roster-row:focus-visible {
   font-weight: 700;
 }
 
-/* Solid accent on a dark label, the `.plan-round-now` pill's treatment. The
-   footer's draft button (`.pp-pop-foot.is-draft`) wears the same accent as a
+/* Solid accent on a dark label. The footer's draft button (`.pp-pop-foot.is-draft`) wears the same accent as a
    12% tint, and the difference is deliberate: this one is attached to a
    clock that is running, and a banner nobody notices is a banner that did
    not work. */
@@ -2285,15 +3009,23 @@ button.roster-row:focus-visible {
    overflow-y: auto (triggered by setting overflow-x alone) never actually
    has anything to clip -- the box's height stays intrinsic to its content,
    so sticky headers pin against the *page's* scroll, not an inner one. */
+/* THE BOARD IS TILES ON A DARK CANVAS, not cells in a ruled table. There
+   are no border lines anywhere in it: the grid's 2px gap lets the page
+   canvas show through as dark seams, every cell is a rounded tile, and the
+   only strokes on the board are the ones that mean something -- the
+   position hue down a tile's leading edge, the accent ring round your own
+   column, the pulse on the pick that is on the clock. */
 .board-wrap {
   overflow-x: auto;
+  padding: 2px;
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg-1);
+  border-radius: 6px;
+  background: var(--bg-0);
 }
 
 .board-grid {
   display: grid;
+  gap: 2px;
   width: 100%;
 }
 
@@ -2302,10 +3034,9 @@ button.roster-row:focus-visible {
   position: sticky;
   top: 0;
   z-index: 3;
+  padding: 8px 10px;
+  border-radius: 3px;
   background: var(--bg-1);
-  border-bottom: 1px solid var(--border);
-  border-right: 1px solid var(--border);
-  padding: 6px 8px;
 }
 
 .board-corner {
@@ -2320,9 +3051,9 @@ button.roster-row:focus-visible {
   gap: 6px;
   font-size: var(--text-xs);
   font-weight: 600;
-  color: var(--text-2);
+  color: var(--text-3);
   text-transform: uppercase;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.06em;
   white-space: nowrap;
   overflow: hidden;
 }
@@ -2332,37 +3063,26 @@ button.roster-row:focus-visible {
   text-overflow: ellipsis;
 }
 
-/* The viewer's own column, tinted across its whole height -- applied per
-   cell (header and body alike) rather than as a single column rule, since
-   CSS grid has no clean "style the Nth column" selector for a column count
-   that varies with league size. A 2px accent border on the left+right edge
-   of every cell in the column (header included) lines up top-to-bottom into
-   one continuous rule, so the column reads as unmistakably "yours" even
-   before the header's "YOU" chip is read; the header itself gets a
-   stronger fill plus an accent-colored underline in place of the plain
-   border. */
+/* YOUR COLUMN. Applied per cell (header and body alike) because grid has
+   no clean "style the Nth column" for a column count that varies with
+   league size. One treatment, top to bottom: an accent-tinted tile with a
+   1px accent ring inset -- the rings stack into a single continuous rail
+   down the board -- and the header's name in the accent with the YOU chip
+   beside it. No heavy side borders: the column should read as lit, not
+   fenced. */
 .board-col-mine {
-  background: color-mix(in srgb, var(--accent) 20%, var(--bg-1));
-  color: var(--text-1);
-  border-bottom-color: var(--accent);
-  border-left: 2px solid var(--accent);
-  border-right: 2px solid var(--accent);
-}
-
-/* `.board-cell` (below) also sets border-right and is declared after this in
-   the cascade -- the compound selector here (not just `.board-cell-mine`)
-   is what keeps this border winning regardless of source order. */
-.board-cell.board-cell-mine {
-  border-left: 2px solid var(--accent);
-  border-right: 2px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg-1));
+  color: var(--accent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent);
 }
 
 .board-you-chip {
   flex-shrink: 0;
-  padding: 0 5px;
-  font-size: var(--text-xs);
+  padding: 1px 6px;
+  font-size: 9px;
   font-weight: 700;
-  border-radius: var(--radius);
+  letter-spacing: 0.08em;
+  border-radius: 999px;
   background: var(--accent);
   color: var(--bg-0);
 }
@@ -2375,70 +3095,79 @@ button.roster-row:focus-visible {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 0;
+  gap: 1px;
   padding: 0 4px;
+  border-radius: 3px;
   background: var(--bg-1);
-  border-bottom: 1px solid var(--border);
-  border-right: 1px solid var(--border);
-  color: var(--text-2);
+  color: var(--text-3);
 }
 
 .board-round-n {
   font-size: var(--text-xs);
-  color: var(--text-2);
   font-weight: 600;
+  color: var(--text-2);
 }
 
-/* The snake cue: a bold, accent-colored direction arrow per round (odd rows
-   run left-to-right, even rows reverse), read together with the even-round
-   banding below so the back-and-forth of a snake draft is obvious at a
-   glance rather than inferred from pick numbers. */
+/* The snake cue. Quiet: the accent is spent on your column and the clock,
+   and an arrow every row in the same colour would compete with both. */
 .board-snake-dir {
-  color: var(--accent);
-  font-size: 13px;
-  font-weight: 700;
+  color: var(--text-3);
+  font-size: 11px;
   line-height: 1;
 }
 
-/* Even rounds tinted across their whole width (label + empty cells), so the
-   rounds read as alternating bands and the snake's reversal is visible. */
 /* The overall pick number in a slot nobody has taken yet. Dim enough to sit
    under the board rather than on it -- until it is one of yours, where it is
    the number the whole rail is planned around. */
 .board-cell-pick {
   font-size: 10px;
   color: var(--text-3);
-  opacity: 0.55;
+  opacity: 0.6;
+}
+
+/* A pick this board has no row for: ESPN's rooms draft outside our pool
+   (`api/live.py`'s identify_players), so the cell is named from the player
+   tables but has no profile behind it. It stays a cell -- same tint, same
+   hover card -- and only stops claiming to be a control. */
+.board-cell-flat {
+  cursor: default;
 }
 
 .board-cell-mine .board-cell-pick {
   color: var(--accent);
-  opacity: 0.75;
+  opacity: 0.9;
+  font-weight: 600;
 }
 
+/* Even rounds a shade different across the label and the empty slots, so
+   the back-and-forth of the snake shows as bands without a line drawn. */
 .board-row-even.board-round-label,
 .board-cell-empty.board-row-even {
-  background: color-mix(in srgb, var(--bg-2) 40%, transparent);
+  background: color-mix(in srgb, var(--bg-1) 55%, var(--bg-0));
 }
 
 .board-cell {
   display: flex;
   flex-direction: column;
-  /* Top row pinned to the top (so pos/team/ADP line up across every cell);
-     the name fills the space below and centers within it -- see
-     .board-cell-namewrap -- so a one-line name sits centered rather than
-     hugging the top. */
   justify-content: flex-start;
   gap: 2px;
+  /* THE POSITION, AS THE TILE'S OWN COLOUR. A board is read for runs, and
+     a badge in the corner makes that a thing you count rather than see.
+     A wash of the hue, strongest at the leading edge, and nothing else:
+     the tint is enough for a column to scan, and a solid stroke down the
+     edge was one more line on a board that has none. */
+  border: 0;
+  background: linear-gradient(
+    to right,
+    color-mix(in srgb, var(--pos, transparent) 18%, transparent),
+    color-mix(in srgb, var(--pos, transparent) 5%, transparent) 60%,
+    transparent);
+  transition: background 120ms ease, box-shadow 120ms ease;
   /* Fixed, not min-height: a one-line name and a two-line name must occupy
-     the same cell height so every row is uniform. The name area below clamps
-     to two lines and this height reserves room for both PLUS breathing room,
-     so a wrapped name centers with slack above and below rather than filling
-     the cell edge-to-edge (which read as squished). */
+     the same tile height so every row is uniform. */
   height: 62px;
-  padding: 7px 8px;
-  border-bottom: 1px solid var(--border);
-  border-right: 1px solid var(--border);
+  padding: 7px 9px;
+  border-radius: 3px;
   text-decoration: none;
   color: var(--text-2);
   position: relative;
@@ -2460,23 +3189,6 @@ button.roster-row:focus-visible {
   flex-shrink: 0;
 }
 
-/* The at-a-glance signal icons (hype/lame, trending, steal/reach), pushed to
-   the right of the pos badge. Emoji carry their own color; the row just sizes
-   and spaces them. */
-.board-cell-icons {
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  flex-shrink: 0;
-  font-size: 12px;
-  line-height: 1;
-}
-
-.board-icon {
-  line-height: 1;
-  cursor: default;
-}
-
 .board-cell .pos-badge {
   flex-shrink: 0;
   padding: 0 5px;
@@ -2491,51 +3203,52 @@ button.roster-row:focus-visible {
 .board-cell-adp.is-steal { color: var(--ok); }
 .board-cell-adp.is-reach { color: var(--fail); }
 
+/* One variable per position, set on the cell, read by the tint and the edge
+   above. Same six hues the badges use. */
+.board-cell-pos-qb { --pos: var(--pos-qb); }
+.board-cell-pos-rb { --pos: var(--pos-rb); }
+.board-cell-pos-wr { --pos: var(--pos-wr); }
+.board-cell-pos-te { --pos: var(--pos-te); }
+.board-cell-pos-k { --pos: var(--pos-k); }
+.board-cell-pos-dst { --pos: var(--pos-dst); }
+
 .board-cell-empty {
-  background: color-mix(in srgb, var(--bg-2) 45%, transparent);
+  background: var(--bg-1);
 }
 
 .board-cell-empty.board-cell-mine {
-  background: color-mix(in srgb, var(--accent) 18%, var(--bg-2));
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-1));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
 }
 
-/* `.board-cell-filled` is a real <button> now (it used to be an <a
-   href="/players/:slug">, which is gone -- see DraftBoardGrid.tsx). This
-   undoes the browser's default button chrome that would otherwise show
-   through: no UA appearance, host font instead of the system button font,
-   left-aligned instead of centered, stretched to the grid cell's full width
-   instead of shrink-to-fit. `border-top`/`border-left` only, NOT the
-   `border` shorthand -- `.board-cell` (declared above) sets border-bottom/
-   border-right for the divider between cells, and since this rule has the
-   same specificity and comes after it, a `border: 0` shorthand here would
-   reset those two sides right back to none. `padding`/`background`/`color`
-   are deliberately not reset at all -- `.board-cell` (padding, color) and
-   `background` right below already declare them as author styles, which
-   beat the user-agent stylesheet's own button defaults regardless of
-   selector specificity or source order, so there is nothing left for the UA
-   sheet to win. */
+/* `.board-cell-filled` is a real <button>: undo the UA chrome. */
 .board-cell-filled {
   appearance: none;
   -webkit-appearance: none;
-  border-top: 0;
-  border-left: 0;
+  border: 0;
   font: inherit;
   text-align: left;
   width: 100%;
-  background: var(--bg-1);
+  background-color: var(--bg-1);
   cursor: pointer;
 }
 
 .board-cell-filled.board-cell-mine {
-  background: color-mix(in srgb, var(--accent) 22%, var(--bg-1));
+  background-color: color-mix(in srgb, var(--accent) 16%, var(--bg-1));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent);
 }
 
+/* Hover lifts the tile: a brighter ground and a 1px ring in the tile's own
+   position hue, so the pointer reads as a pointer and not as a new state. */
 .board-cell-filled:hover {
-  background: var(--bg-2);
+  background-color: var(--bg-2);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--pos, var(--border)) 60%, transparent);
+  z-index: 2;
 }
 
 .board-cell-filled.board-cell-mine:hover {
-  background: color-mix(in srgb, var(--accent) 32%, var(--bg-2));
+  background-color: color-mix(in srgb, var(--accent) 24%, var(--bg-2));
+  box-shadow: inset 0 0 0 1px var(--accent);
 }
 
 .board-cell-filled:focus-visible {
@@ -2549,10 +3262,7 @@ button.roster-row:focus-visible {
   font-size: var(--text-sm);
   font-weight: 600;
   color: var(--text-1);
-  line-height: 1.1;
-  /* Up to two lines so a full name fits ("Jaxon Smith-Njigba") instead of
-     truncating; a third line (none in practice) would clip rather than grow
-     the cell unbounded. */
+  line-height: 1.15;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
@@ -2565,32 +3275,30 @@ button.roster-row:focus-visible {
   color: var(--text-3);
 }
 
-/* On-the-clock: a pulsing accent-tinted overlay filling the cell, not a
-   border ring -- an absolutely-positioned ::before layered inside `.board-cell`
-   (already `position: relative; overflow: hidden`), so it paints on top of
-   whatever the cell already carries -- including `.board-cell-mine`'s own
-   tint/border below -- and always reads as the single strongest highlight on
-   the board, without disturbing the fixed 62px cell height. Reduced motion:
-   a solid tint, no pulse -- still unmistakably the active cell without
-   relying on motion to say so. */
+/* ON THE CLOCK: a 2px accent ring and a breathing tint, layered inside the
+   tile with ::before so it paints over whatever the tile already carries
+   (your column's own tint included) and is always the single strongest
+   thing on the board. Reduced motion: the ring and a steady tint. */
 .board-cell-clock::before {
   content: '';
   position: absolute;
   inset: 0;
-  background: color-mix(in srgb, var(--accent) 38%, transparent);
+  border-radius: 3px;
+  box-shadow: inset 0 0 0 2px var(--accent);
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
   pointer-events: none;
-  animation: board-clock-pulse 1.6s ease-in-out infinite;
+  animation: board-clock-pulse 1.8s ease-in-out infinite;
 }
 
 @keyframes board-clock-pulse {
-  0%, 100% { background: color-mix(in srgb, var(--accent) 28%, transparent); }
-  50% { background: color-mix(in srgb, var(--accent) 55%, transparent); }
+  0%, 100% { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+  50% { background: color-mix(in srgb, var(--accent) 38%, transparent); }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .board-cell-clock::before {
     animation: none;
-    background: color-mix(in srgb, var(--accent) 45%, transparent);
+    background: color-mix(in srgb, var(--accent) 28%, transparent);
   }
 }
 
@@ -2599,54 +3307,7 @@ button.roster-row:focus-visible {
    it nor any ancestor sets a transform that would give fixed a closer
    containing block. Left/top come in as an inline style, computed per-hover
    from the cell's own bounding rect (see DraftBoardGrid's popoverStyle). -- */
-.board-pop {
-  position: fixed;
-  z-index: 50;
-  width: 220px;
-  padding: var(--space-3);
-  background: var(--bg-2);
-  border: 1px solid var(--accent-border);
-  border-radius: var(--radius);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-  pointer-events: none;
-}
 
-.board-pop-name {
-  font-size: var(--text-md);
-  font-weight: 600;
-  color: var(--text-1);
-  margin-bottom: 4px;
-}
-
-.board-pop-meta {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--text-sm);
-  color: var(--text-2);
-  margin-bottom: 8px;
-}
-
-.board-pop-stats {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  font-size: var(--text-sm);
-  color: var(--text-2);
-}
-
-.board-pop-value.is-steal {
-  color: var(--ok);
-  font-weight: 600;
-}
-
-.board-pop-value.is-reach {
-  color: var(--fail);
-  font-weight: 600;
-}
 
 /* ==========================================================================
    Landing page
@@ -3443,341 +4104,6 @@ button.roster-row:focus-visible {
   }
 }
 
-/* ==========================================================================
-   The Plan tab -- "given my draft slot, which positions should I take in
-   which round, and why". Same padding as `.board-tab` and the same "flows in
-   `.draft-main`'s own overflow-y: auto, no second vertical scroller" rule
-   every other tab already follows; only the WHY table's own wide row (round
-   + four position columns + the annotation) gets a scroll container of its
-   own, per `.plan-cliff-wrap` below, so it can never be the thing that makes
-   the page scroll sideways.
-   ========================================================================== */
-
-.plan-tab {
-  padding: var(--space-3) var(--space-4) var(--space-5);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-5);
-}
-
-.plan-head {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: var(--space-3);
-}
-
-.plan-head-line {
-  font-size: var(--text-md);
-  color: var(--text-1);
-}
-
-.plan-head-sep {
-  margin: 0 2px;
-  color: var(--text-3);
-}
-
-.plan-head-meta {
-  font-size: var(--text-xs);
-  color: var(--text-3);
-}
-
-/* Same spinner idiom as `.pp-loading-tail`/`.pp-loading-dot` and
-   `.top3-recompute`/`.top3-recompute-dot` -- riding the tail of a line
-   that's already on screen rather than opening a block of its own, so a
-   refetch landing (or not) never moves anything below it. `margin-left:
-   auto` parks it at the far right of `.plan-head` for the same reason
-   `.top3-recompute`'s own comment gives: nothing sits to its right, so its
-   own width changing pushes nothing. Animates on the shared `landing-spin`
-   keyframe (see its own comment, further up this file, on why it's kept
-   around for exactly this). */
-.plan-loading-tail {
-  margin-left: auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: var(--text-xs);
-  color: var(--text-3);
-  white-space: nowrap;
-}
-
-.plan-loading-dot {
-  width: 9px;
-  height: 9px;
-  border: 1.5px solid var(--border);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: landing-spin 0.8s linear infinite;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .plan-loading-dot {
-    animation: none;
-  }
-}
-
-/* The empty/loading state -- no resolved slot yet, no session at all, or
-   the very first plan still building. Reuses `.rail-empty`'s own tone;
-   `.plan-empty` only adds the centered geometry the rail's own use of it
-   doesn't need. */
-.plan-empty {
-  padding: var(--space-6) 0;
-  text-align: center;
-}
-
-.plan-section-title {
-  margin-bottom: var(--space-3);
-}
-
-/* The WHY section's header row -- title plus the cliff/best-available
-   toggle (PlanTab.tsx's `whyView`). Only used there; the round-by-round
-   section above has no control to sit beside its own title, so it keeps
-   using `.plan-section-title`'s margin directly rather than this wrapper. */
-.plan-section-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: var(--space-3);
-  margin-bottom: var(--space-3);
-}
-
-.plan-section-head .plan-section-title {
-  margin-bottom: 0;
-}
-
-/* Same pill idiom as `.avail-pill`/`.avail-pills` (AvailableList's position
-   filter) -- a two-way switch reuses that look rather than inventing a
-   second one, just scoped under `.plan-` since it lives in this tab. */
-.plan-why-toggle {
-  display: flex;
-  gap: 4px;
-  flex-shrink: 0;
-}
-
-.plan-why-toggle-btn {
-  padding: 3px 9px;
-  border-radius: 10px;
-  border: 0;
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  font-weight: 700;
-  background: var(--bg-2);
-  color: var(--text-3);
-  cursor: pointer;
-}
-
-.plan-why-toggle-btn:hover {
-  color: var(--text-2);
-}
-
-.plan-why-toggle-btn.is-active {
-  background: var(--accent);
-  color: var(--bg-0);
-}
-
-/* -- round-by-round plan -- */
-
-.plan-rounds {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.plan-round {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  height: 34px;
-  padding: 0 var(--space-3);
-  border-radius: var(--radius);
-  border: 1px solid transparent;
-}
-
-/* Settled fact, not prediction -- the one distinction the task brief calls
-   out as "the single most important thing in the layout". Past rounds are
-   dimmed as a whole AND swap their inner content from a bar to a checkmark
-   (see PlanRoundRow's own comment) -- two independent cues, neither of
-   which depends on the reader distinguishing hues, so the distinction still
-   reads for anyone not picking up the opacity alone. */
-.plan-round.is-past {
-  opacity: 0.62;
-}
-
-/* "Where am I" -- the one round this whole tab exists to make instantly
-   findable (task brief, layout section). Same accent-tinted treatment
-   ClockPanel's `.clock-panel-up` gives the live pick clock, so "you are
-   here" reads in one consistent color across the whole room. */
-.plan-round.is-current {
-  background: var(--accent-bg);
-  border-color: var(--accent-border);
-}
-
-.plan-round-label {
-  flex-shrink: 0;
-  width: 60px;
-  font-size: var(--text-sm);
-  font-weight: 700;
-  color: var(--text-2);
-}
-
-.plan-round-pick {
-  margin-left: 4px;
-  font-weight: 400;
-  color: var(--text-3);
-}
-
-.plan-round-now {
-  flex-shrink: 0;
-  padding: 1px 6px;
-  border-radius: 10px;
-  background: var(--accent);
-  color: var(--bg-0);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-}
-
-.plan-round-actual,
-.plan-round-predict {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-width: 0;
-}
-
-.plan-round-check {
-  color: var(--ok);
-  font-weight: 700;
-}
-
-.plan-round-actual-label {
-  font-size: var(--text-xs);
-  color: var(--text-3);
-}
-
-.plan-round-nodata {
-  font-size: var(--text-sm);
-  color: var(--text-3);
-}
-
-.plan-bar-track {
-  flex-shrink: 0;
-  width: 120px;
-  height: 8px;
-  border-radius: 4px;
-  background: var(--bg-2);
-  overflow: hidden;
-}
-
-.plan-bar-fill {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  transition: width 260ms ease-out;
-}
-
-.plan-bar-pct {
-  flex-shrink: 0;
-  width: 32px;
-  font-size: var(--text-xs);
-  color: var(--text-2);
-}
-
-.plan-round-secondary {
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: var(--text-xs);
-  color: var(--text-3);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .plan-bar-fill {
-    transition: none;
-  }
-}
-
-/* -- the WHY table -- */
-
-/* Same horizontal-scroll-container idiom as `.board-wrap` (see its own
-   comment): the one thing here that could ever outgrow a narrow viewport,
-   kept from ever being the reason the page itself scrolls sideways. */
-.plan-cliff-wrap {
-  overflow-x: auto;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg-1);
-}
-
-/* Inherits width/border-collapse/font-size and every th/td/hover rule from
-   the base `table`/`th`/`td` rules above -- only the column-specific
-   tweaks below are this table's own, same split `.avail-table` uses. Rows
-   aren't clickable here, unlike the base rule's own assumption. */
-.plan-cliff-table tbody tr {
-  cursor: default;
-}
-
-.plan-cliff-col-round {
-  white-space: nowrap;
-  color: var(--text-2);
-}
-
-.plan-cliff-pick {
-  margin-left: 5px;
-  font-size: var(--text-xs);
-  color: var(--text-3);
-}
-
-.plan-cliff-col-num {
-  width: 60px;
-  text-align: right;
-}
-
-.plan-cliff-dash {
-  color: var(--text-3);
-}
-
-/* The color ramp itself is set inline per cell (PlanTab.tsx's `cliffTone`,
-   a fixed 0-90 scale so one row's "big" means the same as another's) --
-   `.is-loud` only adds the weight bump large costs get on top of it, so a
-   90-point cliff pops on shape as well as color, not color alone. */
-.plan-cliff-value.is-loud {
-  font-weight: 700;
-}
-
-/* The best-available view's own cell treatment (PlanTab.tsx's
-   `bestAvailTone`) -- color is set inline per cell (position hue for the
-   first round and for a round that dropped, `--text-3` for a round that
-   didn't move), and `.is-drop` only adds the same weight bump `.is-loud`
-   gives a big cliff, so a real drop pops on shape as well as color here
-   too. Deliberately NOT a color ramp: these values run 200-370 and a scale
-   built for 0-90 point losses would paint the whole row near-maximum. */
-.plan-avail-value.is-drop {
-  font-weight: 700;
-}
-
-.plan-cliff-col-note {
-  white-space: nowrap;
-  font-size: var(--text-xs);
-}
-
-.plan-cliff-annotation {
-  color: var(--accent);
-}
-
-.plan-cliff-table tr.is-current {
-  background: var(--accent-bg);
-}
-
-.plan-cliff-table tr.is-current .plan-cliff-col-round {
-  color: var(--text-1);
-}
-
 /* -- a player leaving the board -------------------------------------------
    The row fades out where it sits, is removed, and the rows below slide up
    to close the gap. The slide is NOT here -- it is a FLIP transform applied
@@ -3836,35 +4162,53 @@ button.roster-row:focus-visible {
    distinct animation being generated per row, which is what keeps ~250
    simultaneously-pulsing rows affordable.
 
-   Scoped to `> td`, matching `.avail-row-taken` two sections up rather than
-   the `<tr>` itself, for the same reason that fade is: `box-shadow` (like
-   `background`) is not reliably painted on internal table boxes
-   (`display: table-row`) across engines, where a `<td>` -- a normal block
-   box as far as visual effects are concerned -- is not in question. Only
-   `box-shadow` is animated, and only INSET, so nothing here can grow past a
-   cell's own border box, expand the row, or touch layout.
+   A flat `background-color` across the whole cell, NOT an inset
+   `box-shadow`. An inset shadow feathers in from all four edges of the box
+   it is painted on, and the box here is a `<td>`, so what a reader actually
+   saw was every cell in the row outlining itself and the column dividers
+   breathing -- a row cut into eleven pieces rather than one row saying one
+   thing. A flat fill has no edge falloff, so neighbouring cells meet
+   seamlessly and the animation reads as the single row-wide wash it is
+   meant to be. Same colour vocabulary and roughly the same peak weight as
+   `.avail-row-taken`'s own 16% tint just above, which is the other thing in
+   this table that colours a whole row.
 
-   No `background` and no plain `opacity` fade of the row's own content:
-   dimming the name and numbers on every breath would fight the one thing
-   this table has to stay -- readable under a pick clock -- for a signal
-   that is supposed to be a peripheral cue, not something that has to be
-   read. `box-shadow`'s own alpha (via `color-mix`, the same technique
-   `riskTone` and `.avail-row-taken` already use) is the entire pulse. */
+   Scoped to `> td`, matching `.avail-row-taken` two sections up rather than
+   the `<tr>` itself, for the same reason that fade is: `background` is not
+   reliably painted on internal table boxes (`display: table-row`) across
+   engines, where a `<td>` -- a normal block box as far as visual effects
+   are concerned -- is not in question. Semi-transparent at every stop, so
+   `tbody tr:hover`'s own `--bg-2` still reads through a pulsing row instead
+   of being covered by it.
+
+   No plain `opacity` fade of the row's own content: dimming the name and
+   numbers on every breath would fight the one thing this table has to stay
+   -- readable under a pick clock -- for a signal that is supposed to be a
+   peripheral cue, not something that has to be read. The tint's own alpha
+   (via `color-mix`, the same technique `riskTone` and `.avail-row-taken`
+   already use) is the entire pulse. */
 .avail-row-pulse > td {
   animation: avail-pulse 2.4s ease-in-out infinite;
 }
 
 @keyframes avail-pulse {
   /* Never fully off: a row with something to say about it should never read
-     as identical to a row with nothing to say (below at ~0%). Never fully
-     on either -- 65% at a row's own peak (`--pulse: 1`, survive_pct 0) is a
-     clear red wash without going opaque enough to fight the text sitting
-     on top of it. */
+     as identical to a row with nothing to say (below at ~0%). Never fully on
+     either -- these are a WHOLE ROW, text and all, where the toolbar's key
+     (`avail-key-pulse`, 24-78%) is an 11px chip with nothing on top of it and
+     can be as loud as it likes. 38% at a row's own peak (`--pulse: 1`,
+     survive_pct 0) is the most red this can carry while the name and the
+     numbers still read cleanly over it, which is the constraint that decides
+     this number rather than taste.
+
+     Raised from 7/22%: at that weight the mid-danger rows -- squared danger
+     puts a real cluster around 0.16-0.36 -- came out under 8% red, which is
+     visible on a still screenshot and not on a moving one. */
   0%, 100% {
-    box-shadow: inset 0 0 8px 0 color-mix(in srgb, var(--fail) calc(var(--pulse) * 20%), transparent);
+    background-color: color-mix(in srgb, var(--fail) calc(var(--pulse) * 12%), transparent);
   }
   50% {
-    box-shadow: inset 0 0 8px 0 color-mix(in srgb, var(--fail) calc(var(--pulse) * 65%), transparent);
+    background-color: color-mix(in srgb, var(--fail) calc(var(--pulse) * 38%), transparent);
   }
 }
 
@@ -3876,7 +4220,7 @@ button.roster-row:focus-visible {
 @media (prefers-reduced-motion: reduce) {
   .avail-row-pulse > td {
     animation: none;
-    box-shadow: inset 0 0 8px 0 color-mix(in srgb, var(--fail) calc(var(--pulse) * 40%), transparent);
+    background-color: color-mix(in srgb, var(--fail) calc(var(--pulse) * 25%), transparent);
   }
 }
 
@@ -3884,6 +4228,15 @@ button.roster-row:focus-visible {
    purpose: this is a five-state summary, not a series, and giving it equal
    weight would say the two carry equal information. */
 .avail-col-health { width: 74px; }
+
+/* The same meter as Health, and now the same width: the header reads
+   `Steady`, which is narrower than the meter under it, so the column is back
+   to being sized by its contents rather than by its own title. (It carried
+   118px while the header said `Consistency`, which at 12px uppercase is
+   about that wide with the caret and could not be shrunk -- an auto-layout
+   table takes the widest min-content in the column and `.avail-th-btn` is
+   nowrap.) */
+.avail-col-steady { width: 74px; }
 
 /* -- career availability, as a signal-strength meter ----------------------
    Five discrete steps rather than a continuous ramp: the meter answers "how
@@ -4055,6 +4408,72 @@ button.roster-row:focus-visible {
                   font-family: var(--font-mono); color: var(--text-2); }
 
 .ctip-empty { color: var(--text-3); }
+
+/* -- the tip, while its profile is in flight ------------------------------
+   Five bars over a shared baseline: the shape of every panel this tip can
+   open (`.ctip-chart` below), so what is drawn while the fetch runs is a
+   sketch of what is about to replace it rather than a word in an empty box.
+
+   Height matched to the panels it stands in for (a Health or Finish column),
+   so the tip does not jump vertically under the pointer when the real content
+   lands. The WIDTH still grows -- `.avail-cell-tip` is `width: max-content`
+   and a real panel carries labels this sketch has no text for -- and pinning
+   it to a guess would leave every loaded panel either cramped or padded. */
+.ctip-loading {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 34px;
+  padding: 2px 0;
+}
+
+/* The wave. Each bar runs the same 1.1s cycle a beat behind the one before
+   it, which reads as a sweep across the chart rather than five things
+   blinking together -- and one `@keyframes` plus a per-child delay is the
+   whole cost of it.
+
+   `opacity` and `transform` only: both are composited, so this animates off
+   the main thread. That matters more here than anywhere else in the table --
+   the thread this would otherwise compete with is the one running the fetch
+   this animation exists to cover. */
+.ctip-skel {
+  width: 9px;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--bg-1);
+  transform-origin: bottom center;
+  animation: ctip-skel 1.1s ease-in-out infinite;
+}
+
+.ctip-skel:nth-child(3) { animation-delay: 0.08s; }
+.ctip-skel:nth-child(4) { animation-delay: 0.16s; }
+.ctip-skel:nth-child(5) { animation-delay: 0.24s; }
+.ctip-skel:nth-child(6) { animation-delay: 0.32s; }
+
+/* nth-child counts from 2 because the first child is the screen-reader
+   sentence (see CellTip.tsx) -- it is `position: absolute` and draws
+   nothing, but it is still a child. */
+
+@keyframes ctip-skel {
+  0%, 100% { transform: scaleY(0.45); opacity: 0.5; }
+  50% { transform: scaleY(1); opacity: 1; }
+}
+
+/* Asked for less motion, given a still sketch: the bars keep their staggered
+   heights, which is still recognisably the chart's shape and still not the
+   finished thing, without anything moving. */
+@media (prefers-reduced-motion: reduce) {
+  .ctip-skel {
+    animation: none;
+    opacity: 0.7;
+  }
+
+  .ctip-skel:nth-child(2) { height: 55%; }
+  .ctip-skel:nth-child(3) { height: 80%; }
+  .ctip-skel:nth-child(4) { height: 65%; }
+  .ctip-skel:nth-child(5) { height: 95%; }
+  .ctip-skel:nth-child(6) { height: 70%; }
+}
 
 /* ONE chart, drawn by all three panels: time along the bottom, a column per
    period, something growing from a shared baseline, the value above and the
@@ -4252,18 +4671,28 @@ button.roster-row:focus-visible {
   min-width: 0;
 }
 
-/* Baseline, not centre: the chip is set beside the name as a word in the
-   same line, and centring a 9px box against 19px type floats it. */
+/* Centre, not baseline. Baseline put the chip's TEXT on the name's baseline,
+   which is not the same as putting the chip on the name -- the box kept its
+   padding and its descender space below that line, so the chip hung about
+   five pixels under a name that has no descenders to hang beside. A chip is
+   an object set next to the name, not a word in it, and the line it should
+   share is the middle of the letters.
+
+   That only reads as centred because the name's line-height is pulled in
+   below: at the browser's own leading, the row's centre is the centre of a
+   band of empty space and the chip floats in it. The two rules are one
+   decision. */
 .pp-pop-name-row {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: var(--space-2);
 }
 
 .pp-pop-name {
-  font-size: 19px;
+  font-size: 20px;
   font-weight: 700;
   letter-spacing: -0.01em;
+  line-height: 1.1;
 }
 
 /* The board's position hue in the chip the artboard cut for a name line:
@@ -4273,19 +4702,25 @@ button.roster-row:focus-visible {
 .pp-pop-pos {
   padding: 2px 5px;
   border-radius: var(--radius);
-  font-size: 9px;
+  font-size: 10px;
+  /* Its own leading, not the page's. At the inherited 1.5 the chip stood
+     19px tall against a name whose capitals are 15 -- a chip taller than the
+     word it qualifies, which is what made it read as a second heading rather
+     than a tag. At 1 the box is its letters plus its padding: 14px, the
+     height of the capitals it sits beside. */
+  line-height: 1;
   letter-spacing: normal;
 }
 
 .pp-pop-meta {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-3);
 }
 
 .pp-pop-figures {
   margin-left: auto;
-  /* Never squeezed: these four are the numbers the pick is made on, and the
-     name beside them is the thing with room to give. */
+  /* Never squeezed: these are the numbers the pick is made on, and the name
+     beside them is the thing with room to give. */
   flex: 0 0 auto;
   display: flex;
   gap: var(--space-4);
@@ -4299,18 +4734,36 @@ button.roster-row:focus-visible {
 }
 
 .pp-pop-figure-label {
-  font-size: 8px;
+  font-size: 9px;
   letter-spacing: 0.07em;
   text-transform: uppercase;
   color: var(--text-3);
 }
 
-/* `line-height: 1` so the four values sit on one line with their captions
+/* The figure and its move, on one line and sharing a baseline: the move is
+   an annotation on the number, not a second number. */
+.pp-pop-figure-line {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+/* `line-height: 1` so the values sit on one line with their captions
    however tall the caption's own font wants to be. */
 .pp-pop-figure-value {
-  font-size: 15px;
+  font-size: 16px;
   line-height: 1;
   color: var(--text-1);
+}
+
+/* Well under the figure's own 15px: green up, red down, and small enough
+   that the eye reads the projection first and the move second. Tabular so a
+   two-digit move cannot shove the figure beside it out of line. */
+.pp-pop-figure-delta {
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
 }
 
 /* The two facts that can make every panel under them irrelevant, on one
@@ -4390,7 +4843,7 @@ button.roster-row:focus-visible {
 .pp-pop-edge {
   margin-left: auto;
   flex: 0 0 auto;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 /* The dashed line under the status line (MissingData.tsx), on a popup whose
@@ -4446,6 +4899,19 @@ button.roster-row:focus-visible {
   border-radius: var(--radius);
 }
 
+/* And a card with LESS to fit than its even share. The Market card is seven
+   label/value rows -- a word and a short number each -- beside a Vegas card
+   holding a five-column table, and at an even split the market rows had a
+   lane of empty card between label and number while the table beside them
+   was squeezed. Narrower here means less gap to leave.
+
+   The rows themselves stay one column: sorted, that column IS the spread the
+   head states, and pairing them across two broke the reading order for the
+   sake of the space. */
+.pp-pop-card.is-narrow {
+  flex: 0.75 1 0;
+}
+
 /* A card that has more to fit than its even share of the row: Per game
    carries a fourth column (the projection, behind its dashed rule), and the
    schedule strip's head states a rank out of the league where the others
@@ -4469,7 +4935,7 @@ button.roster-row:focus-visible {
    own gap, so the head's bottom margin would double it. */
 .pp-pop-card .ctip-head {
   gap: 6px;
-  font-size: 9px;
+  font-size: 10px;
   letter-spacing: 0.07em;
   margin-bottom: 0;
 }
@@ -4499,20 +4965,122 @@ button.roster-row:focus-visible {
   color: inherit;
 }
 
+/* -- what this card measures, on hover of its title (CardHint.tsx) ---------
+
+   The affordance is a dotted underline under the title itself, the same one
+   the available table's headers wear for the same promise, and nothing else:
+   an icon on fourteen cards in one popup would be fourteen new marks on
+   screen, each explaining one word. No `cursor: help` either -- the owner
+   had that taken off the recommendation cards, and a second pointer shape
+   inside a popup that already opens panels on hover is noise.
+
+   `inherit` on everything but the border, because the h3 above it is doing
+   the ellipsis: the span has to be the same inline box the bare title was or
+   a long card name would clip differently from an explained one. */
+.pp-pop-hint {
+  border-bottom: 1px dotted var(--text-3);
+  /* Keyboard-reachable (see CardHint), so it needs a focus ring -- and the
+     one the rest of the popup uses, not the browser's. */
+  outline: none;
+}
+
+.pp-pop-hint:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* The panel itself. Fixed, for the same reason `.avail-th-tip` is: it has to
+   escape the popup's own scroller and the card's `overflow: hidden` rather
+   than be clipped inside either. Left/top arrive as inline styles from
+   `positionTip`, measured off this panel's own rect.
+
+   Wider than the table's 300px cap: these explain a whole card rather than
+   one column, and several of them name a direction and a denominator in the
+   same breath. */
+.pp-pop-tip {
+  position: fixed;
+  z-index: 60;
+  width: max-content;
+  max-width: 340px;
+  padding: 8px 11px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  font-weight: 400;
+  /* The head this sits under is 10px uppercase with letter-spacing, and the
+     figure rows around it are nowrap monospace -- all inherited properties.
+     Without every one of these resets the tooltip comes out in the trigger's
+     own dress: seen in the wild as one unwrapped line running off the card,
+     because a caption's `white-space: nowrap` reached it. */
+  text-transform: none;
+  letter-spacing: normal;
+  white-space: normal;
+  text-align: left;
+  font-family: var(--font-ui);
+  line-height: 1.5;
+  /* Never the thing under the pointer -- a panel a mouse could enter would
+     keep the title's own `mouseleave` from firing, which is how a tooltip
+     gets stuck open. */
+  pointer-events: none;
+}
+
 /* A long career is more columns than a quarter of this popup can hold, and
    the columns are fixed-width on purpose (Health's stack of circles IS the
    count -- see `.ctip-units`). So it scrolls inside its own card rather than
    overflowing it or pushing the row wider than the panel. */
 .pp-pop-panel .ctip-chart {
   overflow-x: auto;
+  /* And explicitly NOT vertically. `overflow-x: auto` on its own does not
+     mean what it looks like it means: per spec, when one axis is not
+     `visible` the other computes to `auto` as well, so this box was a
+     vertical scroller too -- a wheel over Health or Finish scrolled the
+     chart a few pixels inside its own card instead of scrolling the popup. */
+  overflow-y: hidden;
 }
 
-/* And the columns inside it keep their own width while it does. `.ctip-col`
-   sets an explicit `min-width`, which replaces the min-content floor a flex
-   item would otherwise get, so in a card that is allowed to squeeze them a
-   nine-season career prints two seasons' values on top of each other. */
+/* The columns SPREAD to fill the card, and stop shrinking at 17px.
+   `flex: 0 0 auto` held them at their intrinsic width, which left five
+   seasons huddled against the left edge of a card that had grown twice since
+   those widths were set -- a chart that has been cut off rather than one
+   that has been drawn. Growing is the fix; the floor is what the old rule
+   was really protecting (`.ctip-col`'s own `min-width` replaces the
+   min-content floor a flex item would otherwise get, so without it a
+   nine-season career prints two seasons' values on top of each other, and
+   `.pp-pop-panel .ctip-chart` scrolls when it comes to that). */
 .pp-pop-panel .ctip-col {
-  flex: 0 0 auto;
+  flex: 1 1 17px;
+}
+
+/* And the bar grows with its column, up to a point. Unbounded, three seasons
+   in a wide card would draw three slabs -- the O-line's own meters made that
+   mistake once. Capped and centred, the column spreads and the bar keeps a
+   shape a reader recognises as a bar. */
+.pp-pop-panel .ctip-col-slot {
+  width: 100%;
+  max-width: 24px;
+}
+
+/* The projection's column is wider than a season's, and for a reason nothing
+   else in the chart shares: every other label is a two-digit year and this
+   one is a word. At the 17px floor the seasons take, "proj" was printing
+   past its own column and being clipped by the card. It also carries the
+   dashed rule and the gap that separates it from what has actually happened
+   (`.ctip-col.is-forecast` above), so its box has 9px of furniture in it
+   before any text. */
+.pp-pop-panel .ctip-col.is-forecast {
+  flex: 1 1 32px;
+  min-width: 32px;
+}
+
+/* And no label wraps, in any column: a year or a word breaking over two
+   lines would push the baseline of one column below its neighbours. */
+.pp-pop-panel .ctip-col-label,
+.pp-pop-panel .ctip-col-val {
+  white-space: nowrap;
 }
 
 /* -- the week chart and the games it is made of (WeekByWeek.tsx) ----------
@@ -4568,7 +5136,7 @@ button.roster-row:focus-visible {
 /* One step down from the season panels' labels: these are eighteen columns
    in the width they draw three or four in. */
 .pp-pop-weeks .ctip-col-label {
-  font-size: 8px;
+  font-size: 9px;
 }
 
 /* Where the picture stops and the words for it start. */
@@ -4602,7 +5170,7 @@ button.roster-row:focus-visible {
    selector would lose the tie to them. */
 .pp-pop-log-head > span,
 .pp-pop-comps-head > span {
-  font-size: 8px;
+  font-size: 9px;
   letter-spacing: 0.07em;
   text-transform: uppercase;
   color: var(--text-3);
@@ -4635,14 +5203,14 @@ button.roster-row:focus-visible {
 /* The week number is the axis restating itself -- the row's place in the
    list already says it -- so it is set at the dimmest of the three. */
 .pp-pop-log-wk {
-  flex: 0 0 20px;
-  font-size: 10px;
+  flex: 0 0 22px;
+  font-size: 11px;
   color: var(--text-3);
 }
 
 .pp-pop-log-opp {
-  flex: 0 0 30px;
-  font-size: 10px;
+  flex: 0 0 33px;
+  font-size: 11px;
   color: var(--text-2);
 }
 
@@ -4656,7 +5224,7 @@ button.roster-row:focus-visible {
   text-overflow: ellipsis;
   /* Half a pixel under --text-xs, which is what buys "19 car, 80 yds, 0 TD
      · 3 rec, 33 yds" its last few characters at this width. */
-  font-size: 10.5px;
+  font-size: 11.5px;
   color: var(--text-2);
 }
 
@@ -4669,14 +5237,14 @@ button.roster-row:focus-visible {
   flex: 1 1 0;
   min-width: 0;
   text-align: right;
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-2);
 }
 
 /* The one cell in the row that is coloured, and it takes the chart's ramp
    (see `.ctip-col-val` above, which these join). */
 .pp-pop-log-pts {
-  flex: 0 0 34px;
+  flex: 0 0 37px;
   text-align: right;
   font-size: var(--text-xs);
 }
@@ -4758,8 +5326,10 @@ button.roster-row:focus-visible {
 .delta-tone.is-down { color: var(--fail); }
 
 .pp-pop-vegas-foot {
-  font-size: 9px;
-  white-space: nowrap;
+  font-size: 10px;
+  /* Wraps now. It carries the implied total as well as the week count, and
+     a nowrap line of three clauses would push the card wider than its share
+     of the row on a narrow window. */
   color: var(--text-3);
 }
 
@@ -4772,6 +5342,16 @@ button.roster-row:focus-visible {
   gap: 3px;
   padding-top: var(--space-2);
   border-top: 1px solid var(--border);
+  /* The block TAKES the rest of the card and spreads its rows through it,
+     rather than clumping at the top or being shoved to the floor. Both were
+     tried: at the top it left a dead band under the last market, and pinned
+     to the bottom (`margin-top: auto`) it left the same band above the
+     hairline instead -- a card with a hole punched in the middle. Spread,
+     one to four markets each get a share of whatever height the row's
+     tallest card sets, which is the only version where the space reads as
+     rhythm rather than as absence. */
+  flex: 1 1 auto;
+  justify-content: space-between;
 }
 
 /* Five tracks: the market, its bar, the chance, and the two ranks. Grid
@@ -4781,7 +5361,12 @@ button.roster-row:focus-visible {
 .pp-pop-futures-head,
 .pp-pop-futures-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 44px 33px 33px 33px;
+  /* The bar takes a share rather than a fixed 44px. The label column stays
+     `1fr` because the head above these rows is its own grid and has to line
+     up with them -- a `max-content` label would collapse to nothing in the
+     head -- so the only way to close the lane between a short market name
+     and its bar is to let the bar grow into it. */
+  grid-template-columns: minmax(0, 1fr) minmax(44px, 1fr) 36px 36px 36px;
   align-items: center;
   gap: var(--space-2);
 }
@@ -4793,8 +5378,10 @@ button.roster-row:focus-visible {
   text-align: right;
 }
 
-/* Both ranks in the same ink by default: the comparison is the reader's to
-   make, and only a real gap between them (see RANK_GAP) earns a colour. */
+/* Both ranks in the same ink by default. Only the vegas one ever takes a
+   colour, and only when it parts from the adp one beside it by a real gap
+   (see RANK_GAP) -- the adp rank is the thing being compared against, so
+   painting it too would leave nothing to read the colour as being about. */
 .pp-pop-futures-rank {
   text-align: right;
   font-size: 11px;
@@ -4811,13 +5398,13 @@ button.roster-row:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-2);
 }
 
 .pp-pop-futures-pct {
   text-align: right;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--accent);
 }
 
@@ -4844,8 +5431,140 @@ button.roster-row:focus-visible {
 
 .pp-pop-futures-note {
   padding-top: 1px;
-  font-size: 9px;
+  font-size: 10px;
   color: var(--text-3);
+}
+
+/* Usage: the label, the seasons drawn as a line, the seasons printed as
+   numbers, and the projection.
+
+   The line is not a replacement for the figures and not decoration beside
+   them -- it is the subtraction a reader was doing in their head. 11.5
+   carries a game says nothing on its own; the shape says it came from 6.8,
+   and then the columns say exactly which years it came through. Read the
+   shape, read the number that interests you.
+
+   The line also has a second job, which is why it sits where it sits. Its
+   column is the flexible one, so the slack that used to open up as dead air
+   between a label on the left wall and its numbers on the right is spent on
+   the graphic instead. A wider card draws a longer line, not a bigger
+   hole. */
+.pp-pop-usage {
+  /* Takes the card's leftover height rather than sitting in a heap at the
+     top of it. The cards in a row are stretched to the tallest of them (see
+     `.pp-pop-row`), and Usage is rarely the tallest -- so without this the
+     card ended in a band of empty panel as deep as three of its own rows. */
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+/* Label, line, one track per season, projection. The season tracks are
+   fixed -- a percentage and a rate have to sit under the same year in every
+   row -- and the two on the left take the rest between them.
+
+   37px is wider than the figures in it need, and that is the point: the
+   numbers are right-aligned, so the slack in a track is the air in front of
+   the number, and four four-character figures in tracks cut to fit ran
+   together into one long number. The line gives the width up (it is the
+   column with nothing to clip) but the label does not -- at anything under
+   about 70px "Pass yds / g" starts being ellipsised, and a label a reader
+   cannot finish is worse than a line an inch shorter. One track per season the card is ACTUALLY drawing
+   (`--season-cols`, set from what the player has): fixed tracks for the full
+   three left a two-season card an empty column wide of its own right edge. */
+.pp-pop-usage-head,
+.pp-pop-usage-row {
+  display: grid;
+  grid-template-columns:
+    minmax(0, 1fr) minmax(40px, 0.9fr) repeat(var(--season-cols, 3), 37px);
+  column-gap: 7px;
+  align-items: center;
+}
+
+.pp-pop-usage.has-proj .pp-pop-usage-head,
+.pp-pop-usage.has-proj .pp-pop-usage-row {
+  grid-template-columns:
+    minmax(0, 1fr) minmax(40px, 0.9fr) repeat(var(--season-cols, 3), 37px) 40px;
+}
+
+.pp-pop-usage-head {
+  padding-bottom: 4px;
+  font-size: 10px;
+  letter-spacing: 0.07em;
+  color: var(--text-3);
+}
+
+.pp-pop-usage-head > span { text-align: right; }
+
+/* The year the line starts from, over the left END of the line rather than
+   over a column -- it heads a graphic, not a figure. Empty, and so invisible,
+   whenever the line spans exactly what the columns span. */
+.pp-pop-usage-head > .pp-pop-usage-from { text-align: left; }
+
+/* The rows take that leftover height between them, up to a ceiling. Growing
+   without a limit would turn a card beside a very tall neighbour into eight
+   lines floating a centimetre apart; stopping at 34px means the card either
+   fills or leaves a band too shallow to read as a mistake. */
+.pp-pop-usage-row {
+  flex: 1 0 auto;
+  min-height: 22px;
+  max-height: 34px;
+}
+
+.pp-pop-usage-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* 11px, not `--text-xs`: that token is a step larger inside `.player-page`
+     and the same card is drawn in both contexts, so taking it would leave
+     the label a pixel off the figure it labels on the page and two pixels
+     under it in the popup. The hierarchy is the point -- the figure leads. */
+  font-size: 11px;
+  color: var(--text-2);
+}
+
+/* The figures, right-aligned under their year. 12px against an 11px label:
+   the card used to set its labels LARGER than its numbers, which is the
+   wrong way round on a card whose numbers are the content. */
+.pp-pop-usage-row > .mono {
+  text-align: right;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+/* The last season, which is the one every other figure in the row is read
+   against: the projection is a step off it and the line ends on it. Card ink
+   and a weight up, so the eye lands there first and reads back. */
+.pp-pop-usage-row > .mono.is-now {
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+/* The projection, behind the same dashed rule the Per game and Finish panels
+   put in front of theirs -- what happened on one side, what is only expected
+   on the other. Stretched rather than baseline-aligned so the rule runs the
+   full height of the card as one line instead of breaking into a dash per
+   row. */
+.pp-pop-usage-row > .pp-pop-usage-proj,
+.pp-pop-usage-head > .pp-pop-usage-proj {
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding-left: 7px;
+  border-left: 1px dashed var(--border);
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-2);
+}
+
+/* The seam between the two shares and the per-game rates under them: above
+   it is how much of the offence he was, below it is what he did with it. */
+.pp-pop-usage-row.is-seam {
+  margin-top: 4px;
+  padding-top: 5px;
+  border-top: 1px solid var(--border);
 }
 
 /* Which way the number moved on the season before it: green up, red down,
@@ -4853,79 +5572,52 @@ button.roster-row:focus-visible {
    number itself -- this card replaced twelve tinted boxes, which fought the
    panels above it for attention and answered a question (where does he place
    among his position) that the Per game panel already answers with a bar.
+
+   Softened, both of them. --ok and --fail are sized for a pill or a bar; at
+   11px of mono on a dark card the flat tokens read as highlighter, and a
+   card with a colour in most of its cells is a card with no emphasis left to
+   spend. Mixed toward the text colour they are still unmistakably green and
+   red and they sit at the weight of type rather than of signage.
+
    Both rules are `>` children of the row and carry three classes, because
-   `.pp-pop-seasons-row > span:not(:first-child)` below sets every cell to
-   --text-1 and would otherwise outrank them. */
-.pp-pop-seasons-row > .delta-tone.is-up { color: var(--ok); }
-.pp-pop-seasons-row > .delta-tone.is-down { color: var(--fail); }
+   `.delta-tone` is a global rule of its own and would otherwise tie. */
+.pp-pop-usage-row > .delta-tone.is-up { color: var(--ok-soft); }
+.pp-pop-usage-row > .delta-tone.is-down { color: var(--fail-soft); }
 
-/* A season with no number in it. Dimmer than the numbers beside it, so a
-   row that is half missing reads as a row with gaps rather than as a row of
-   equally weighted cells one of which happens to be a dash. */
-.pp-pop-seasons-row > .is-blank.is-blank {
+/* A row with nothing in that cell -- a share the projection cannot answer, a
+   season that did not happen. Dimmer than the numbers beside it, so a card
+   that is half dashes reads as a card with gaps rather than as a card of
+   equally weighted cells some of which happen to be dashes. */
+.pp-pop-usage-row > .is-blank.is-blank {
   color: var(--text-3);
 }
 
-/* A small season table: a label column that takes what it needs and one
-   equal column per season. Grid rather than rows of flex, so "Snap share"
-   and "Target share" line their years up with each other -- the whole point
-   of the card is reading ACROSS a row and DOWN a column, and flex rows would
-   let a wider number in one row shift its column out from under the next. */
-.pp-pop-seasons {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-}
-
-.pp-pop-seasons-head,
-.pp-pop-seasons-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) repeat(4, 34px);
-  gap: var(--space-1);
-  align-items: baseline;
-}
-
-/* The projected column, when there is one: a fourth track, and the rule that
-   separates what happened from what is only expected -- the same dashed line
-   the Per game and Finish panels put in front of their own projections. */
-.pp-pop-seasons-head.has-proj,
-.pp-pop-seasons-row.has-proj {
-  grid-template-columns: minmax(0, 1fr) repeat(4, 34px) 40px;
-}
-
-.pp-pop-seasons-proj {
-  padding-left: 5px;
-  border-left: 1px dashed var(--border);
-  text-align: right;
-  font-size: 10px;
-  color: var(--text-2);
-}
-
-.pp-pop-seasons-head {
-  font-size: 9px;
-  letter-spacing: 0.07em;
+/* The line takes the row's own colour and sits a shade back from the number
+   it leads into: the figure is the measurement, the line is the run-up. Its
+   head keeps the full colour -- it is the point the figure states, and it is
+   what tells the eye which end of a short line is this year. */
+.pp-pop-usage-spark {
+  display: block;
   color: var(--text-3);
 }
 
-.pp-pop-seasons-row {
-  font-size: var(--text-sm);
-  color: var(--text-2);
-}
+.pp-pop-usage-spark.is-up { color: var(--ok-soft); }
+.pp-pop-usage-spark.is-down { color: var(--fail-soft); }
 
-/* The numbers right-aligned under their year, the label left where the eye
-   picks the row up. */
-.pp-pop-seasons-head > span:not(:first-child),
-.pp-pop-seasons-row > span:not(:first-child) {
-  text-align: right;
-  font-size: 10px;
-  color: var(--text-1);
-}
+/* Descendant rules, not child ones: a run and its projected tail are drawn
+   inside a `<g>` so they share one fit, and an opacity on that group would
+   multiply with the one on the tail inside it. */
+.pp-pop-usage-spark path,
+.pp-pop-usage-spark line { opacity: 0.7; }
 
-.pp-pop-seasons-row > span:first-child {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+/* The head of the line is the last season that happened. Full colour: it is
+   the seam, and everything to the right of it is only expected. */
+.pp-pop-usage-spark .pp-pop-usage-spark-head { opacity: 1; }
+
+/* And the projected step, fainter still behind its dashes. Two signals for
+   one fact -- a dashed line and a lighter one -- because this is the mark on
+   the card that must never be mistaken for a season. */
+.pp-pop-usage-spark .pp-pop-usage-spark-proj { opacity: 0.45; }
 
 /* An arrow on each side of the week chart, for walking the career a season
    at a time. The chart takes the middle and the arrows do not shrink, so the
@@ -4977,7 +5669,7 @@ button.roster-row:focus-visible {
 }
 
 /* Label on the left, number on the right (PopCard's PopRows). Market, Usage
-   and Blocking are all made of these, so a row in one lines up with a row in
+   and O-line are all made of these, so a row in one lines up with a row in
    the next -- they sit shoulder to shoulder and the eye reads across. */
 .pp-pop-kv {
   display: flex;
@@ -5003,7 +5695,7 @@ button.roster-row:focus-visible {
    short, and a truncated number is a wrong number. */
 .pp-pop-kv-value {
   flex: 0 0 auto;
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-2);
 }
 
@@ -5055,7 +5747,7 @@ button.pp-pop-list-row:focus-visible {
 
 .pp-pop-list-rank {
   flex: 0 0 16px;
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-3);
 }
 
@@ -5071,7 +5763,7 @@ button.pp-pop-list-row:focus-visible {
 
 .pp-pop-list-tail {
   flex: 0 0 auto;
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-3);
 }
 
@@ -5096,15 +5788,201 @@ button.pp-pop-list-row:focus-visible {
 }
 
 .pp-pop-lead-value {
-  font-size: 19px;
+  font-size: 20px;
   line-height: 1;
   color: var(--text-1);
 }
 
 .pp-pop-lead-of {
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+/* The rating's three parts, as gauges rather than as a chart
+   (LineQuality.tsx). Label, track, value -- the track takes whatever width
+   the card has left, so the three fills line up under each other and the
+   short one is the thing you see. */
+.pp-pop-meters {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 2px 0 1px;
+}
+
+.pp-pop-meter {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+/* Fixed, so three tracks start on one line. Set by "Returning", the longest
+   of the three. */
+.pp-pop-meter-label {
+  flex: 0 0 62px;
   font-size: 10px;
   color: var(--text-3);
 }
+
+.pp-pop-meter-track {
+  flex: 1 1 auto;
+  height: 5px;
+  border-radius: 3px;
+  /* The unfilled part is a surface, not an absence: without it a 60% meter
+     and a 100% meter are the same picture with a different right edge. */
+  background: var(--bg-2);
+  overflow: hidden;
+}
+
+.pp-pop-meter-fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+}
+
+/* The five-step ramp, as fills rather than as text. Same names, same tokens
+   and the same cut points the chart bars take (see `.ctip-col-bar` above),
+   so one colour means one thing across the popup. */
+.pp-pop-meter-fill.is-good { background: var(--ok); }
+.pp-pop-meter-fill.is-strong { background: var(--ramp-strong); }
+.pp-pop-meter-fill.is-mid { background: var(--ramp-mid); }
+.pp-pop-meter-fill.is-fringe { background: var(--accent); }
+.pp-pop-meter-fill.is-bad { background: var(--fail); }
+
+/* Tabular and fixed-width so three percentages stack into a column rather
+   than three separately-placed numbers. */
+.pp-pop-meter-value {
+  flex: 0 0 34px;
+  text-align: right;
+  /* Never two lines. A value that wraps takes its own meter's row with it
+     and breaks the column of bars the card is read down. */
+  white-space: nowrap;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2);
+}
+
+/* Where the list is, and how to walk it (ComparableSeasons.tsx). Under the
+   rows rather than in the head: the head already carries what the cohort
+   did, and two numbers up there would be read as one sentence. */
+.pp-pop-comps-pager {
+  /* Pinned to the bottom, the way the News pager beside it already is.
+     These two share a row, so whichever card has more in it sets the height
+     and the other one carries the slack -- and slack UNDER a footer reads as
+     a card that stopped early, while slack above one reads as a table that
+     ended. Pinned, the two pagers sit on the same line whichever card is
+     taller. */
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  padding-top: 5px;
+}
+
+/* The range, and the depth behind it. Quiet: it is a position in a list, not
+   one of the list's own numbers. */
+.pp-pop-comps-count {
+  margin-right: auto;
+  font-size: 10px;
+  color: var(--text-3);
+}
+
+.pp-pop-comps-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.pp-pop-comps-page:hover:not(:disabled) {
+  border-color: var(--accent-border);
+  color: var(--text-1);
+}
+
+.pp-pop-comps-page:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 2px;
+}
+
+/* At an end. Dimmed rather than removed, so the pair keeps its place and the
+   row does not shift sideways as you page. */
+.pp-pop-comps-page:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* The five men behind the rating (LineQuality.tsx). Hairline-separated rows
+   like the game log and the comparable seasons, because a list of names
+   against a column of numbers is the same object wherever it appears in this
+   popup -- and indented by nothing: the card is narrow, and a position tag
+   in the left column is already the indent. */
+.pp-pop-line {
+  display: flex;
+  flex-direction: column;
+  list-style: none;
+  /* Pushed to the FLOOR of the card. `.pp-pop-row` stretches every card to
+     the tallest of them, and this one is usually not it -- so the line used
+     to end wherever its five rows happened to stop, leaving a band of empty
+     card under it. Sitting on the bottom edge gives the list the same
+     baseline as whatever it is drawn beside, and puts the slack between the
+     rating and the men rather than under both. */
+  margin: auto 0 0;
+  padding: 0;
+}
+
+.pp-pop-line-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 0;
+  border-top: 1px solid var(--border);
+}
+
+/* Two or three characters, fixed width so five names start on one line. */
+.pp-pop-line-pos {
+  flex: 0 0 21px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--text-3);
+}
+
+.pp-pop-line-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-2);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Where each man places among the league's other starters at his slot, on
+   the availability the meter above averages. Takes the same ramp as the
+   meters -- cut on the fraction of the field rather than on a share (see
+   `placeTone`) -- so a green here and a green up there both mean "one of the
+   good ones". Fixed width and tabular so five places stack into a column. */
+.pp-pop-line-avail {
+  flex: 0 0 42px;
+  text-align: right;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-3);
+}
+
+.pp-pop-line-avail.is-good { color: var(--ok); }
+.pp-pop-line-avail.is-strong { color: var(--ramp-strong); }
+.pp-pop-line-avail.is-mid { color: var(--ramp-mid); }
+.pp-pop-line-avail.is-fringe { color: var(--accent); }
+.pp-pop-line-avail.is-bad { color: var(--fail); }
 
 /* -- comparable seasons, and the news beside them (the popup's last row) --
 
@@ -5112,7 +5990,13 @@ button.pp-pop-list-row:focus-visible {
    (ComparableSeasons.tsx), drawn as the same object as the game log above:
    a head in 8px caps over rows separated by hairlines. Two lists of names
    against columns of numbers should not be two different pictures. */
+/* Fills the card, so the pager at its foot has somewhere to be pushed to.
+   Without the grow this block is only as tall as its rows, `margin-top:
+   auto` on the pager has no slack to consume, and the footer floats
+   wherever the last comparable season happens to end -- which is never
+   where the News pager beside it sits. */
 .pp-pop-comps {
+  flex: 1 1 auto;
   display: flex;
   flex-direction: column;
 }
@@ -5176,15 +6060,15 @@ button.pp-pop-comp:focus-visible {
 }
 
 .pp-pop-comp-yr {
-  flex: 0 0 26px;
-  font-size: 10px;
+  flex: 0 0 28px;
+  font-size: 11px;
   color: var(--text-3);
 }
 
 .pp-pop-comp-ppg {
-  flex: 0 0 30px;
+  flex: 0 0 33px;
   text-align: right;
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-2);
 }
 
@@ -5192,10 +6076,165 @@ button.pp-pop-comp:focus-visible {
    `is-good` / `is-bad` (see `.player-page .is-good`): what a green number
    means here is what it means everywhere else on this popup. */
 .pp-pop-comp-next {
-  flex: 0 0 34px;
+  flex: 0 0 37px;
   text-align: right;
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-2);
+}
+
+/* The match percentage, on the comparable-seasons card and on Similar
+   players alike: one spelling of "how close is this really", so a 74% on one
+   card and a 74% on the other are the same claim. Quieter than the column it
+   qualifies -- it is the confidence in the row, not the row's own number. */
+.pp-pop-comp-sim {
+  flex: 0 0 35px;
+  text-align: right;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+/* -- similar players (SimilarPlayers.tsx) ---------------------------------
+   Five faces at his own position off THIS year's board, closest first. A
+   strip rather than a list: recognition is the job, and a photograph does it
+   faster than a row of numbers. Equal tracks so the five sit on one rhythm
+   whatever their names are; `minmax(0, 1fr)` because a long name must
+   ellipsise inside its own tile rather than widen it. */
+.pp-pop-sims {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: var(--space-2);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.pp-pop-sim {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  width: 100%;
+  padding: 4px 2px;
+  background: none;
+  border: 0;
+  border-radius: var(--radius);
+  color: inherit;
+  text-align: center;
+  cursor: pointer;
+}
+
+.pp-pop-sim:hover {
+  background: var(--bg-2);
+}
+
+.pp-pop-sim:hover .pp-pop-sim-name {
+  color: var(--accent);
+}
+
+.pp-pop-sim:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 2px;
+}
+
+.pp-pop-sim-face {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  object-fit: cover;
+  /* The photo sits ON a surface rather than on the card, so a transparent
+     PNG and a cropped portrait are the same circle. */
+  background: var(--bg-2);
+}
+
+/* A player with no photograph: his initial, in the circle the photo would
+   have filled, so five tiles keep one rhythm. */
+.pp-pop-sim-face.is-blank {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 19px;
+  font-weight: 600;
+  color: var(--text-3);
+}
+
+.pp-pop-sim-name {
+  width: 100%;
+  font-size: 11px;
+  line-height: 1.25;
+  color: var(--text-2);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* The one number on the tile, and the brightest thing under the face: it is
+   what a drafter would be getting instead of the player whose card this is. */
+.pp-pop-sim-proj {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-1);
+}
+
+/* The gap to the player the popup is about, under his projection. Its own
+   line rather than trailing the figure: five tiles wide, a signed number on
+   the same line would either wrap or squeeze the name beside it, and the
+   two numbers are answering different questions anyway -- how good he is,
+   then what swapping would cost. Empty for a pair the board cannot compare,
+   and the line collapses to nothing rather than holding a dash. */
+/* A badge, not a loose number. Under a name and a projection, a bare "-2.0"
+   is a third figure in a stack of figures and reads as another thing about
+   HIM; boxed, it reads as a relation -- what swapping costs against the
+   player whose card this is. The tint carries the sign, so the sign is said
+   twice and neither reading depends on colour alone.
+
+   `min-height` is kept for the tiles that have no gap to show (a player ESPN
+   does not project): the five faces stay on one baseline whether or not
+   every one of them has a badge under it. */
+.pp-pop-sim-gap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 16px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-3);
+}
+
+/* Only a badge with something in it wears a box: an empty one would be five
+   grey pills saying nothing. */
+.pp-pop-sim-gap:empty {
+  padding: 0;
+  background: none;
+}
+
+/* Three classes, to outrank the plain colour above. The fill is the same
+   token at low alpha, which is how every other tinted object in this popup
+   is built (see `.pos-badge`, `.pp-pop-status`). */
+.pp-pop-sim .delta-tone.is-up {
+  background: color-mix(in srgb, var(--ok) 16%, transparent);
+  color: var(--ok);
+}
+
+.pp-pop-sim .delta-tone.is-down {
+  background: color-mix(in srgb, var(--fail) 16%, transparent);
+  color: var(--fail);
+}
+
+/* Inside the dead band, where the two projections are the same projection.
+   Boxed like the others so the row keeps one shape, but in the card's own
+   surface rather than a colour: "no real difference" is a finding too. */
+.pp-pop-sim-gap:not(.is-up):not(.is-down):not(:empty) {
+  background: var(--bg-2);
+}
+
+/* The unit, once per tile and quieter than the figure: five tiles that each
+   shouted "/ g" would be five units and one fact. */
+.pp-pop-sim-unit {
+  font-size: 10px;
+  color: var(--text-3);
 }
 
 /* Two headlines and where each came from (NewsPanel.tsx). */
@@ -5206,6 +6245,65 @@ button.pp-pop-comp:focus-visible {
   list-style: none;
   margin: 0;
   padding: 0;
+}
+
+/* The pager, pushed to the floor of the card: `.pp-pop-row` stretches every
+   card to the tallest in its row, so a News card beside a taller neighbour
+   has space under its list, and a control that floated in the middle of it
+   would read as part of the last story. The card's own 7px gap is the space
+   above it -- a padding here would be that gap twice. */
+.pp-pop-news-pager {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+/* Where the reader is in the stories, not where they are in the pages. The
+   total is in the card's head and is not repeated here. */
+.pp-pop-news-range {
+  margin-right: auto;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--text-3);
+}
+
+/* The same button as the week chart's season arrows (`.pp-pop-weeks-arrow`),
+   at the size a footer can carry. Kept as its own rule rather than sharing
+   that class: those are 78px tall because they stand beside a chart, and a
+   News card has no chart to stand beside. */
+.pp-pop-news-page {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.pp-pop-news-page:hover:not(:disabled) {
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+.pp-pop-news-page:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 2px;
+}
+
+/* Disabled, not hidden: at the ends of the list the arrow stays where it was
+   so the footer never shifts sideways under the cursor. */
+.pp-pop-news-page:disabled {
+  color: var(--text-3);
+  opacity: 0.4;
+  cursor: default;
 }
 
 .pp-pop-news-item {
@@ -5258,7 +6356,7 @@ button.pp-pop-comp:focus-visible {
   align-items: baseline;
   gap: 2px 5px;
   margin-top: 2px;
-  font-size: 9px;
+  font-size: 10px;
   color: var(--text-3);
 }
 
@@ -5339,101 +6437,26 @@ button.pp-pop-comp:focus-visible {
   color: var(--accent);
 }
 
-/* ==========================================================================
-   Who made the pick
+/* WHO MADE THE PICK -- only a recorded mock draft (/api/mocks/{id}/board)
+   carries these labels; the live room's own board never does, so on /draft
+   every tile is the plain tile above.
 
-   An extension of the draft board grid above, and the page that exists to
-   read it (/mocks). The farm joins public ESPN mock drafts, and most of the
-   seats in one are not people: ESPN fills a room with computer teams, and
-   the people who ARE there wander off and get autopicked for. One real
-   8-team room went 94 machine picks out of 128. A board that does not say
-   so looks exactly like a room full of drafters and is worth studying far
-   less than it appears.
+   The vocabulary is presence, drawn as light. A person's pick is a tile at
+   full strength. A seat a person left (ESPN autopicking for them) is the
+   same tile turned down. A seat nobody ever sat in (ESPN's own team) is
+   turned down further and drained of its position colour. No glyphs, no
+   hatching: a board where most picks are machine-made -- which is most
+   public mocks -- should read as a board with a few lit tiles on it, not as
+   a wall of marks. The tile's aria-label and hover title still say which.
 
-   So the shading is not decoration, it is the finding, and it is built out
-   of LIGHT rather than out of hue: a human pick is the brightest thing on
-   the board and a machine pick sinks toward the page background, which is
-   what makes the ratio legible from across the room without reading a
-   single name. Hue was not available for this anyway -- --accent is
-   reserved for interactive state, --ok/--fail have fixed meanings, and the
-   position hues are already spent on positions (see index.css) -- and it
-   would have been the wrong tool regardless: five hues is a code to be
-   memorised, one brightness ramp is a picture.
-
-   The two machine states are NOT just two dimnesses, because they answer
-   different questions:
-     auto   -- a person WAS here and left. Knocked back, but hatched: the
-               diagonal texture reads as a struck-through seat, a room that
-               had people in it.
-     engine -- nobody was ever here. Not textured, but drained: the darkest
-               fill on the board (below the panel it sits on, so the cell
-               reads as a hole in the grid) and the position badge loses its
-               colour entirely. Colour drains out of a column ESPN was
-               always playing.
-   So a room that emptied out looks striped, and a room that was never full
-   looks punched through, which is the distinction the reader actually cares
-   about.
-
-   `us` is our own bot's seat. It is neither signal nor ESPN -- it drafts
-   semi-randomly on purpose -- so it takes the accent tint the board already
-   gives our column rather than a place on the human/machine ramp.
-   `unknown` gets nothing at all: no glyph, no tint, the plain cell the
-   /draft board has always drawn. Every draft recorded before the farm
-   labelled picks is unknown, as is every harvested one, and a board with no
-   labels must not look like a board full of people.
-
-   A glyph rides in each labelled cell beside the ADP delta -- filled, half,
-   hollow circle for human, auto, engine, a diamond for us -- so once you
-   look straight at a cell it says which state it is in without a colour
-   judgement. See DraftBoardGrid's MAKER_MARK.
+   `us` is our own bot's seat: neither signal nor ESPN (it drafts
+   semi-randomly on purpose), so it takes the accent the board already
+   spends on our column. `unknown` gets nothing at all.
    -------------------------------------------------------------------- */
 
-/* -- human: the signal. Lifted off the panel rather than tinted, plus a
-   bright rule down the cell's leading edge -- a run of them in one column
-   joins into a line you can find without reading. -- */
-.board-cell-filled.board-cell-by-human {
-  background: color-mix(in srgb, var(--text-1) 8%, var(--bg-1));
-}
-
-.board-cell-filled.board-cell-by-human:hover {
-  background: color-mix(in srgb, var(--text-1) 15%, var(--bg-1));
-}
-
-/* ::after, not ::before -- `.board-cell-clock::before` is the on-the-clock
-   overlay and must keep painting over whatever the cell already carries. */
-.board-cell-by-human::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 3px;
-  background: var(--text-1);
-  opacity: 0.65;
-  pointer-events: none;
-}
-
-/* -- auto: a seat that had somebody in it. Sunk below the panel and
-   hatched. -- */
+/* auto: a person was here. */
 .board-cell-filled.board-cell-by-auto {
-  background: color-mix(in srgb, var(--bg-0) 45%, var(--bg-1));
-}
-
-.board-cell-filled.board-cell-by-auto:hover {
-  background: color-mix(in srgb, var(--bg-0) 20%, var(--bg-2));
-}
-
-.board-cell-by-auto::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background: repeating-linear-gradient(
-    135deg,
-    transparent 0 4px,
-    color-mix(in srgb, var(--text-3) 55%, transparent) 4px 5px
-  );
-  opacity: 0.55;
+  background-color: color-mix(in srgb, var(--bg-1) 70%, var(--bg-0));
 }
 
 .board-cell-by-auto .board-cell-name {
@@ -5442,19 +6465,14 @@ button.pp-pop-comp:focus-visible {
 }
 
 .board-cell-by-auto .pos-badge,
-.board-cell-by-auto .board-cell-adp {
-  opacity: 0.55;
+.board-cell-by-auto .board-cell-adp,
+.board-cell-by-auto .board-cell-team {
+  opacity: 0.6;
 }
 
-/* -- engine: a seat nobody was ever in. Darker than the page's own panel,
-   flat, and with the position colour drained out of it -- the one state on
-   the board that carries no hue at all. -- */
+/* engine: nobody was ever here. */
 .board-cell-filled.board-cell-by-engine {
-  background: var(--bg-0);
-}
-
-.board-cell-filled.board-cell-by-engine:hover {
-  background: color-mix(in srgb, var(--bg-2) 55%, var(--bg-0));
+  background: color-mix(in srgb, var(--bg-1) 45%, var(--bg-0));
 }
 
 .board-cell-by-engine .board-cell-name {
@@ -5465,81 +6483,39 @@ button.pp-pop-comp:focus-visible {
 .board-cell-by-engine .pos-badge,
 .board-cell-by-engine .board-cell-adp {
   filter: grayscale(1);
-  opacity: 0.5;
+  opacity: 0.45;
 }
 
 .board-cell-by-engine .board-cell-team {
-  opacity: 0.6;
+  opacity: 0.5;
 }
 
-/* -- us: the same accent the board already spends on our own column, so our
-   seat reads as ours and not as a verdict on the room. -- */
+/* us: our own seat, in the accent the board already gives our column. */
 .board-cell-filled.board-cell-by-us {
-  background: color-mix(in srgb, var(--accent) 20%, var(--bg-1));
-}
-
-.board-cell-filled.board-cell-by-us:hover {
-  background: color-mix(in srgb, var(--accent) 30%, var(--bg-2));
-}
-
-.board-cell-by-us::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 3px;
-  background: var(--accent);
-  pointer-events: none;
+  background-color: color-mix(in srgb, var(--accent) 16%, var(--bg-1));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent);
 }
 
 .board-cell-by-us .board-cell-name {
   color: var(--text-1);
 }
 
-/* The per-cell glyph, and the same glyph in the /mocks key. Grouped so the
-   two can never drift into meaning different things. */
+/* The /mocks key's own swatches carry the same four states; the glyph
+   column there is kept only for screen readers' sake and is not drawn. */
 .board-by-mark,
 .mocks-key-mark {
-  flex-shrink: 0;
-  font-size: 10px;
-  line-height: 1;
+  display: none;
 }
 
-.board-by-mark.is-human,
-.mocks-key-mark.is-human { color: var(--text-1); }
-
-.board-by-mark.is-auto,
-.mocks-key-mark.is-auto { color: var(--text-2); }
-
-.board-by-mark.is-engine,
-.mocks-key-mark.is-engine { color: var(--text-3); }
-
-.board-by-mark.is-us,
-.mocks-key-mark.is-us { color: var(--accent); }
-
-/* -- column headers: did anyone ever sit here at all --
-
-   The same filled/hollow circle the cells use, so the header answers for
-   the whole column what a cell answers for one pick -- without scanning
-   sixteen rounds to find out. A seat nobody ever took also has its header
-   knocked back, `:not(.board-col-mine)` so our own column keeps its accent
-   whatever the farm recorded about it (our bot is not a person, and a
-   header that lost its tint over that would be reporting the wrong thing).
-   -------------------------------------------------------------------- */
+/* Column headers: a seat nobody ever took is knocked back to match the
+   column under it. `:not(.board-col-mine)` so our own column keeps its
+   accent whatever the farm recorded about it. */
 .board-col-owner {
-  flex-shrink: 0;
-  font-size: 9px;
-  line-height: 1;
-  color: var(--text-3);
-}
-
-.board-col-owner.is-owned {
-  color: var(--text-1);
+  display: none;
 }
 
 .board-col-header.board-col-vacant:not(.board-col-mine) {
-  background: color-mix(in srgb, var(--bg-0) 50%, var(--bg-1));
+  background: color-mix(in srgb, var(--bg-1) 45%, var(--bg-0));
 }
 
 .board-col-header.board-col-vacant:not(.board-col-mine) .board-col-name {

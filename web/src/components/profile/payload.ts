@@ -160,6 +160,12 @@ export interface Bio {
   rookie_season: number | null
   age: number | null
   nfl_season: number | null
+  /** Inches and pounds, from the same two `players` columns the Similar
+   *  players card scores on. Null for a defense, for a player nflverse has
+   *  no biography for, and for a database refreshed before the columns
+   *  existed -- the header prints whichever half it has. */
+  height: number | null
+  weight: number | null
 }
 
 export interface CohortSeason {
@@ -208,6 +214,32 @@ export interface LineQualityData {
   availability: number | null
   returning: number | null
   experience: number | null
+  /** `experience` as a percentile among the 32 lines. Seasons have no full
+   *  mark, so this is what the card's fourth meter fills to while the number
+   *  beside it stays in years. */
+  experience_pct?: number | null
+  /** The five men the four numbers above are computed over, in field order
+   *  (LT, LG, C, RG, RT). Empty for a database that can rate a line but has
+   *  no depth chart to name one, and ABSENT from a server that predates the
+   *  field -- read it with `?? []`. `availability` and `snap_share` are
+   *  shares of one; `games` / `games_possible` are the career counts the
+   *  first of those is the ratio of. */
+  starters?: LineStarter[]
+}
+
+export interface LineStarter {
+  position: string | null
+  name: string | null
+  availability: number | null
+  snap_share: number | null
+  games: number | null
+  games_possible: number | null
+  seasons: number | null
+  /** His place on availability among the league's other starters at the same
+   *  slot, and how many of them could be placed. Both null together -- a
+   *  place with no field to be placed in is not a fact. */
+  avail_rank?: number | null
+  avail_rank_of?: number | null
 }
 
 /** The board row the profile is built from. `api.ts`'s `Player` is the
@@ -323,6 +355,25 @@ export function fmtSigned(n: number | null | undefined, digits = 0): string {
 
 /** One decimal only when the number isn't whole -- ADP consensus is 1.8 but
  *  a single source is 1. Same rule as AvailableList's own fmtRank. */
+// How loud a disagreement with the market is allowed to be. Under ten slots
+// your board and the market take him in the same round of any league this
+// tool supports (8 to 14 teams), so there is no decision in the gap and it
+// reads as a note. Ten or more is a round he would fall past, which is the
+// version of this number worth colouring as a bargain.
+//
+// Lives here rather than on the card that draws it: it was written for the
+// status band under the header and is read by the Market card now, and a
+// second copy is how the two would come to disagree about what a bargain is.
+const EDGE_ROUND = 10
+
+export function edgeTone(slots: number): string {
+  if (slots >= EDGE_ROUND) return 'is-good'
+  if (slots > 0) return 'is-accent'
+  // Zero is agreement, not a failure -- it takes the row's own body colour.
+  if (slots === 0) return ''
+  return 'is-bad'
+}
+
 export function fmtRank(n: number | null | undefined): string {
   if (n === null || n === undefined) return '—'
   return Number.isInteger(n) ? String(n) : n.toFixed(1)

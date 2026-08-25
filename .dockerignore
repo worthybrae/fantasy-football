@@ -1,0 +1,42 @@
+# What must not reach the build context.
+#
+# The first two entries are the ones that matter. `data/` is 80 MB of DuckDB
+# plus, in `data/custody/`, other people's encrypted ESPN sessions -- neither
+# belongs in an image layer, and the custody file least of all: image layers
+# are cached, pushed to a registry and generally treated as public within an
+# organisation. It arrives on the mounted volume instead. `.env` is the key
+# that makes that file readable, so the two of them in one image would undo
+# the entire point of encrypting it.
+
+data/
+.env
+.env.*
+!.env.example
+
+.git/
+.gitignore
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Built by the web stage inside the image, never copied from the host: a
+# stale local build would otherwise win over the one just compiled.
+web/node_modules/
+web/dist/
+
+# Development and research surface with no runtime role.
+tests/
+docs/
+design/
+research/
+scripts/
+.claude/
+.superpowers/
+.design/
+.playwright-mcp/
+*.patch
+*.out
+README.md
+Makefile

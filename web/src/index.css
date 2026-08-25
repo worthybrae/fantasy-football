@@ -25,6 +25,15 @@
   --ok: #0ca30c;
   --fail: #d03b3b;
 
+  /* The same two signals at the weight of type rather than of signage. A
+     pill or a bar can carry the flat token; a column of 11px mono cells
+     cannot -- at that size the saturated pair reads as highlighter, and a
+     card that colours most of its cells has no emphasis left to spend.
+     Mixed toward the text colour rather than hand-picked, so a change to
+     --ok or --fail carries into the soft pair with it. */
+  --ok-soft: color-mix(in srgb, var(--ok) 70%, var(--text-1));
+  --fail-soft: color-mix(in srgb, var(--fail) 78%, var(--text-1));
+
   /* The two steps of the five-step ramp that are not already a token:
      its ends are --ok and --fail and its fourth step is --accent, but
      these two were literals repeated in eight places in App.css. A

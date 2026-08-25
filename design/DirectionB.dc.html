@@ -1,0 +1,192 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap">
+  <style>
+    body {
+      margin: 0;
+      background: #0a0b0e;
+      color: #98a0b0;
+      font: 13px/1.45 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: #ffb454; text-decoration: none; }
+    a:hover { color: #ffc57e; }
+    .mono { font-family: 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace; }
+  </style>
+</helmet>
+
+<div style="width: 1440px; height: 900px; display: flex; flex-direction: column; background: #0a0b0e; overflow: hidden;">
+
+  <div style="display: flex; align-items: center; gap: 16px; height: 44px; padding: 0 16px; background: #121319; border-bottom: 1px solid #262932; flex-shrink: 0;">
+    <div style="display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #e8eaef;">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><ellipse cx="8" cy="8" rx="7" ry="4.2" transform="rotate(-38 8 8)" stroke="#ffb454" stroke-width="1.4"/><path d="M5.6 10.4L10.4 5.6" stroke="#ffb454" stroke-width="1.4"/></svg>
+      ESPN Draft Assist
+    </div>
+    <div style="width: 1px; height: 18px; background: #262932;"></div>
+    <div style="align-self: stretch; display: flex;">
+      <div style="display: flex; align-items: center; padding: 0 16px; font-size: 12px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: #565b69; border-bottom: 2px solid transparent;">Drafts</div>
+      <div style="display: flex; align-items: center; padding: 0 16px; font-size: 12px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: #ffb454; background: #1b1d25; border-bottom: 2px solid #ffb454;">Waiting room</div>
+    </div>
+    <div style="width: 1px; height: 18px; background: #262932;"></div>
+    <div style="font-size: 12px; color: #98a0b0;">14 teams · PPR · snake · 16 rounds · 30s a pick</div>
+    <div style="flex-grow: 1;"></div>
+    <div class="mono" style="display: flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 10px; background: rgba(255, 180, 84, 0.12); color: #ffb454; font-size: 11px; font-weight: 700;">
+      <span style="width: 6px; height: 6px; border-radius: 50%; background: #ffb454;"></span>
+      2:35
+    </div>
+  </div>
+
+  <div style="flex: 1 1 auto; min-height: 0; display: flex;">
+
+    <!-- LEFT: the room, as a list you scan down. Draft order top to bottom. -->
+    <div style="flex: 0 0 420px; display: flex; flex-direction: column; border-right: 1px solid #262932; background: #121319; min-height: 0;">
+      <div style="display: flex; align-items: baseline; justify-content: space-between; padding: 14px 16px 10px; border-bottom: 1px solid #262932;">
+        <div style="text-transform: uppercase; letter-spacing: 0.14em; font-size: 10.5px; font-weight: 700; color: #565b69;">The room</div>
+        <div class="mono" style="font-size: 11px; color: #565b69;">11 / 14 seats</div>
+      </div>
+
+      <div style="flex: 1 1 auto; overflow: hidden;">
+        <!-- one row per seat: slot, who, first pick -->
+        <div style="display: flex; align-items: center; gap: 12px; height: 46px; padding: 0 16px; border-bottom: 1px solid rgba(38, 41, 50, 0.55);">
+          <div class="mono" style="flex: 0 0 26px; text-align: right; font-size: 15px; font-weight: 700; color: #565b69;">1</div>
+          <div style="flex: 1 1 auto; min-width: 0; font-size: 13px; color: #98a0b0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">Mike's Magnificent Team</div>
+          <div class="mono" style="flex: 0 0 auto; font-size: 11px; color: #565b69;">#1 · #28</div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 12px; height: 46px; padding: 0 16px; border-bottom: 1px solid rgba(38, 41, 50, 0.55);">
+          <div class="mono" style="flex: 0 0 26px; text-align: right; font-size: 15px; font-weight: 700; color: #565b69;">2</div>
+          <div style="flex: 1 1 auto; min-width: 0; font-size: 13px; color: #98a0b0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">Riley's Rowdy Team</div>
+          <div class="mono" style="flex: 0 0 auto; font-size: 11px; color: #565b69;">#2 · #27</div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 12px; height: 46px; padding: 0 16px; border-bottom: 1px solid rgba(38, 41, 50, 0.55);">
+          <div class="mono" style="flex: 0 0 26px; text-align: right; font-size: 15px; font-weight: 700; color: #565b69;">3</div>
+          <div style="flex: 1 1 auto; min-width: 0; font-size: 13px; color: #98a0b0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">Owen's Other Team</div>
+          <div class="mono" style="flex: 0 0 auto; font-size: 11px; color: #565b69;">#3 · #26</div>
+        </div>
+
+        <!-- an open seat: the row itself is the control -->
+        <div style="display: flex; align-items: center; gap: 12px; height: 46px; padding: 0 16px; border-bottom: 1px solid rgba(38, 41, 50, 0.55); background: rgba(255, 180, 84, 0.04);">
+          <div class="mono" style="flex: 0 0 26px; text-align: right; font-size: 15px; font-weight: 700; color: #98a0b0;">4</div>
+          <div style="flex: 1 1 auto; min-width: 0; font-size: 13px; color: #565b69;">Open</div>
+          <div class="mono" style="flex: 0 0 auto; font-size: 11px; color: #565b69;">#4 · #25</div>
+          <div style="flex: 0 0 auto; padding: 4px 10px; border: 1px solid #262932; border-radius: 3px; font-size: 11px; color: #98a0b0;">Choose</div>
+        </div>
+
+        <div style="display: flex; align-items: center; gap: 12px; height: 46px; padding: 0 16px; border-bottom: 1px solid rgba(38, 41, 50, 0.55);">
+          <div class="mono" style="flex: 0 0 26px; text-align: right; font-size: 15px; font-weight: 700; color: #565b69;">5</div>
+          <div style="flex: 1 1 auto; min-width: 0; font-size: 13px; color: #98a0b0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">Bob's Best Team</div>
+          <div class="mono" style="flex: 0 0 auto; font-size: 11px; color: #565b69;">#5 · #24</div>
+        </div>
+
+        <!-- the selected open seat -->
+        <div style="display: flex; align-items: center; gap: 12px; height: 46px; padding: 0 16px; border-bottom: 1px solid rgba(38, 41, 50, 0.55); background: rgba(255, 180, 84, 0.12); border-left: 2px solid #ffb454;">
+          <div class="mono" style="flex: 0 0 26px; text-align: right; font-size: 15px; font-weight: 700; color: #ffb454;">6</div>
+          <div style="flex: 1 1 auto; min-width: 0; font-size: 13px; font-weight: 600; color: #ffb454;">Open</div>
+          <div class="mono" style="flex: 0 0 auto; font-size: 11px; color: #ffb454;">#6 · #23</div>
+          <div style="flex: 0 0 auto; padding: 4px 10px; border: 1px solid #ffb454; border-radius: 3px; font-size: 11px; font-weight: 700; color: #ffb454;">Picked</div>
+        </div>
+
+        <div style="display: flex; align-items: center; gap: 12px; height: 46px; padding: 0 16px; border-bottom: 1px solid rgba(38, 41, 50, 0.55);">
+          <div class="mono" style="flex: 0 0 26px; text-align: right; font-size: 15px; font-weight: 700; color: #565b69;">7</div>
+          <div style="flex: 1 1 auto; min-width: 0; font-size: 13px; color: #98a0b0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">James's Scary Team</div>
+          <div class="mono" style="flex: 0 0 auto; font-size: 11px; color: #565b69;">#7 · #22</div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 12px; height: 46px; padding: 0 16px; border-bottom: 1px solid rgba(38, 41, 50, 0.55);">
+          <div class="mono" style="flex: 0 0 26px; text-align: right; font-size: 15px; font-weight: 700; color: #565b69;">8</div>
+          <div style="flex: 1 1 auto; min-width: 0; font-size: 13px; color: #98a0b0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">Dane's Daring Team</div>
+          <div class="mono" style="flex: 0 0 auto; font-size: 11px; color: #565b69;">#8 · #21</div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 12px; height: 46px; padding: 0 16px; border-bottom: 1px solid rgba(38, 41, 50, 0.55);">
+          <div class="mono" style="flex: 0 0 26px; text-align: right; font-size: 15px; font-weight: 700; color: #565b69;">9</div>
+          <div style="flex: 1 1 auto; min-width: 0; font-size: 13px; color: #98a0b0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">Marco's Mighty Team</div>
+          <div class="mono" style="flex: 0 0 auto; font-size: 11px; color: #565b69;">#9 · #20</div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 12px; height: 46px; padding: 0 16px; border-bottom: 1px solid rgba(38, 41, 50, 0.55);">
+          <div class="mono" style="flex: 0 0 26px; text-align: right; font-size: 15px; font-weight: 700; color: #565b69;">10</div>
+          <div style="flex: 1 1 auto; min-width: 0; font-size: 13px; color: #98a0b0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">James's Finest Team</div>
+          <div class="mono" style="flex: 0 0 auto; font-size: 11px; color: #565b69;">#10 · #19</div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 12px; height: 46px; padding: 0 16px; border-bottom: 1px solid rgba(38, 41, 50, 0.55);">
+          <div class="mono" style="flex: 0 0 26px; text-align: right; font-size: 15px; font-weight: 700; color: #565b69;">11</div>
+          <div style="flex: 1 1 auto; min-width: 0; font-size: 13px; color: #98a0b0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">Matthew's Mean Team</div>
+          <div class="mono" style="flex: 0 0 auto; font-size: 11px; color: #565b69;">#11 · #18</div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 12px; height: 46px; padding: 0 16px; border-bottom: 1px solid rgba(38, 41, 50, 0.55); background: rgba(255, 180, 84, 0.04);">
+          <div class="mono" style="flex: 0 0 26px; text-align: right; font-size: 15px; font-weight: 700; color: #98a0b0;">12</div>
+          <div style="flex: 1 1 auto; min-width: 0; font-size: 13px; color: #565b69;">Open</div>
+          <div class="mono" style="flex: 0 0 auto; font-size: 11px; color: #565b69;">#12 · #17</div>
+          <div style="flex: 0 0 auto; padding: 4px 10px; border: 1px solid #262932; border-radius: 3px; font-size: 11px; color: #98a0b0;">Choose</div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 12px; height: 46px; padding: 0 16px; border-bottom: 1px solid rgba(38, 41, 50, 0.55);">
+          <div class="mono" style="flex: 0 0 26px; text-align: right; font-size: 15px; font-weight: 700; color: #565b69;">13</div>
+          <div style="flex: 1 1 auto; min-width: 0; font-size: 13px; color: #98a0b0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">Connor's Cool Team</div>
+          <div class="mono" style="flex: 0 0 auto; font-size: 11px; color: #565b69;">#13 · #16</div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 12px; height: 46px; padding: 0 16px;">
+          <div class="mono" style="flex: 0 0 26px; text-align: right; font-size: 15px; font-weight: 700; color: #565b69;">14</div>
+          <div style="flex: 1 1 auto; min-width: 0; font-size: 13px; color: #98a0b0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">Will's Wonderful Team</div>
+          <div class="mono" style="flex: 0 0 auto; font-size: 11px; color: #565b69;">#14 · #15</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT: the seat you are considering, at full size -->
+    <div style="flex: 1 1 auto; min-width: 0; padding: 26px 28px; display: flex; flex-direction: column; gap: 24px;">
+
+      <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 24px;">
+        <div>
+          <div style="text-transform: uppercase; letter-spacing: 0.14em; font-size: 10.5px; font-weight: 700; color: #565b69;">Picking starts in</div>
+          <div class="mono" style="margin-top: 5px; font-size: 64px; font-weight: 700; line-height: 1; letter-spacing: -0.045em; color: #e8eaef; font-variant-numeric: tabular-nums;">2:35</div>
+        </div>
+        <div style="text-align: right;">
+          <div class="mono" style="font-size: 30px; font-weight: 700; color: #ffb454; letter-spacing: -0.02em;">Seat 6</div>
+          <div style="margin-top: 2px; font-size: 13px; color: #98a0b0;">of 14 · picks 6th, then 23rd</div>
+        </div>
+      </div>
+
+      <div style="height: 1px; background: #262932;"></div>
+
+      <!-- the schedule as a round-by-round table: dense, and the wait is a
+           column rather than a picture -->
+      <div style="display: flex; flex-direction: column; gap: 10px;">
+        <div style="text-transform: uppercase; letter-spacing: 0.14em; font-size: 10.5px; font-weight: 700; color: #565b69;">Every pick this seat owns</div>
+        <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px;">
+          <div style="padding: 9px 11px; background: #121319; border: 1px solid #262932; border-radius: 3px; display: flex; align-items: baseline; justify-content: space-between;"><span class="mono" style="font-size: 11px; color: #565b69;">R1</span><span class="mono" style="font-size: 15px; font-weight: 700; color: #e8eaef;">6</span></div>
+          <div style="padding: 9px 11px; background: #121319; border: 1px solid #262932; border-radius: 3px; display: flex; align-items: baseline; justify-content: space-between;"><span class="mono" style="font-size: 11px; color: #565b69;">R2</span><span class="mono" style="font-size: 15px; font-weight: 700; color: #e8eaef;">23</span></div>
+          <div style="padding: 9px 11px; background: #121319; border: 1px solid #262932; border-radius: 3px; display: flex; align-items: baseline; justify-content: space-between;"><span class="mono" style="font-size: 11px; color: #565b69;">R3</span><span class="mono" style="font-size: 15px; font-weight: 700; color: #e8eaef;">34</span></div>
+          <div style="padding: 9px 11px; background: #121319; border: 1px solid #262932; border-radius: 3px; display: flex; align-items: baseline; justify-content: space-between;"><span class="mono" style="font-size: 11px; color: #565b69;">R4</span><span class="mono" style="font-size: 15px; font-weight: 700; color: #e8eaef;">51</span></div>
+          <div style="padding: 9px 11px; background: #121319; border: 1px solid #262932; border-radius: 3px; display: flex; align-items: baseline; justify-content: space-between;"><span class="mono" style="font-size: 11px; color: #565b69;">R5</span><span class="mono" style="font-size: 15px; font-weight: 700; color: #98a0b0;">62</span></div>
+          <div style="padding: 9px 11px; background: #121319; border: 1px solid #262932; border-radius: 3px; display: flex; align-items: baseline; justify-content: space-between;"><span class="mono" style="font-size: 11px; color: #565b69;">R6</span><span class="mono" style="font-size: 15px; font-weight: 700; color: #98a0b0;">79</span></div>
+          <div style="padding: 9px 11px; background: #121319; border: 1px solid #262932; border-radius: 3px; display: flex; align-items: baseline; justify-content: space-between;"><span class="mono" style="font-size: 11px; color: #565b69;">R7</span><span class="mono" style="font-size: 15px; font-weight: 700; color: #98a0b0;">90</span></div>
+          <div style="padding: 9px 11px; background: #121319; border: 1px solid #262932; border-radius: 3px; display: flex; align-items: baseline; justify-content: space-between;"><span class="mono" style="font-size: 11px; color: #565b69;">R8</span><span class="mono" style="font-size: 15px; font-weight: 700; color: #98a0b0;">107</span></div>
+          <div style="padding: 9px 11px; background: #121319; border: 1px solid #262932; border-radius: 3px; display: flex; align-items: baseline; justify-content: space-between;"><span class="mono" style="font-size: 11px; color: #565b69;">R9</span><span class="mono" style="font-size: 15px; font-weight: 700; color: #98a0b0;">118</span></div>
+          <div style="padding: 9px 11px; background: #121319; border: 1px solid #262932; border-radius: 3px; display: flex; align-items: baseline; justify-content: space-between;"><span class="mono" style="font-size: 11px; color: #565b69;">R10</span><span class="mono" style="font-size: 15px; font-weight: 700; color: #98a0b0;">135</span></div>
+          <div style="padding: 9px 11px; background: #121319; border: 1px solid #262932; border-radius: 3px; display: flex; align-items: baseline; justify-content: space-between;"><span class="mono" style="font-size: 11px; color: #565b69;">R11</span><span class="mono" style="font-size: 15px; font-weight: 700; color: #98a0b0;">146</span></div>
+          <div style="padding: 9px 11px; background: #121319; border: 1px solid #262932; border-radius: 3px; display: flex; align-items: baseline; justify-content: space-between;"><span class="mono" style="font-size: 11px; color: #565b69;">R12</span><span class="mono" style="font-size: 15px; font-weight: 700; color: #98a0b0;">163</span></div>
+          <div style="padding: 9px 11px; background: #121319; border: 1px solid #262932; border-radius: 3px; display: flex; align-items: baseline; justify-content: space-between;"><span class="mono" style="font-size: 11px; color: #565b69;">R13</span><span class="mono" style="font-size: 15px; font-weight: 700; color: #98a0b0;">174</span></div>
+          <div style="padding: 9px 11px; background: #121319; border: 1px solid #262932; border-radius: 3px; display: flex; align-items: baseline; justify-content: space-between;"><span class="mono" style="font-size: 11px; color: #565b69;">R14</span><span class="mono" style="font-size: 15px; font-weight: 700; color: #98a0b0;">191</span></div>
+          <div style="padding: 9px 11px; background: #121319; border: 1px solid #262932; border-radius: 3px; display: flex; align-items: baseline; justify-content: space-between;"><span class="mono" style="font-size: 11px; color: #565b69;">R15</span><span class="mono" style="font-size: 15px; font-weight: 700; color: #98a0b0;">202</span></div>
+          <div style="padding: 9px 11px; background: #121319; border: 1px solid #262932; border-radius: 3px; display: flex; align-items: baseline; justify-content: space-between;"><span class="mono" style="font-size: 11px; color: #565b69;">R16</span><span class="mono" style="font-size: 15px; font-weight: 700; color: #98a0b0;">219</span></div>
+        </div>
+      </div>
+
+      <div style="flex-grow: 1;"></div>
+
+      <div style="display: flex; align-items: center; gap: 16px;">
+        <div style="padding: 12px 24px; border: 1px solid #ffb454; border-radius: 3px; background: #ffb454; color: #10110f; font-size: 14px; font-weight: 700;">Take seat 6</div>
+        <div style="max-width: 46ch; font-size: 12px; line-height: 1.5; color: #565b69;">Final — ESPN allows one team per manager, so this cannot be swapped afterwards. The board opens here when picking starts.</div>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

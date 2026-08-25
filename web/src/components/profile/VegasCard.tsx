@@ -1,6 +1,7 @@
 import type { Vegas } from './payload'
 import PopCard from './PopCard'
-import { fmtSigned, ordinal } from './payload'
+import { ordinal } from './payload'
+import { CARD_HINTS } from './hints'
 
 // What the betting market prices this player's offence at, and what it
 // prices him at.
@@ -27,9 +28,10 @@ import { fmtSigned, ordinal } from './payload'
 // agreeing, and painting every row would make the card look like an argument
 // nobody is having.
 //
-// Green means the BOOKS rank him higher than the draft room does, which is
-// the direction a drafter is shopping in -- the same sense the board's own
-// edge carries, where a player the room is late on is the one worth taking.
+// Green means the BOOKS rank him higher than the draft room does -- a lower
+// number, RB4 against RB9 -- which is the direction a drafter is shopping
+// in, the same sense the board's own edge carries: a player the room is late
+// on is the one worth taking. Red is the room ahead of the book.
 const RANK_GAP = 3
 
 function gapTone(place: number | null, adpPlace: number | null): string {
@@ -64,18 +66,23 @@ export default function VegasCard({ vegas, position }: {
   const ranked = hasTeam && vegas.rank !== null && vegas.teams !== null
 
   return (
-    <PopCard title="Vegas" className="is-widest">
+    // No `is-widest` any more. This card was given the row's largest share
+    // when it carried an implied total, a strip of eighteen weeks and four
+    // markets; it carries a rank and one to four rows now, while the Market
+    // card beside it grew from four lines to seven. The width belongs to
+    // whichever card has something to put in it.
+    <PopCard title="Vegas" hint={CARD_HINTS.vegas}>
       {hasTeam && (
       <>
       {ranked && (
         // The rank, in the O-line card's own lead treatment -- `pp-pop-lead`
-        // is that card's, not a copy of it -- because the two cards make the
-        // same kind of statement: one number, out of the same thirty-two
-        // teams, that a reader places instantly. A popup that wrote "13th of
-        // 32" two different ways on two cards would be asking to be read
-        // twice.
+        // is that card's, not a copy of it -- because the two cards are
+        // making the same kind of statement: one number, out of the same
+        // thirty-two teams, that a reader places instantly. A popup that
+        // wrote "13th of 32" two different ways on two cards would be asking
+        // to be read twice.
         //
-        // The track that used to sit beside it goes with the second
+        // The track that used to sit beside it is gone with the second
         // spelling. A bar drawn against thirty-two teams was a second
         // rendering of a number already in plain words.
         <div className="pp-pop-lead">
@@ -86,7 +93,19 @@ export default function VegasCard({ vegas, position }: {
       {/* Where the rank comes from, and what the percentages below it are.
           Both are provenance rather than findings, which is why they share
           one 9px line instead of costing two. */}
+      {/* Where the rank comes from: the number itself, how many weeks it is
+          an average over, and -- when there are markets below -- what those
+          percentages are. All three are provenance rather than findings,
+          which is why they share one line instead of costing three.
+
+          The implied total is BACK on this line, and only on this line. It
+          was a headline figure once, needed a sentence to explain, and was
+          misread as a projection for the player rather than for his whole
+          offence; as the small print under a rank that has already made the
+          point, it is what it always should have been -- the arithmetic,
+          available to anyone who wants to check the placing. */}
       <div className="pp-pop-vegas-foot mono">
+        {vegas.implied !== null && `${vegas.implied.toFixed(1)} team pts / g · `}
         over {vegas.priced} priced weeks{futures.length > 0 && ' · book prices'}
       </div>
       </>
@@ -101,7 +120,7 @@ export default function VegasCard({ vegas, position }: {
             <span />
             <span>chance</span>
             <span>vegas</span>
-            <span>vs adp</span>
+            <span>adp</span>
           </div>
           {futures.slice(0, SHOWN_MARKETS).map((f) => {
             const pct = f.implied_pct
@@ -139,28 +158,31 @@ export default function VegasCard({ vegas, position }: {
                   {pct === null ? '—'
                     : pct < 1 ? '<1%' : `${Math.round(pct)}%`}
                 </span>
-                {/* Where the book ranks him among his own position, and how
-                    far the draft room is from that. The subtraction is the
-                    point, so the card does it: printing both ranks made a
-                    reader carry two numbers per row and take the difference
-                    himself, four rows running.
+                {/* Two ranks over the same position: where the book puts
+                    him, and where the room drafts him. Both printed plainly,
+                    and the comparison carried by the colour of the first
+                    rather than by a third number.
 
-                    Vegas MINUS ADP, so the sign reads the way the colour
-                    does: NEGATIVE is the book ranking him better than the
-                    room drafts him, which is green and is what a drafter is
-                    shopping for. POSITIVE is the room ahead of the book --
-                    Jalen Hurts, QB15 for MVP and QB5 by ADP, reads +10 in
-                    red: ten places of draft capital the book does not
-                    believe in.
+                    This column was a signed difference for a while -- "+10",
+                    "-4" -- and it read as an argument with itself. A reader
+                    had to hold which way round the subtraction went before
+                    the sign meant anything, on every row, and the two ranks
+                    it was computed from were right there beside it. Now the
+                    vegas rank is green when the book likes him better than
+                    the room does (a LOWER number: QB4 against QB9) and red
+                    when the room is ahead of the book -- Jalen Hurts, QB15
+                    for MVP and QB5 by ADP, is red without needing to say
+                    +10. The direction is the whole finding, and colour says
+                    a direction without being read.
 
-                    Stated the other way round first, and it was wrong: a
-                    reach came out negative, and a negative number painted
-                    red is a number fighting its own sign. */}
-                <span className="mono pp-pop-futures-rank">{byPos(f.pos_place)}</span>
+                    Still on a three-place deadband (RANK_GAP): two rankings
+                    over a field of sixty that differ by one are agreeing,
+                    and a card painted top to bottom claims a disagreement on
+                    every line. */}
                 <span className={`mono pp-pop-futures-rank ${gapTone(f.pos_place, f.pos_adp_place)}`}>
-                  {f.pos_place === null || f.pos_adp_place === null
-                    ? '—' : fmtSigned(f.pos_place - f.pos_adp_place)}
+                  {byPos(f.pos_place)}
                 </span>
+                <span className="mono pp-pop-futures-rank">{byPos(f.pos_adp_place)}</span>
               </div>
             )
           })}

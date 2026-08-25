@@ -87,10 +87,10 @@ _BOARD_COLUMNS = [
     # the available table draws per row. See `season_finishes`.
     "season_finishes",
     # Week-to-week steadiness. `_cv` is the raw coefficient of variation
-    # (lower is steadier) and `_pct` its within-position percentile among the
-    # players ON THIS BOARD, steadiest highest. A coefficient, never a sigma,
-    # and ranked against the draftable pool -- see `consistency` for why both
-    # of those are load-bearing.
+    # (lower is steadier) and `_pct` its within-position percentile among
+    # EVERY measured player at that position, steadiest highest. A
+    # coefficient, never a sigma -- see `consistency`, where that part is
+    # load-bearing and the pool is a decision.
     "consistency_cv",
     "consistency_pct",
     # nflverse's photo url for this player, or null. Carried on the board
@@ -110,8 +110,13 @@ _BOARD_COLUMNS = [
     # trending icon (api/live.py `_board_cell`). One column, computed once,
     # so those three cannot disagree. It is also the honest way to SHOW the
     # estimate rather than bury it: see `projection_scale`.
-    "proj_scale", "vor",
-    "tier", "market_rank",
+    "proj_scale",
+    # ESPN's week-1 projection, converted by that same proj_scale, or NaN for
+    # a player it does not project. Beside `proj_scale` because it is the
+    # other thing that factor is applied to. Display only -- nothing ranks on
+    # it: the board ranks on the season, the roster rail prints the week.
+    "proj_wk1",
+    "vor", "tier", "market_rank",
     "market_spread", "market_sources", "espn_ppr_rank", "espn_id", "ffc_rank", "edge",
     "rookie", "drafted", "rank",
     "stats", "avail_pct", "ev", "ev_se",
@@ -379,14 +384,22 @@ def consistency(weekly: pd.DataFrame, rules: dict | None = None,
     a negative coefficient would sort as the steadiest player alive.
 
     `pool` is the set of players to rank WITHIN -- a frame of `player_id` and
-    `position`, normally the board itself. It is not an optimization, it is
-    the difference between a column that means something and one that does
-    not: ranked against every player with eight games anywhere in the weekly
-    history, 630 of them, the spiky tail is all special-teamers and backup
-    quarterbacks, and 143 of the 181 draftable players come out in the top two
-    of five bars. Every name a drafter can actually take reads "steady", which
-    is no information at all. Ranked against the board, the pool is the one
-    the reader is choosing from. Passing None ranks against everyone measured.
+    `position`. None, which is what the board passes, ranks against every
+    player measured at that position.
+
+    THAT IS A DECISION, NOT A DEFAULT, and it has a cost worth knowing. The
+    measured comparison: ranked against all 630 players with eight games
+    anywhere in the weekly history, the spiky tail is special-teamers and
+    backup quarterbacks, and 143 of the 181 draftable players land in the top
+    two of five bars -- so the column separates draftable players from
+    fringe ones rather than from each other. Passing the board instead ranks
+    a player against the pool the reader is choosing from, which spreads the
+    bars across the names on screen.
+
+    The owner chose the wider pool: a bar reads "steady for a player at this
+    position", which is a claim about the player rather than about who
+    happens to be draftable this year, and it does not move when the board
+    does. If the top of the board ever needs separating again, pass `pool`.
 
     Returns `consistency_cv`, the raw coefficient (lower is steadier, for a
     tooltip that wants the number), and `consistency_pct` in [0, 1] with the
@@ -736,6 +749,53 @@ def projection_scale(board: pd.DataFrame, rules: dict | None = None) -> np.ndarr
     return scale
 
 
+def week_projections(conn, board: pd.DataFrame) -> pd.Series:
+    """ESPN's WEEK 1 projection per board row, in this league's scoring.
+
+    A season total is a number nobody has a feel for -- 323 is good, 297 is
+    fine, and only a reader who already knows the scale can tell them apart --
+    where "18.4 in week 1" reads against a Sunday every manager in the league
+    has watched. So the roster rail prices a pick in weeks, and this is where
+    that number comes from.
+
+    Deliberately NOT a rung ladder like `projections()`. That function has to
+    produce a number for every row on the board, because a player with no
+    projection would sort to the bottom of the draft; this one is a display
+    value, and a player ESPN does not project for week 1 (a deep-bench rookie,
+    7 of the top 300 measured) is honestly a dash rather than a guess derived
+    from last season's per-game average.
+
+    Converted by the same `proj_scale` the season projection is, for the same
+    reason: `appliedTotal` is scored under ESPN's own PPR defaults, so a
+    half-PPR league reading it raw would be reading somebody else's currency.
+    """
+    espn = read_table(conn, "espn_adp")
+    lookup = {}
+    if not espn.empty and "espn_wk1" in espn.columns:
+        valid = espn.dropna(subset=["espn_wk1"])
+        teams = (valid["team"] if "team" in valid.columns
+                 else pd.Series([None] * len(valid), index=valid.index))
+        # Keyed exactly as `projections()` keys the season number, DSTs on
+        # team included -- one matching rule, so a player who has a season
+        # projection on this board cannot fail to have his weekly one for a
+        # reason nobody can explain.
+        for (_, row), team in zip(valid.iterrows(), teams):
+            key = adp_match_key(row["espn_name"], row["position"], team)
+            if key is not None:
+                lookup[key] = float(row["espn_wk1"])
+
+    scale = (pd.to_numeric(board["proj_scale"], errors="coerce")
+             .fillna(1.0).to_numpy(dtype=float)
+             if "proj_scale" in board.columns else np.ones(len(board)))
+
+    values = []
+    for i, (_, row) in enumerate(board.iterrows()):
+        key = adp_match_key(row["name"], row["position"], row.get("team"))
+        value = lookup.get(key) if key is not None else None
+        values.append(np.nan if value is None else value * scale[i])
+    return pd.Series(values, index=board.index, dtype=float)
+
+
 def projections(conn, board: pd.DataFrame) -> pd.Series:
     """Projected season points per player_id.
 
@@ -1079,12 +1139,12 @@ def build_board(conn, weights: dict | None = None,
         uni = uni.merge(raw, on="player_id", how="left")
     uni = uni.merge(career, on="player_id", how="left")
     uni = uni.merge(finishes, on="player_id", how="left")
-    # Ranked against the board, not the whole weekly universe, and computed
-    # here rather than beside `career`/`finishes` above for exactly that
-    # reason: `uni` is the pool. Against the FULL weekly, since `consistency`
-    # applies the RECENCY_WEIGHTS window itself as its weighting -- handing it
-    # the narrowed frame would weight a subset of a subset.
-    uni = uni.merge(consistency(read_table(conn, "weekly"), rules, pool=uni),
+    # Ranked against EVERY measured player at the position, not against the
+    # draftable board -- the owner's call, and it changes what the column
+    # means: a bar now says "steady among everyone who plays this position",
+    # not "steady among the players you could take". See `consistency` for
+    # what that costs at the top of the board.
+    uni = uni.merge(consistency(read_table(conn, "weekly"), rules),
                     on="player_id", how="left")
 
     env = factors.environment_factor(sched) if not sched.empty else pd.DataFrame(columns=["team", "env_raw"])
@@ -1172,6 +1232,10 @@ def build_board(conn, weights: dict | None = None,
     # positionally gives every row -- including both id-colliding rows --
     # its own correct value, without ever reindexing on the id at all.
     uni["proj_points"] = proj.to_numpy(dtype=float)
+    # Week 1, beside the season total rather than instead of it: the board
+    # ranks on the season (a draft is a season-long bet), the roster rail
+    # prints the week (a number a reader can feel). See `week_projections`.
+    uni["proj_wk1"] = week_projections(conn, uni).to_numpy(dtype=float)
     # After proj_points exists, and against the FULL weekly rather than the
     # RECENCY_WEIGHTS slice `weekly` was narrowed to above: `expected_change`
     # applies that window itself, as its weighting, and handing it a

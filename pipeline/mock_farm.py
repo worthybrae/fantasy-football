@@ -122,6 +122,20 @@ TURN_BUDGET_SECONDS = 25.0
 # ride out a reconnect (draft_socket backs off ~2s and ESPN replays on JOIN),
 # short enough that a dead room does not eat the night.
 IDLE_TIMEOUT_SECONDS = 300.0
+# A seat whose socket is DEAD, as opposed to reconnecting. draft_socket's
+# own reconnect takes seconds and ESPN replays the draft on JOIN, so a
+# handle with nothing attached is ordinary for that long. Observed live
+# (room 457868220, 2026-08-25): a seat whose socket cycled for twenty
+# minutes -- every JOIN accepted, a greeting, a close, no picks ever
+# replayed, every SELECT on our turn refused with "not connected" -- while
+# the listener thread stayed alive, so neither the give-up in draft_socket
+# nor the idle timer here ever fired. A handle that has had nothing
+# attached for this long is that seat, and the answer is a fresh token and
+# a new session; failing that, the room is abandoned rather than played to
+# the end by ESPN's autodraft under our name.
+SOCKET_DEAD_SECONDS = 60.0
+# How many times one draft gets that fresh session before it is abandoned.
+MAX_SOCKET_RECONNECTS = 2
 # ESPN's draft socket does NOT accept a JOIN for a room whose draft has not
 # opened yet: connecting ~6 minutes ahead of `draftDate` was answered with
 # "server rejected WebSocket connection: HTTP 500", twice, against two
@@ -931,6 +945,19 @@ def live_payload(timeline, tool, league_id, season, teams, rounds, my_slot,
             "player_id": None if player_id is None else str(player_id),
             "autodrafted": (None if frame.autodrafted is None
                             else bool(frame.autodrafted)),
+            # The turn's timing, carried through unchanged from the frame.
+            # `clock_seconds` is the only thing that can drive a real
+            # countdown on the page: ESPN's SELECTING frame is the one place
+            # the clock's FULL length is ever stated (its CLOCK frames carry
+            # only what is left), so a reader that never saw a turn open
+            # cannot recover it later at any price. None when this pick's
+            # turn was never seen opening -- never guessed, because a room on
+            # a 90-second clock shown a 30-second one is a countdown that
+            # lies twice a minute.
+            "clock_seconds": (None if frame.clock_seconds is None
+                              else float(frame.clock_seconds)),
+            "seconds_to_pick": (None if frame.seconds_to_pick is None
+                                else float(frame.seconds_to_pick)),
         })
     return {
         "league_id": str(league_id),
@@ -1159,6 +1186,17 @@ def _wait_until_available(room, out) -> None:
         seconds = MAX_AVAILABLE_WAIT_SECONDS
     out(f"  room opens in {seconds:.0f}s -- waiting before connecting")
     time.sleep(seconds)
+
+
+def _attached(handle) -> bool:
+    """Whether the session's socket handle currently holds a connection.
+
+    `None` (not published yet) and a handle with no `alive` (the fakes the
+    tests hand in) both read as attached: the dead-socket rule above is
+    about a handle that can say it is empty and has said so for a minute,
+    not about anything that cannot answer."""
+    alive = getattr(handle, "alive", None)
+    return True if alive is None else bool(alive())
 
 
 def _connect_session(listener, league_id, team_id, swid, fetch, season, out):
@@ -1427,11 +1465,47 @@ def play_draft(conn, corpus_path, cookies, room, rng,
         last_progress = time.monotonic()
         start_deadline = time.monotonic() + START_TIMEOUT_SECONDS
         last_autodraft_nudge = 0.0
+        # When the socket handle last went empty, or None while it holds a
+        # connection. See SOCKET_DEAD_SECONDS.
+        detached_since = None
+        reconnects = 0
 
         while True:
             if not session.alive():
                 out(f"  socket thread stopped: {session.error}")
                 break
+
+            # THE SEAT'S SOCKET IS DEAD, not merely reconnecting: nothing has
+            # been attached to the handle for SOCKET_DEAD_SECONDS. The
+            # listener thread is alive (checked above) and cycling, which is
+            # the one shape neither its own give-up nor the idle timer below
+            # catches. Stop it, mint a fresh token, join again -- the shared
+            # listener keeps every event it has, and ESPN's replay on JOIN
+            # is deduped on the way in -- and if that seat is dead too,
+            # abandon the room.
+            if not _attached(session.socket):
+                if detached_since is None:
+                    detached_since = time.monotonic()
+                elif time.monotonic() - detached_since >= SOCKET_DEAD_SECONDS:
+                    if reconnects >= MAX_SOCKET_RECONNECTS:
+                        out(f"  the draft socket has been down for "
+                            f"{SOCKET_DEAD_SECONDS:.0f}s again -- abandoning "
+                            "this room")
+                        break
+                    reconnects += 1
+                    out(f"  the draft socket has been down for "
+                        f"{SOCKET_DEAD_SECONDS:.0f}s -- reconnecting with a "
+                        f"fresh token ({reconnects}/{MAX_SOCKET_RECONNECTS})")
+                    session.stop()
+                    fresh = _connect_session(listener, league_id, team_id,
+                                             swid, fetch, season, out)
+                    if fresh is None:
+                        out("  could not reconnect -- abandoning this room")
+                        break
+                    session = fresh
+                    detached_since = None
+            else:
+                detached_since = None
             timeline = draft_timeline(listener.events, owners)
             n = len(timeline)
             if n != picks_seen:

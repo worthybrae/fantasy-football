@@ -165,3 +165,186 @@ def value_neighbors(board: pd.DataFrame, player_id: str, top_n: int = 5) -> dict
                 "market_rank": (None if pd.isna(r["market_rank"]) else float(r["market_rank"]))}
                for _, r in pool.iterrows()]
     return {"mode": "value_neighbors", "players": players}
+
+
+# What "similar player" is scored on, and how much each part counts. Not the
+# same list as FEATURES above and deliberately so: `find_twins` matches one
+# SEASON against seasons that already happened, so a stat line is the whole
+# of it. This one matches a PLAYER against the players he is being drafted
+# beside, where the projection is the loudest single fact about him and his
+# body is a real part of what makes two backs the same kind of back.
+#
+# The stat line still outweighs the rest put together. Height and weight are
+# priced low on purpose: they separate a slot receiver from an X, which is
+# worth something, but two players are not similar BECAUSE they are the same
+# size, and a heavier weighting turns the card into a combine list.
+SIMILAR_WEIGHTS = {
+    "proj_points": 2.0,
+    "ppg": 2.0,
+    "target_share": 1.5,
+    "carry_share": 1.5,
+    "yards_per_opp": 1.0,
+    "td_per_opp": 1.0,
+    "rec_pg": 1.0,
+    "games": 0.5,
+    "age": 1.0,
+    "height": 0.5,
+    "weight": 0.5,
+}
+
+# What fraction of the total weight a pair has to share before a distance
+# between them means anything. Two players compared on one feature alone
+# would score 100 for being the same size, or for carrying the same
+# projection, which is the failure this guards.
+#
+# 0.3 is where a rookie lands: he has no stat line, so he is compared on his
+# projection, his age and his build -- four facts of the eleven, about a
+# third of the weight -- and that is a real if thin comparison, which is why
+# the line sits under it rather than over it. Projection alone (a rookie in a
+# database with no bio columns yet) is 0.17 and drops out, which is the
+# intended half of the same rule: one number in common is not a resemblance.
+MIN_SHARED_WEIGHT = 0.3
+
+
+def _latest_season_stats(season_features: pd.DataFrame | None) -> pd.DataFrame:
+    """Each player's most recent season on file, one row per player.
+
+    The most recent SEASON HE PLAYED, not last year specifically -- a back
+    who missed all of last season is still the player his last real year
+    describes, and the alternative (no stat line at all) drops him out of
+    every comparison on the board.
+    """
+    cols = ["player_id", "ppg", "games", "target_share", "carry_share",
+            "yards_per_opp", "td_per_opp", "rec_pg"]
+    if season_features is None or season_features.empty:
+        return pd.DataFrame(columns=cols)
+    have = [c for c in cols if c in season_features.columns]
+    latest = (season_features.sort_values("season")
+              .drop_duplicates("player_id", keep="last"))
+    return latest[have].copy()
+
+
+def similar_players(board: pd.DataFrame, player_id: str, *,
+                    season_features: pd.DataFrame | None = None,
+                    players: pd.DataFrame | None = None,
+                    season: int | None = None, top_n: int = 5) -> dict | None:
+    """The players on THIS year's board most like this one, best first.
+
+    A different question from `find_twins`, which asks what has happened
+    before: this one asks who else is on the shelf. The pool is the board
+    itself, filtered to his own position -- a tight end is not "like" a
+    running back in any sense a drafter can use, however close their numbers
+    land -- and the score is a percentage, so the rows can be ranked against
+    each other rather than read as bare distances.
+
+    Every part of `SIMILAR_WEIGHTS` a pair actually shares is used, and the
+    distance is divided by the weight of exactly those parts. That is what
+    lets a rookie (no stat line) and a veteran (no missing anything) sit in
+    the same pool without the rookie either crashing the sort or matching
+    everybody at 100: he is compared on what he has, and dropped when what
+    he has is too little to mean anything (MIN_SHARED_WEIGHT).
+
+    Returns None when the player is not on the board, or when nobody at his
+    position is left to compare him against.
+    """
+    if board is None or board.empty or "player_id" not in board.columns:
+        return None
+    me = board[board["player_id"] == player_id]
+    if me.empty:
+        return None
+    me = me.iloc[0]
+
+    keep = ["player_id", "name", "position", "proj_points", "rank",
+            "market_rank"]
+    pool = board[board["position"] == me["position"]].copy()
+    pool = pool[[c for c in keep if c in pool.columns]]
+    pool = pool.merge(_latest_season_stats(season_features), on="player_id",
+                      how="left")
+
+    # Bio, when the players table carries it. `height`/`weight` arrived with
+    # a later import (pipeline/sources.py) and a database refreshed before
+    # that has neither column -- so they are merged if present and simply
+    # absent from the distance if not, rather than being required.
+    pool["age"] = None
+    if players is not None and not players.empty and "gsis_id" in players.columns:
+        bio = players.set_index("gsis_id")
+        if "birth_date" in bio.columns and season is not None:
+            births = bio["birth_date"]
+            pool["age"] = [_age_in_season(births.get(pid), int(season))
+                           for pid in pool["player_id"]]
+        for col in ("height", "weight"):
+            if col in bio.columns:
+                pool[col] = [pd.to_numeric(bio[col].get(pid), errors="coerce")
+                             for pid in pool["player_id"]]
+        # Not a feature -- nobody is similar BECAUSE of his photograph. It
+        # rides along because the card is a row of faces and the payload is
+        # where the card gets them; fetching them separately would be a
+        # second read of the same table for the same five rows.
+        if "headshot" in bio.columns:
+            pool["headshot"] = [bio["headshot"].get(pid)
+                                for pid in pool["player_id"]]
+
+    feats = [f for f in SIMILAR_WEIGHTS if f in pool.columns]
+    if not feats:
+        return None
+    # z-scored over his own position, so a target share and a weight in
+    # pounds can be added up at all. A feature with no spread (or one value)
+    # contributes nothing rather than dividing by zero.
+    z = pd.DataFrame(index=pool.index)
+    for f in feats:
+        col = pd.to_numeric(pool[f], errors="coerce").astype(float)
+        std = col.std()
+        z[f] = 0.0 if pd.isna(std) or std == 0 else (col - col.mean()) / std
+        z.loc[col.isna(), f] = np.nan
+
+    mine = pool.index[pool["player_id"] == player_id]
+    if len(mine) == 0:
+        return None
+    tvec = z.loc[mine[0]].to_numpy(dtype=float)
+    w = np.array([SIMILAR_WEIGHTS[f] for f in feats], dtype=float)
+    total_w = w.sum()
+
+    cand = pool[pool["player_id"] != player_id]
+    if cand.empty:
+        return {"season": None if season is None else int(season),
+                "position": str(me["position"]), "players": []}
+    mat = z.loc[cand.index].to_numpy(dtype=float)
+    shared = ~np.isnan(mat) & ~np.isnan(tvec)
+    shared_w = (shared * w).sum(axis=1)
+    diffs = np.where(shared, mat - tvec, 0.0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        dist = np.sqrt(((diffs ** 2) * w).sum(axis=1) / shared_w)
+    out = cand.copy()
+    out["distance"] = dist
+    out["shared_weight"] = shared_w / total_w
+    out = out[(out["shared_weight"] >= MIN_SHARED_WEIGHT)
+              & out["distance"].notna()]
+    # Same curve `find_twins` scores on, so 80% means the same closeness on
+    # both cards of the same popup.
+    out["similarity"] = (100 * np.exp(-out["distance"] / DECAY)).round(1)
+    out = out.sort_values(["distance", "player_id"]).head(top_n)
+
+    def _num(value, digits=1):
+        if value is None or pd.isna(value):
+            return None
+        return round(float(value), digits)
+
+    def _text(value):
+        if value is None or (not isinstance(value, str) and pd.isna(value)):
+            return None
+        return str(value)
+
+    rows = [{"player_id": r["player_id"], "name": r["name"],
+             "headshot": _text(r.get("headshot")),
+             "similarity": float(r["similarity"]),
+             "proj_points": _num(r.get("proj_points")),
+             "ppg": _num(r.get("ppg")),
+             "age": (None if r.get("age") is None or pd.isna(r.get("age"))
+                     else int(r["age"])),
+             "height": _num(r.get("height"), 0),
+             "weight": _num(r.get("weight"), 0),
+             "rank": (None if pd.isna(r.get("rank")) else int(r["rank"])),
+             "market_rank": _num(r.get("market_rank"))}
+            for _, r in out.iterrows()]
+    return {"season": None if season is None else int(season),
+            "position": str(me["position"]), "players": rows}

@@ -157,7 +157,8 @@ from scoring.board import _norm_name
 # profile assembled half from before a refresh and half from after.
 from scoring.board_cache import _db_key, _meta_key
 from scoring.config import CURRENT_SEASON
-from scoring.oline import (LINE_QUALITY_COLUMNS, line_quality,
+from scoring.oline import (LINE_QUALITY_COLUMNS, LINE_UNITS_COLUMNS,
+                           _ol_snaps_with_gsis, line_units, line_quality,
                            reconcile_pfr_to_gsis)
 from scoring.ppr import compute_ppr_points, normalize_rules
 from scoring.similarity import player_season_features
@@ -231,11 +232,16 @@ class ProfileFrames:
     # -- the four frames the redesigned player card added, every one of them
     # a cross-player computation that must not be redone per click. See
     # `season_rank_frame`, `comparable_pool`, `_pfr_crosswalk` and
-    # `_line_quality` below for what each costs to build.
+    # `_line_frames` below for what each costs to build.
     season_ranks: pd.DataFrame
     comp_pool: pd.DataFrame
     pfr_to_gsis: pd.DataFrame
     line_quality: pd.DataFrame
+    # The five projected starters per team, which is the same computation
+    # `line_quality` rolls up into its score -- built beside it off the same
+    # crosswalked snaps rather than a second time, and kept because the
+    # Blocking card names the line as well as rating it.
+    line_units: pd.DataFrame
     # Team targets per (season, week, team). Tiny -- about one row per team
     # per week -- and the denominator a per-game target share needs. The
     # season figure the card already carries averages a role away: a receiver
@@ -307,6 +313,7 @@ class ProfileFrames:
             comp_pool=self.comp_pool.copy(),
             pfr_to_gsis=self.pfr_to_gsis.copy(),
             line_quality=self.line_quality.copy(),
+            line_units=self.line_units.copy(),
             draft_season=self.draft_season,
             snap_columns=self.snap_columns,
             news_columns=self.news_columns,
@@ -565,13 +572,19 @@ def _table_columns(conn, name: str) -> set[str]:
         [name]).fetchall()}
 
 
-def _line_quality(conn, season: int, snaps: pd.DataFrame) -> pd.DataFrame:
-    """`oline.line_quality` for the season being drafted, or an empty frame.
+def _line_frames(conn, season: int, snaps: pd.DataFrame):
+    """`(line_quality, line_units)` for the season being drafted, or a pair
+    of empty frames.
 
-    COST, AND WHY IT IS BEHIND THIS CACHE AT ALL: 1.54s on data/nfl.duckdb.
-    It reads `snap_counts` (253,106 rows) four times over and rebuilds the
-    pfr->gsis crosswalk twice, because it was written as a standalone
-    analysis nothing called per request. It is a whole-league, whole-season
+    Built together because they are the same computation read two ways --
+    the score, and the five players it is a score OF -- and because the
+    expensive half of both is the pfr->gsis crosswalk over `snap_counts`,
+    which is done once here and handed to each.
+
+    COST, AND WHY THIS IS BEHIND THE CACHE AT ALL: 1.54s on data/nfl.duckdb
+    when `line_quality` was written as a standalone analysis that read
+    `snap_counts` four times over and rebuilt the crosswalk twice; 0.76s
+    after it was made to read once. It is a whole-league, whole-season
     computation with no per-player component, so it belongs here and is
     built exactly once per (database, refresh, season). Left uncached it
     would have made a profile click ten times slower than the 0.15s it costs
@@ -583,23 +596,35 @@ def _line_quality(conn, season: int, snaps: pd.DataFrame) -> pd.DataFrame:
     rules (2025 for a league whose last completed draft was 2025), which is
     the right source for teams/starters/scoring and the wrong answer to
     "which season is being drafted". It matters here more than most places,
-    because `line_quality` reads today's depth-chart snapshot against
-    `season - 1`'s snap history: asked for 2025 it rates the 2026 depth
-    charts sitting in this database against 2024's line, and Detroit comes
-    out 22nd of 32 at 43.1 with 0.200 returning; asked for 2026 it rates
-    them against 2025's, and Detroit is 21st of 32 at 44.4 with 0.600
-    returning. The second is the one that describes the line that will
-    block this season.
+    because these read today's depth-chart snapshot against `season - 1`'s
+    snap history: asked for 2025 they rate the 2026 depth charts sitting in
+    this database against 2024's line, and Detroit comes out 22nd of 32 at
+    43.1 with 0.200 returning; asked for 2026 they rate them against 2025's,
+    and Detroit is 21st of 32 at 44.4 with 0.600 returning. The second is
+    the one that describes the line that will block this season.
 
     CURRENT_SEASON is a module constant, so it is deliberately NOT part of
     the cache key -- the same argument scoring/board_cache.py makes for
     REPLACEMENT_RANK: a constant can only change by editing the source and
     restarting, and a restart empties this cache along with it.
+
+    The table guard is checked before either is called, because unlike
+    everything else in this module these are reached on databases they were
+    never written for: `oline.py` used to be imported by nothing but its own
+    test, whose fixtures are all in the real nflverse shape, and the profile
+    now calls it on every database the app has -- including test fixtures
+    whose `snap_counts` is (player, team, season, offense_pct) and whose
+    `depth_charts` has no `pos_name`. Missing columns mean "this database
+    cannot rate a line", which is a pair of empty frames and a null on the
+    card, not a KeyError out of a profile request.
     """
     for table, need in _LINE_QUALITY_NEEDS.items():
         if not need.issubset(_table_columns(conn, table)):
-            return pd.DataFrame(columns=LINE_QUALITY_COLUMNS)
-    return line_quality(conn, season, snaps=snaps)
+            return (pd.DataFrame(columns=LINE_QUALITY_COLUMNS),
+                    pd.DataFrame(columns=LINE_UNITS_COLUMNS))
+    ol_snaps = _ol_snaps_with_gsis(conn, snaps=snaps)
+    return (line_quality(conn, season, snaps=snaps, ol_snaps=ol_snaps),
+            line_units(conn, season, snaps=snaps, ol_snaps=ol_snaps))
 
 
 def _pfr_crosswalk(conn, snaps: pd.DataFrame) -> pd.DataFrame:
@@ -668,7 +693,8 @@ def _build(conn, rules: dict | None) -> ProfileFrames:
         season_ranks=season_rank_frame(weekly, feats, rules, share),
         comp_pool=comparable_pool(feats, players),
         pfr_to_gsis=_pfr_crosswalk(conn, snaps),
-        line_quality=_line_quality(conn, CURRENT_SEASON, snaps),
+        **dict(zip(("line_quality", "line_units"),
+                   _line_frames(conn, CURRENT_SEASON, snaps))),
         team_week_targets=_team_week_targets(weekly),
         draft_season=CURRENT_SEASON,
         snap_columns=frozenset(snaps.columns),

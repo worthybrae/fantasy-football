@@ -1,0 +1,115 @@
+/* PickOption.tsx -- one player as the archive knows him, drawn the same way
+   on every page that asks. Lifted out of landing.css, where these rules were
+   `.wr-pick-*` and belonged to the waiting room alone; the archive now draws
+   the same card, so the rules moved with the markup rather than being copied
+   under a second prefix. Imported by the component itself, which is why this
+   file is not a page stylesheet like landing.css or market.css. */
+
+.pick-opt {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  /* The button reset. A card that opens a profile has to keep looking like
+     the card that does not -- the difference belongs in the cursor and the
+     hover, not in a second visual language. */
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+}
+
+button.pick-opt {
+  cursor: pointer;
+}
+
+button.pick-opt:hover .pick-opt-name {
+  color: var(--accent);
+}
+
+/* Round, because what it rings is a round face. */
+button.pick-opt:focus-visible {
+  outline: 1px solid var(--accent-border);
+  outline-offset: 3px;
+  border-radius: 20px;
+}
+
+/* Round, like every other face in the app. A player the board has no photo of
+   keeps the disc as an empty well, so the name beside it starts on the same
+   line as the name in the column next to it. */
+.pick-opt-face {
+  flex: 0 0 auto;
+  display: block;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--bg-2);
+}
+
+.pick-opt-face.is-blank {
+  border: 1px solid var(--border);
+}
+
+.pick-opt-who {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.pick-opt-nameline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.pick-opt-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--text-base);
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color 120ms ease;
+}
+
+/* The second line: how often he goes here, and what he is worth if he does.
+   Quieter than the name, because the name is what a reader is scanning for
+   and these two are what he stops on. */
+.pick-opt-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* How decided the pick is. 78% is "this one is spoken for"; 11% is "nobody
+   agrees and you are free" -- which is the more interesting number of the
+   two, so neither is shouted. */
+.pick-opt-share {
+  flex: 0 0 auto;
+  color: var(--text-2);
+}
+
+.pick-opt-ppg {
+  color: var(--text-3);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pick-opt-name {
+    transition: none;
+  }
+}
+
+/* The projection's own delta on his recent seasons, in the same tones every
+   other up/down reading uses. */
+.pick-opt-move { margin-left: 5px; }
+.pick-opt-move.is-up { color: var(--ok); }
+.pick-opt-move.is-down { color: var(--fail); }

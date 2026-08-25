@@ -629,18 +629,60 @@ def test_half_a_session_is_refused_rather_than_half_stored(store):
     assert store.counts() == {"credentials": 0, "sessions": 0}
 
 
-def test_reconnecting_from_the_same_browser_replaces_the_stored_session(store):
-    """ESPN reissues espn_s2; a reconnect from a browser that already holds
-    the cookie must overwrite the stored copy, not leave a stale one we would
-    otherwise keep for thirty days."""
+def test_reconnecting_with_the_same_session_refreshes_the_one_row(store):
+    """The same secret is the same row, whoever presents it and however often.
+
+    This is what keeps a user clicking the bookmarklet twice from accumulating
+    credentials: the id is HMAC(espn_s2), so a repeat connect lands on the row
+    that is already there.
+    """
     first = store.connect(FAKE_SWID, FAKE_S2)
-    replacement = FAKE_S2 + "ROTATEDBYESPN"
-    _ACCOUNTS[replacement] = FAKE_SWID
-    second = store.connect(FAKE_SWID, replacement, cookie=first.cookie)
-    assert second.replaced is True
+    second = store.connect(FAKE_SWID, FAKE_S2, cookie=first.cookie)
     assert store.counts()["credentials"] == 1
-    assert store.resolve(second.cookie).espn_s2 == replacement
-    assert store.resolve(first.cookie).espn_s2 == replacement
+    assert store.resolve(first.cookie).espn_s2 == FAKE_S2
+    assert store.resolve(second.cookie).espn_s2 == FAKE_S2
+
+
+def test_a_reissued_session_supersedes_the_one_the_cookie_holds(store):
+    """ESPN reissues `espn_s2` on every sign-in, so the same person comes back
+    with a different secret and therefore a different row id.
+
+    WITH THE COOKIE that resolves to the old row, this is a replacement: the
+    caller is holding the password to the row being dropped, so dropping it is
+    authorised -- and it has to happen, because a stored `espn_s2` is a live
+    ESPN session and an abandoned one would sit encrypted on disk until the
+    reaper reached it a month later. The browsers attached to the old row move
+    across rather than being logged out.
+    """
+    first = store.connect(FAKE_SWID, FAKE_S2)
+    reissued = FAKE_S2 + "ROTATEDBYESPN"
+    second = store.connect(FAKE_SWID, reissued, cookie=first.cookie)
+
+    assert second.credential_id != first.credential_id, "a new secret is a new id"
+    assert store.counts()["credentials"] == 1, "the old row was left behind"
+    assert store.resolve(second.cookie).espn_s2 == reissued
+    assert store.resolve(first.cookie).espn_s2 == reissued, \
+        "the first browser was logged out by the second"
+
+
+def test_a_reissued_session_without_the_cookie_is_its_own_row(store):
+    """The other half, and the visible cost of keying by the secret: a connect
+    that presents no cookie has proved nothing about any existing row, so it
+    gets one of its own rather than evicting somebody.
+
+    That is the honest outcome. Both sessions are live at ESPN, both browsers
+    work, and the unused one leaves on the reaper's schedule or the first time
+    ESPN answers 401 for it. What must never happen is one silently resolving
+    to the other's session.
+    """
+    first = store.connect(FAKE_SWID, FAKE_S2)
+    reissued = FAKE_S2 + "ROTATEDBYESPN"
+    second = store.connect(FAKE_SWID, reissued)          # no cookie
+
+    assert second.credential_id != first.credential_id
+    assert store.counts()["credentials"] == 2
+    assert store.resolve(first.cookie).espn_s2 == FAKE_S2
+    assert store.resolve(second.cookie).espn_s2 == reissued
 
 
 def test_the_minted_cookie_is_never_stored_anywhere(store):
@@ -671,15 +713,20 @@ def test_the_blob_is_the_only_place_the_pair_lives(store):
 # victim's browser holding a valid cookie that resolved to the attacker's ESPN
 # account. The read path was the only one with a password on it.
 
-def test_a_stranger_cannot_replace_a_users_stored_session(store):
-    """THE TAKEOVER, reproduced and then refused.
+def test_a_stranger_cannot_touch_a_users_stored_session(store):
+    """THE TAKEOVER, reproduced and then structurally impossible.
 
     The attacker has everything a real attacker has: the victim's SWID, which
     is public and rides in every draft url, and a working ESPN session of
-    their own. What they do not have is a session belonging to the victim's
-    account -- and that is now the only thing that decides which row is
-    written, because the row is keyed on what ESPN says the presented cookie
-    owns, never on the `swid` field the client filled in.
+    their own. What they do not have is the victim's SESSION -- and since the
+    row id is HMAC(espn_s2), that is the only thing that decides which row
+    gets written. Naming the victim's account buys nothing at all, because the
+    name is not a key any more.
+
+    Compare the previous defence, which asked ESPN to name the owner and keyed
+    the row on the answer: correct, but it depended on an ESPN endpoint that
+    turned out to be public (see `CredentialStore.connect`). This version
+    depends on nothing outside the process.
     """
     victim = store.connect(FAKE_SWID, FAKE_S2)
     assert store.resolve(victim.cookie).espn_s2 == FAKE_S2
@@ -690,35 +737,52 @@ def test_a_stranger_cannot_replace_a_users_stored_session(store):
     resolved = store.resolve(victim.cookie)
     assert resolved is not None, "the victim was logged out"
     assert resolved.espn_s2 == FAKE_S2, \
-        "the victim's browser now resolves to somebody else's ESPN account"
+        "the victim's browser now resolves to somebody else's ESPN session"
     assert resolved.swid == FAKE_SWID
-    # The attacker got a row, but their own -- keyed on the account they can
-    # actually prove, which is the one their session belongs to.
-    assert store.resolve(attacker.cookie).swid == OTHER_SWID
+    # The attacker got a row, but their own -- keyed on the secret they
+    # actually hold.
+    assert store.resolve(attacker.cookie).espn_s2 == OTHER_S2
     assert attacker.credential_id != victim.credential_id
     assert store.counts()["credentials"] == 2
 
 
-def test_the_row_is_keyed_on_espns_answer_not_on_the_claimed_swid(store):
-    """The claim is not evidence, so it is not the key either.
+def test_the_row_is_keyed_on_the_session_not_on_the_claimed_swid(store):
+    """The claim is not evidence, so it is not the key.
 
-    Connecting one session while naming four different accounts produces ONE
-    row, under the account that session actually belongs to.
+    Connecting ONE session while naming four different accounts produces ONE
+    row -- the id does not move, because the id is the secret's.
     """
+    ids = set()
     for claimed in (FAKE_SWID, OTHER_SWID, "{00000000-0000-0000-0000-000000000000}",
-                    "not-a-swid-at-all"):
+                    "{DEADBEEF-0000-0000-0000-000000000000}"):
         minted = store.connect(claimed, FAKE_S2, cookie=None)
-        assert store.resolve(minted.cookie).swid == FAKE_SWID
+        ids.add(minted.credential_id)
+        assert store.resolve(minted.cookie).espn_s2 == FAKE_S2
+    assert len(ids) == 1
     assert store.counts()["credentials"] == 1
 
 
-def test_a_session_espn_does_not_recognise_is_never_stored(store):
-    """Fails closed. An unverifiable session -- expired, forged, or ESPN
-    unreachable -- leaves nothing behind, because "we could not check, so we
-    kept it for thirty days" is not an available answer on a write path that
-    stores account credentials."""
-    with pytest.raises(OwnershipUnproven):
-        store.connect(FAKE_SWID, "AEBnot-a-session-espn-has-ever-issued")
+def test_the_claimed_account_is_still_what_gets_stored_and_sent(store):
+    """Not a key, but not ignored either: every ESPN call made on this
+    credential's behalf has to send a SWID, so the one handed in is
+    normalised, stored in the blob and read back out."""
+    minted = store.connect(FAKE_SWID.lower(), FAKE_S2)
+    assert store.resolve(minted.cookie).swid == FAKE_SWID
+
+
+def test_half_a_session_is_still_refused(store):
+    """The one refusal left on this path. An empty secret would hash to a
+    shared id and an empty swid cannot be sent to ESPN, so neither is stored
+    rather than half-written.
+
+    A malformed-but-present swid is NOT refused, deliberately: `canonical_swid`
+    passes an unrecognised shape through unchanged so that ESPN changing its
+    id format degrades to "one spelling, exactly as sent" rather than to a
+    refusal to store anybody at all.
+    """
+    for swid, s2 in ((FAKE_SWID, ""), ("", FAKE_S2), ("", "")):
+        with pytest.raises(ValueError):
+            store.connect(swid, s2)
     assert store.counts() == {"credentials": 0, "sessions": 0}
 
 
@@ -729,8 +793,8 @@ def test_a_refused_connect_does_not_even_create_the_database(tmp_path):
     path = str(tmp_path / "nested" / "custody.duckdb")
     lonely = cred.CredentialStore(path=path, keys=f"1:{_key()}",
                                   out=lambda *a: None, verifier=_verifier)
-    with pytest.raises(OwnershipUnproven):
-        lonely.connect(FAKE_SWID, "AEBunknown")
+    with pytest.raises(ValueError):
+        lonely.connect("", "AEBunknown")
     assert not pathlib_exists(path)
     cred.close_all()
 
@@ -739,38 +803,26 @@ def pathlib_exists(path):
     return Path(path).exists()
 
 
-def test_a_second_browser_attaches_rather_than_rewriting_the_stored_session(store):
-    """LOCK 2, and the reason it is an attach and not a refusal.
+def test_a_second_browser_sharing_a_session_attaches_to_the_one_row(store):
+    """Two browsers, one ESPN session: one credential and two sessions.
 
-    Verification proves the caller owns the account they are posting. It
-    cannot, by itself, stop a caller who owns that account from retargeting a
-    row other browsers already resolve through -- so replacing the stored
-    secret additionally requires a cookie for it.
-
-    Refusing the cookie-less case would have broken the ordinary flow this
-    design exists to support: the same person clicking the bookmarklet from a
-    second browser, which has no cookie and whose ESPN session is usually a
-    different espn_s2. So that case ATTACHES: the new browser works
-    immediately, and the stored secret every other browser depends on is
-    untouched.
+    This is the case the two-table split exists for, and keying by the secret
+    keeps it: whether the second browser presents a cookie or not, the same
+    `espn_s2` lands on the same row. What it never does is evict the first --
+    each browser holds its own password to the credential they share.
     """
     first = store.connect(FAKE_SWID, FAKE_S2)
-    reissued = FAKE_S2 + "REISSUEDBYESPN"
-    _ACCOUNTS[reissued] = FAKE_SWID
-
-    second = store.connect(FAKE_SWID, reissued)        # no cookie
-    assert second.replaced is False
+    second = store.connect(FAKE_SWID, FAKE_S2)         # no cookie
     assert second.credential_id == first.credential_id
     assert store.counts() == {"credentials": 1, "sessions": 2}
-    # Both browsers work, and both see the secret that was already stored --
-    # nothing was retargeted.
     assert store.resolve(first.cookie).espn_s2 == FAKE_S2
     assert store.resolve(second.cookie).espn_s2 == FAKE_S2
 
-    # With the cookie, the same call is authorised and does replace it.
-    third = store.connect(FAKE_SWID, reissued, cookie=first.cookie)
-    assert third.replaced is True
-    assert store.resolve(first.cookie).espn_s2 == reissued
+    # And disconnecting one leaves the other working, which is the whole
+    # reason sessions are a table rather than a column.
+    assert store.disconnect(first.cookie) is True
+    assert store.resolve(first.cookie) is None
+    assert store.resolve(second.cookie).espn_s2 == FAKE_S2
 
 
 def test_an_attach_still_restarts_the_credentials_clock(store):

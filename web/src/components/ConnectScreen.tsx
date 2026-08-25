@@ -150,7 +150,7 @@ export default function ConnectScreen(props: ConnectScreenProps) {
 
       <div className="cs-col">
         <header className="cs-head">
-          <p className="cs-cap">Draft Assistant</p>
+          <p className="cs-cap">ESPN Draft Assist</p>
           <h1 className="cs-title">Getting your draft ready</h1>
           <p className="cs-sub">
             Reading your league straight from ESPN. This runs once per draft.
@@ -333,7 +333,7 @@ function Degraded(props: ConnectScreenProps & { warned: ConnectStage[] }) {
       <div className="cs-bar cs-bar-done" />
       <div className="cs-col">
         <header className="cs-head">
-          <p className="cs-cap">Draft Assistant</p>
+          <p className="cs-cap">ESPN Draft Assist</p>
           <h1 className="cs-title">Ready, with one thing to know</h1>
           <p className="cs-sub">
             The draft is connected and you can pick. {notes.length === 1

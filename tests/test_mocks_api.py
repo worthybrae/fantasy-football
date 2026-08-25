@@ -485,3 +485,65 @@ def test_a_draft_from_another_source_is_not_a_mock(client):
         corpus.close()
     assert client.get("/api/mocks").json() == {"drafts": []}
     assert client.get(f"/api/mocks/{draft_id}/board").status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# picks the board does not carry
+# ---------------------------------------------------------------------------
+#
+# THE BOARD IS NOT THE DRAFT POOL. `build_board` drops anyone ESPN's own
+# ranking file leaves out (`scoring/board.py`'s `espn_unranked` filter, and
+# that file is a top-500 pull), while ESPN's mock rooms happily offer those
+# players -- Evan Engram, projected 106 points, went at pick 5 of a real
+# farmed room. The cell used to draw his GSIS id in a grid of names.
+
+
+def _off_board(monkeypatch, named):
+    """A crosswalk that resolves pick 2 to a player the board frame has no row
+    for, plus whatever `identify_players` can say about him."""
+    monkeypatch.setattr("api.mocks.identify_players",
+                        lambda conn, ids: {i: named for i in ids} if named else {})
+
+
+def test_a_pick_the_board_does_not_carry_is_still_named(client, monkeypatch):
+    _off_board(monkeypatch, {"name": "Evan Engram", "position": "TE",
+                             "team": "DEN", "headshot": "http://x/e.png"})
+    timeline = [mf.PickFrame(1, 11, 901, False),
+                mf.PickFrame(2, 12, 950, False)]
+    payload = mf.live_payload(timeline, _tool(), "555", 2026, TEAMS, ROUNDS,
+                              MY_SLOT, None, owners=_owners(),
+                              my_team_id=10 + MY_SLOT)
+    # 950 is not in the crosswalk, so the farm records the raw id it saw.
+    payload["picks"][1]["player_id"] = "00-0033881"
+    mf.write_live(payload)
+
+    board = client.get(f"/api/mocks/{payload['draft_id']}/board").json()
+    off = board["cells"][1]["player"]
+
+    assert off["name"] == "Evan Engram"
+    assert (off["position"], off["team"]) == ("TE", "DEN")
+    assert off["headshot"] == "http://x/e.png"
+    # Identity, never ranks: he is genuinely not on this board, and a market
+    # rank invented to fill the cell would be a number nobody computed.
+    assert off["overall_rank"] is None
+    assert off["market_rank"] is None
+    assert off["value"] is None
+    # A named pick is not an unresolved one -- the count means "still drawn as
+    # an id", which is the thing worth knowing about.
+    assert board["unresolved"] == 0
+
+
+def test_a_pick_nothing_can_name_still_falls_back_to_its_id(client, monkeypatch):
+    _off_board(monkeypatch, None)
+    timeline = [mf.PickFrame(1, 11, 901, False),
+                mf.PickFrame(2, 12, 950, False)]
+    payload = mf.live_payload(timeline, _tool(), "556", 2026, TEAMS, ROUNDS,
+                              MY_SLOT, None, owners=_owners(),
+                              my_team_id=10 + MY_SLOT)
+    payload["picks"][1]["player_id"] = "who-is-this"
+    mf.write_live(payload)
+
+    board = client.get(f"/api/mocks/{payload['draft_id']}/board").json()
+
+    assert board["cells"][1]["player"]["name"] == "who-is-this"
+    assert board["unresolved"] == 1

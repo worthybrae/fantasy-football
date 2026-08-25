@@ -64,6 +64,7 @@ import time
 from urllib.parse import quote
 
 from pipeline.draft_socket import DRAFT_SECURITY_HEADERS
+from pipeline.espn_identity import canonical_swid
 from pipeline.espn_league import BASE
 
 # The write host is a DIFFERENT hostname from `espn_league.BASE`'s read host,
@@ -302,7 +303,58 @@ def lobby_report(rows, now_ms: float | None = None, exclude=(),
             "size": FARM_LEAGUE_SIZE}
 
 
-def join(post, league_id, swid: str, season: int) -> int:
+def room_url(league_id, season: int) -> str:
+    """One room's seats, settings and draft state.
+
+    PROBED LIVE (2026-08-24) and public: this answers 200 with no cookies at
+    all, the same as the directory. So a reader can be shown who is in a room
+    and when it starts before they have any session -- and nobody's ESPN login
+    is sent upstream to find that out.
+
+    Three views, because the waiting room needs all three and one request is
+    cheaper than three: `mTeam` for the seats and who owns them, `mSettings`
+    for the draft's date, type, clock and pick order, `mDraftDetail` for
+    whether picking has started.
+    """
+    return (f"{BASE}/seasons/{int(season)}/segments/0/leagues/{league_id}"
+            "?view=mTeam&view=mSettings&view=mDraftDetail")
+
+
+def seats(payload: dict, swid: str | None = None) -> list:
+    """Every seat in a room, in draft order, with its owner resolved.
+
+    A seat with an empty `owners` is OPEN -- verified against the directory's
+    own `teamsJoined`, which is what the farm's human floor is built on (see
+    this module's docstring). `mine` compares against the caller's SWID
+    through `canonical_swid`, the same normalizer every other comparison in
+    this codebase uses, so a stored session and a live response cannot
+    disagree about whether the braces are part of the value.
+
+    `slot` is the seat's position in `pickOrder`, which is the draft order --
+    not the team id, which only happens to match it in a fresh mock room. The
+    two are different fields and a room that reorders is a room where every
+    pick number this page prints would be wrong.
+    """
+    order = ((payload.get("settings") or {}).get("draftSettings") or {}).get("pickOrder") or []
+    slot_of = {int(team): i + 1 for i, team in enumerate(order)}
+    mine = canonical_swid(swid) if swid else None
+    out = []
+    for team in payload.get("teams") or []:
+        owners = team.get("owners") or []
+        team_id = int(team.get("id"))
+        out.append({
+            "team_id": str(team_id),
+            # Ordered by this, not by id: see above.
+            "slot": slot_of.get(team_id, team_id),
+            "name": team.get("name") or f"Team {team_id}",
+            "taken": bool(owners),
+            "mine": bool(mine and any(canonical_swid(o) == mine for o in owners)),
+        })
+    out.sort(key=lambda seat: seat["slot"])
+    return out
+
+
+def join(post, league_id, swid: str, season: int, team_id: int | None = None) -> int:
     """Take a seat in a room. Returns the team id ESPN assigned.
 
     `post(url, payload) -> body` is injected, mirroring the `fetch` seam
@@ -310,13 +362,22 @@ def join(post, league_id, swid: str, season: int) -> int:
     ("any open seat") -- both the array wrapper and the sentinel were probed
     live; neither is a guess.
 
+    `team_id` asks for ONE PARTICULAR SEAT; None sends the `-1` sentinel and
+    takes whatever is open, which is what the farm wants and what a reader who
+    does not care should send. That ESPN honours a specific id was probed live
+    (2026-08-24): a room with seats 2, 3 and 4 open was asked for 4 -- not the
+    first one it would have handed out -- and answered `{"teamId": 4}`. A seat
+    somebody else took between the read and the POST is refused by ESPN rather
+    than silently swapped, which is the behaviour the waiting room needs.
+
     The 201 response carries the assignment as `[{"isDeleted": false,
     "teamId": 7}]`, and that value is READ, never assumed. A wrong team id
     mints a socket URL for somebody else's seat, and the failure would show
     up as a draft in which our picks never land rather than as an error here.
     A response that does not carry one raises, for the same reason.
     """
-    body = _as_json(post(invite_url(league_id, swid, season), [{"teamId": -1}]))
+    body = _as_json(post(invite_url(league_id, swid, season),
+                         [{"teamId": -1 if team_id is None else int(team_id)}]))
     rows = body if isinstance(body, list) else [body]
     for row in rows:
         if isinstance(row, dict) and row.get("teamId") is not None:

@@ -1,19 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { fetchBoard, fetchLiveState, fetchPlan, fetchPlayers, selectPlayer, setAutodraft,
+import { fetchBoard, fetchLiveState, fetchPlayers, selectPlayer, setAutodraft,
          type BoardPlayer, type LiveBoard,
          type LiveCandidate, type LiveSettings, type LiveState, type Player,
-         type PlanFetchResult, type RosterPlayer } from '../api'
+         type RosterPlayer } from '../api'
 import ClockPanel from '../components/draft/ClockPanel'
 import RosterPanel, { type RosterSlot } from '../components/draft/RosterPanel'
 import TopThree from '../components/draft/TopThree'
 import AvailableList from '../components/draft/AvailableList'
-import PlanTab from '../components/draft/PlanTab'
 import ConfirmPick, { type PickStatus } from '../components/draft/ConfirmPick'
 import PickTicker from '../components/draft/PickTicker'
 import PlayerOverlay, { type OverlayTarget } from '../components/draft/PlayerOverlay'
 import { seedFromBoardPlayer, seedFromCandidate, seedFromPlayer } from '../components/draft/playerSeed'
 import DraftBoardGrid from '../components/DraftBoardGrid'
+import { nextPickFor } from '../components/draft/pickOrder'
 import { Logo } from '../components/Logo'
 
 const POLL_MS = 2500
@@ -25,7 +25,7 @@ const POLL_MS = 2500
 // thirty-second timer is worse off than one who never had the stream.
 const FALLBACK_POLL_MS = 5000
 
-type Tab = 'available' | 'board' | 'plan'
+type Tab = 'available' | 'board'
 
 // Canonical display order for the starter positions ESPN's own settings
 // dict (session.settings.starters, api/live.py's `settings` key) carries no
@@ -172,18 +172,6 @@ export default function DraftRoom() {
   // broken.
   const [board, setBoard] = useState<LiveBoard | null>(null)
   const [boardError, setBoardError] = useState<string | null>(null)
-  // The Plan tab's own data, polled far more coarsely than board/state above
-  // (see the effect below): /api/live/plan costs ~4s server-side to rebuild
-  // and only ever changes when a pick lands, so it is refetched on
-  // `picks_made` changing rather than on the 2.5s timer (plus a slow retry
-  // while the server itself reports `pending` -- see planStatusRef below).
-  // `planResult` is never cleared on a failed refetch -- same "one hiccup
-  // must not blank an otherwise-fine view" rule `board`/`boardError` already
-  // follow -- only on the session itself going inactive, where a stale plan
-  // from a finished or different draft would be actively misleading.
-  const [planResult, setPlanResult] = useState<PlanFetchResult | null>(null)
-  const [planFetchError, setPlanFetchError] = useState<string | null>(null)
-  const [planLoading, setPlanLoading] = useState(false)
   const [players, setPlayers] = useState<Record<string, Player>>({})
   // Whether the join table is still ON ITS WAY, as opposed to having arrived
   // empty. The two look identical from `players` alone and must not be drawn
@@ -211,31 +199,6 @@ export default function DraftRoom() {
   // slot left over from a *previous* draft can never masquerade as a real
   // transition in the next one.
   const prevOnClockRef = useRef<number | null | undefined>(undefined)
-
-  // `picks_made` last seen when a plan fetch was kicked off, so the poll
-  // below can refetch on a NEW pick landing rather than on a timer.
-  // `undefined` (mirroring prevOnClockRef's own convention just above) marks
-  // "no session observed yet", so the first poll of a session always
-  // fetches once regardless of what `picks_made` actually is. Written
-  // BEFORE the plan fetch is awaited (see the poll effect), not after it
-  // resolves: `setInterval` does not wait for one `poll()` call to finish
-  // before scheduling the next, and without that ordering an overlapping
-  // call could see the same stale `picks_made` and fire a second request
-  // for the same pick.
-  const lastPlanPicksRef = useRef<number | undefined>(undefined)
-  // The last plan status this room actually observed, so the poll below can
-  // tell "still building the first plan" apart from "sitting on a finished
-  // one" without another state read. A `pending` result means the slot
-  // isn't resolved yet or the ~4s simulation is still running -- neither of
-  // which is tied to a pick landing -- so a session stuck there needs its
-  // own slow retry (see planPollTickRef below) rather than waiting on
-  // picks_made to change, which might not happen again for a while.
-  const planStatusRef = useRef<'inactive' | 'pending' | 'ready'>('inactive')
-  // Increments once per poll() call, purely to throttle the `pending` retry
-  // above to every OTHER cycle (~5s) rather than every one (~2.5s) -- "poll
-  // it no more often than every few seconds" for an endpoint this expensive,
-  // even while it has nothing to report yet.
-  const planPollTickRef = useRef(0)
 
   // The pick this session is confirming, plus how that confirmation is
   // going -- held here (not inside ConfirmPick) because a poll landing
@@ -302,14 +265,6 @@ export default function DraftRoom() {
     let cancelled = false
 
     async function poll() {
-      // `undefined` means "the state fetch below failed this cycle" -- kept
-      // apart from `false` ("fetched fine, session is inactive") so a single
-      // missed /api/live/state poll can't be mistaken for a real transition
-      // to inactive and wipe the plan over it. Set from `data` (this poll's
-      // own fresh read), never from the `state` component value, which is
-      // one render behind by the time this runs.
-      let liveActive: boolean | undefined
-      let livePicksMade = 0
       try {
         const data = await fetchLiveState()
         if (!cancelled) {
@@ -329,8 +284,6 @@ export default function DraftRoom() {
             }
           }
         }
-        liveActive = data.active
-        livePicksMade = data.picks_made
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load live state')
       }
@@ -343,45 +296,6 @@ export default function DraftRoom() {
       } catch (e) {
         if (!cancelled) {
           setBoardError(e instanceof Error ? e.message : 'Failed to load the draft board')
-        }
-      }
-
-      // /api/live/plan -- see lastPlanPicksRef/planStatusRef's own comments
-      // on why this is gated on picks_made changing (plus a slow retry while
-      // `pending`) rather than run every cycle like the two fetches above.
-      planPollTickRef.current += 1
-      if (liveActive === false) {
-        lastPlanPicksRef.current = undefined
-        planStatusRef.current = 'inactive'
-        if (!cancelled) {
-          setPlanResult({ status: 'inactive' })
-          setPlanFetchError(null)
-        }
-      } else if (liveActive === true) {
-        const pickLanded = lastPlanPicksRef.current === undefined
-          || livePicksMade !== lastPlanPicksRef.current
-        // Every other tick (~5s) while the server itself is still resolving
-        // the slot or building the first plan -- a pick landing during that
-        // window is caught by `pickLanded` above regardless, this is only
-        // for the case where nothing else would ever ask again.
-        const pendingRetryDue = planStatusRef.current === 'pending' && planPollTickRef.current % 2 === 0
-        if (pickLanded || pendingRetryDue) {
-          lastPlanPicksRef.current = livePicksMade
-          if (!cancelled) setPlanLoading(true)
-          try {
-            const result = await fetchPlan()
-            planStatusRef.current = result.status
-            if (!cancelled) {
-              setPlanResult(result)
-              setPlanFetchError(null)
-            }
-          } catch (e) {
-            if (!cancelled) {
-              setPlanFetchError(e instanceof Error ? e.message : 'Failed to load the draft plan')
-            }
-          } finally {
-            if (!cancelled) setPlanLoading(false)
-          }
         }
       }
     }
@@ -541,6 +455,21 @@ export default function DraftRoom() {
     ? state.horizon_is_end_of_draft
       ? 'the end of the draft'
       : state.horizon_pick !== null ? `pick ${state.horizon_pick}` : null
+    : null
+
+  // The reader's own next turn, which is the pick the LASTS figure is
+  // measured to now. `nextPickFor` scans strictly past the pick it is given,
+  // so handing it the pick on the clock answers "my turn AFTER this one"
+  // whenever that pick is mine -- which is exactly the turn the server
+  // measures when it calls survival with `on_the_clock`. ClockPanel makes
+  // its own identical call rather than sharing this one: there it answers a
+  // different question ("when do I pick next") that happens to be the same
+  // arithmetic, and tying them together would mean one caption moving
+  // because the other's question changed.
+  const nextPickLabel = state?.active && state.my_slot !== null
+      && state.settings?.teams
+    ? `pick ${nextPickFor(state.picks_made + 1, state.my_slot,
+                          state.settings.teams as number)}`
     : null
 
   // "Roster after" for the confirm dialog: my_roster's current length plus
@@ -737,7 +666,7 @@ export default function DraftRoom() {
             a pick clock. The title carries it rather than adding a control:
             same layout, same words, now clickable. ClockPanel's listener-down
             panel links here too, with the instruction. */}
-        <Link to="/" className="draft-topbar-title"><Logo /> Draft Assistant</Link>
+        <Link to="/" className="draft-topbar-title"><Logo /> ESPN Draft Assist</Link>
         <span className="draft-topbar-sep" aria-hidden="true" />
         {/* The two views, in the top bar rather than on a strip of their own
             below it. They were a 38px `.draft-tabs` row spanning the main
@@ -747,10 +676,14 @@ export default function DraftRoom() {
             styling -- they are full-bar height here so the active tab's
             underline lands on the top bar's own bottom border, which is what
             makes them still read as tabs over the region they switch. */}
+        {/* `aria-current` because the active tab is amber lettering and
+            nothing else -- no fill, no underline. The colour is the whole
+            visual state, so the state has to be said out loud as well. */}
         <nav className="draft-topbar-tabs" aria-label="Draft views">
           <button
             type="button"
             className={`draft-tab${tab === 'available' ? ' is-active' : ''}`}
+            aria-current={tab === 'available'}
             onClick={() => setTab('available')}
           >
             Available
@@ -758,16 +691,10 @@ export default function DraftRoom() {
           <button
             type="button"
             className={`draft-tab${tab === 'board' ? ' is-active' : ''}`}
+            aria-current={tab === 'board'}
             onClick={() => setTab('board')}
           >
             Snake Board
-          </button>
-          <button
-            type="button"
-            className={`draft-tab${tab === 'plan' ? ' is-active' : ''}`}
-            onClick={() => setTab('plan')}
-          >
-            Plan
           </button>
         </nav>
         {/* Rendered on both tabs, not just Available. The pool size does not
@@ -811,6 +738,11 @@ export default function DraftRoom() {
           </span>
         )}
         <span className="draft-topbar-spacer" />
+        {/* The archive: what hundreds of recorded drafts do from a seat.
+            Reachable from the room because that is where somebody is when
+            they wonder whether a run is normal -- and it is research rather
+            than a draft view, so it is a link out and not a third tab. */}
+        <Link className="draft-topbar-link" to="/archive">Archive</Link>
         {state?.active && totalPicks !== null && (
           <span className="draft-topbar-pick mono">
             PICK <strong>{thisPickNo ?? '—'}</strong> / {totalPicks}
@@ -929,6 +861,9 @@ export default function DraftRoom() {
                   onDraft={handleDraftClick}
                   isMyTurn={isMyTurn}
                   horizonLabel={horizonLabel}
+                  nextPickLabel={nextPickLabel}
+                  pickNo={thisPickNo}
+                  settings={state?.settings}
                   recompute={recompute}
                   onOpenPlayer={handleOpenCandidate}
                 />
@@ -937,53 +872,42 @@ export default function DraftRoom() {
                   players={players}
                   onDraft={handleDraftClick}
                   isMyTurn={isMyTurn}
-                  horizonLabel={horizonLabel}
                   onOpenPlayer={handleOpenCandidate}
                   draftedIds={draftedIds}
                   settings={state?.settings}
                 />
               </>
             )
-            : tab === 'board'
-              ? (
-                board?.active
-                  ? (
-                    // `.board-tab` only pads the grid, same padding the
-                    // mock's own snake-board panel uses -- `.board-wrap`
-                    // itself is DraftBoardGrid's own horizontal scroll
-                    // container (per its own CSS comment), and it flows
-                    // straight in `.draft-main`'s existing overflow-y:
-                    // auto region rather than opening a second, nested
-                    // vertical scroller -- the same "no second scroll
-                    // container" call the ranked available table already
-                    // makes (see App.css, the comment above
-                    // `.avail-col-rank`) so the page itself never scrolls
-                    // and there is exactly one vertical scroll container
-                    // per tab.
-                    <div className="board-tab">
-                      {boardError && <p className="error draft-error-banner">{boardError}</p>}
-                      <DraftBoardGrid board={board} onOpenPlayer={handleOpenBoardPlayer} />
-                    </div>
-                  )
-                  // No board yet: either still loading (boardError null) or
-                  // the fetch itself failed before a first board ever
-                  // landed (nothing stale to fall back to, unlike the
-                  // branch above).
-                  : (
-                    <p className="rail-empty draft-main-placeholder">
-                      {boardError ?? 'Waiting for the draft board…'}
-                    </p>
-                  )
-              )
-              // PlanTab is its own top-level content, same as
-              // DraftBoardGrid/AvailableList above -- `.plan-tab` supplies
-              // its own padding (matching `.board-tab`'s) rather than this
-              // needing a wrapper div of its own, and it flows in
-              // `.draft-main`'s existing vertical scroll region exactly as
-              // the other two tabs do.
-              : (
-                <PlanTab result={planResult} loading={planLoading} fetchError={planFetchError} />
-              )}
+            : (
+              board?.active
+                ? (
+                  // `.board-tab` only pads the grid, same padding the
+                  // mock's own snake-board panel uses -- `.board-wrap`
+                  // itself is DraftBoardGrid's own horizontal scroll
+                  // container (per its own CSS comment), and it flows
+                  // straight in `.draft-main`'s existing overflow-y:
+                  // auto region rather than opening a second, nested
+                  // vertical scroller -- the same "no second scroll
+                  // container" call the ranked available table already
+                  // makes (see App.css, the comment above
+                  // `.avail-col-rank`) so the page itself never scrolls
+                  // and there is exactly one vertical scroll container
+                  // per tab.
+                  <div className="board-tab">
+                    {boardError && <p className="error draft-error-banner">{boardError}</p>}
+                    <DraftBoardGrid board={board} onOpenPlayer={handleOpenBoardPlayer} />
+                  </div>
+                )
+                // No board yet: either still loading (boardError null) or
+                // the fetch itself failed before a first board ever
+                // landed (nothing stale to fall back to, unlike the
+                // branch above).
+                : (
+                  <p className="rail-empty draft-main-placeholder">
+                    {boardError ?? 'Waiting for the draft board…'}
+                  </p>
+                )
+            )}
         </div>
 
         <aside className="draft-rail">

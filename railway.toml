@@ -1,0 +1,32 @@
+# Railway service configuration.
+#
+# WHAT IS NOT HERE, ON PURPOSE: the volume and the environment variables.
+# Railway configures volumes through its dashboard or CLI, not this file, and
+# the variables include the key that decrypts other people's ESPN sessions --
+# `ESPN_CUSTODY_KEYS` belongs in Railway's variable store and nowhere a git
+# history can hold it. The README's deploy section lists the full set.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# ONE REPLICA. Not a starting point to be scaled later -- a hard constraint of
+# the storage. DuckDB takes a single-writer lock per file, so a second
+# instance would fail to open the database the first one holds; the Makefile
+# already documents this happening between the API and a local pipeline job.
+# Horizontal scaling requires moving the mutable tables to Postgres first.
+numReplicas = 1
+
+# Cheap by construction: `/api/landing/status` is raw table reads and is
+# deliberately split from the endpoint that builds the board, which costs
+# seconds. A healthcheck pointed at a board build would time out on a cold
+# container and roll back a good deploy.
+healthcheckPath = "/api/landing/status"
+healthcheckTimeout = 30
+
+# A crash loop should stop rather than burn the container's restart budget
+# silently. Ten attempts is enough to ride out a slow volume mount and few
+# enough to be visibly broken.
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

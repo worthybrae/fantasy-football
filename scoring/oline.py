@@ -327,15 +327,36 @@ def _last_season_snap_share(ol_snaps: pd.DataFrame, season: int) -> pd.DataFrame
         "snap_share_last_season").reset_index()[cols]
 
 
+# The longest career any offensive lineman has actually had is about twenty
+# seasons (Jason Peters, 21). Anything past this is not a durable veteran, it
+# is a JOIN THAT LANDED ON THE WRONG MAN: the depth chart carries a gsis_id,
+# and for a rookie who shares his name with a player from the nineties it is
+# sometimes that player's. Indianapolis' 2026 right tackle Blake Miller
+# (00-0041439, rookie season 2026) was matched to the Blake Miller who came
+# into the league in 1992, and read as 34 seasons -- which dragged Detroit's
+# line-wide mean from under three to nine.
+#
+# Those rows come back NaN rather than clipped. A clip would put a plausible
+# 22 on a man who has played none, which is the same lie in a quieter voice;
+# NaN is "this database cannot say", and `line_quality`'s own normalization
+# already treats a missing part as neutral.
+_MAX_CAREER = 22
+
+
 def _experience(conn, season: int) -> pd.DataFrame:
     """Seasons in the league as of `season`, from `players.rookie_season` --
-    a fact knowable before the season starts, not a result of it."""
+    a fact knowable before the season starts, not a result of it.
+
+    NaN past `_MAX_CAREER`, which is an identity check rather than a cap: see
+    the constant.
+    """
     cols = ["gsis_id", "seasons_in_league"]
     people = read_table(conn, "players")
     if people.empty or "rookie_season" not in people.columns:
         return pd.DataFrame(columns=cols)
     out = people[["gsis_id", "rookie_season"]].copy()
     out["seasons_in_league"] = (season - out["rookie_season"]).clip(lower=0)
+    out.loc[out["seasons_in_league"] > _MAX_CAREER, "seasons_in_league"] = np.nan
     return out[cols]
 
 
@@ -440,7 +461,8 @@ def line_units(conn, season: int, *, snaps: pd.DataFrame | None = None,
 
 
 def line_quality(conn, season: int, *,
-                 snaps: pd.DataFrame | None = None) -> pd.DataFrame:
+                 snaps: pd.DataFrame | None = None,
+                 ol_snaps: pd.DataFrame | None = None) -> pd.DataFrame:
     """Per team, a 0-100 O-line rating built from continuity, availability,
     experience and returning-starter share, normalized within position the
     same way `scoring/factors.py` normalizes player factors
@@ -470,7 +492,13 @@ def line_quality(conn, season: int, *,
     """
     if snaps is None:
         snaps = read_table(conn, "snap_counts")
-    ol_snaps = _ol_snaps_with_gsis(conn, snaps=snaps)
+    # `ol_snaps` is the crosswalked snap frame, and building it is the
+    # expensive half of this module (see the cost note above). A caller that
+    # needs `line_units` as well as the score -- scoring/profile_cache.py
+    # does, the card shows both -- builds it once and hands it to both,
+    # rather than paying for the pfr->gsis join twice for one card.
+    if ol_snaps is None:
+        ol_snaps = _ol_snaps_with_gsis(conn, snaps=snaps)
     units = line_units(conn, season, snaps=snaps, ol_snaps=ol_snaps)
 
     cont = _continuity(ol_snaps, season - 1)

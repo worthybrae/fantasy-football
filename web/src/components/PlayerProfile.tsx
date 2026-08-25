@@ -11,17 +11,19 @@ import {
 import DepthChartCard from './DepthChartCard'
 import PageSkeleton from './PageSkeleton'
 import ComparableSeasons from './profile/ComparableSeasons'
-import InjuryStatus from './profile/InjuryStatus'
+import InjuryStatus, { injuryTone } from './profile/InjuryStatus'
 import NewsPanel from './profile/NewsPanel'
 import PopCard from './profile/PopCard'
+import { CARD_HINTS, finishHint } from './profile/hints'
 import LineQuality from './profile/LineQuality'
 import MarketRow from './profile/MarketRow'
 import MissingData from './profile/MissingData'
 import ScheduleRanks from './profile/ScheduleRanks'
+import SimilarPlayers from './profile/SimilarPlayers'
 import UsageLine from './profile/UsageLine'
 import VegasCard from './profile/VegasCard'
 import WeekByWeek from './profile/WeekByWeek'
-import { fmtSigned, hasHistory, type PlayerStatus, type ProfileHeader, type ProfilePayload } from './profile/payload'
+import { hasHistory, type PlayerStatus, type ProfileHeader, type ProfilePayload } from './profile/payload'
 
 // Everything the opener already knew about this player, so the profile can
 // paint on the frame it opens instead of behind a skeleton.
@@ -40,7 +42,7 @@ import { fmtSigned, hasHistory, type PlayerStatus, type ProfileHeader, type Prof
 // component has no business knowing, and are not even defined outside a
 // draft. A label/value pair is the widest contract that stays honest.
 // `accent` marks the one figure worth highlighting (an open starter slot,
-// same rule as `.top3-figure.is-open`).
+// same rule as `.confirm-figure.is-open`).
 export interface ProfileSeed {
   name: string
   position: string
@@ -105,21 +107,6 @@ function depthSlotLabel(
   const order = status?.depth_chart_order ?? depthSlot
   if (!order) return null
   return `${status?.depth_chart_position ?? position}${order}`
-}
-
-// How loud the disagreement with the room is allowed to be. Under ten slots
-// your board and the market take him in the same round of any league this
-// tool supports (8 to 14 teams), so there is no decision in the gap and it
-// reads as a note. Ten or more is a round he would fall past, which is the
-// version of this number worth colouring as a bargain.
-const ROUND = 10
-
-function edgeTone(slots: number): string {
-  if (slots >= ROUND) return 'is-good'
-  if (slots > 0) return 'is-accent'
-  // Zero is agreement, not a failure -- it takes the row's own body colour.
-  if (slots === 0) return ''
-  return 'is-bad'
 }
 
 // A rookie's Per game panel is one column, the projection, with nothing to
@@ -216,7 +203,7 @@ function PopFigures({ header, profile }: {
     // season beside it. An arrow rather than a sign: on a rank, "+3" reads
     // as a bigger number and a bigger number is worse.
     {
-      label: 'Proj rank',
+      label: 'Pos rank',
       value: header.proj_pos_finish === null
         ? '—' : `${header.position}${header.proj_pos_finish}`,
       delta: rankMove === null || rankMove === 0 ? undefined : {
@@ -224,6 +211,12 @@ function PopFigures({ header, profile }: {
         tone: rankMove > 0 ? 'is-up' : 'is-down',
       },
     },
+    // And where the room puts him overall, which is the number every other
+    // figure here is a component of and none of them state: "WR50" is a
+    // place among receivers, and a draft is one list. To the right of the
+    // positional place, because that is what a roster is filled by and this
+    // is the scale it sits on.
+    { label: 'Rank', value: String(header.rank) },
   ]
   return (
     <div className="pp-pop-figures">
@@ -246,6 +239,62 @@ function PopFigures({ header, profile }: {
   )
 }
 
+// Height and weight as one item on the meta line. Feet and inches because 74
+// is a number nobody carries around and 6'2" is how a height is said;
+// pounds because the payload's own unit is pounds.
+//
+// Either half alone still prints. A payload that knows his weight and not
+// his height should say the weight -- the alternative is a card that drops a
+// fact it holds because it is missing a different one.
+function fmtBuild(height: number | null, weight: number | null): string | null {
+  const parts: string[] = []
+  if (height !== null) parts.push(`${Math.floor(height / 12)}'${height % 12}"`)
+  if (weight !== null) parts.push(`${weight} lb`)
+  return parts.length === 0 ? null : parts.join(' ')
+}
+
+// The mark on the corner of his photo. A designation is the one fact on this
+// card that can make every number under it irrelevant, so it belongs where
+// the eye lands first rather than in a band below the header -- and as a
+// mark, so a reader who is scanning several profiles sees "there is
+// something here" before he reads what.
+//
+// On the photo rather than after the name, which is where it used to sit. A
+// triangle in the name line is read as punctuation on the name -- it took
+// its place in the reading order between "Malik Nabers" and the meta under
+// it, and a name line that can grow a third element is a name line whose
+// length depends on a fact about the player's knee. Pinned to a corner of a
+// fixed 44px square it is the same mark in the same place on every profile,
+// which is what makes it scannable across several.
+//
+// It falls BACK to the name line for a player with no photo (see the head
+// below): a defense, or anyone nflverse has no picture of. The corner of a
+// photo that is not there is nowhere, and this is the one mark on the card
+// that must not go missing.
+//
+// Severity is the pill's own (`InjuryStatus`'s SEVERE/WATCH lists), read off
+// the same strings, so a red triangle here and a red pill under it cannot
+// disagree. The full designation and its detail ride on the tooltip; the
+// band below carries them in text for anyone who does not hover, which is
+// why this is an icon and not a second copy of the sentence.
+function InjuryMark({ status }: { status: PlayerStatus | null }): ReactNode {
+  if (status === null || status.injury_status === null) return null
+  const said = [status.injury_status, status.injury_body_part, status.injury_notes]
+    .filter((s): s is string => typeof s === 'string' && s.trim() !== '')
+    .join(' — ')
+  return (
+    <span className={`pp-pop-injury-mark ${injuryTone(status.injury_status)}`}
+          title={said} role="img" aria-label={said}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4"
+           strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M12 9v5" />
+        <path d="M12 17.5v.01" />
+        <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+      </svg>
+    </span>
+  )
+}
+
 // One line for the two facts that can make every panel under it irrelevant --
 // a designation, and where he actually stands on his own depth chart -- with
 // the edge over the room on its right end. That edge used to have a card of
@@ -253,33 +302,29 @@ function PopFigures({ header, profile }: {
 function StatusLine({ profile }: { profile: ProfilePayload }): ReactNode {
   const status = profile.status ?? null
   // NEVER "healthy": a null designation is the absence of a claim, not a
-  // clean bill of health. InjuryStatus renders nothing for it (see its own
-  // comment), so this row says the thing it can actually source instead.
-  const flagged = status !== null && status.injury_status !== null
+  // clean bill of health. So the row is drawn ONLY when there is a
+  // designation to draw -- it used to render either way and spend a full
+  // band of the card saying "No injury designation", which is a sentence
+  // about the absence of news. The two facts it carried for everyone else
+  // have moved to where they are always true: the depth slot into the
+  // header's own meta line, and the edge onto the Market card, which is the
+  // card about disagreeing with the market.
+  if (status === null || status.injury_status === null) return null
   const slot = depthSlotLabel(profile.header.position, status, profile.outlook.depth_slot)
-  const { edge, market_rank: marketRank, team } = profile.header
-  const slots = edge === null ? null : Math.round(edge)
+  const { team } = profile.header
   return (
-    <div className={`pp-pop-status${flagged ? ' is-flagged' : ''}`}>
+    <div className="pp-pop-status is-flagged">
       {/* `currentColor`, so the row's own state colours the mark once. */}
       <svg
         className="pp-pop-status-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
         strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"
       >
-        {flagged ? (
-          <>
-            <path d="M12 9v5" />
-            <path d="M12 17.5v.01" />
-            <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
-          </>
-        ) : (
-          <path d="M20 6 9 17l-5-5" />
-        )}
+        <path d="M12 9v5" />
+        <path d="M12 17.5v.01" />
+        <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
       </svg>
       <p className="pp-pop-status-text">
-        {flagged && status
-          ? <InjuryStatus status={status} />
-          : 'No injury designation'}
+        <InjuryStatus status={status} />
         {slot !== null && (
           <>
             {' · '}
@@ -288,26 +333,22 @@ function StatusLine({ profile }: { profile: ProfilePayload }): ReactNode {
           </>
         )}
       </p>
-      {slots !== null && marketRank !== null && (
-        <span className={`mono pp-pop-edge ${edgeTone(slots)}`}>
-          {`${fmtSigned(edge)} ${Math.abs(slots) === 1 ? 'slot' : 'slots'} vs consensus`}
-        </span>
-      )}
     </div>
   )
 }
 
-function PopPanel({ title, note, cols, wide = false }: {
+function PopPanel({ title, note, hint, cols, wide = false }: {
   // ReactNode, not string: Per game's note is a signed number that is
   // coloured by its own sign, so it arrives as an element rather than text.
-  title: string; note: ReactNode; cols: Col[]; wide?: boolean
+  title: string; note: ReactNode; hint?: string; cols: Col[]; wide?: boolean
 }): ReactNode {
   return (
     // The same card as the six below (PopCard), plus the class that says
     // this one holds a chart: how a long career scrolls inside it, and how
     // much wider Per game is allowed to be, are the only two things a panel
     // decides for itself.
-    <PopCard title={title} note={note} className={`pp-pop-panel${wide ? ' is-wide' : ''}`}>
+    <PopCard title={title} note={note} hint={hint}
+             className={`pp-pop-panel${wide ? ' is-wide' : ''}`}>
       <Chart cols={cols} />
     </PopCard>
   )
@@ -339,27 +380,22 @@ function PopPanels({ profile, settings }: {
   const seasons = profile.seasons.slice(0, POPUP_SEASONS)
   const health = healthCols(seasons)
   const finish = finishCols(seasons, startersAt(header.position, settings),
-                            header.proj_pos_finish)
-  const steady = steadyCols(seasons)
-  // Newest first in the payload, so the first rated season carries the pool
-  // the last column was ranked in. A denominator that moves year to year,
-  // and this note is here to make that column legible, not to average them.
-  //
-  // Both filters are the builders' own (`panels.ts`), never a local copy:
-  // the board's hover panel quotes the same "of N" for the same player three
-  // inches behind this popup, and a looser test here would quote it off a
-  // season neither chart drew.
-  const rated = ratedSeasons(seasons)
+                            header.proj_pos_finish, header.position)
+  // The builder's own filter (`panels.ts`), never a local copy: the board's
+  // hover panel draws the same seasons for the same player three inches
+  // behind this popup, and a looser test here would draw one neither chart
+  // agrees on.
   const played = playedSeasons(seasons)
   const proj = profile.summary?.proj_ppg ?? null
   const scoring = perGameCols(seasons, proj, header.position)
   const perGame = played.length
     ? scoring : [...blankSeasonCols(profile.bio.season), ...scoring]
   const delta = perGameDelta(seasons, proj)
-  // A defense has none of these: no games counted, no positional finish, no
-  // coefficient, and no per-game projection either. An empty row would still
-  // cost the gap above the section under it.
-  if (!health.length && !finish.length && !steady.length && !scoring.length) return null
+  // A defense has none of these: no games counted, no positional finish and
+  // no per-game projection either. An empty row would still cost the gap
+  // above the section under it. (Steady is not in this row any more -- see
+  // SteadyPanel, which lives beside Schedule and Room.)
+  if (!health.length && !finish.length && !scoring.length) return null
   return (
     <div className="pp-pop-row">
       {health.length > 0 && (
@@ -368,28 +404,66 @@ function PopPanels({ profile, settings }: {
           // Off the last column's own season, not off today: a 16-game 2019
           // is a full year, and "of 17" against it would invent an injury.
           note={`of ${seasonLength(health[health.length - 1].key as number)}`}
+          hint={CARD_HINTS.health}
           cols={health}
         />
       )}
       {finish.length > 0 && (
-        <PopPanel title="Finish" note={header.position} cols={finish} />
-      )}
-      {steady.length > 0 && (
-        <PopPanel title="Steady" note={`of ${rated[0].cv_rank_n}`} cols={steady} />
+        // "WR rank", and then bare numbers -- except the projection, which
+        // names the position itself (see `finishCols`). The position was on
+        // every column for a revision ("WR43 WR12 WR4") and said the same
+        // word five times to qualify five numbers in the same unit, which is
+        // what a title is for. On the forecast alone it is not repetition:
+        // that is the column a reader quotes elsewhere.
+        <PopPanel title={`${header.position} rank`} note={undefined}
+                  hint={finishHint(header.position)} cols={finish} />
       )}
       {scoring.length > 0 && (
         <PopPanel
-          title="Per game"
+          title="Points per game"
           // Green up, red down: the only number in the four panels that is a
           // direction rather than a level, and the direction is why it is
           // there. The panel's own columns already say the levels.
           note={delta === null ? 'projection only'
             : <span className={`delta-tone ${delta.tone}`}>{delta.label}</span>}
+          hint={CARD_HINTS.perGame}
           cols={perGame}
           wide
         />
       )}
     </div>
+  )
+}
+
+// Steady, drawn with the CARDS rather than with the season panels above.
+//
+// It is the same object -- a PopPanel, same frame, same chart -- and it was
+// the fourth of four up there, which made the top row read as "here are four
+// things about his scoring". Three of them are: games, finish, points a game.
+// Steady is not a level at all, it is the variance around one, and a reader
+// running along that row had to change what he was reading for on the last
+// panel. Down here it sits with Schedule and Room, which are the other two
+// cards that qualify a projection rather than state one -- how hard the
+// season is, who else is in the room, and how reliable he is week to week.
+//
+// It carries its own slice of the payload rather than being handed one:
+// PopPanels applies the same POPUP_SEASONS cap for its own three, and two
+// callers sharing one derived list would be one more thing to keep in step
+// for no gain -- `steadyCols` is a pure function of the seasons.
+function SteadyPanel({ profile }: { profile: ProfilePayload }): ReactNode {
+  const seasons = profile.seasons.slice(0, POPUP_SEASONS)
+  const cols = steadyCols(seasons)
+  // A rookie has no coefficient to rank and a defense never will have one.
+  if (cols.length === 0) return null
+  // Newest first in the payload, so the first rated season carries the pool
+  // the last column was ranked in. A denominator that moves year to year,
+  // and the note is here to make that column legible, not to average them.
+  const rated = ratedSeasons(seasons)
+  return (
+    <PopPanel title="Steady"
+              note={rated.length ? `of ${rated[0].cv_rank_n}` : undefined}
+              hint={CARD_HINTS.steady}
+              cols={cols} />
   )
 }
 
@@ -410,13 +484,14 @@ function PopCards({ profile, onSelectPlayer }: {
     <>
       <div className="pp-pop-row">
         <ScheduleRanks weeks={profile.schedule} sosPct={profile.outlook.sos_pct} />
-        {/* The wider of the two now: it lists a room, and a name cut short
-            is a name you cannot recognise. */}
+        {/* The wider of the three: it lists a room, and a name cut short is a
+            name you cannot recognise. */}
         <DepthChartCard
           team={header.team}
           position={header.position}
           groups={profile.depth_chart}
         />
+        <SteadyPanel profile={profile} />
       </div>
       <div className="pp-pop-row">
         <UsageLine seasons={profile.seasons} position={header.position}
@@ -443,6 +518,7 @@ function PopCards({ profile, onSelectPlayer }: {
           sources={header.market_sources}
           position={header.position}
           posRanks={header.market_pos}
+          edge={header.edge}
           // Only for the thin state, where the whole popup carries one
           // forward-looking number and this is it -- for everyone else the
           // Per game panel and the week chart are already that, and a fifth
@@ -576,9 +652,12 @@ export default function PlayerProfile({
   // in for. Without one this is unchanged: skeleton until the request lands.
   if (loading && !profile && !seed) return <PageSkeleton />
 
-  // Meta line, in the artboard's order: team, age, service year, bye. The
-  // depth slot left it for the status line, which is where a designation and
-  // a depth chart now argue with each other in one sentence.
+  // Meta line, in the artboard's order: team, age, build, service year, bye.
+  //
+  // Build sits next to age because they are the same kind of fact -- what he
+  // is, rather than where he plays or when he is off -- and because the two
+  // of them together are what a reader is checking when they look at a
+  // 31-year-old back at all.
   //
   // Age and service year are the payload's alone (`bio`), so the line grows
   // by two facts when the request lands -- inline, in a line that is already
@@ -592,10 +671,22 @@ export default function PlayerProfile({
   // played. His first NFL year is the one fact about him that needs none.
   if (age !== null) meta.push(`age ${age}`)
   else if (ident?.rookie) meta.push('rookie')
+  const build = fmtBuild(profile?.bio.height ?? null, profile?.bio.weight ?? null)
+  if (build !== null) meta.push(build)
   const nflSeason = profile?.bio.nfl_season ?? (ident?.rookie ? 1 : null)
   if (nflSeason !== null) meta.push(`NFL yr ${nflSeason}`)
   const bye = profile?.outlook.bye ?? ident?.bye ?? null
   meta.push(`bye ${bye ?? '—'}`)
+  // Where the room has him overall, which is the number this whole card is
+  // an argument about -- the header's own figures are per game and per
+  // position, and neither says "he is the 181st player on your board".
+  //
+  // The depth slot was here for a revision and is gone: "RWR2 on depth
+  // chart" is his place in a room of four, in a line whose other four facts
+  // are about him, and the Room card lists that room in full a few inches
+  // down. A designation still carries it, because there the slot is part of
+  // the news (see StatusLine).
+
 
   return (
     <div className={`player-page${embedded ? ' player-page-embedded' : ''}`}>
@@ -614,14 +705,19 @@ export default function PlayerProfile({
               because the name is right beside it: a screen reader that reads
               both says his name twice. */}
           {profile?.bio?.headshot && (
-            <img
-              className="pp-pop-face"
-              src={profile.bio.headshot}
-              alt=""
-              width={44}
-              height={44}
-              loading="lazy"
-            />
+            /* The photo and the mark on its corner are one object: the mark
+               is positioned against this box, not against the header row. */
+            <div className="pp-pop-face-wrap">
+              <img
+                className="pp-pop-face"
+                src={profile.bio.headshot}
+                alt=""
+                width={44}
+                height={44}
+                loading="lazy"
+              />
+              <InjuryMark status={profile?.status ?? null} />
+            </div>
           )}
           <div className="pp-pop-ident">
             {/* Name first, chip second: the artboard reads it as a sentence,
@@ -632,6 +728,8 @@ export default function PlayerProfile({
               <span className={`pos-badge pos-badge-${ident.position.toLowerCase()} pp-pop-pos`}>
                 {ident.position}
               </span>
+              {/* Only where there is no photo to pin it to. */}
+              {!profile?.bio?.headshot && <InjuryMark status={profile?.status ?? null} />}
             </div>
             <p className="mono pp-pop-meta">
               {meta.join(' · ')}
@@ -678,6 +776,18 @@ export default function PlayerProfile({
         />
       )}
       {profile && <PopCards profile={profile} onSelectPlayer={onSelectPlayer} />}
+      {/* LAST among the content, just above the draft footer: a row of other
+          players' faces is the one card on the popup that is about somebody
+          else, and every card above it is about him. Reading order follows:
+          who he is, what he does, THEN who else to consider -- which is also
+          the moment a reader who got this far actually wants the exits. */}
+      {profile && (
+        <div className="pp-pop-row">
+          <SimilarPlayers data={profile.similar_players ?? null}
+                          projPpg={profile.summary.proj_ppg}
+                          onSelectPlayer={onSelectPlayer} />
+        </div>
+      )}
 
       {/* The last thing in the popup, and the whole point of it: the profile
           takes the player it is describing. It opens the confirm dialog and

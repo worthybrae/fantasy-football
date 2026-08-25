@@ -292,77 +292,6 @@ from scoring.config import CURRENT_SEASON
 from scoring.draft_sim import (_drafted_state, _seed_rosters, horizon_picks,
                                horizon_target, snake_slots, survival)
 from scoring.gain import available_by_vor, rank_available
-from scoring.plan import build_plan
-
-# How many times the plan worker re-attempts a build that keeps getting
-# pre-empted by rankings before dropping the request and waiting for the
-# next pick to queue a fresh one. Generous, because an attempt costs nothing
-# until the draft actually goes quiet, and cheap to be wrong about: a
-# dropped request is replaced by the very next pick.
-PLAN_BUILD_ATTEMPTS = 40
-
-
-def plan_is_worth_rebuilding(settings, my_slot, previous, picks_made) -> bool:
-    """Whether the plan has gone stale enough to be worth ~2.5s of CPU.
-
-    It was rebuilt on every pick, which for an 8-team, 16-round draft is 128
-    builds of a 120-draft simulation. The ranking worker is protected from
-    that by `ranking_wanted`, but nothing else is: every HTTP request the
-    room makes -- a player profile above all -- competes with it for the GIL,
-    and a profile is what the user clicks while the clock runs.
-
-    A plan does not change much when some other team takes a running back. It
-    changes when MY roster changes, because every round after that is
-    re-planned around what I now hold, and it drifts as the board empties.
-    So: rebuild on my own picks, rebuild once a round otherwise, skip the
-    rest. Roughly 30 builds instead of 128, and never more than a round out
-    of date.
-
-    `previous` is `state["plan_as_of_pick"]`, or None when no plan has ever
-    been built -- which always rebuilds, since "stale" is meaningless before
-    there is anything to be stale.
-    """
-    if previous is None:
-        return True
-    if picks_made - previous >= settings.teams:
-        return True
-    # The pick that just landed, if it was mine: `picks_made` counts
-    # COMPLETED picks, so the last one sits at index picks_made - 1.
-    snake = snake_slots(settings.teams, settings.rounds)
-    if 0 < picks_made <= len(snake):
-        return snake[picks_made - 1] == my_slot
-    return False
-
-
-def _plan_bias_for_round(plan, my_slot, my_picks_made):
-    """The plan's read on the round I am about to pick in, as position ->
-    confidence, or None when there is nothing trustworthy to steer by.
-
-    Joined on ROUND NUMBER, never on how stale the plan is. The plan and the
-    ranking run on separate workers at different speeds, so the plan is
-    routinely a pick or two behind -- but "round 4 goes to a running back"
-    does not stop being the plan's claim because two other teams have picked
-    since. What would break it is a round mismatch, so the round I am
-    actually about to fill (`my_picks_made`, the count of my own picks so
-    far) is what selects the entry.
-
-    Guarded on `my_slot` because a plan is slot-specific in a way candidates
-    are not: reconnecting as a different team leaves the previous session's
-    plan in `state` for the ~4s a new one takes to build, and steering the
-    new team's board with the old team's plan is worse than not steering it.
-    `is_past` entries return None for the same reason -- an entry describing
-    a pick already made is a record, not a recommendation, and its 100% is
-    certainty about the past rather than confidence about the future.
-    """
-    if not plan or plan.get("my_slot") != my_slot:
-        return None
-    for entry in plan.get("rounds_plan", []):
-        if entry.get("round") == my_picks_made + 1:
-            if entry.get("is_past"):
-                return None
-            return {d["position"]: d["pct"] / 100.0
-                    for d in entry.get("positions", [])} or None
-    return None
 
 
 def _ordinal(n: int) -> str:
@@ -1066,7 +995,103 @@ def _board_index(board) -> dict:
     return {str(row["player_id"]): row for _, row in board.iterrows()}
 
 
-def _board_cell(player_id, pick_no, teams: int, slots: list, by_id: dict) -> dict:
+# -- naming a player the board does not carry --------------------------------
+#
+# THE BOARD IS A TOP-250 POOL, AND A DRAFT IS NOT. `build_board` ranks the
+# players worth drafting in this league; ESPN's rooms draft whoever they
+# like, and the deep rounds of a 16-round mock routinely land on somebody
+# outside that pool. Evan Engram, projected 106 points in 2026, is a real
+# tight end nobody's board cuts by accident -- he is simply the 251st name.
+#
+# Before this, such a pick was drawn as its own id: a cell reading
+# "00-0033881" in the middle of a grid of names, which is the bug this
+# answers. The board is still the only source of RANKS -- an off-board player
+# genuinely has no market rank, no tier and no VOR here -- but a name, a
+# position, a team and a face are facts about the person, and this project
+# has all four in `players` and `weekly`.
+#
+# Cached for the life of the process, misses included. /api/live/board is
+# polled every couple of seconds while a draft runs, and re-asking DuckDB for
+# a name it has already failed to find, twice a second, for the whole draft,
+# would be the same query answering the same way a few thousand times. A
+# name does not change; a database refreshed mid-draft is not a case worth
+# holding a cache open for.
+_IDENTITY_LOCK = threading.Lock()
+_IDENTITY: dict[str, dict | None] = {}
+
+
+def _identity_rows(conn, ids: list) -> dict:
+    """One query for the ids given, straight off the two identity tables.
+
+    `players` is the anchor for a name and a headshot; `weekly` supplies the
+    position and the team he last played for, which `players` does not carry.
+    A player who has a weekly row and no `players` row (nflverse adds the
+    roster table on its own schedule) is still named, off `weekly`'s own
+    display name -- the whole point here is to name somebody, and half an
+    identity beats an id.
+    """
+    marks = ", ".join("?" for _ in ids)
+    rows = conn.execute(f"""
+        WITH last AS (
+            SELECT player_id, position, recent_team, player_display_name,
+                   row_number() OVER (PARTITION BY player_id
+                                      ORDER BY season DESC, week DESC) AS rn
+            FROM weekly
+            WHERE player_id IN ({marks})
+        )
+        SELECT COALESCE(p.gsis_id, l.player_id)      AS player_id,
+               COALESCE(p.display_name, l.player_display_name) AS name,
+               p.headshot                            AS headshot,
+               l.position                            AS position,
+               l.recent_team                         AS team
+        FROM (SELECT * FROM last WHERE rn = 1) l
+        FULL OUTER JOIN players p ON p.gsis_id = l.player_id
+        WHERE COALESCE(p.gsis_id, l.player_id) IN ({marks})
+    """, list(ids) + list(ids)).fetchall()
+    return {str(r[0]): {"name": _str_or_none(r[1]), "headshot": _str_or_none(r[2]),
+                        "position": _str_or_none(r[3]), "team": _str_or_none(r[4])}
+            for r in rows if _str_or_none(r[1]) is not None}
+
+
+def identify_players(conn, ids) -> dict:
+    """Identity for the ids given, for cells the board cannot name.
+
+    Returns only what it could resolve, so a caller reads it with `.get` and
+    falls back to the raw id exactly as before for anything genuinely
+    unknown. Never raises: a missing table or a closed connection means the
+    grid draws ids for one request, which is what it did for every request
+    before this existed.
+    """
+    wanted = [str(i) for i in dict.fromkeys(ids) if i is not None]
+    if not wanted or conn is None:
+        return {}
+    with _IDENTITY_LOCK:
+        known = {i: _IDENTITY[i] for i in wanted if i in _IDENTITY}
+    missing = [i for i in wanted if i not in known]
+    if missing:
+        try:
+            found = _identity_rows(conn, missing)
+        except Exception:      # noqa: BLE001 -- see the docstring
+            found = {}
+        with _IDENTITY_LOCK:
+            for i in missing:
+                # The miss is cached too, as None: an id nothing in the
+                # database knows is not going to become known by being asked
+                # again on the next poll.
+                _IDENTITY[i] = found.get(i)
+        known.update({i: found.get(i) for i in missing})
+    return {i: row for i, row in known.items() if row is not None}
+
+
+def clear_identity_cache() -> None:
+    """Test hook. Nothing in the request path needs to evict -- see
+    `_IDENTITY`'s own comment on why a name is cached for good."""
+    with _IDENTITY_LOCK:
+        _IDENTITY.clear()
+
+
+def _board_cell(player_id, pick_no, teams: int, slots: list, by_id: dict,
+                named: dict | None = None) -> dict:
     """One drafted pick as a board-grid cell: its snake round/slot plus the
     rich player payload the front end draws in the column.
 
@@ -1087,11 +1112,20 @@ def _board_cell(player_id, pick_no, teams: int, slots: list, by_id: dict) -> dic
     rnd = (idx // teams) + 1 if teams else None
     row = by_id.get(str(player_id))
     if row is None:
-        player = {"player_id": str(player_id), "name": str(player_id),
-                  "position": None, "team": None, "bye": None,
+        # Off the board, but not necessarily unknown: `identify_players` names
+        # him from `players`/`weekly` when it can (see its own comment). The
+        # ranks stay null either way -- an off-board player has no market
+        # rank, tier or VOR in this installation, and inventing one to fill
+        # the cell would be worse than the blank.
+        known = (named or {}).get(str(player_id)) or {}
+        player = {"player_id": str(player_id),
+                  "name": known.get("name") or str(player_id),
+                  "position": known.get("position"), "team": known.get("team"),
+                  "bye": None,
                   "overall_rank": None, "tier": None, "market_rank": None,
                   "espn_ppr_rank": None, "vor": None, "last_ppg": None,
-                  "last_points": None, "proj_ppg": None, "value": None}
+                  "last_points": None, "proj_ppg": None, "value": None,
+                  "headshot": known.get("headshot")}
     else:
         market_rank = _float_or_none(row.get("market_rank"))
         stats = row.get("stats")
@@ -1221,6 +1255,13 @@ def _my_roster(session, taken_order) -> list:
             "name": _str_or_none(row.get("name")),
             "position": _str_or_none(row.get("position")),
             "proj_points": _float_or_none(row.get("proj_points")),
+            # ESPN's week-1 projection, already converted into this league's
+            # scoring by the board (`scoring/board.week_projections`). The rail
+            # prints this rather than the season total: 18.4 reads against a
+            # Sunday somebody has watched, where 323 is a number only a reader
+            # who already knows the scale can weigh. Null for a player ESPN
+            # does not project that week -- a dash, never a zero.
+            "wk1_points": _float_or_none(row.get("proj_wk1")),
         })
     return roster
 
@@ -1467,28 +1508,12 @@ def register_live_routes(app, conn, db_path):
              # its own: a horizon left over from a previous session would
              # caption the new one's list with the old one's pick number.
              "horizon_pick": None,
-             # The draft plan (scoring/plan.py) and the pick it was built
-             # against. Kept apart from `candidates`/`as_of_pick` because the
-             # two move on different clocks: a ranking is ~1-1.5s and must
-             # land before the user acts, a plan is ~4s and describes rounds
-             # they will not reach for twenty minutes. Sharing the recompute
-             # worker would have made every ranking wait behind a plan.
-             "plan": None, "plan_as_of_pick": None, "plan_error": None,
              # Pick count as the SOCKET has seen it, which is ahead of
-             # everything derived from it: `as_of_pick` trails by a ranking
-             # and `plan_as_of_pick` by up to a round. The event stream
-             # watches this so a pick reaches the room the moment ESPN sends
-             # it, rather than whenever the room next asks.
+             # everything derived from it: `as_of_pick` trails it by a
+             # ranking. The event stream watches this so a pick reaches the
+             # room the moment ESPN sends it, rather than whenever the room
+             # next asks.
              "picks_seen": 0,
-             # Set the moment a ranking is requested, cleared when one is
-             # stored. The plan worker yields on it: see _compute_plan and
-             # build_plan's `should_abort`. Without it the two workers are
-             # simply two Python simulation loops competing for the GIL, and
-             # the ranking measured 3.5x slower (1.23s -> 4.38s) whenever a
-             # plan happened to be building -- which, since both fired on
-             # every pick, was most of the draft. That is what made the
-             # available list read two picks stale.
-             "ranking_wanted": False,
              # Bumped by live_start and live_stop. A stop/start cycle resets
              # as_of_pick to None, which blinds the pick-count guard below --
              # a stale _recompute launched under the old session would see
@@ -1814,26 +1839,21 @@ def register_live_routes(app, conn, db_path):
             # survival()'s avail_pct is already a 0-1 probability (see its
             # docstring and the "counts / max(n_rollouts, 1)" line it
             # returns) -- rank_available wants exactly that, no rescaling.
-            avail = survival(
+            rollouts = survival(
                 session.pool, session.settings, session.slot_managers,
                 session.my_slot, taken, session.betas,
                 n_rollouts=SURVIVAL_ROLLOUTS, seed=session.seed,
                 taken_order=taken_order, on_the_clock=on_the_clock,
-                horizon=h, nested=session.nested)["avail_pct"].to_numpy()
-            # Read under the lock, like every other cross-worker read
-            # here: the plan worker writes `state["plan"]` whole, so an
-            # unlocked read could observe a plan from one session next to a
-            # slot from another.
-            with lock:
-                # How many picks I have made, from `counts` rather than
-                # the roster's `indices`: the two are the same number by
-                # construction (every pick increments exactly one position
-                # count) and `counts` is already in hand above.
-                plan_bias = _plan_bias_for_round(
-                    state["plan"], session.my_slot, sum(counts.values()))
+                horizon=h, nested=session.nested)
+            avail = rollouts["avail_pct"].to_numpy()
+            # Two questions out of one set of rollouts. `avail` is the turn
+            # this list is PRICED against and is what `gain_now` steps to;
+            # `avail_next_pct` is my very next turn and is the only one shown
+            # as a percentage beside a player's name, because that is the
+            # question a reader is asking of it. See `rank_available`.
             frame = rank_available(session.pool, session.settings, taken,
                                    counts, avail, my_turns_left,
-                                   plan_bias=plan_bias)
+                                   survive_display=rollouts["avail_next_pct"].to_numpy())
         finally:
             cur.close()
         with lock:
@@ -1850,66 +1870,6 @@ def register_live_routes(app, conn, db_path):
             # waiting until pick 31" because a pick landed in between. The
             # pair is written together or not at all.
             state["horizon_pick"] = int(horizon)
-
-    def _compute_plan(session, picks_made):
-        """Build the draft plan and store it, unless superseded meanwhile.
-
-        Mirrors `_recompute`'s guards exactly and for the same reasons -- see
-        its docstring for the generation/as_of_pick argument. The state it
-        writes is separate throughout: a plan computed against a board that
-        has since moved is as wrong as a stale ranking, but the two are
-        allowed to disagree about which pick they describe, because they are
-        recomputed on different clocks. Serving them from one `as_of_pick`
-        would force the slower of the pair to caption the faster.
-
-        Like `_recompute`, this returns immediately without a resolved slot:
-        the whole plan is "what should I do at MY turns", which is not a
-        question that has an answer without knowing which turns are mine.
-
-        Returns True when the plan is settled for this request (stored, or
-        deliberately discarded as superseded) and False when it yielded to a
-        ranking and should be retried -- see `plan_worker`.
-        """
-        if session.my_slot is None:
-            return True         # nothing to build, and retrying cannot help
-        with lock:
-            generation = state["generation"]
-            active_conn = state["league_conn"] or conn
-        # The cursor is opened, read from, and closed BEFORE the simulation
-        # -- not held across it. `_drafted_state` is the only database work
-        # this function does; keeping the cursor open through 2.5s of pure
-        # numpy would pin a cursor on the league's connection for the whole
-        # build, against the ranking worker reading the same connection on
-        # every pick.
-        cur = active_conn.cursor()
-        try:
-            taken, taken_order = _drafted_state(cur, session.pool)
-        finally:
-            cur.close()
-
-        def _yield_to_ranking():
-            """Give up this plan the moment a ranking is wanted. Called once
-            per simulated draft by build_plan."""
-            with lock:
-                return bool(state["ranking_wanted"])
-
-        plan = build_plan(session.pool, session.settings,
-                          session.slot_managers, session.my_slot, taken,
-                          session.betas, session.seed,
-                          taken_order=taken_order,
-                          should_abort=_yield_to_ranking)
-        if plan is None:
-            return False        # yielded to a ranking; the worker retries
-        with lock:
-            if state["generation"] != generation:
-                return True     # session stopped/restarted -- do not retry
-            if (state["plan_as_of_pick"] is not None
-                    and state["plan_as_of_pick"] > picks_made):
-                return True     # superseded by a newer plan -- do not retry
-            state["plan"] = plan
-            state["plan_as_of_pick"] = picks_made
-            state["plan_error"] = None
-        return True
 
     def _provision_and_build(league_id, team_id, settings=None, progress=None):
         """Open (provisioning if needed) the connection this league's session
@@ -2276,12 +2236,6 @@ def register_live_routes(app, conn, db_path):
         pending = {"session": None, "made": None}
 
         def request_recompute(sess, made):
-            # Raised here rather than inside the worker so it is set the
-            # instant a pick lands, not once the worker gets scheduled -- a
-            # plan already mid-build has to hear about it immediately, which
-            # is the whole point of the flag.
-            with lock:
-                state["ranking_wanted"] = True
             with recompute_cv:
                 pending["session"] = sess
                 pending["made"] = made
@@ -2355,21 +2309,6 @@ def register_live_routes(app, conn, db_path):
                             state["recompute_error"] = None
                         ranked = len(state["candidates"])
                     progress.ok("ranking", f"{ranked} ranked")
-                finally:
-                    # Lower the plan worker's yield flag here, and on EVERY
-                    # path -- not inside _recompute, which has three early
-                    # returns (no resolved slot, superseded generation,
-                    # superseded pick count). Clearing on only its success
-                    # path would leave the flag stuck high and starve the
-                    # plan permanently, which is the same bug as starving
-                    # the ranking, just pointed the other way. Set to
-                    # whether ANOTHER request is already queued rather than
-                    # a flat False, so a pick landing mid-ranking keeps the
-                    # plan yielding instead of racing the next ranking.
-                    with recompute_cv:
-                        queued = pending["made"] is not None
-                    with lock:
-                        state["ranking_wanted"] = queued
 
         def _resolve_slot(c2) -> bool:
             """Resolve my_slot from ESPN's pick order, history, or the
@@ -2467,7 +2406,6 @@ def register_live_routes(app, conn, db_path):
                             with lock:
                                 state["picks_seen"] = made
                             request_recompute(current["session"], made)
-                            request_plan(current["session"], made)
                     finally:
                         c2.close()
 
@@ -2522,7 +2460,6 @@ def register_live_routes(app, conn, db_path):
                 with lock:
                     state["picks_seen"] = made
                 request_recompute(current["session"], made)
-                request_plan(current["session"], made)
 
             try:
                 run_fn(listener, on_change, on_activity, stop_event)
@@ -2550,87 +2487,8 @@ def register_live_routes(app, conn, db_path):
                                    "the Draft Assistant bookmark again -- it "
                                    "mints a fresh token.")
 
-        # The plan's own coalescing slot and worker. Same latest-wins
-        # shape as the recompute pair above, deliberately NOT the same
-        # thread: build_plan simulates 120 full drafts (~4s), and queueing
-        # that ahead of a ranking would mean the user watches a stale
-        # recommendation list for four seconds after every pick. Two
-        # independent depth-one slots let the fast answer overtake the slow
-        # one, which is exactly the behaviour wanted -- the ranking is what
-        # they act on now, the plan is context for rounds away.
-        plan_cv = threading.Condition()
-        plan_pending = {"session": None, "made": None}
-
-        def request_plan(sess, made):
-            with plan_cv:
-                plan_pending["session"] = sess
-                plan_pending["made"] = made
-                plan_cv.notify()
-
-        def _wait_for_quiet():
-            """Block until no ranking is wanted. Sleeps on `stop_event`
-            rather than spinning: a busy-wait here would burn the very CPU
-            the ranking is trying to use, and measured 11x WORSE than the
-            contention it was meant to cure."""
-            while not stop_event.is_set():
-                with lock:
-                    if not state["ranking_wanted"]:
-                        return True
-                stop_event.wait(0.05)
-            return False
-
-        def plan_worker():
-            while not stop_event.is_set():
-                with plan_cv:
-                    while plan_pending["made"] is None and not stop_event.is_set():
-                        plan_cv.wait(timeout=0.5)
-                    if stop_event.is_set():
-                        return
-                    sess, made = plan_pending["session"], plan_pending["made"]
-                    plan_pending["session"] = plan_pending["made"] = None
-                with lock:
-                    if state["listener"] is not listener:
-                        continue
-                with lock:
-                    previous = (state["plan_as_of_pick"]
-                                if state["plan"] is not None else None)
-                if not plan_is_worth_rebuilding(sess.settings, sess.my_slot,
-                                                previous, made):
-                    continue
-                # Build in the gaps between rankings, retrying after each
-                # yield. Retrying is not optional: a ranking is requested on
-                # EVERY pick and a plan takes ~2.5s, so a worker that gave
-                # up on being pre-empted and waited for the next request
-                # would be pre-empted again by that request's own ranking,
-                # and would never once finish a plan for the whole draft.
-                # The retries are what make the yield a deferral rather than
-                # a cancellation. Bounded so a pathological burst of picks
-                # cannot spin this thread for the rest of the session -- the
-                # next pick queues a fresh request anyway.
-                for _ in range(PLAN_BUILD_ATTEMPTS):
-                    if not _wait_for_quiet():
-                        return                  # shutting down
-                    with plan_cv:
-                        if plan_pending["made"] is not None:
-                            break               # a newer pick supersedes this
-                    # Guarded for the same reason recompute_worker is: this
-                    # loop is the thread's whole body, so an escaping
-                    # exception ends the plan for the rest of the draft with
-                    # nothing reporting it. Recorded rather than re-raised,
-                    # and cleared by the next success.
-                    try:
-                        if _compute_plan(sess, made):
-                            break
-                    except Exception as exc:  # noqa: BLE001 -- see above
-                        with lock:
-                            if state["listener"] is listener:
-                                state["plan_error"] = \
-                                    f"{type(exc).__name__}: {exc}"
-                        break
-
         thread = threading.Thread(target=pump, daemon=True)
         recompute_thread = threading.Thread(target=recompute_worker, daemon=True)
-        plan_thread = threading.Thread(target=plan_worker, daemon=True)
         # Pick count as of launch, for the one recompute this function
         # requests below. Read HERE -- on the connect handler's own thread,
         # on the connection it just built this session with, and BEFORE that
@@ -2675,7 +2533,6 @@ def register_live_routes(app, conn, db_path):
                 league_conn.close()
             return None
         recompute_thread.start()
-        plan_thread.start()
         # ONE recompute at launch, when the slot is already known. Without it
         # nothing ever asked for a ranking until a pick landed:
         # request_recompute was called only from on_change (a pick) and from
@@ -2707,7 +2564,6 @@ def register_live_routes(app, conn, db_path):
             with lock:
                 state["picks_seen"] = made_at_launch
             request_recompute(session, made_at_launch)
-            request_plan(session, made_at_launch)
             progress.begin("ranking")
         else:
             # Terminal, and honestly so: with no slot there is nothing to rank
@@ -2743,8 +2599,6 @@ def register_live_routes(app, conn, db_path):
         with lock:
             state["generation"] += 1
             state.update({"session": session, "candidates": [],
-                          "plan": None, "plan_as_of_pick": None,
-                          "plan_error": None,
                           "as_of_pick": None, "horizon_pick": None,
                           "unmapped": [], "last_poll_at": None,
                           "recompute_error": None})
@@ -3073,17 +2927,17 @@ def register_live_routes(app, conn, db_path):
         """What the room is actually looking at, as one comparable value.
 
         A fingerprint rather than an event bus, and deliberately so: state is
-        written from three background threads (the socket listener, the
-        recompute worker, the plan worker) at sites that already carry their
-        own staleness guards. Publishing an event from each of them would
-        mean touching every one of those guards and inventing a fourth way to
-        be wrong about ordering. Reading the five values the room renders
-        from cannot be out of order with itself.
+        written from two background threads (the socket listener and the
+        recompute worker) at sites that already carry their own staleness
+        guards. Publishing an event from each of them would mean touching
+        every one of those guards and inventing a third way to be wrong about
+        ordering. Reading the values the room renders from cannot be out of
+        order with itself.
         """
         listener = state["listener"]
         return (
             state["generation"], state["picks_seen"], state["as_of_pick"],
-            state["plan_as_of_pick"], listener is not None,
+            listener is not None,
             # THE CLOCK. Left out of the first version of this fingerprint,
             # which was a straight regression: the room used to resync the
             # clock on its 2500ms poll, and pushing everything EXCEPT the
@@ -3134,9 +2988,9 @@ def register_live_routes(app, conn, db_path):
                     last, idle = rev, 0.0
                     payload = {"generation": rev[0], "picks_made": rev[1],
                                "candidates_as_of_pick": rev[2],
-                               "plan_as_of_pick": rev[3], "listener": rev[4],
-                               "on_the_clock": rev[5], "draft_started": rev[6],
-                               "seconds_remaining": rev[7]}
+                               "listener": rev[3],
+                               "on_the_clock": rev[4], "draft_started": rev[5],
+                               "seconds_remaining": rev[6]}
                     yield f"event: state\ndata: {json.dumps(payload)}\n\n"
                 else:
                     idle += EVENT_TICK
@@ -3148,40 +3002,6 @@ def register_live_routes(app, conn, db_path):
         return StreamingResponse(stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache",
                                           "X-Accel-Buffering": "no"})
-
-    @app.get("/api/live/plan")
-    def live_plan():
-        """The draft plan for my slot: positions by round, and the cliffs why.
-
-        Read-only over `state`, like live_board -- the work happens on the
-        plan worker, never on this request. Three distinguishable answers,
-        because the room has to render all three differently:
-
-          active False   -- no session at all.
-          plan None      -- a session, but no plan yet. Either the slot is
-                            still unresolved (a plan is "what do I do at MY
-                            turns", which has no answer without them) or the
-                            first ~4s of simulation is still running. Both
-                            are `pending: true`, because from the room's side
-                            they are the same thing: wait, do not show an
-                            error, do not reserve space that will jump.
-          plan present   -- the fields scoring.plan.build_plan returns,
-                            spread at the top level.
-
-        `as_of_pick` is the plan's OWN pick count, not the ranking's -- the
-        two are recomputed on separate workers and are expected to differ by
-        a pick or two mid-draft. Serving the ranking's number here would
-        caption a four-second-old plan with a one-second-old pick.
-        """
-        with lock:
-            if state["session"] is None:
-                return {"active": False, "pending": False, "plan": None}
-            plan = state["plan"]
-            error = state["plan_error"]
-            if plan is None:
-                return {"active": True, "pending": True, "plan": None,
-                        "error": error}
-            return {"active": True, "pending": False, "error": error, **plan}
 
     @app.get("/api/live/board")
     def live_board():
@@ -3229,7 +3049,12 @@ def register_live_routes(app, conn, db_path):
             for slot in range(1, teams + 1)]
 
         by_id = _board_index(session.board)
-        cells = [_board_cell(pid, pick_no, teams, slots, by_id)
+        # One lookup for every pick the board cannot name, before any cell is
+        # built: the deep rounds of a real room reach past a 250-player pool,
+        # and a grid of ids is what that used to look like.
+        named = identify_players(conn, [pid for pid, _ in picks
+                                        if str(pid) not in by_id])
+        cells = [_board_cell(pid, pick_no, teams, slots, by_id, named)
                  for pid, pick_no in picks]
 
         return {
@@ -3506,8 +3331,6 @@ def register_live_routes(app, conn, db_path):
             # the identity guard, it does not touch anything the thread
             # itself might still hold open.
             state.update({"session": None, "candidates": [],
-                          "plan": None, "plan_as_of_pick": None,
-                          "plan_error": None,
                           "as_of_pick": None, "horizon_pick": None,
                           "unmapped": [], "last_poll_at": None,
                           "listener": None,

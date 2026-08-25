@@ -71,7 +71,8 @@ export function healthCols(seasons: SeasonSummary[]): Col[] {
 }
 
 export function finishCols(seasons: SeasonSummary[], starters: number,
-                           projFinish?: number | null): Col[] {
+                           projFinish?: number | null,
+                           projPosition?: string): Col[] {
   const cols: Col[] = seasons.slice().reverse().map((s) => ({
     key: s.season,
     label: year(s.season),
@@ -91,7 +92,15 @@ export function finishCols(seasons: SeasonSummary[], starters: number,
     cols.push({
       key: 'proj',
       label: 'proj',
-      value: String(projFinish),
+      // The ONE column that spells the position out. Every column here is a
+      // place among the same position and the head says which -- but this
+      // one has not happened, and it is the number a reader carries away
+      // from the card and quotes at a keeper league six weeks later. Naming
+      // it there makes it portable in a way "87" under a head he is no
+      // longer looking at is not. Optional, so the board's own hover panel
+      // (CellTip) still prints a bare number under a row that names the
+      // position already.
+      value: projPosition ? `${projPosition}${projFinish}` : String(projFinish),
       tone: finishTone(projFinish, starters),
       fill: 1 - finishPosition(projFinish, starters),
       projected: true,
@@ -198,7 +207,7 @@ export function playedSeasons(seasons: SeasonSummary[]): SeasonSummary[] {
  *  meaning two things.
  */
 export function perGameDelta(seasons: SeasonSummary[], projPpg: number | null):
-{ label: string; tone: string } | null {
+{ label: string; tone: string; zero: boolean } | null {
   const rows = playedSeasons(seasons)
   if (!rows.length || projPpg === null) return null
   return signedChange(projPpg - rows[0].ppg)

@@ -2,7 +2,7 @@
 # One-time setup: make setup && make refresh
 # Draft night:    make up   (then open http://localhost:5173)
 
-.PHONY: setup refresh api web up test build espn-import fit-managers fit-prior score-ladder sim mock-backfill farm-mocks corpus-report
+.PHONY: setup refresh api web up test build image deploy-data espn-import fit-managers fit-prior score-ladder espn-ladder sim mock-backfill farm-mocks corpus-report
 
 setup: ## create venv, install python + web deps
 	python3 -m venv .venv
@@ -64,6 +64,26 @@ score-ladder: ## measure the ladder on HUMAN picks only (autodrafted IS FALSE), 
 	# `weekly` and `players` tables.
 	.venv/bin/python -m pipeline.score_ladder $(if $(LEAGUE_DB),--league-db $(LEAGUE_DB),)
 
+espn-ladder: ## measure the ESPN-board features on HUMAN picks vs the champion (scoring/human_prior.py); regenerates it ONLY if they beat it on top-1 without worsening log-loss
+	# The single highest-value experiment: does reading ESPN's OWN board
+	# (espn_rank/espn_proj) predict a person better than the shipped champion,
+	# which reads the consensus market? Adds the five `_ESPN_BOARD_FEATURES`
+	# columns on top of the champion's own feature set and measures them on
+	# human picks only, held out by draft, SE clustered by draft.
+	#
+	# Reuses `pipeline.score_ladder`'s harness -- the same human-only replay,
+	# the same `ablation` (candidates passed by name), the same writer -- but
+	# recomputes the champion's held-out score on this snapshot in ONE
+	# backtest rather than re-deriving rung 3 and rung 4, so it runs in about
+	# half the fits. Read-only against the corpus and the league database.
+	# There is no --force: it needs top-1 UP and log-loss NOT WORSE, and a
+	# losing rung prints its numbers, writes nothing, and exits non-zero.
+	#
+	# LEAGUE_DB, same as score-ladder: needed when the API holds
+	# data/nfl.duckdb read-write, since any data/leagues/*.duckdb carries the
+	# same universal `weekly` and `players` tables.
+	.venv/bin/python -m pipeline.espn_ladder $(if $(LEAGUE_DB),--league-db $(LEAGUE_DB),)
+
 fit-managers: ## fit per-manager pick models from imported draft history (REDUCED=1 also measures reduced personal models -- slow)
 	# filter-out, not a bare $(if): $(if) tests emptiness, so REDUCED=0 would
 	# have switched the slow path ON.
@@ -89,3 +109,33 @@ test: ## run the python test suite
 
 build: ## typecheck + production-build the frontend
 	cd web && npm run build
+
+image: ## build the deployable image locally (same one Railway builds)
+	# Worth running before a push: the web stage runs `tsc -b`, so a type
+	# error fails the image rather than the deploy.
+	docker build -t draft-assist .
+
+deploy-data: ## pack the databases the deployed volume needs into deploy/
+	# STOP THE API FIRST. DuckDB holds a write lock on data/nfl.duckdb while
+	# `make up` is running, and copying a file mid-write packs a torn one.
+	#
+	# Two databases, for two different reasons:
+	#
+	#   nfl.duckdb        rebuildable on the server with `pipeline.refresh`,
+	#                     which is usually the better move -- it pulls current
+	#                     stats rather than shipping this morning's. Packed
+	#                     here anyway for a first deploy that wants to be
+	#                     serving in a minute rather than in twenty.
+	#
+	#   draft_corpus.duckdb   NOT rebuildable. It is hundreds of mock drafts
+	#                     harvested over hours by `make farm-mocks`, and the
+	#                     archive page is nothing without it. This one has to
+	#                     be uploaded, after every farm run worth keeping.
+	@mkdir -p deploy
+	@test -f data/nfl.duckdb || { echo "data/nfl.duckdb is missing -- run make refresh"; exit 1; }
+	@test -f data/draft_corpus.duckdb || { echo "data/draft_corpus.duckdb is missing -- run make farm-mocks"; exit 1; }
+	gzip -c data/nfl.duckdb > deploy/nfl.duckdb.gz
+	gzip -c data/draft_corpus.duckdb > deploy/draft_corpus.duckdb.gz
+	@ls -lh deploy/
+	@echo
+	@echo "Upload these to the volume's /data -- see README, 'Putting the data there'."

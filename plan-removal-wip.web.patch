@@ -1,0 +1,782 @@
+diff --git a/web/src/App.css b/web/src/App.css
+index 05d380c..b1e6311 100644
+--- a/web/src/App.css
++++ b/web/src/App.css
+@@ -2192,8 +2192,7 @@ button.roster-row:focus-visible {
+   font-weight: 700;
+ }
+ 
+-/* Solid accent on a dark label, the `.plan-round-now` pill's treatment. The
+-   footer's draft button (`.pp-pop-foot.is-draft`) wears the same accent as a
++/* Solid accent on a dark label. The footer's draft button (`.pp-pop-foot.is-draft`) wears the same accent as a
+    12% tint, and the difference is deliberate: this one is attached to a
+    clock that is running, and a banner nobody notices is a banner that did
+    not work. */
+@@ -3385,341 +3384,6 @@ button.roster-row:focus-visible {
+   }
+ }
+ 
+-/* ==========================================================================
+-   The Plan tab -- "given my draft slot, which positions should I take in
+-   which round, and why". Same padding as `.board-tab` and the same "flows in
+-   `.draft-main`'s own overflow-y: auto, no second vertical scroller" rule
+-   every other tab already follows; only the WHY table's own wide row (round
+-   + four position columns + the annotation) gets a scroll container of its
+-   own, per `.plan-cliff-wrap` below, so it can never be the thing that makes
+-   the page scroll sideways.
+-   ========================================================================== */
+-
+-.plan-tab {
+-  padding: var(--space-3) var(--space-4) var(--space-5);
+-  display: flex;
+-  flex-direction: column;
+-  gap: var(--space-5);
+-}
+-
+-.plan-head {
+-  display: flex;
+-  align-items: baseline;
+-  flex-wrap: wrap;
+-  gap: var(--space-3);
+-}
+-
+-.plan-head-line {
+-  font-size: var(--text-md);
+-  color: var(--text-1);
+-}
+-
+-.plan-head-sep {
+-  margin: 0 2px;
+-  color: var(--text-3);
+-}
+-
+-.plan-head-meta {
+-  font-size: var(--text-xs);
+-  color: var(--text-3);
+-}
+-
+-/* Same spinner idiom as `.pp-loading-tail`/`.pp-loading-dot` and
+-   `.top3-recompute`/`.top3-recompute-dot` -- riding the tail of a line
+-   that's already on screen rather than opening a block of its own, so a
+-   refetch landing (or not) never moves anything below it. `margin-left:
+-   auto` parks it at the far right of `.plan-head` for the same reason
+-   `.top3-recompute`'s own comment gives: nothing sits to its right, so its
+-   own width changing pushes nothing. Animates on the shared `landing-spin`
+-   keyframe (see its own comment, further up this file, on why it's kept
+-   around for exactly this). */
+-.plan-loading-tail {
+-  margin-left: auto;
+-  display: inline-flex;
+-  align-items: center;
+-  gap: 5px;
+-  font-size: var(--text-xs);
+-  color: var(--text-3);
+-  white-space: nowrap;
+-}
+-
+-.plan-loading-dot {
+-  width: 9px;
+-  height: 9px;
+-  border: 1.5px solid var(--border);
+-  border-top-color: var(--accent);
+-  border-radius: 50%;
+-  animation: landing-spin 0.8s linear infinite;
+-}
+-
+-@media (prefers-reduced-motion: reduce) {
+-  .plan-loading-dot {
+-    animation: none;
+-  }
+-}
+-
+-/* The empty/loading state -- no resolved slot yet, no session at all, or
+-   the very first plan still building. Reuses `.rail-empty`'s own tone;
+-   `.plan-empty` only adds the centered geometry the rail's own use of it
+-   doesn't need. */
+-.plan-empty {
+-  padding: var(--space-6) 0;
+-  text-align: center;
+-}
+-
+-.plan-section-title {
+-  margin-bottom: var(--space-3);
+-}
+-
+-/* The WHY section's header row -- title plus the cliff/best-available
+-   toggle (PlanTab.tsx's `whyView`). Only used there; the round-by-round
+-   section above has no control to sit beside its own title, so it keeps
+-   using `.plan-section-title`'s margin directly rather than this wrapper. */
+-.plan-section-head {
+-  display: flex;
+-  align-items: baseline;
+-  justify-content: space-between;
+-  flex-wrap: wrap;
+-  gap: var(--space-3);
+-  margin-bottom: var(--space-3);
+-}
+-
+-.plan-section-head .plan-section-title {
+-  margin-bottom: 0;
+-}
+-
+-/* Same pill idiom as `.avail-pill`/`.avail-pills` (AvailableList's position
+-   filter) -- a two-way switch reuses that look rather than inventing a
+-   second one, just scoped under `.plan-` since it lives in this tab. */
+-.plan-why-toggle {
+-  display: flex;
+-  gap: 4px;
+-  flex-shrink: 0;
+-}
+-
+-.plan-why-toggle-btn {
+-  padding: 3px 9px;
+-  border-radius: 10px;
+-  border: 0;
+-  font-family: var(--font-mono);
+-  font-size: var(--text-xs);
+-  font-weight: 700;
+-  background: var(--bg-2);
+-  color: var(--text-3);
+-  cursor: pointer;
+-}
+-
+-.plan-why-toggle-btn:hover {
+-  color: var(--text-2);
+-}
+-
+-.plan-why-toggle-btn.is-active {
+-  background: var(--accent);
+-  color: var(--bg-0);
+-}
+-
+-/* -- round-by-round plan -- */
+-
+-.plan-rounds {
+-  list-style: none;
+-  margin: 0;
+-  padding: 0;
+-  display: flex;
+-  flex-direction: column;
+-  gap: 2px;
+-}
+-
+-.plan-round {
+-  display: flex;
+-  align-items: center;
+-  gap: var(--space-3);
+-  height: 34px;
+-  padding: 0 var(--space-3);
+-  border-radius: var(--radius);
+-  border: 1px solid transparent;
+-}
+-
+-/* Settled fact, not prediction -- the one distinction the task brief calls
+-   out as "the single most important thing in the layout". Past rounds are
+-   dimmed as a whole AND swap their inner content from a bar to a checkmark
+-   (see PlanRoundRow's own comment) -- two independent cues, neither of
+-   which depends on the reader distinguishing hues, so the distinction still
+-   reads for anyone not picking up the opacity alone. */
+-.plan-round.is-past {
+-  opacity: 0.62;
+-}
+-
+-/* "Where am I" -- the one round this whole tab exists to make instantly
+-   findable (task brief, layout section). Same accent-tinted treatment
+-   ClockPanel's `.clock-panel-up` gives the live pick clock, so "you are
+-   here" reads in one consistent color across the whole room. */
+-.plan-round.is-current {
+-  background: var(--accent-bg);
+-  border-color: var(--accent-border);
+-}
+-
+-.plan-round-label {
+-  flex-shrink: 0;
+-  width: 60px;
+-  font-size: var(--text-sm);
+-  font-weight: 700;
+-  color: var(--text-2);
+-}
+-
+-.plan-round-pick {
+-  margin-left: 4px;
+-  font-weight: 400;
+-  color: var(--text-3);
+-}
+-
+-.plan-round-now {
+-  flex-shrink: 0;
+-  padding: 1px 6px;
+-  border-radius: 10px;
+-  background: var(--accent);
+-  color: var(--bg-0);
+-  font-size: 10px;
+-  font-weight: 700;
+-  letter-spacing: 0.04em;
+-}
+-
+-.plan-round-actual,
+-.plan-round-predict {
+-  display: flex;
+-  align-items: center;
+-  gap: var(--space-2);
+-  min-width: 0;
+-}
+-
+-.plan-round-check {
+-  color: var(--ok);
+-  font-weight: 700;
+-}
+-
+-.plan-round-actual-label {
+-  font-size: var(--text-xs);
+-  color: var(--text-3);
+-}
+-
+-.plan-round-nodata {
+-  font-size: var(--text-sm);
+-  color: var(--text-3);
+-}
+-
+-.plan-bar-track {
+-  flex-shrink: 0;
+-  width: 120px;
+-  height: 8px;
+-  border-radius: 4px;
+-  background: var(--bg-2);
+-  overflow: hidden;
+-}
+-
+-.plan-bar-fill {
+-  display: block;
+-  height: 100%;
+-  border-radius: inherit;
+-  transition: width 260ms ease-out;
+-}
+-
+-.plan-bar-pct {
+-  flex-shrink: 0;
+-  width: 32px;
+-  font-size: var(--text-xs);
+-  color: var(--text-2);
+-}
+-
+-.plan-round-secondary {
+-  flex-shrink: 0;
+-  display: inline-flex;
+-  align-items: center;
+-  gap: 4px;
+-  font-size: var(--text-xs);
+-  color: var(--text-3);
+-}
+-
+-@media (prefers-reduced-motion: reduce) {
+-  .plan-bar-fill {
+-    transition: none;
+-  }
+-}
+-
+-/* -- the WHY table -- */
+-
+-/* Same horizontal-scroll-container idiom as `.board-wrap` (see its own
+-   comment): the one thing here that could ever outgrow a narrow viewport,
+-   kept from ever being the reason the page itself scrolls sideways. */
+-.plan-cliff-wrap {
+-  overflow-x: auto;
+-  border: 1px solid var(--border);
+-  border-radius: var(--radius);
+-  background: var(--bg-1);
+-}
+-
+-/* Inherits width/border-collapse/font-size and every th/td/hover rule from
+-   the base `table`/`th`/`td` rules above -- only the column-specific
+-   tweaks below are this table's own, same split `.avail-table` uses. Rows
+-   aren't clickable here, unlike the base rule's own assumption. */
+-.plan-cliff-table tbody tr {
+-  cursor: default;
+-}
+-
+-.plan-cliff-col-round {
+-  white-space: nowrap;
+-  color: var(--text-2);
+-}
+-
+-.plan-cliff-pick {
+-  margin-left: 5px;
+-  font-size: var(--text-xs);
+-  color: var(--text-3);
+-}
+-
+-.plan-cliff-col-num {
+-  width: 60px;
+-  text-align: right;
+-}
+-
+-.plan-cliff-dash {
+-  color: var(--text-3);
+-}
+-
+-/* The color ramp itself is set inline per cell (PlanTab.tsx's `cliffTone`,
+-   a fixed 0-90 scale so one row's "big" means the same as another's) --
+-   `.is-loud` only adds the weight bump large costs get on top of it, so a
+-   90-point cliff pops on shape as well as color, not color alone. */
+-.plan-cliff-value.is-loud {
+-  font-weight: 700;
+-}
+-
+-/* The best-available view's own cell treatment (PlanTab.tsx's
+-   `bestAvailTone`) -- color is set inline per cell (position hue for the
+-   first round and for a round that dropped, `--text-3` for a round that
+-   didn't move), and `.is-drop` only adds the same weight bump `.is-loud`
+-   gives a big cliff, so a real drop pops on shape as well as color here
+-   too. Deliberately NOT a color ramp: these values run 200-370 and a scale
+-   built for 0-90 point losses would paint the whole row near-maximum. */
+-.plan-avail-value.is-drop {
+-  font-weight: 700;
+-}
+-
+-.plan-cliff-col-note {
+-  white-space: nowrap;
+-  font-size: var(--text-xs);
+-}
+-
+-.plan-cliff-annotation {
+-  color: var(--accent);
+-}
+-
+-.plan-cliff-table tr.is-current {
+-  background: var(--accent-bg);
+-}
+-
+-.plan-cliff-table tr.is-current .plan-cliff-col-round {
+-  color: var(--text-1);
+-}
+-
+ /* -- a player leaving the board -------------------------------------------
+    The row fades out where it sits, is removed, and the rows below slide up
+    to close the gap. The slide is NOT here -- it is a FLIP transform applied
+@@ -4171,8 +3835,8 @@ button.roster-row:focus-visible {
+ 
+ .pp-pop-figures {
+   margin-left: auto;
+-  /* Never squeezed: these four are the numbers the pick is made on, and the
+-     name beside them is the thing with room to give. */
++  /* Never squeezed: these are the numbers the pick is made on, and the name
++     beside them is the thing with room to give. */
+   flex: 0 0 auto;
+   display: flex;
+   gap: var(--space-4);
+@@ -4192,7 +3856,7 @@ button.roster-row:focus-visible {
+   color: var(--text-3);
+ }
+ 
+-/* `line-height: 1` so the four values sit on one line with their captions
++/* `line-height: 1` so the values sit on one line with their captions
+    however tall the caption's own font wants to be. */
+ .pp-pop-figure-value {
+   font-size: 15px;
+@@ -4338,18 +4002,16 @@ button.roster-row:focus-visible {
+    schedule strip's head states a rank out of the league where the others
+    state a team. Both would otherwise be solved by drawing their own contents
+    smaller than the cards beside them. */
++/* The dominant card in a row of two: a figure, eighteen weeks of bars and
++   three priced markets against a neighbour of four label/value rows. */
++.pp-pop-card.is-widest {
++  flex: 1.7 1 0;
++}
++
+ .pp-pop-card.is-wide {
+   flex: 1.35 1 0;
+ }
+ 
+-/* Usage is the widest thing in its row -- four labels and up to five columns
+-   -- but not by as much as it was: Vegas joined the row and was squeezed into
+-   a single share, where its unit wrapped over four lines and its market
+-   labels ellipsised to "R..." and "O". Its row is two cards now, so this
+-   share buys real width rather than a slightly larger slice of a crowd. */
+-.pp-pop-card.is-widest {
+-  flex: 1.6 1 0;
+-}
+ 
+ /* The hover panel's own head, a step smaller: these sit side by side in a
+    popup instead of alone in a tooltip. The card is a flex column with its
+@@ -4669,6 +4331,7 @@ button.roster-row:focus-visible {
+    computed. */
+ .pp-pop-vegas-bar {
+   flex: 1 1 0;
++  max-width: 22px;
+   align-self: flex-end;
+   min-height: 4px;
+   border-radius: 1px;
+diff --git a/web/src/api.ts b/web/src/api.ts
+index 70ea1fa..88f6a24 100644
+--- a/web/src/api.ts
++++ b/web/src/api.ts
+@@ -536,126 +536,6 @@ export async function fetchBoard(): Promise<LiveBoard> {
+   return res.json()
+ }
+ 
+-// -- live draft plan (the "Plan" tab, GET /api/live/plan) -------------------
+-//
+-// Answers "given my draft slot, which positions should I take in which
+-// round, and why" -- the round-by-round prediction plus the positional
+-// cliffs (points of projected value lost by waiting one more round) that
+-// explain it. Server cost is ~4s (120 simulated drafts) and the plan only
+-// changes when a pick lands, so DraftRoom refetches it on `picks_made` changing rather than on
+-// the 2.5s state/board timer -- see its own poll effect.
+-
+-export interface PlanPositionShare {
+-  position: string
+-  pct: number
+-}
+-
+-// One round of the round-by-round plan. `positions` is sorted descending by
+-// `pct` and only carries positions above a small server-side threshold, so
+-// its length runs 1 to 4 -- QB/RB/WR/TE **and** K/DST all legitimately
+-// appear here (unlike `cliffs`/`best_available` below): a real roster needs
+-// one of each late, and the plan predicts them the same as any other
+-// position.
+-//
+-// `is_past`/`actual` is the one distinction the whole tab exists to make
+-// obvious: `is_past: true` means this pick already happened in the live
+-// draft and `actual` names what was actually taken -- settled fact, not
+-// prediction. `actual` is null exactly when `is_past` is false.
+-export interface PlanRound {
+-  round: number
+-  pick: number
+-  is_past: boolean
+-  actual: string | null
+-  positions: PlanPositionShare[]
+-}
+-
+-// Points of projected value lost by waiting one more round at that
+-// position, keyed by QB/RB/WR/TE only -- K and DST never carry a cliff.
+-// `0.0` is common and meaningful ("costs nothing to wait"), never a
+-// placeholder for "unknown".
+-export interface PlanCliffRound {
+-  round: number
+-  pick: number
+-  by_position: Record<string, number>
+-}
+-
+-// The best projected points still on the board at that position/round --
+-// what `PlanCliffRound.by_position` is the round-over-round drop of. Same
+-// QB/RB/WR/TE-only keying as the cliff it backs.
+-export interface PlanBestAvailableRound {
+-  round: number
+-  pick: number
+-  by_position: Record<string, number>
+-}
+-
+-// `cliffs`/`best_available` carry one entry per round, same `round`/`pick`
+-// keys as `rounds_plan`, but can run SHORTER than it: the last round has no
+-// "next round" to wait for, so there is nothing to measure a cliff against.
+-// Always join these against `rounds_plan` by `round` -- never by array
+-// index -- and render a round with no matching cliff entry as an empty
+-// cliff row rather than dropping it.
+-//
+-// Every field here is required: a plan missing its slot or its rounds is
+-// exactly the `pending` case below, not a `ready` one with holes in it.
+-export interface LivePlan {
+-  my_slot: number
+-  teams: number
+-  rounds: number
+-  n_drafts: number
+-  as_of_pick: number
+-  rounds_plan: PlanRound[]
+-  cliffs: PlanCliffRound[]
+-  best_available: PlanBestAvailableRound[]
+-}
+-
+-// GET /api/live/plan always answers 200, in one of three shapes:
+-//   1. no draft session at all --
+-//      {"active": false, "pending": false, "plan": null}
+-//   2. a session, but no plan yet -- the slot isn't resolved, or the first
+-//      ~4s of simulation is still running (indistinguishable from here, and
+-//      meant to be: both are a quiet loading state, never an error) --
+-//      {"active": true, "pending": true, "plan": null, "error": null}
+-//   3. a ready plan -- its fields ride at the TOP LEVEL of the body, not
+-//      nested under `plan` (which is absent in this shape entirely) --
+-//      {"active": true, "pending": false, "error": null,
+-//       "my_slot": 2, "teams": 8, ..., "rounds_plan": [...], ...}
+-// Normalized here into one discriminated union so nothing downstream has to
+-// juggle `active`/`pending`/the top-level-vs-nested split itself.
+-export type PlanFetchResult =
+-  | { status: 'inactive' }
+-  | { status: 'pending'; error: string | null }
+-  // `error` is NOT "the plan failed" here -- it is the last REBUILD
+-  // attempt's own error, and can be set even on a `ready` result when a
+-  // previous good plan is still being served underneath it. Render it as a
+-  // small non-blocking notice beside the tab's content, never in place of
+-  // it.
+-  | { status: 'ready'; plan: LivePlan; error: string | null }
+-
+-export async function fetchPlan(): Promise<PlanFetchResult> {
+-  const res = await fetch('/api/live/plan')
+-  if (!res.ok) {
+-    throw new Error(`Failed to load the draft plan (${res.status}): ${await detailText(res)}`)
+-  }
+-  const body = await res.json()
+-  const error = typeof body.error === 'string' ? body.error : null
+-  if (!body.active) return { status: 'inactive' }
+-  if (!Array.isArray(body.rounds_plan)) return { status: 'pending', error }
+-  return {
+-    status: 'ready',
+-    error,
+-    plan: {
+-      my_slot: body.my_slot,
+-      teams: body.teams,
+-      rounds: body.rounds,
+-      n_drafts: body.n_drafts,
+-      as_of_pick: body.as_of_pick,
+-      rounds_plan: body.rounds_plan,
+-      cliffs: Array.isArray(body.cliffs) ? body.cliffs : [],
+-      best_available: Array.isArray(body.best_available) ? body.best_available : [],
+-    },
+-  }
+-}
+-
+ // The connect screen's only call. `board_fingerprint` identifies the pool
+ // build the session locked in, not shown to the user -- what the connect
+ // screen actually shows is a slot number, but that comes from a follow-up
+diff --git a/web/src/pages/DraftRoom.tsx b/web/src/pages/DraftRoom.tsx
+index f9e17da..5c179f0 100644
+--- a/web/src/pages/DraftRoom.tsx
++++ b/web/src/pages/DraftRoom.tsx
+@@ -1,14 +1,13 @@
+ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+ import { Link } from 'react-router-dom'
+-import { fetchBoard, fetchLiveState, fetchPlan, fetchPlayers, selectPlayer, setAutodraft,
++import { fetchBoard, fetchLiveState, fetchPlayers, selectPlayer, setAutodraft,
+          type BoardPlayer, type LiveBoard,
+          type LiveCandidate, type LiveSettings, type LiveState, type Player,
+-         type PlanFetchResult, type RosterPlayer } from '../api'
++         type RosterPlayer } from '../api'
+ import ClockPanel from '../components/draft/ClockPanel'
+ import RosterPanel, { type RosterSlot } from '../components/draft/RosterPanel'
+ import TopThree from '../components/draft/TopThree'
+ import AvailableList from '../components/draft/AvailableList'
+-import PlanTab from '../components/draft/PlanTab'
+ import ConfirmPick, { type PickStatus } from '../components/draft/ConfirmPick'
+ import PickTicker from '../components/draft/PickTicker'
+ import PlayerOverlay, { type OverlayTarget } from '../components/draft/PlayerOverlay'
+@@ -25,7 +24,7 @@ const POLL_MS = 2500
+ // thirty-second timer is worse off than one who never had the stream.
+ const FALLBACK_POLL_MS = 5000
+ 
+-type Tab = 'available' | 'board' | 'plan'
++type Tab = 'available' | 'board'
+ 
+ // Canonical display order for the starter positions ESPN's own settings
+ // dict (session.settings.starters, api/live.py's `settings` key) carries no
+@@ -156,18 +155,6 @@ export default function DraftRoom() {
+   // broken.
+   const [board, setBoard] = useState<LiveBoard | null>(null)
+   const [boardError, setBoardError] = useState<string | null>(null)
+-  // The Plan tab's own data, polled far more coarsely than board/state above
+-  // (see the effect below): /api/live/plan costs ~4s server-side to rebuild
+-  // and only ever changes when a pick lands, so it is refetched on
+-  // `picks_made` changing rather than on the 2.5s timer (plus a slow retry
+-  // while the server itself reports `pending` -- see planStatusRef below).
+-  // `planResult` is never cleared on a failed refetch -- same "one hiccup
+-  // must not blank an otherwise-fine view" rule `board`/`boardError` already
+-  // follow -- only on the session itself going inactive, where a stale plan
+-  // from a finished or different draft would be actively misleading.
+-  const [planResult, setPlanResult] = useState<PlanFetchResult | null>(null)
+-  const [planFetchError, setPlanFetchError] = useState<string | null>(null)
+-  const [planLoading, setPlanLoading] = useState(false)
+   const [players, setPlayers] = useState<Record<string, Player>>({})
+   // Whether the join table is still ON ITS WAY, as opposed to having arrived
+   // empty. The two look identical from `players` alone and must not be drawn
+@@ -196,31 +183,6 @@ export default function DraftRoom() {
+   // transition in the next one.
+   const prevOnClockRef = useRef<number | null | undefined>(undefined)
+ 
+-  // `picks_made` last seen when a plan fetch was kicked off, so the poll
+-  // below can refetch on a NEW pick landing rather than on a timer.
+-  // `undefined` (mirroring prevOnClockRef's own convention just above) marks
+-  // "no session observed yet", so the first poll of a session always
+-  // fetches once regardless of what `picks_made` actually is. Written
+-  // BEFORE the plan fetch is awaited (see the poll effect), not after it
+-  // resolves: `setInterval` does not wait for one `poll()` call to finish
+-  // before scheduling the next, and without that ordering an overlapping
+-  // call could see the same stale `picks_made` and fire a second request
+-  // for the same pick.
+-  const lastPlanPicksRef = useRef<number | undefined>(undefined)
+-  // The last plan status this room actually observed, so the poll below can
+-  // tell "still building the first plan" apart from "sitting on a finished
+-  // one" without another state read. A `pending` result means the slot
+-  // isn't resolved yet or the ~4s simulation is still running -- neither of
+-  // which is tied to a pick landing -- so a session stuck there needs its
+-  // own slow retry (see planPollTickRef below) rather than waiting on
+-  // picks_made to change, which might not happen again for a while.
+-  const planStatusRef = useRef<'inactive' | 'pending' | 'ready'>('inactive')
+-  // Increments once per poll() call, purely to throttle the `pending` retry
+-  // above to every OTHER cycle (~5s) rather than every one (~2.5s) -- "poll
+-  // it no more often than every few seconds" for an endpoint this expensive,
+-  // even while it has nothing to report yet.
+-  const planPollTickRef = useRef(0)
+-
+   // The pick this session is confirming, plus how that confirmation is
+   // going -- held here (not inside ConfirmPick) because a poll landing
+   // mid-confirm must not lose track of what's being sent, and because the
+@@ -286,14 +248,6 @@ export default function DraftRoom() {
+     let cancelled = false
+ 
+     async function poll() {
+-      // `undefined` means "the state fetch below failed this cycle" -- kept
+-      // apart from `false` ("fetched fine, session is inactive") so a single
+-      // missed /api/live/state poll can't be mistaken for a real transition
+-      // to inactive and wipe the plan over it. Set from `data` (this poll's
+-      // own fresh read), never from the `state` component value, which is
+-      // one render behind by the time this runs.
+-      let liveActive: boolean | undefined
+-      let livePicksMade = 0
+       try {
+         const data = await fetchLiveState()
+         if (!cancelled) {
+@@ -313,8 +267,6 @@ export default function DraftRoom() {
+             }
+           }
+         }
+-        liveActive = data.active
+-        livePicksMade = data.picks_made
+       } catch (e) {
+         if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load live state')
+       }
+@@ -329,45 +281,6 @@ export default function DraftRoom() {
+           setBoardError(e instanceof Error ? e.message : 'Failed to load the draft board')
+         }
+       }
+-
+-      // /api/live/plan -- see lastPlanPicksRef/planStatusRef's own comments
+-      // on why this is gated on picks_made changing (plus a slow retry while
+-      // `pending`) rather than run every cycle like the two fetches above.
+-      planPollTickRef.current += 1
+-      if (liveActive === false) {
+-        lastPlanPicksRef.current = undefined
+-        planStatusRef.current = 'inactive'
+-        if (!cancelled) {
+-          setPlanResult({ status: 'inactive' })
+-          setPlanFetchError(null)
+-        }
+-      } else if (liveActive === true) {
+-        const pickLanded = lastPlanPicksRef.current === undefined
+-          || livePicksMade !== lastPlanPicksRef.current
+-        // Every other tick (~5s) while the server itself is still resolving
+-        // the slot or building the first plan -- a pick landing during that
+-        // window is caught by `pickLanded` above regardless, this is only
+-        // for the case where nothing else would ever ask again.
+-        const pendingRetryDue = planStatusRef.current === 'pending' && planPollTickRef.current % 2 === 0
+-        if (pickLanded || pendingRetryDue) {
+-          lastPlanPicksRef.current = livePicksMade
+-          if (!cancelled) setPlanLoading(true)
+-          try {
+-            const result = await fetchPlan()
+-            planStatusRef.current = result.status
+-            if (!cancelled) {
+-              setPlanResult(result)
+-              setPlanFetchError(null)
+-            }
+-          } catch (e) {
+-            if (!cancelled) {
+-              setPlanFetchError(e instanceof Error ? e.message : 'Failed to load the draft plan')
+-            }
+-          } finally {
+-            if (!cancelled) setPlanLoading(false)
+-          }
+-        }
+-      }
+     }
+ 
+     poll()
+@@ -746,13 +659,6 @@ export default function DraftRoom() {
+           >
+             Snake Board
+           </button>
+-          <button
+-            type="button"
+-            className={`draft-tab${tab === 'plan' ? ' is-active' : ''}`}
+-            onClick={() => setTab('plan')}
+-          >
+-            Plan
+-          </button>
+         </nav>
+         {/* Rendered on both tabs, not just Available. The pool size does not
+             change mid-draft, so a hint that came and went with the tab would
+@@ -908,46 +814,36 @@ export default function DraftRoom() {
+                 />
+               </>
+             )
+-            : tab === 'board'
+-              ? (
+-                board?.active
+-                  ? (
+-                    // `.board-tab` only pads the grid, same padding the
+-                    // mock's own snake-board panel uses -- `.board-wrap`
+-                    // itself is DraftBoardGrid's own horizontal scroll
+-                    // container (per its own CSS comment), and it flows
+-                    // straight in `.draft-main`'s existing overflow-y:
+-                    // auto region rather than opening a second, nested
+-                    // vertical scroller -- the same "no second scroll
+-                    // container" call the ranked available table already
+-                    // makes (see App.css, the comment above
+-                    // `.avail-col-rank`) so the page itself never scrolls
+-                    // and there is exactly one vertical scroll container
+-                    // per tab.
+-                    <div className="board-tab">
+-                      {boardError && <p className="error draft-error-banner">{boardError}</p>}
+-                      <DraftBoardGrid board={board} onOpenPlayer={handleOpenBoardPlayer} />
+-                    </div>
+-                  )
+-                  // No board yet: either still loading (boardError null) or
+-                  // the fetch itself failed before a first board ever
+-                  // landed (nothing stale to fall back to, unlike the
+-                  // branch above).
+-                  : (
+-                    <p className="rail-empty draft-main-placeholder">
+-                      {boardError ?? 'Waiting for the draft board…'}
+-                    </p>
+-                  )
+-              )
+-              // PlanTab is its own top-level content, same as
+-              // DraftBoardGrid/AvailableList above -- `.plan-tab` supplies
+-              // its own padding (matching `.board-tab`'s) rather than this
+-              // needing a wrapper div of its own, and it flows in
+-              // `.draft-main`'s existing vertical scroll region exactly as
+-              // the other two tabs do.
+-              : (
+-                <PlanTab result={planResult} loading={planLoading} fetchError={planFetchError} />
+-              )}
++            : (
++              board?.active
++                ? (
++                  // `.board-tab` only pads the grid, same padding the
++                  // mock's own snake-board panel uses -- `.board-wrap`
++                  // itself is DraftBoardGrid's own horizontal scroll
++                  // container (per its own CSS comment), and it flows
++                  // straight in `.draft-main`'s existing overflow-y:
++                  // auto region rather than opening a second, nested
++                  // vertical scroller -- the same "no second scroll
++                  // container" call the ranked available table already
++                  // makes (see App.css, the comment above
++                  // `.avail-col-rank`) so the page itself never scrolls
++                  // and there is exactly one vertical scroll container
++                  // per tab.
++                  <div className="board-tab">
++                    {boardError && <p className="error draft-error-banner">{boardError}</p>}
++                    <DraftBoardGrid board={board} onOpenPlayer={handleOpenBoardPlayer} />
++                  </div>
++                )
++                // No board yet: either still loading (boardError null) or
++                // the fetch itself failed before a first board ever
++                // landed (nothing stale to fall back to, unlike the
++                // branch above).
++                : (
++                  <p className="rail-empty draft-main-placeholder">
++                    {boardError ?? 'Waiting for the draft board…'}
++                  </p>
++                )
++            )}
+         </div>
+ 
+         <aside className="draft-rail">

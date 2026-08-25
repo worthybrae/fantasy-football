@@ -794,6 +794,37 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
     from api.custody import register_custody_routes
     register_custody_routes(app)
 
+    # Upcoming drafts and server-side token minting. Registered after custody
+    # because it reads through it: the session these routes act as is the one
+    # `custody_for` resolves, and only in its total absence this machine's own
+    # saved ESPN login (see api/drafts.py for why that order is fixed).
+    from api.drafts import register_draft_routes
+    register_draft_routes(app)
+
+    # The landing page's hero: a real mock draft, live, off the farm's own
+    # record. Read-only, anonymous, and given this app's connection so the
+    # names and prices it shows are the board every other endpoint serves.
+    from api.demo import register_demo_routes
+    register_demo_routes(app, conn)
+
+    # The draft archive: what hundreds of recorded drafts do from a given
+    # seat. Signed in only, and read out of the corpus rather than this
+    # database -- the board's connection is passed for names alone.
+    from api.market import register_market_routes
+    register_market_routes(app, conn)
+
+    # THE BUILT FRONTEND, LAST. Its fallback route matches every path there
+    # is, so anything registered after it would be unreachable -- see
+    # api/static.py, which also explains why the SPA is served from this
+    # process at all rather than from its own domain (the custody cookie is
+    # SameSite=Lax and would not survive the split).
+    #
+    # A checkout with no `web/dist` -- every test run, and the dev server,
+    # where Vite serves the frontend itself -- mounts nothing and is not an
+    # error.
+    from api.static import register_spa
+    register_spa(app)
+
     return app
 
 app = create_app()

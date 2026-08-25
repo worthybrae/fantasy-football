@@ -1,0 +1,1203 @@
+/* THE DRAFT ARCHIVE -- a research surface, not a draft room.
+ *
+ * Same tokens as the room, deliberately: this is the same product looking at
+ * the same players, and a second palette would read as a second app. What
+ * differs is the RHYTHM. The room is a cockpit -- 11px mono, every pixel
+ * spent, nothing below the fold that matters. This is read sitting down,
+ * before a draft, so it gets a wider measure, a bigger type scale, and air
+ * between its sections.
+ *
+ * The one visual idea, used at two scales: PROPORTIONAL INK. A turn's picks
+ * are segments whose widths are their shares, and a player's draft slots are
+ * bins whose heights are their frequencies. Nothing here is a gauge, a score
+ * out of ten, or a traffic light -- the widths ARE the finding, and position
+ * colour (--pos-*, the room's own) is the only encoding on top of them.
+ *
+ * `mk-` prefix throughout; nothing in here may leak into the room. */
+
+/* The page carries the product's own top bar (`.draft-topbar`, shared with
+   the room, the dashboard and /mocks) over a centred reading column. The bar
+   is sticky HERE only -- everywhere else it sits in a fixed-height app shell
+   that never scrolls, and this is the one page a reader scrolls a long table
+   on. Scoped to `.mk-page` so the room's own bar is untouched. */
+.mk-page {
+  min-height: 100vh;
+  background: var(--bg-0);
+}
+
+.mk-page .draft-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+}
+
+.mk {
+  /* Full width, like the room: the archive is tables and bars, and a
+     column with margins either side of it on a wide screen is a document
+     dressed as a tool. */
+  width: 100%;
+  padding: 32px 28px 96px;
+  color: var(--text-2);
+}
+
+/* -- masthead ------------------------------------------------------------ */
+
+/* Title and credentials side by side rather than stacked: stacked, the
+   figures pushed the seat control -- the page's one input -- most of a
+   screen down, and left a column of empty beside a 56ch lede. */
+.mk-mast {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 40px;
+  padding-bottom: 26px;
+  border-bottom: 1px solid var(--border);
+}
+
+.mk-title {
+  margin: 0;
+  font-size: 40px;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  color: var(--text-1);
+  font-weight: 700;
+}
+
+.mk-lede {
+  margin: 10px 0 0;
+  max-width: 56ch;
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
+/* The corpus, as figures rather than a sentence: these are the page's
+   credentials and they should be checkable at a glance. Hairlines between
+   them rather than four cards -- the same rule the tables below are ruled
+   with, so the strip reads as one counted thing, not a row of tiles. */
+.mk-facts {
+  display: flex;
+  flex-wrap: wrap;
+  margin: 6px 0 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-1);
+}
+
+.mk-facts div {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 12px 18px;
+  border-left: 1px solid var(--border);
+}
+
+.mk-facts div:first-child {
+  border-left: none;
+}
+
+.mk-facts dt {
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.mk-facts dd {
+  margin: 0;
+  font-size: 20px;
+  line-height: 1;
+  color: var(--text-1);
+  white-space: nowrap;
+}
+
+.mk-note {
+  margin: 18px 0 0;
+  max-width: 68ch;
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  color: var(--text-3);
+}
+
+/* -- the one control ----------------------------------------------------- */
+
+.mk-seats {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 20px 0 22px;
+  flex-wrap: wrap;
+}
+
+.mk-seat-row {
+  display: flex;
+  gap: 6px;
+}
+
+/* Eight buttons in a row IS the front of the draft board, which is why they
+   are square and evenly spaced rather than a select: the control looks like
+   the thing it is choosing from. */
+.mk-seat {
+  width: 40px;
+  height: 40px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-1);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 15px;
+  cursor: pointer;
+  transition: border-color 120ms ease, color 120ms ease, background 120ms ease;
+}
+
+.mk-seat:hover {
+  border-color: var(--text-3);
+  color: var(--text-1);
+}
+
+.mk-seat.is-active {
+  background: var(--accent-bg);
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+/* Every control on the page keeps the same ring. The room's controls get
+   theirs from App.css; nothing under `.mk-` inherited one. */
+.mk-seat:focus-visible,
+.mk-pill:focus-visible,
+.mk-more:focus-visible,
+.mk-at select:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 1px;
+}
+
+.mk-seat-picks {
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+/* -- panels -------------------------------------------------------------- */
+
+.mk-cols {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+/* Sixteen turns on the left against two short panels on the right left the
+   rail's own column empty for most of a screen's scroll. Sticky: the two
+   readings that describe the whole seat stay beside whichever turn is being
+   read, which is what they are for. 60px clears the sticky top bar. */
+.mk-side {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  position: sticky;
+  top: 60px;
+}
+
+.mk-panel {
+  padding: 22px 24px 26px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-1);
+}
+
+.mk-players {
+  margin-top: 20px;
+}
+
+.mk-h2 {
+  margin: 0;
+  font-size: 17px;
+  line-height: 1.25;
+  color: var(--text-1);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.mk-sub {
+  margin: 8px 0 0;
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+
+.mk-loading,
+.mk-error {
+  margin: 16px 0 0;
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+
+.mk-error {
+  color: var(--fail-soft);
+}
+
+/* -- your turns ---------------------------------------------------------- */
+
+.mk-turns {
+  list-style: none;
+  margin: 18px 0 0;
+  padding: 0;
+}
+
+.mk-turn {
+  padding: 14px 0 16px;
+  border-top: 1px solid var(--border);
+}
+
+.mk-turn:first-child {
+  border-top: none;
+  padding-top: 4px;
+}
+
+.mk-turn-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+/* The pick number leads, at a size nothing else on the row competes with:
+   the reader is looking for their own pick and should find it by scanning
+   one column of figures. */
+.mk-turn-pick {
+  font-size: 21px;
+  line-height: 1;
+  color: var(--text-1);
+}
+
+.mk-turn-round {
+  font-size: var(--text-xs);
+  letter-spacing: 0.06em;
+  color: var(--text-3);
+}
+
+.mk-turn-verdict {
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+
+.mk-turn-meta {
+  margin-left: auto;
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+/* THE SIGNATURE. Widths are shares; colour is position. One long block is a
+   turn that is already decided, a row of slivers is one nobody agrees on. */
+.mk-bar {
+  display: flex;
+  height: 12px;
+  margin-top: 10px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--bg-2);
+}
+
+.mk-bar-seg {
+  height: 100%;
+  min-width: 1px;
+}
+
+/* Everyone outside the named few, kept rather than dropped -- a bar showing
+   only its top six would make every turn look settled. Striped so it reads
+   as "many people" instead of as a seventh player. */
+.mk-bar-rest {
+  height: 100%;
+  background-image: repeating-linear-gradient(
+    135deg, var(--bg-2) 0 4px, var(--border) 4px 8px);
+}
+
+/* Four across, on a fixed grid rather than a wrapping row: the tiles are
+   two lines tall (PickOption), and a flex-wrap of unequal names put the last
+   one under the first at one width and beside it at another.
+
+   The fourth column is what the stacked bar above these used to occupy. A
+   turn is a spread of names, and a fourth name says more about that spread
+   than a second drawing of the same three shares did. */
+.mk-turn-names {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-3);
+  list-style: none;
+  /* Was 12px, under a bar. The head above is now the only thing between two
+     turns, so the tiles sit closer to the pick number they belong to. */
+  margin: 10px 0 0;
+  padding: 0;
+}
+
+/* Two rows of two before one column: four tiles at this page's own middle
+   widths clip a name like "Jaxon Smith-Njigba" long before the layout is
+   narrow enough to want a single file. */
+@media (max-width: 1180px) {
+  .mk-turn-names {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.mk-turn-names li {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+/* One column at the width where three two-line tiles start clipping names. */
+@media (max-width: 720px) {
+  .mk-turn-names {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* -- the paths people walk ----------------------------------------------- */
+
+.mk-paths {
+  list-style: none;
+  margin: 16px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mk-paths li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.mk-path {
+  display: flex;
+  gap: 3px;
+}
+
+/* A position path is read left to right like the draft it describes, so the
+   chips are square, tight, and never wrap mid-path. */
+.mk-chip {
+  min-width: 30px;
+  padding: 3px 0;
+  border: 1px solid;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-align: center;
+  opacity: 0.9;
+}
+
+.mk-path-share {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+/* The track is what makes the fill's percentage mean anything: without it
+   the width resolved against a shrink-to-fit flex parent and every bar
+   collapsed to its minimum, which is what these were doing. */
+.mk-path-track {
+  width: 90px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg-2);
+  overflow: hidden;
+}
+
+.mk-path-fill {
+  display: block;
+  height: 100%;
+  min-width: 2px;
+  border-radius: 2px;
+  background: var(--text-3);
+}
+
+.mk-extreme + .mk-extreme {
+  margin-top: 16px;
+}
+
+.mk-extreme-line {
+  margin: 6px 0 0;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
+.mk-extreme-line strong {
+  color: var(--text-1);
+  font-weight: 600;
+}
+
+/* -- players ------------------------------------------------------------- */
+
+.mk-players-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.mk-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.mk-search {
+  width: 190px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  color: var(--text-1);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+}
+
+.mk-search:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 1px;
+}
+
+.mk-pills {
+  display: flex;
+  gap: 4px;
+}
+
+.mk-pill {
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.mk-pill:hover {
+  color: var(--text-1);
+}
+
+.mk-pill.is-active {
+  background: var(--accent-bg);
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+.mk-at {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+.mk-at select {
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  color: var(--text-1);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.mk-table {
+  width: 100%;
+  margin-top: 18px;
+  border-collapse: collapse;
+}
+
+/* The table runs to several hundred rows, so its heading follows the scroll
+   -- "STILL AT 32" and "ESPN" are unguessable from the figures alone. 44px
+   is the top bar's height, which is what it parks under. */
+.mk-table th {
+  position: sticky;
+  top: 44px;
+  z-index: 1;
+  padding: 10px 10px;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--text-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  font-weight: 500;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.mk-table th.mk-col-player,
+.mk-table th.mk-col-strip {
+  text-align: left;
+}
+
+.mk-axis-note {
+  display: block;
+  margin-top: 3px;
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  text-transform: none;
+  color: var(--text-3);
+  opacity: 0.75;
+}
+
+.mk-table td {
+  padding: 9px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+  font-size: var(--text-sm);
+  text-align: right;
+  vertical-align: middle;
+}
+
+.mk-table tr:hover td {
+  background: color-mix(in srgb, var(--bg-2) 60%, transparent);
+}
+
+.mk-col-player {
+  text-align: left;
+  width: 250px;
+}
+
+.mk-col-num {
+  width: 74px;
+}
+
+.mk-col-strip {
+  text-align: left;
+}
+
+/* A NAME ON THIS PAGE IS A CONTROL. The table's name column opens the same
+   profile the turn tiles above it do -- those carry their own reset, since
+   the tile is shared with the waiting room (pickOption.css). Inheriting the
+   font is the point: this has to keep looking like the text it replaced, and
+   only say so on hover and focus. */
+.mk-open {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mk-open:hover .mk-player-name {
+  color: var(--accent);
+}
+
+/* Round, because what it rings on the turn rows is a round headshot. */
+.mk-open:focus-visible {
+  outline: 1px solid var(--accent-border);
+  outline-offset: 3px;
+  border-radius: 14px;
+}
+
+.mk-player {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* One line, clipped rather than wrapped: a two-line name doubled its row's
+   height and pushed the team code to the far side of the column, which read
+   as a broken cell. */
+.mk-player-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-1);
+}
+
+.mk-player-team {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-3);
+}
+
+.mk-range,
+.mk-quiet-num {
+  color: var(--text-3);
+}
+
+/* The player's own distribution over the draft, with this seat's picks drawn
+   on it -- the reason the page asks for a seat at all. */
+.mk-strip {
+  position: relative;
+  height: 26px;
+  min-width: 260px;
+}
+
+.mk-strip-bins {
+  display: flex;
+  align-items: flex-end;
+  gap: 1px;
+  height: 100%;
+}
+
+.mk-strip-bin {
+  flex: 1;
+  display: flex;
+  align-items: flex-end;
+  height: 100%;
+}
+
+.mk-strip-bin > span {
+  width: 100%;
+  min-height: 1px;
+  border-radius: 1px 1px 0 0;
+  opacity: 0.85;
+}
+
+/* Where eight of ten of his draft slots fall: a quiet band under the bars,
+   never over them -- it is context for the shape, not a second reading. */
+.mk-strip-band {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--text-3) 14%, transparent);
+}
+
+/* YOUR picks. Sixteen equally lit hairlines on every row read as a grid --
+   ruling the table rather than marking anything -- so all sixteen are drawn
+   faintly and only the turn the STILL-AT column is currently asking about is
+   drawn in the accent. Selecting a turn lights its own line in every row. */
+.mk-strip-tick {
+  position: absolute;
+  top: 2px;
+  bottom: -2px;
+  width: 1px;
+  background: color-mix(in srgb, var(--text-3) 55%, transparent);
+}
+
+.mk-strip-tick.is-at {
+  top: -2px;
+  background: var(--accent);
+}
+
+.mk-more {
+  margin-top: 16px;
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-2);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.mk-more:hover {
+  border-color: var(--text-3);
+  color: var(--text-1);
+}
+
+/* The bar drops the corpus size before it drops the seat: 383 drafts is a
+   standing fact the masthead states again three lines below, and the seat is
+   the page's own state, said nowhere else once the control has scrolled off.
+   App.css drops the hint at this width for the room, where the trade runs
+   the other way. */
+@media (max-width: 1100px) {
+  .mk-page .draft-topbar-hint {
+    display: inline;
+  }
+
+  .mk-page .draft-topbar-league {
+    display: none;
+  }
+}
+
+@media (max-width: 1080px) {
+  .mk-cols {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* Stacked, the rail sits under the turns rather than beside them, and
+     there is no long neighbour left for it to keep pace with. */
+  .mk-side {
+    position: static;
+  }
+
+  .mk-col-player {
+    width: auto;
+  }
+}
+
+@media (max-width: 900px) {
+  .mk-mast {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 22px;
+  }
+}
+
+@media (max-width: 720px) {
+  .mk {
+    padding: 28px 16px 64px;
+  }
+
+  .mk-title {
+    font-size: 30px;
+  }
+
+  /* The strip is the row's whole point, so on a narrow screen the table
+     scrolls sideways rather than crushing it into something unreadable. */
+  .mk-players {
+    overflow-x: auto;
+  }
+
+  .mk-table {
+    min-width: 720px;
+  }
+}
+
+/* -- the raw data ------------------------------------------------------- */
+/* On /archive: the panel that points at it. On /archive/data: the table
+   itself, on the same `.mk-table` the archive's tables use, with the status
+   pill borrowed from /mocks so LIVE/DONE reads the same everywhere. */
+
+/* The panel is a ledger entry, not a card with a button: an eyebrow, the
+   two figures the page is counted from, and a row that opens the table
+   those figures come from -- drawn like a row of that table, hairline over
+   and under, the arrow parked at the far edge where the table's own
+   "Board" link sits. */
+.mk-raw {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mk-raw-figures {
+  margin: 0 0 8px;
+  font-size: var(--text-md);
+  line-height: 1.4;
+  color: var(--text-3);
+}
+
+.mk-raw-figures strong {
+  font-size: 22px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: var(--text-1);
+}
+
+.mk-raw-dot {
+  margin: 0 10px;
+  color: var(--border);
+}
+
+.mk-raw-cta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  /* Out to the panel's own edges (its 24px padding), so the hairlines run
+     the full width the way a table row's do. */
+  margin: 0 -24px -26px;
+  padding: 12px 24px;
+  border-top: 1px solid var(--border);
+  border-radius: 0 0 var(--radius) var(--radius);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  text-decoration: none;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.mk-raw-arrow {
+  color: var(--text-3);
+  transition: transform 160ms ease, color 120ms ease;
+}
+
+.mk-raw-cta:hover {
+  background: var(--bg-2);
+  color: var(--text-1);
+}
+
+.mk-raw-cta:hover .mk-raw-arrow {
+  color: var(--accent);
+  transform: translateX(3px);
+}
+
+.mk-raw-cta:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: -2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mk-raw-cta,
+  .mk-raw-arrow {
+    transition: none;
+  }
+  .mk-raw-cta:hover .mk-raw-arrow {
+    transform: none;
+  }
+}
+
+/* Every column but the last is as narrow as its widest value and never
+   wraps; the last soaks up the width, so the table reads left to right
+   as a list and the way in sits at the far edge of every row. The heading
+   keeps the archive's sticky-under-the-bar behaviour: 441 rows is a lot of
+   scroll to lose "human seats" over. Narrow screens trade that for a
+   sideways scroll (below), where sticky cannot work anyway. */
+.mk-raw-table .mk-table {
+  margin-top: 0;
+}
+
+.mk-raw-table .mk-table th,
+.mk-raw-table .mk-table td {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.mk-raw-table .mk-table th:last-child,
+.mk-raw-table .mk-table td:last-child {
+  width: auto;
+}
+
+.mk-raw-table .mk-table th.mk-col-player,
+.mk-raw-table .mk-table td.mk-col-player {
+  width: 1%;
+}
+
+@media (max-width: 900px) {
+  .mk-raw-table {
+    overflow-x: auto;
+  }
+
+  .mk-raw-table .mk-table th {
+    position: static;
+  }
+}
+
+.mk-table th.mk-col-left,
+.mk-table td.mk-col-left {
+  text-align: left;
+}
+
+.mk-raw-row {
+  cursor: pointer;
+}
+
+.mk-raw-row td.mk-col-player {
+  color: var(--text-1);
+}
+
+.mk-raw-open {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-3);
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.mk-raw-row:hover .mk-raw-open,
+.mk-raw-open:focus-visible {
+  color: var(--accent);
+}
+
+/* -- the account gate ---------------------------------------------------- */
+
+.mk-gate {
+  max-width: 520px;
+  margin: 48px auto 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.mk-gate-copy {
+  font-size: var(--text-md);
+  line-height: 1.55;
+  color: var(--text-2);
+}
+
+.mk-gate-cta {
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: #101114;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 9px 16px;
+  cursor: pointer;
+}
+
+.mk-gate-cta:hover { filter: brightness(1.07); }
+
+.mk-gate-cta:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 2px;
+}
+
+/* -- the data download, up in the mast ----------------------------------- */
+
+.mk-export {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-start;
+  padding: 9px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  color: var(--text-1);
+  font-size: var(--text-md);
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.mk-export:hover { border-color: var(--accent-border); color: var(--accent); }
+
+.mk-export:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 2px;
+}
+
+.mk-export svg {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.mk-export-kind {
+  font-weight: 400;
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+.mk-facts-share { color: var(--text-3); }
+
+/* -- /archive/data: a field of cards ------------------------------------- */
+/* Nothing on this page is ruled off from anything else. The head is type
+   and one button; the totals are tiles; the drafts are tiles; the tiles
+   float on the page background with the same border, radius and hover as
+   each other. One kind of object, two sizes. */
+
+.mkd-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  flex-wrap: wrap;
+  margin-bottom: 28px;
+}
+
+.mkd-head-say {
+  flex: 1 1 320px;
+}
+
+.mkd-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin: 0 0 32px;
+}
+
+.mkd-stat {
+  padding: 14px 16px 15px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-1);
+}
+
+.mkd-stat dt {
+  margin: 0 0 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.mkd-stat dd {
+  margin: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 24px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  line-height: 1.1;
+  color: var(--text-1);
+}
+
+.mkd-stat dd.is-live { color: var(--ok); }
+
+.mkd-stat-share {
+  font-size: var(--text-sm);
+  font-weight: 400;
+  color: var(--text-3);
+}
+
+.mkd-drafts {
+  margin: 0;
+}
+
+.mkd-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+}
+
+.mkd-card {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding: 13px 15px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-1);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 120ms ease, transform 160ms ease, box-shadow 160ms ease;
+}
+
+.mkd-card:hover {
+  border-color: var(--accent-border);
+  transform: translateY(-2px);
+  box-shadow: 0 10px 28px -14px rgba(0, 0, 0, 0.8);
+}
+
+.mkd-card:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 2px;
+}
+
+/* A room still playing is the only card whose figures are moving, and the
+   one a reader is most likely looking for. Its fill is green, its pill
+   carries the pulse /mocks gives it, nothing else shouts. */
+.mkd-card.is-live .mkd-card-fill { background: var(--ok); }
+
+.mkd-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.mkd-card-when { color: var(--text-3); font-size: var(--text-xs); }
+
+.mkd-card-id {
+  margin-top: 4px;
+  font-size: var(--text-md);
+  color: var(--text-1);
+}
+
+.mkd-card-picks {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  margin-top: 2px;
+}
+
+.mkd-card-n {
+  font-size: 22px;
+  font-weight: 500;
+  line-height: 1;
+  color: var(--text-1);
+}
+
+.mkd-card-of { color: var(--text-3); }
+
+.mkd-card-unit { color: var(--text-3); font-size: var(--text-xs); }
+
+.mkd-card-bar {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--bg-2);
+  overflow: hidden;
+}
+
+.mkd-card-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  opacity: 0.8;
+}
+
+.mkd-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 2px;
+  color: var(--text-3);
+}
+
+.mkd-card-open {
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.mkd-card:hover .mkd-card-open,
+.mkd-card:focus-visible .mkd-card-open {
+  opacity: 1;
+  color: var(--accent);
+}
+
+.mkd-pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin-top: 24px;
+}
+
+.mkd-page-btn {
+  padding: 7px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-1);
+  color: var(--text-1);
+  font-size: var(--text-base);
+  cursor: pointer;
+}
+
+.mkd-page-btn:hover:not(:disabled) { border-color: var(--accent-border); }
+
+.mkd-page-btn:disabled { opacity: 0.4; cursor: default; }
+
+.mkd-page-btn:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 2px;
+}
+
+.mkd-page-where { color: var(--text-3); font-size: var(--text-sm); }
+
+@media (prefers-reduced-motion: reduce) {
+  .mkd-card,
+  .mkd-card-open {
+    transition: none;
+  }
+  .mkd-card:hover { transform: none; }
+  /* Without the hover lift the way in should just be visible. */
+  .mkd-card-open { opacity: 1; }
+}

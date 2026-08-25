@@ -94,6 +94,49 @@ def test_parse_espn():
     assert r["espn_id"] == 4429795 and r["position"] == "RB"
     assert r["espn_adp"] == 1.77 and r["espn_ppr_rank"] == 1
 
+
+def test_parse_espn_reads_the_week_one_projection():
+    """ESPN publishes a projection per WEEK alongside the season total, in the
+    same `stats` list: source 1 (projected), split 1 (weekly), the week in
+    `scoringPeriodId`. The roster rail prices a pick in week 1, so that row is
+    the one worth carrying -- and the season total must not be mistaken for
+    it, nor last season's week 1, nor an actual."""
+    payload = {"players": [{"player": {
+        "id": 7, "fullName": "Jahmyr Gibbs", "defaultPositionId": 2,
+        "stats": [
+            # Last season's real week 1 -- an ACTUAL, not a projection.
+            {"statSourceId": 0, "statSplitTypeId": 1, "seasonId": 2025,
+             "scoringPeriodId": 1, "appliedTotal": 31.4},
+            # Last season's projected week 1: right shape, wrong year.
+            {"statSourceId": 1, "statSplitTypeId": 1, "seasonId": 2025,
+             "scoringPeriodId": 1, "appliedTotal": 15.0},
+            # This season's SEASON projection: right year, wrong split.
+            {"statSourceId": 1, "statSplitTypeId": 0, "seasonId": 2026,
+             "scoringPeriodId": 0, "appliedTotal": 352.78},
+            # This season's week 2: right everything but the week.
+            {"statSourceId": 1, "statSplitTypeId": 1, "seasonId": 2026,
+             "scoringPeriodId": 2, "appliedTotal": 19.9},
+            {"statSourceId": 1, "statSplitTypeId": 1, "seasonId": 2026,
+             "scoringPeriodId": 1, "appliedTotal": 21.57},
+        ],
+    }}]}
+
+    r = parse_espn(payload, year=2026).iloc[0]
+
+    assert r["espn_wk1"] == 21.57
+    assert r["espn_proj"] == 352.78
+
+
+def test_a_player_with_no_weekly_row_has_no_week_one_projection():
+    """Measured on the live feed: 7 of the top 300 carry none, the same tail
+    that has no season projection either. Absent is a dash on the rail, never
+    a zero -- a projected zero is a claim that he will not score."""
+    payload = {"players": [{"player": {
+        "id": 7, "fullName": "Deep Bench", "defaultPositionId": 2, "stats": [],
+    }}]}
+
+    assert parse_espn(payload, year=2026).iloc[0]["espn_wk1"] is None
+
 def test_parse_fp_ecr():
     html = ('<script>var x = 1; var ecrData = {"players": [{"player_name": "JaMarr Chase",'
             '"player_team_id": "CIN", "player_position_id": "WR", "rank_ecr": 1,'

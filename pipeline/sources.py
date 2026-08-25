@@ -50,9 +50,18 @@ def fetch_players(_=None):
     # from the source this project already reads rather than hotlinked off a
     # site nothing else here depends on. Null for anyone it has no photo of,
     # which the card renders as no image rather than a broken one.
+    #
+    # `height` (inches) and `weight` (pounds) are two of the features the
+    # profile's Similar players card scores on. Taken from here rather than
+    # from a second source because this is already the table every other
+    # static fact about a player comes from, and a body measured in one
+    # place cannot disagree with itself. A database refreshed before these
+    # were added simply has neither column, and `similar_players` drops the
+    # features it cannot see rather than failing.
     df = nfl.import_players()
-    return df[["gsis_id", "display_name", "birth_date", "rookie_season",
-               "headshot"]].dropna(subset=["gsis_id"])
+    cols = ["gsis_id", "display_name", "birth_date", "rookie_season",
+            "headshot", "height", "weight"]
+    return df[[c for c in cols if c in df.columns]].dropna(subset=["gsis_id"])
 
 def fetch_depth_charts(season):
     return nfl.import_depth_charts([season])
@@ -91,6 +100,36 @@ def _espn_season_projection(p: dict, year: int):
             return st.get("appliedTotal")
     return None
 
+
+# The week the roster rail prices a pick in. A season total is a number nobody
+# has a feel for -- 323 is good and 297 is fine and only a reader who already
+# knows the scale can tell -- where "18.4 in week 1" reads against a Sunday
+# anybody in the league has watched. Week 1 rather than a rolling "next week"
+# because this is a DRAFT tool: every roster it shows is being built before a
+# ball is thrown, and week 1 is the first game the roster will ever play.
+ESPN_PROJECTION_WEEK = 1
+
+
+def _espn_week_projection(p: dict, year: int, week: int = ESPN_PROJECTION_WEEK):
+    """ESPN's projected points for one week, or None.
+
+    The same `stats` list the season projection is read from, with the WEEKLY
+    split (`statSplitTypeId: 1`) and the week in `scoringPeriodId`. Measured
+    live against the 2026 feed: 293 of the top 300 by ADP carry a week-1
+    projection, and the misses are the same tail that has no season projection
+    either -- deep bench, unprojected rookies.
+
+    `appliedTotal` is scored under ESPN's own default PPR rules, exactly like
+    the season number, so it is converted for a non-PPR league by the same
+    `proj_scale` (see scoring/board.py) rather than re-derived here.
+    """
+    for st in p.get("stats") or []:
+        if (st.get("statSourceId") == 1 and st.get("statSplitTypeId") == 1
+                and st.get("seasonId") == year
+                and st.get("scoringPeriodId") == week):
+            return st.get("appliedTotal")
+    return None
+
 def parse_espn(payload: dict, year: int | None = None) -> pd.DataFrame:
     # `team` is carried for the DST rows' sake: ESPN names a defense
     # "Ravens D/ST" while the board names it from the ADP feed's nickname, so
@@ -109,9 +148,11 @@ def parse_espn(payload: dict, year: int | None = None) -> pd.DataFrame:
             "espn_adp": (p.get("ownership") or {}).get("averageDraftPosition"),
             "espn_ppr_rank": ((p.get("draftRanksByRankType") or {}).get("PPR") or {}).get("rank"),
             "espn_proj": _espn_season_projection(p, year) if year else None,
+            "espn_wk1": _espn_week_projection(p, year) if year else None,
         })
     return pd.DataFrame(rows, columns=["espn_id", "espn_name", "position", "team",
-                                       "espn_adp", "espn_ppr_rank", "espn_proj"])
+                                       "espn_adp", "espn_ppr_rank", "espn_proj",
+                                       "espn_wk1"])
 
 # ESPN's printable preseason draft cheat sheet: the PPR top 300 as it stood
 # BEFORE each season, which is exactly what `draft_model` needs and what the

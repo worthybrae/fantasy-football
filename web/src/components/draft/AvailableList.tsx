@@ -114,7 +114,7 @@ function barHeight(points: number): number {
 // mutated, so a row's bars are built exactly once no matter how often the
 // table re-filters and re-sorts. Without this, every keystroke in the search
 // box would rebuild up to 250 x 18 = 4,500 spans.
-const GameBars = memo(function GameBars({ points, season, position }: {
+export const GameBars = memo(function GameBars({ points, season, position }: {
   points: (number | null)[]
   season: number | null
   position: string
@@ -226,7 +226,7 @@ function posIndex(position: string): number {
 // reader's side.
 type TipId = SortKey | 'games' | 'draft'
 
-const TIP_DELAY_MS = 130
+export const TIP_DELAY_MS = 130
 const TIP_MARGIN = 8
 
 // Mirrors DraftBoardGrid.tsx's own `popoverStyle` -- `position: fixed` off
@@ -239,7 +239,7 @@ const TIP_MARGIN = 8
 // ranges from one short sentence (posTitle) to a genuinely long paragraph
 // (gamesTitle), where a single guessed height would either clip the long
 // ones or leave the short ones floating with acres of empty space.
-function positionTip(
+export function positionTip(
   rect: DOMRect, size: { width: number; height: number },
 ): { left: number; top: number } {
   const left = Math.max(
@@ -304,7 +304,7 @@ function changeLevel(change: number): number {
   return level
 }
 
-const ChangeMeter = memo(function ChangeMeter({ change }: { change: number }): ReactNode {
+export const ChangeMeter = memo(function ChangeMeter({ change }: { change: number }): ReactNode {
   const level = changeLevel(change)
   const label = `${change > 0 ? '+' : ''}${change.toFixed(1)} points per game vs last season`
   return (
@@ -332,7 +332,7 @@ const ChangeMeter = memo(function ChangeMeter({ change }: { change: number }): R
 // same position twice.
 const FINISH_MAX = 10
 
-const FinishArc = memo(function FinishArc(
+export const FinishArc = memo(function FinishArc(
   { arc, position, starters }: {
     arc: [number, number][]; position: string; starters: number
   },
@@ -357,7 +357,7 @@ const FinishArc = memo(function FinishArc(
 
 const HEALTH_CUTS = [10, 13, 15, 16.3] as const
 
-function healthLevel(gamesPg: number | null | undefined): number | null {
+export function healthLevel(gamesPg: number | null | undefined): number | null {
   if (gamesPg === null || gamesPg === undefined || Number.isNaN(gamesPg)) return null
   let level = 1
   for (const cut of HEALTH_CUTS) if (gamesPg >= cut) level += 1
@@ -365,7 +365,7 @@ function healthLevel(gamesPg: number | null | undefined): number | null {
 }
 
 
-const HealthMeter = memo(function HealthMeter(
+export const HealthMeter = memo(function HealthMeter(
   { level, gamesPg }: { level: number; gamesPg: number },
 ): ReactNode {
   // The bars are the glance; this is the number behind them. Without it the
@@ -389,12 +389,12 @@ const HealthMeter = memo(function HealthMeter(
 // board's players at each position lands on each bar by construction, which
 // is the whole reason the percentile is taken against the BOARD and not the
 // weekly universe (see scoring/board.py's `consistency`).
-function steadyLevel(pct: number | null | undefined): number | null {
+export function steadyLevel(pct: number | null | undefined): number | null {
   if (pct === null || pct === undefined || Number.isNaN(pct)) return null
   return Math.min(5, Math.max(1, Math.ceil(pct * 5)))
 }
 
-const SteadyMeter = memo(function SteadyMeter(
+export const SteadyMeter = memo(function SteadyMeter(
   { level, cv }: { level: number; cv: number | null },
 ): ReactNode {
   // Same falsifiability as HealthMeter: the bars are the glance, the
@@ -402,7 +402,7 @@ const SteadyMeter = memo(function SteadyMeter(
   const label = cv === null
     ? `Steadier than ${(level - 1) * 20}-${level * 20}% of his position`
     : `Week-to-week swing of ${cv.toFixed(2)} (sigma over mean) -- steadier `
-      + `than ${(level - 1) * 20}-${level * 20}% of his position on this board`
+      + `than ${(level - 1) * 20}-${level * 20}% of everyone measured at his position`
   return (
     <span className={`steady-meter ${METER_CLASS[level]}`} role="img"
           aria-label={`${label} (${level} of 5)`}>
@@ -490,17 +490,6 @@ interface AvailableListProps {
   // TopThree gate their buttons on the exact same boolean rather than each
   // re-deriving "is it my turn" from state fields they don't have.
   isMyTurn: boolean
-  // The pick the server measured this list against ("pick 18", "the end of
-  // the draft"), or null when there is no gain-ranked list yet. Same value
-  // TopThree's hint names. AvailableList only reads its NULLNESS now (is
-  // there a horizon yet, to gate the toolbar note) -- it used to interpolate
-  // the pick number into "Lasts = chance he's still there at pick 18", which
-  // reads as a promise that pick 18 is the user's own turn. Verified against
-  // the real model it never is (see lastsTitle's own comment below); the
-  // toolbar note and the tooltip now describe the horizon's DISTANCE
-  // instead, which needs only whether one exists, not this string's actual
-  // content.
-  horizonLabel: string | null
   // Opens the player's profile over the room (DraftRoom's PlayerOverlay).
   // The whole row is not the target -- only the name -- because every other
   // cell in this row is a number the eye is comparing down a column, and the
@@ -555,10 +544,10 @@ function pulseIntensity(survivePct: number | null): number | null {
 
 // Below this intensity a row gets NO animation, not a faint one.
 //
-// The keyframes scale `--fail` by `--pulse * 20%` and `--pulse * 65%`, so at
-// an intensity of 0.02 both stops land under 1.5% opacity -- and at 0 (a
+// The keyframes scale `--fail` by `--pulse * 12%` and `--pulse * 38%`, so at
+// an intensity of 0.02 both stops land under 0.8% opacity -- and at 0 (a
 // player at `survive_pct: 100`) both evaluate to `transparent`, an animation
-// between two identical invisible values. That is not free. `box-shadow` is
+// between two identical invisible values. That is not free. `background` is
 // a PAINT property: unlike `opacity` and `transform` it cannot be handed to
 // the compositor, so every frame of it re-rasterizes the row on the main
 // thread. This table renders ~250 rows with no virtualization, and the
@@ -633,6 +622,23 @@ const AvailableRow = memo(function AvailableRow({
   const animated = pulse !== null && pulse >= PULSE_FLOOR
   return (
               <tr key={c.player_id} data-pid={c.player_id}
+                  // THE WHOLE ROW OPENS THE PROFILE, not just the name. The
+                  // name stays a real button -- it is the keyboard path, and
+                  // a <tr> with a click handler is not tabbable -- but a
+                  // pointer should not have to find a 90px target in a row
+                  // fourteen columns wide.
+                  //
+                  // Two guards. A click that landed on a button belongs to
+                  // that button (Draft, and the name's own button, which
+                  // would otherwise open the profile twice), and a click
+                  // that ends a text selection is somebody copying a number
+                  // out of the row, not asking for a player.
+                  onClick={(e) => {
+                    if (isTaken) return
+                    if ((e.target as HTMLElement).closest('button')) return
+                    if (window.getSelection()?.toString()) return
+                    onOpenPlayer(c)
+                  }}
                   className={isTaken
                     ? 'avail-row-taken'
                     : animated ? 'avail-row-pulse' : undefined}
@@ -795,7 +801,7 @@ const AvailableRow = memo(function AvailableRow({
 // whole ranked list") -- the pool tops out in the low hundreds, cheap
 // enough to filter AND sort on every keystroke without debouncing or memos.
 export default function AvailableList({
-  candidates, players, onDraft, isMyTurn, horizonLabel, onOpenPlayer,
+  candidates, players, onDraft, isMyTurn, onOpenPlayer,
   draftedIds, settings,
 }: AvailableListProps) {
   const [search, setSearch] = useState('')
@@ -937,6 +943,15 @@ export default function AvailableList({
     }
     return null
   }, [players])
+
+  // Whether any row on this board can pulse at all, and therefore whether the
+  // toolbar owes the reader a key for it. `survive_pct` is null for a whole
+  // board when nothing has a seat to survive FOR (see pulseIntensity), and a
+  // legend for a signal that is not on screen is furniture. `.some` over a
+  // few hundred rows on a list that is rebuilt every recompute is nothing
+  // next to the sparklines below it.
+  const pulses = useMemo(
+    () => candidates.some((c) => c.survive_pct !== null), [candidates])
 
   // A player leaving the board is the single most informative event in a
   // draft, and until now it was also the least visible: the row simply was
@@ -1217,11 +1232,14 @@ export default function AvailableList({
     + 'season every year; one bar is a player who has missed a lot of '
     + 'football. Blank for a defense, or anyone with no NFL season yet.'
   const steadyTitle = 'How steady his scoring has been week to week, ranked '
-    + 'against the other players at his position ON THIS BOARD. Five bars is '
+    + 'against EVERY measured player at his position, not only the draftable '
+    + 'ones -- so the bars say "steady for a running back", and do not move '
+    + 'when the board does. Five bars is '
     + 'the steadiest fifth, one bar the spikiest. Measured as swing relative '
     + 'to his own average, not raw swing -- a 20-point-a-week player moves in '
     + 'bigger absolute points than an 8-point one without being less '
-    + 'reliable. Steady is not the same as good: a spiky player can be worth '
+    + 'reliable. Steadiness is not the same as quality: a spiky player can '
+    + 'be worth '
     + 'more if his ceiling is why you want him. Blank for anyone without a '
     + 'full-enough recent season to measure.'
   const projTitle = "Projected fantasy points PER GAME for the upcoming "
@@ -1230,26 +1248,23 @@ export default function AvailableList({
     + "reads against the weekly scores you have watched all year. It assumes "
     + "a full season, so it says nothing about whether he will be available "
     + "for it; that is what Health answers."
-  // NOT "chance he's still there at pick N" any more -- verified against the
-  // real model for an 8-team draft at slot 2 (own turns 2, 15, 18, 31, 34,
-  // 47): the pick this number is measured against came back 13, 27, 27, 29,
-  // 43, every single one somebody else's turn, never the user's own. That
-  // is not a bug in the number -- scoring/draft_sim.horizon_picks/
-  // horizon_ceiling measure a fixed distance (roughly a round to a round
-  // and a half of opponent picks) on purpose, because the user's own next
-  // turn is usually much further off, and at that distance survival reads
-  // ~0% for every row and the ranking loses its signal. The number was
-  // right; the old label just asserted a pick the user was never actually
-  // making. This one names the HORIZON instead of a pick, and says why it
-  // stops there rather than at the user's own turn.
-  const lastsTitle = "Chance he's still on the board roughly a round to a "
-    + "round and a half from now -- not at your own next pick, which is "
-    + 'almost always further off than that. Measured any nearer and nearly '
-    + 'every player would read close to 100% (nothing left to rank by); any '
-    + 'further and nearly every player would read close to 0% (same '
-    + 'problem, the other way) -- this is the furthest point out that still '
-    + 'tells the rows apart. A low percentage is the argument for taking '
-    + 'him now.'
+  // "Chance he's still there when you pick again" -- the reader's own next
+  // turn, which is what this column answers now. It used to answer the
+  // horizon the RANKING is priced against (a fixed distance, roughly a round
+  // to a round and a half of opponent picks), which is a different pick
+  // whenever the reader is at the wheel and reads as a much longer wait than
+  // the one they are about to make.
+  //
+  // The ranking still prices that further turn -- it has to, since a step of
+  // a position's supply curve over one opponent pick is near zero for
+  // everybody -- so the two figures on a card answer two questions and say
+  // which is which. See scoring/gain.rank_available.
+  const lastsTitle = "Chance he's still on the board when your next turn "
+    + 'comes round -- measured over the picks between now and then, not to '
+    + 'some fixed distance. At the wheel, with your two picks back to back, '
+    + 'nearly everybody survives and this column says so; a long wait is '
+    + 'where it starts separating names. A low percentage is the argument '
+    + 'for taking him now.'
   const adpTitle = 'Average draft position across the consensus of public '
     + 'sources -- where the market as a whole takes him.'
   const espnTitle = "ESPN's own ranking, shown so you can see where this "
@@ -1299,11 +1314,22 @@ export default function AvailableList({
             </button>
           ))}
         </div>
-        {horizonLabel !== null && (
-          <div className="avail-horizon-note">
-            <span className="avail-horizon-key">Lasts</span>
-            {" = chance he's still on the board roughly a round to a round "
-              + 'and a half from now'}
+        {/* The one thing this table says that a column header cannot: what
+            the rows breathing red are doing. Gated on the survival numbers
+            themselves, which the landing page's spectator room also serves
+            -- for the seat on the clock rather than for the reader -- so a
+            reader watching rows glow under a pick clock never has to guess
+            whether it means "gone", "injured" or "bad". The Lasts column
+            explains itself through its own header tooltip (`lastsTitle`). */}
+        {pulses && (
+          <div className="avail-keys">
+            <span
+              className="avail-key"
+              title="These rows are the ones least likely to still be there. The stronger the red, the lower the chance he lasts -- the same number the Lasts column prints, read as motion instead of digits."
+            >
+              <span className="avail-key-pulse" aria-hidden="true" />
+              Likely gone by your next pick
+            </span>
           </div>
         )}
       </div>
@@ -1314,34 +1340,38 @@ export default function AvailableList({
             {sortableTh('rank', '#', 'avail-col-rank')}
             {sortableTh('pos', 'Pos', 'avail-col-pos')}
             {sortableTh('player', 'Player', 'avail-col-name')}
-            {/* The one header in this table that is NOT a control, and it
-                says so rather than sitting there looking like the seven that
-                are. There is no honest single number to sort a distribution
-                by: "most 15-point games" and "fewest under 10" and "highest
-                median" are three different questions, and picking one would
-                make the column quietly answer a question nobody asked. The
-                quantity that DOES summarise a season is already sortable two
-                columns over -- Proj -- and `stats.ppg` is on the profile the
-                name opens. So: no button, no caret, default cursor, and the
-                word in the header. Still gets the same tooltip treatment as
-                every sortable one (mouse only -- nothing here is focusable,
-                same as it was under the native `title`). */}
+            {/* The one header in this table that is NOT a control. There is
+                no honest single number to sort a distribution by: "most
+                15-point games" and "fewest under 10" and "highest median" are
+                three different questions, and picking one would make the
+                column quietly answer a question nobody asked. The quantity
+                that DOES summarise a season is already sortable two columns
+                over -- Proj -- and `stats.ppg` is on the profile the name
+                opens.
+
+                It used to say "no sort" beside the year. The absence is
+                already visible -- no caret, no hover, a default cursor next
+                to seven headers that have all three -- so the words were a
+                label for something the column was saying anyway, and the one
+                header carrying an extra word drew more attention to the
+                column that sorts LEAST. The tooltip still says it in full
+                (mouse only -- nothing here is focusable, same as it was
+                under the native `title`). */}
             <th
               className="avail-col-games"
               onMouseEnter={(e) => scheduleTip('games', e.currentTarget)}
               onMouseLeave={hideTip}
             >
               <span className="avail-th-hint">{season ?? 'Last'}</span>
-              <span className="avail-nosort">no sort</span>
             </th>
             {/* Next to the sparkline deliberately: one column is how he
                 scored week to week, the next is whether he was there to do
                 it. Wider than the numeric columns (see `.avail-col-health`)
                 to fit five bars without growing the 32px row. */}
-            {sortableTh('finish', 'Finish', 'avail-col-finish')}
+            {sortableTh('finish', 'Rank', 'avail-col-finish')}
             {sortableTh('health', 'Health', 'avail-col-health')}
-            {sortableTh('steady', 'Steady', 'avail-col-health')}
-            {sortableTh('change', 'Change', 'avail-col-change')}
+            {sortableTh('steady', 'Steady', 'avail-col-steady')}
+            {sortableTh('change', 'Growth', 'avail-col-change')}
             {sortableTh('proj', 'Proj/G', 'avail-col-num')}
             {/* One word. A header naming the horizon at all ("Lasts to pick
                 13") reads as a promise that pick 13 is the user's own turn,

@@ -23,28 +23,6 @@ import pandas as pd
 from scoring.config import NEED_WEIGHTS
 from scoring.draft_sim import FLEX_POSITIONS, _roster_cap, must_fill_positions
 
-# How many points of gain a position the plan is fully confident in is worth
-# on top of its measured `gain_now`, when the caller passes a `plan_bias`.
-#
-# Chosen from measurement, and the measurement is worth stating plainly
-# because it does NOT show what the steer was hoped to show. Simulating 50
-# drafts per cell across slots 1/2/5/8 at steer strengths 0, 5, 10, 20 and
-# 40, the change in end-of-draft roster value ranged from -17 to +15 points
-# on rosters of ~2500 -- while the 95% confidence interval on a difference
-# at that sample size is +/-19 to +/-26. Every result sat inside the noise.
-# Steering the ranking toward the plan does not measurably improve the
-# roster at any strength tested.
-#
-# It is applied anyway, at a strength the sweep showed no degradation for,
-# for a reason that is about the room rather than the roster: the plan and
-# the recommendation list are two views of the same model, and a user who
-# reads "round 3 is for a tight end" directly above a list headed by a
-# receiver is being shown a contradiction the model does not actually have.
-# What the steer buys is coherence between the two panels, and it is priced
-# low enough that a genuinely large edge -- the cliffs it is derived from run
-# to 86 points -- still wins outright.
-PLAN_STEER_POINTS = 10.0
-
 _NO_SLOT = "—"
 
 
@@ -187,7 +165,7 @@ def available_by_vor(pool, taken) -> pd.DataFrame:
 
     Same nine-column shape `rank_available` returns (this is what keeps
     `LiveCandidate` one shape on the frontend, not two payload types to
-    branch on): `gain_now`, `survive_pct` and `fills` are `None`, not `0.0`,
+    branch on): `gain_now`, `gain_next`, `survive_pct` and `fills` are `None`, not `0.0`,
     `0.0` and `""` -- a fabricated zero here would print as a real
     recommendation ("take him now, he's worth nothing") for a player nobody
     has actually ranked yet. `rank` is still the list's own display order,
@@ -197,8 +175,8 @@ def available_by_vor(pool, taken) -> pd.DataFrame:
     available = np.flatnonzero(~np.asarray(taken))
     if available.size == 0:
         return pd.DataFrame(columns=["player_id", "position", "proj_points",
-                                     "vor_points", "gain_now", "plan_steer",
-                                     "survive_pct",
+                                     "vor_points", "gain_now", "gain_next",
+                                     "edge_next", "survive_pct",
                                      "fills", "rank"])
     rows = [{
         "player_id": pool.player_id[idx],
@@ -206,12 +184,8 @@ def available_by_vor(pool, taken) -> pd.DataFrame:
         "proj_points": float(pool.points[idx]),
         "vor_points": float(pool.vor[idx]),
         "gain_now": None,
-        # 0.0 rather than None, unlike its neighbours: the others are None
-        # because this function genuinely cannot know them without a roster,
-        # while a steer of exactly nothing is the true and complete answer
-        # here -- there is no plan to steer toward, so nothing about this
-        # frame's ordering was influenced by one.
-        "plan_steer": 0.0,
+        "gain_next": None,
+        "edge_next": None,
         "survive_pct": None,
         "fills": None,
     } for idx in available]
@@ -223,41 +197,69 @@ def available_by_vor(pool, taken) -> pd.DataFrame:
 
 def rank_available(pool, settings, taken, counts: dict, survive,
                    turns_left: int | None = None,
-                   plan_bias: dict | None = None) -> pd.DataFrame:
-    """The available pool, ranked by gain_now (plus any plan steer) descending.
+                   survive_display=None) -> pd.DataFrame:
+    """The available pool, ranked by gain_now descending.
 
     `taken` is the pool-aligned boolean mask of players already drafted,
     `counts` my own roster's position counts, `survive` the pool-aligned
-    probability each player is still there at my next pick, `turns_left` my
+    probability each player is still there at the turn the ranking is
+    MEASURED against (`draft_sim.survival`'s `avail_pct`), `turns_left` my
     remaining picks including the one on the clock (None = unknown, which
     turns the deferral rule off -- see `need_kind`).
 
-    `plan_bias` maps position -> the draft plan's confidence (0-1) that this
-    round goes to that position, from `scoring.plan.build_plan`. Given it,
-    each row also carries `plan_steer` and the SORT uses gain_now +
-    plan_steer -- but `gain_now` itself is left exactly as measured, and it
-    is `gain_now` the room displays. Folding the steer into it would have
-    been simpler and is the wrong trade: the column is documented, is read
-    as a points figure, and is the number a user checks the tool against.
-    A separate column keeps the displayed quantity honest and lets the room
-    mark which rows the plan moved. Without `plan_bias`, `plan_steer` is
-    0.0 for every row and the ordering is bit-identical to before.
+    `survive_display` is that same probability at MY VERY NEXT TURN
+    (`avail_next_pct`), served as `survive_pct` without entering the
+    arithmetic anywhere. The two are different questions, and the list shows
+    one while pricing on the other:
+
+      * `gain_now` has to be measured a full round out or there is no signal
+        left in it. One step of a position's supply curve over one opponent
+        pick is near zero for everybody, and at the wheel it is exactly zero
+        -- see `draft_sim.survival` for the measurements and the live bugs.
+      * "Will he still be there when I pick again" is what a reader asks of a
+        percentage beside a player's name. At the wheel the honest answer is
+        97%, not the 3% that pricing the turn after next produces.
+
+    None keeps the old behaviour, one number doing both jobs, so a caller
+    holding a single survival array is unchanged.
     """
     available = np.flatnonzero(~np.asarray(taken))
     if available.size == 0:
         return pd.DataFrame(columns=["player_id", "position", "proj_points",
-                                     "vor_points", "gain_now", "plan_steer",
-                                     "survive_pct",
+                                     "vor_points", "gain_now", "gain_next",
+                                     "edge_next", "survive_pct",
                                      "fills", "rank"])
     survive = np.asarray(survive, dtype=float)
+    shown = (survive if survive_display is None
+             else np.asarray(survive_display, dtype=float))
 
     # One expected-best per position, not per player: it depends only on the
     # position's own survivors, so computing it inside the player loop would
     # redo the same sort once per player at that position.
-    next_best = {}
+    #
+    # TWICE, against two different turns. `next_best` prices the turn the
+    # ranking is measured against and is what `gain_now` steps to. `wait_best`
+    # prices MY VERY NEXT TURN and is what the cards report as the cost of
+    # waiting -- "if I pass on him, what is the best player at his position I
+    # can expect to still be there when I pick again". They are the same
+    # question asked of two picks, and at the wheel they are far apart.
+    next_best, wait_best = {}, {}
+    pos_members = {}
     for pos in set(pool.position[available]):
         at_pos = available[pool.position[available] == pos]
+        pos_members[pos] = at_pos
         next_best[pos] = expected_best_next(pool.vor[at_pos], survive[at_pos])
+        wait_best[pos] = expected_best_next(pool.vor[at_pos], shown[at_pos])
+
+    # A third pricing, per PLAYER rather than per position: the expected best
+    # at his position at my very next turn EXCLUDING himself. One number per
+    # position cannot do it -- removing a different player changes the field
+    # -- but the pool tops out in the low hundreds, so one
+    # `expected_best_next` per available player is cheap.
+    def edge_best(idx) -> float:
+        others = pos_members[str(pool.position[idx])]
+        others = others[others != idx]
+        return expected_best_next(pool.vor[others], shown[others])
 
     # One need_kind per POSITION, not per player: it reads `counts` and the
     # league, neither of which varies down the loop.
@@ -274,13 +276,22 @@ def rank_available(pool, settings, taken, counts: dict, survive,
             "proj_points": float(pool.points[idx]),
             "vor_points": float(pool.vor[idx]),
             "gain_now": weight * (float(pool.vor[idx]) - next_best[pos]),
-            # Weighted by `need` like the gain itself, which is what keeps a
-            # steer off a position I cannot use: NEED_WEIGHTS["capped"] is
-            # 0.0, so a plan bias can never resurrect a capped row from the
-            # bottom of the board into contention.
-            "plan_steer": (weight * PLAN_STEER_POINTS
-                           * float((plan_bias or {}).get(pos, 0.0))),
-            "survive_pct": float(survive[idx]) * 100.0,
+            # Points, not a weighted score: what he is worth over the best
+            # player at his own position expected to survive to my next turn.
+            # Unweighted deliberately -- `gain_now` is a RANKING quantity and
+            # carries the roster's needs in it, while this is a claim about
+            # the board that has to survive being checked against the two
+            # players it compares. Within a position, a VOR difference IS a
+            # projected-points difference (both subtract the same
+            # replacement), so this can be read as points.
+            "gain_next": float(pool.vor[idx]) - wait_best[pos],
+            # On the clock, `gain_next` is degenerate: `wait_best` counts the
+            # player himself, so a 100% survivor reads 0 no matter how far
+            # ahead of his position he is. This one excludes him -- his value
+            # over the best OTHER player at his position expected at my next
+            # turn -- which is the figure the cards show while it is my pick.
+            "edge_next": float(pool.vor[idx]) - edge_best(idx),
+            "survive_pct": float(shown[idx]) * 100.0,
             "fills": fills_slot(settings, counts, pos, turns_left),
             # Not part of the result -- dropped after the sort below.
             "capped": weight == 0.0,
@@ -322,13 +333,9 @@ def rank_available(pool, settings, taken, counts: dict, survive,
     # on the real board is a kicker at rank 1 in round 14 and a defense at
     # rank 1 in round 15.
     out = pd.DataFrame(rows)
-    # The steer moves the ORDER, never the reported gain. Held in a scratch
-    # column so the sort can read the combined figure while `gain_now` stays
-    # the measured one; dropped with the other two scratch keys below.
-    out["_ranked_by"] = out["gain_now"] + out["plan_steer"]
     out = out.sort_values(
-        ["capped", "deferred", "_ranked_by"],
+        ["capped", "deferred", "gain_now"],
         ascending=[True, True, False]).drop(
-            columns=["capped", "deferred", "_ranked_by"]).reset_index(drop=True)
+            columns=["capped", "deferred"]).reset_index(drop=True)
     out["rank"] = out.index + 1
     return out

@@ -1956,10 +1956,24 @@ def survival(pool, settings, slot_managers, my_slot, taken, betas,
     # from this one function, so the caption can never name a different pick
     # than the one these rollouts stopped at.
     target = horizon_target(settings, my_slot, already, on_the_clock, horizon)
+    # MY VERY NEXT TURN, measured in the same rollouts. `target` is the pick
+    # the RANKING is priced against -- deliberately a full round of opponent
+    # picks out, for every reason above -- and it answers a question a reader
+    # does not ask in those words. "Will he still be there when I pick again"
+    # is the question, and it is a different pick whenever I am at the wheel:
+    # at pick 48 of an 8-team snake my next turn is 49 and the ranking is
+    # priced against 63.
+    #
+    # Both come out of one set of rollouts because the rollout PASSES THROUGH
+    # my next turn on its way to the horizon -- so this is a snapshot taken
+    # in flight, not a second simulation. Two calls would have doubled the
+    # most expensive thing this endpoint does to serve one column.
+    next_turn = horizon_target(settings, my_slot, already, on_the_clock, 0)
     slots = snake_slots(settings.teams, settings.rounds)
     turns_left = _turns_left(slots, settings.rounds)
     caps = _roster_cap(settings)
     counts = np.zeros(len(pool.player_id))
+    counts_next = np.zeros(len(pool.player_id))
 
     for i in range(n_rollouts):
         rng = np.random.default_rng([seed, i])
@@ -1974,7 +1988,15 @@ def survival(pool, settings, slot_managers, my_slot, taken, betas,
         # still be there" is counted from.
         last_picks = {slot: state["last_pick"] for slot, state in seeded.items()}
         recent = list(seeded_recent)
+        # Filled the moment the walk reaches my next turn; still None at the
+        # end means the walk never got there, which happens when that turn IS
+        # the pick being measured to (nothing simulated in between) or when
+        # the draft ran out first. `~gone` is the right answer in both cases:
+        # the board as it stands where the walk stopped.
+        at_next = None
         for offset in range(start, min(target - 1, len(slots))):
+            if offset + 1 == next_turn:
+                at_next = ~gone.copy()
             slot = slots[offset]
             available = np.flatnonzero(~gone)
             if len(available) == 0:
@@ -2048,9 +2070,18 @@ def survival(pool, settings, slot_managers, my_slot, taken, betas,
             last_picks[slot][pos] = offset + 1
             recent.insert(0, pos)
         counts += ~gone
+        counts_next += ~gone if at_next is None else at_next
 
+    runs = max(n_rollouts, 1)
     return pd.DataFrame({"player_id": pool.player_id,
-                         "avail_pct": counts / max(n_rollouts, 1)})
+                         # What the RANKING is measured against: the horizon
+                         # turn. `gain_now` is a step of the supply curve
+                         # between now and this pick.
+                         "avail_pct": counts / runs,
+                         # And what a reader is actually asking: my very next
+                         # turn. Served as the list's "lasts" column, never
+                         # used in the gain arithmetic -- see `rank_available`.
+                         "avail_next_pct": counts_next / runs})
 
 
 def _drafted_state(conn, pool):

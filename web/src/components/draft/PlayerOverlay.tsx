@@ -8,7 +8,13 @@ import PlayerProfile, { type ProfileSeed } from '../PlayerProfile'
 // the three builders).
 export interface OverlayTarget {
   playerId: string
-  seed: ProfileSeed
+  // Optional because not every caller holds a row about the player it is
+  // opening. The room always does -- it opens profiles off its own board --
+  // but the archive opens one off a name in an aggregate, and a comp clicked
+  // inside a profile can be somebody neither page has a row for. Absent
+  // means the skeleton until the request lands, which is PlayerProfile's own
+  // documented behaviour for a missing seed.
+  seed?: ProfileSeed | null
 }
 
 interface PlayerOverlayProps {
@@ -93,7 +99,7 @@ export default function PlayerOverlay({
         className="player-overlay-panel"
         role="dialog"
         aria-modal="true"
-        aria-label={`${target.seed.name} — player profile`}
+        aria-label={`${target.seed?.name ?? 'Player'} — player profile`}
       >
         <button
           type="button"

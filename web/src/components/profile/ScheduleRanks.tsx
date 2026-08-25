@@ -1,12 +1,13 @@
 import type { ScheduleRankWeek } from './payload'
 import PopCard from './PopCard'
+import { CARD_HINTS } from './hints'
 import { ordinal } from './payload'
 
 // The season as eighteen bars: one per week, tall where the defence in front
 // of him gave up the most to his position last year.
 //
 // THE DIRECTION IS INVERTED FROM INTUITION AND THE COPY SAYS SO: a tall green
-// week is a SOFT one, and the card's note calls the season figure "softest"
+// week is a SOFT one, and each bar's tooltip calls its own figure "softest"
 // for the same reason. Reading it as a difficulty rank turns the best week of
 // the season into the worst.
 //
@@ -53,15 +54,23 @@ export default function ScheduleRanks({ weeks, sosPct }: {
   // table has no column for gets no card, not eighteen grey stubs.
   if (!weeks.some((w) => w.pct !== null)) return null
   const teams = weeks.find((w) => w.rank_n !== null)?.rank_n ?? null
+  // The place and the direction it runs in. "15th softest of 32" was a
+  // sentence, and at this card's width it pushed the title into "SCHEDU…" --
+  // a card whose own name is cut short to make room for its footnote has its
+  // priorities backwards. The field size could go, because it is always the
+  // league; the word could not. A bare "13th" is ambiguous in the one way
+  // that matters, since 13th-hardest and 13th-easiest are opposite facts
+  // about the season and a drafter reading the wrong one takes the wrong
+  // player.
   const note = sosPct !== null && teams !== null
-    ? `${ordinal(softestRank(sosPct, teams))} softest of ${teams}`
+    ? `${ordinal(softestRank(sosPct, teams))} easiest`
     : undefined
 
   return (
     // Back to an even share. It was widened for its note, but eighteen bars
     // are a shape rather than a reading and they hold up narrow -- and the
     // card beside it now lists a whole position room, which does not.
-    <PopCard title="Schedule" note={note}>
+    <PopCard title="Schedule" note={note} hint={CARD_HINTS.schedule}>
       <div className="pp-pop-strip">
         {weeks.map((w) => {
           const opponent = w.opponent === null

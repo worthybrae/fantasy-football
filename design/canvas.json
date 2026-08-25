@@ -1,0 +1,14 @@
+{
+  "artboards": [
+    { "file": "Main.dc.html", "x": 0, "y": 0, "w": 1440, "h": 900, "title": "A — Seat rail + schedule" },
+    { "file": "DirectionB.dc.html", "x": 1560, "y": 0, "w": 1440, "h": 900, "title": "B — Room list + seat detail" },
+    { "file": "DirectionC.dc.html", "x": 3120, "y": 0, "w": 1440, "h": 900, "title": "C — Full board" }
+  ],
+  "annotations": [
+    { "id": "brief", "x": 0, "y": -190, "w": 520, "text": "Waiting room, three directions.\n\nAll three use the live app's tokens exactly: #0a0b0e / #121319 / #1b1d25 surfaces, #262932 borders, #ffb454 accent, Inter + JetBrains Mono, 3px radii, the room's own 44px top bar.\n\nThe question each answers differently: what fills the screen while you decide which seat to take." },
+    { "id": "note-a", "x": 0, "y": 940, "w": 460, "text": "A — Seat rail + schedule ribbon\n\nSeats run left to right in draft order along the top; picking one opens what that seat actually buys: all 16 picks drawn on the draft's own 224-pick axis, so the WAIT between them is visible. Seat 1 and seat 14 look obviously different here.\n\nTrade-off: the ribbon is a new object nobody has seen before, and 14 seats in a rail get narrow." },
+    { "id": "note-b", "x": 1560, "y": 940, "w": 460, "text": "B — Room list + seat detail\n\nThe room as a scannable list (draft order down), the seat under consideration at full size on the right, every round spelled out. Densest of the three and the most familiar shape.\n\nTrade-off: two columns of numbers, no picture — the difference between seat 5 and seat 6 is something you read rather than see." },
+    { "id": "note-c", "x": 3120, "y": 940, "w": 460, "text": "C — Full board\n\nThe draft room's own snake board, empty: seats across, rounds down, the pick number in every cell. Nothing new to learn, and it is literally the screen you are about to be looking at.\n\nTrade-off: 224 cells of equal weight, so the seat decision has to be found in it rather than handed to you. Closest to what is built today." }
+  ],
+  "launch": { "view": "canvas" }
+}

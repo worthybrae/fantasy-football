@@ -1474,6 +1474,81 @@ class _FakeSession:
         self.stopped = True
 
 
+class _DeadHandle:
+    """A socket handle with nothing attached -- what draft_socket leaves
+    behind between a drop and the next connect, and what a dead seat
+    leaves behind for good."""
+
+    def alive(self):
+        return False
+
+
+class _DeadSession(_FakeSession):
+    def __init__(self, listener):
+        super().__init__(listener)
+        self.socket = _DeadHandle()
+
+
+def test_a_socket_dead_for_a_minute_gets_a_fresh_token_then_the_room_is_abandoned(
+        monkeypatch):
+    """Observed live: a seat whose socket cycled for twenty minutes (JOIN
+    accepted, greeting, close, no picks replayed, every SELECT refused) with
+    the listener thread alive throughout -- so neither draft_socket's own
+    give-up nor the idle timer fired, and ESPN autodrafted the rest of the
+    seat under our name. The loop must notice a handle that has had nothing
+    attached for SOCKET_DEAD_SECONDS, stop that session and connect a fresh
+    one; and when the fresh one is just as dead, give the room up.
+    """
+    settings = _mock_settings()
+    listener = _FakeListener(42)
+    sessions = [_DeadSession(listener), _DeadSession(listener)]
+    connects = []
+
+    def connect(*args, **kwargs):
+        connects.append(args)
+        return sessions[len(connects) - 1]
+
+    tool = mf.Tool(board=pd.DataFrame(), pool=_fake_pool(), pool_df=pd.DataFrame(),
+                   crosswalk={}, espn_by_index=[], index_by_player={},
+                   sendable=np.ones(6, dtype=bool))
+
+    monkeypatch.setattr(lobby, "http_poster", lambda cookies: None)
+    monkeypatch.setattr(lobby, "join",
+                        lambda post, league_id, swid, season: 42)
+    monkeypatch.setattr(mf, "http_fetch", lambda cookies: (lambda url: ""))
+    monkeypatch.setattr(mf, "fetch_league_settings",
+                        lambda fetch, league_id, season: {"raw": True})
+    monkeypatch.setattr(mf.league, "from_espn", lambda raw: settings)
+    monkeypatch.setattr(mf, "build_tool", lambda conn, s: tool)
+    monkeypatch.setattr(mf, "DraftListener", lambda crosswalk: listener)
+    monkeypatch.setattr(mf, "_wait_until_available", lambda room, out: None)
+    monkeypatch.setattr(mf, "_connect_session", connect)
+    monkeypatch.setattr(mf, "_make_pick", lambda *a, **k: False)
+    monkeypatch.setattr(mf, "SOCKET_DEAD_SECONDS", 0.0)
+    monkeypatch.setattr(mf, "MAX_SOCKET_RECONNECTS", 1)
+
+    loops = {"n": 0}
+
+    def bounded_sleep(seconds):
+        loops["n"] += 1
+        assert loops["n"] < 50, "the loop never gave the dead room up"
+
+    monkeypatch.setattr(mf.time, "sleep", bounded_sleep)
+
+    said = []
+    result = mf.play_draft(None, None, {"SWID": FAKE_SWID, "espn_s2": "s2"},
+                           _live_room(leagueId=61), np.random.default_rng(0),
+                           season=2026, out=lambda line: said.append(line))
+
+    assert result["status"] == "incomplete"
+    # One fresh session after the first dead minute, then the room given up
+    # when that one is dead too -- never a third.
+    assert len(connects) == 2
+    assert sessions[0].stopped and sessions[1].stopped
+    assert any("reconnecting with a fresh token (1/1)" in line for line in said)
+    assert any("abandoning this room" in line for line in said)
+
+
 def test_a_failed_pick_still_sleeps_before_the_loop_polls_again(monkeypatch):
     """The pick branch used to `continue` past the poll sleep.
 

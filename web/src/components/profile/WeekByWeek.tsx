@@ -5,6 +5,7 @@ import { weekCols } from '../draft/panels'
 import { barTone } from '../draft/weeks'
 import PopCard from './PopCard'
 import type { GameRow, SeasonRow } from './payload'
+import { weeksHint } from './hints'
 
 // What a week was made of, in columns rather than in a sentence.
 //
@@ -20,11 +21,17 @@ import type { GameRow, SeasonRow } from './payload'
 // skill columns only -- so they keep the sentence, which is the whole of
 // what the payload can say about their week.
 //
-// Touchdowns are NOT a column for the skill positions, on purpose: six
-// points each, they are already the loudest part of the PPR figure on the
-// right, and the row has room for nine columns rather than ten. What is not
-// anywhere else is how much of the offence he was that week -- the shares
-// below, which a season average flattens into one number.
+// Touchdowns ARE a column now, for every position. The argument against was
+// that six points each makes them the loudest part of the PPR figure on the
+// right, so the figure already says it -- true, and beside the point: a
+// 23-point week is a different week if it was two scores than if it was 140
+// yards, and the reader cannot tell which from the total. It is the one part
+// of a week the row was leaving him to infer.
+//
+// Rushing plus receiving for a skill player, never a throw -- the same rule
+// `similarity.py` builds the season column on, so the log and the panels
+// count a touchdown the same way. A quarterback's column is his passing
+// scores, with his rushing yards beside it as before.
 type LogColumn = { head: string; cell: (g: GameRow) => string }
 
 const LOG: Record<string, LogColumn[]> = {
@@ -40,6 +47,7 @@ const LOG: Record<string, LogColumn[]> = {
     { head: 'Ru', cell: (g) => String(g.stats.rush_yards) },
     { head: 'Rec', cell: (g) => String(g.stats.receptions) },
     { head: 'Re', cell: (g) => String(g.stats.rec_yards) },
+    { head: 'TD', cell: (g) => String(g.stats.rush_tds + g.stats.rec_tds) },
     { head: 'Snap', cell: (g) => share(g.snap_pct) },
     { head: 'Tgt%', cell: (g) => share(g.target_pct) },
   ],
@@ -47,6 +55,7 @@ const LOG: Record<string, LogColumn[]> = {
     { head: 'Tgt', cell: (g) => String(g.stats.targets) },
     { head: 'Rec', cell: (g) => String(g.stats.receptions) },
     { head: 'Yds', cell: (g) => String(g.stats.rec_yards + g.stats.rush_yards) },
+    { head: 'TD', cell: (g) => String(g.stats.rec_tds + g.stats.rush_tds) },
     { head: 'Snap', cell: (g) => share(g.snap_pct) },
     { head: 'Tgt%', cell: (g) => share(g.target_pct) },
   ],
@@ -121,6 +130,7 @@ export default function WeekByWeek({ games, seasons, position }: {
           {summary !== null && ` · finished ${position}${summary.pos_finish}`}
         </>
       )}
+      hint={weeksHint(season)}
       className="pp-pop-panel pp-pop-weeks"
     >
       {/* An arrow on each side of the picture, pointing the way time runs:

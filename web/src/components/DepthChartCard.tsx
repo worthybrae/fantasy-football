@@ -1,5 +1,6 @@
 import type { DepthChartGroup } from '../api'
 import PopCard from './profile/PopCard'
+import { CARD_HINTS } from './profile/hints'
 import { depthGroup } from './profile/payload'
 
 // HIS room, whole. Still not the four position groups this once printed -- a
@@ -25,7 +26,7 @@ export default function DepthChartCard({ team, position, groups }: {
   const rows = me && !top.includes(me) ? [...top, me] : top
 
   return (
-    <PopCard title="Room" note={team} className="is-wide">
+    <PopCard title="Depth chart" note={team} hint={CARD_HINTS.depth} className="is-wide">
       {/* An ordered list because a depth chart IS an order -- the whole
           card is who stands where in the room. */}
       <ol className="pp-pop-list">

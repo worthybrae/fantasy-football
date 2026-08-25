@@ -1,4 +1,6 @@
 import { Fragment, useEffect, useState, type CSSProperties, type FocusEvent, type MouseEvent, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
+import BoardPeek from './draft/BoardPeek'
 import type { BoardCell, BoardPlayer, LiveBoard, PickMaker } from '../api'
 
 // duplicated from LiveDraft.tsx (unexported there): a four-line pure
@@ -18,13 +20,11 @@ function posBadge(position: string | undefined): ReactNode {
 // shading, the cell the /draft board has always drawn.
 //
 // The vocabulary is one ramp: how much of a PERSON is behind the seat.
-// Filled circle, half circle, hollow circle -- human, walked away, never
-// there. Our own bot gets a diamond instead of a place on that ramp,
-// because it is not a person and is not ESPN either: it plays semi-randomly
-// on purpose, so its picks say nothing about whether the room was worth
-// anything. The colour and the fill of the cell behind these do the work at
-// a glance (see App.css); the glyph is what settles WHICH state a cell is
-// in once you look straight at it.
+// On the board it is drawn as light -- a person's pick at full strength, a
+// seat that emptied turned down, a seat nobody took turned down further
+// (see App.css) -- and said in each tile's aria-label and hover title. The
+// glyphs below are no longer painted on tiles; they survive for the /mocks
+// key, where they are hidden from sight and read only by screen readers.
 export const MAKER_MARK: Record<Exclude<PickMaker, 'unknown'>, string> = {
   human: '\u25cf',
   auto: '\u25d0',
@@ -46,30 +46,17 @@ function isLabelled(made_by: PickMaker | undefined): made_by is Exclude<PickMake
   return made_by !== undefined && made_by !== 'unknown'
 }
 
-// The mark rides in the cell's top row beside the ADP delta rather than
-// over the name: the name is the thing being read, and a board where most
-// picks are machine-made would otherwise be a wall of glyphs across the
-// content.
-function makerMark(made_by: PickMaker | undefined): ReactNode {
-  if (!isLabelled(made_by)) return null
-  return (
-    <span className={`board-by-mark is-${made_by}`} title={MAKER_LABEL[made_by]} aria-hidden="true">
-      {MAKER_MARK[made_by]}
-    </span>
-  )
-}
-
 interface HoverInfo {
   cell: BoardCell
   rect: DOMRect
 }
 
-const POPOVER_WIDTH = 220
+const POPOVER_WIDTH = 340
 const POPOVER_GAP = 8
 // Rough popover height -- there's no real box to measure until it's already
 // painted, and this only has to be close enough to decide which side of the
 // cell has room, not pixel-exact.
-const POPOVER_EST_HEIGHT = 190
+const POPOVER_EST_HEIGHT = 320
 
 function popoverStyle(rect: DOMRect): CSSProperties {
   const left = Math.max(8, Math.min(rect.left, window.innerWidth - POPOVER_WIDTH - 8))
@@ -78,16 +65,6 @@ function popoverStyle(rect: DOMRect): CSSProperties {
     ? below
     : Math.max(8, rect.top - POPOVER_EST_HEIGHT - POPOVER_GAP)
   return { left, top }
-}
-
-// value > 0: fell past ADP (a steal). value < 0: went early (a reach).
-// value === 0 is neither -- it's dropped rather than tagged, same as every
-// other popover field being skipped when it has nothing to say.
-function valueTag(value: number | null): { label: string; tone: 'steal' | 'reach' } | null {
-  if (value === null || value === 0) return null
-  return value > 0
-    ? { label: `steal +${value.toFixed(0)}`, tone: 'steal' }
-    : { label: `reach ${Math.abs(value).toFixed(0)}`, tone: 'reach' }
 }
 
 // The +/- vs ADP: where the pick landed relative to its PPR consensus ADP
@@ -102,32 +79,6 @@ function adpDelta(value: number | null): ReactNode {
     <span className={`board-cell-adp ${steal ? 'is-steal' : 'is-reach'}`}>
       {steal ? `+${value.toFixed(0)}` : value.toFixed(0)}
     </span>
-  )
-}
-
-// The hover/focus detail card: everything ESPN-clean cell content leaves
-// out. Every row is conditional on its own field being non-null -- a player
-// with no market coverage (no ADP, no edge) still gets a popover, just a
-// shorter one.
-function BoardPopover({ player, style }: { player: BoardPlayer; style: CSSProperties }) {
-  const tag = valueTag(player.value)
-  return (
-    <div className="board-pop" style={style} role="tooltip">
-      <div className="board-pop-name">{player.name}</div>
-      <div className="board-pop-meta">
-        {posBadge(player.position)}
-        <span>{player.team ?? '—'}</span>
-        {player.bye !== null && <span>Bye {player.bye}</span>}
-      </div>
-      <ul className="board-pop-stats">
-        {player.overall_rank !== null && <li>#{player.overall_rank} overall</li>}
-        {player.tier !== null && <li>Tier {player.tier}</li>}
-        {player.market_rank !== null && <li>ADP {player.market_rank.toFixed(1)}</li>}
-        {tag && <li className={`board-pop-value is-${tag.tone}`}>{tag.label}</li>}
-        {player.vor !== null && <li>VOR {player.vor.toFixed(1)}</li>}
-        {player.last_ppg !== null && <li>{player.last_ppg.toFixed(1)} ppg last yr</li>}
-      </ul>
-    </div>
   )
 }
 
@@ -202,6 +153,13 @@ export default function DraftBoardGrid({ board, onOpenPlayer }: DraftBoardGridPr
   // does.
   function handleCellClick(cell: BoardCell) {
     if (!onOpenPlayer) return
+    // A pick the board has no row for -- see api/live.py's `identify_players`.
+    // ESPN's rooms draft outside this board's pool (it drops anyone ESPN
+    // itself does not rank), so such a pick is named, positioned and given a
+    // face from the player tables, but there is no profile behind it: the
+    // popup would open on "Failed to load player profile". `overall_rank` is
+    // the board-row marker -- every player ON the board has one.
+    if (cell.player.overall_rank === null) return
     // The hover popover is z-index 50 -- above the overlay's own backdrop --
     // so it would otherwise hang over the dimmed board with no way to
     // dismiss it (the pointer is about to leave without a mouseleave the
@@ -229,18 +187,13 @@ export default function DraftBoardGrid({ board, onOpenPlayer }: DraftBoardGridPr
             ].filter(Boolean).join(' ')}
           >
             <span className="board-col-name">{col.team_name}</span>
-            {/* Same filled/hollow circle the cells use, so "a person sat
-                here" reads the same in the header as it does in the column
-                under it -- without having to scan the column to find out. */}
+            {/* Whether a person ever sat here is said, not drawn: the
+                column's own tiles carry it as light (see App.css), and a
+                dot in every header was one more mark on a board that had
+                too many. */}
             {col.had_owner !== undefined && col.had_owner !== null && (
-              <span
-                className={`board-col-owner${col.had_owner ? ' is-owned' : ''}`}
-                title={col.had_owner ? 'a person sat in this seat' : 'nobody ever sat in this seat'}
-              >
-                <span aria-hidden="true">{col.had_owner ? '\u25cf' : '\u25cb'}</span>
-                <span className="sr-only">
-                  {col.had_owner ? 'a person sat in this seat' : 'nobody ever sat in this seat'}
-                </span>
+              <span className="sr-only">
+                {col.had_owner ? 'a person sat in this seat' : 'nobody ever sat in this seat'}
               </span>
             )}
             {col.is_me && <span className="board-you-chip">YOU</span>}
@@ -286,7 +239,14 @@ export default function DraftBoardGrid({ board, onOpenPlayer }: DraftBoardGridPr
                   key={col.slot}
                   type="button"
                   className={['board-cell board-cell-filled',
+                    // The cell's own position hue, for the tint and the left
+                    // edge. See `.board-cell-pos-*`.
+                    `board-cell-pos-${(cell.player.position || 'na').toLowerCase()}`,
                     col.is_me ? 'board-cell-mine' : '',
+                    // Named, but with no board row behind it, so there is no
+                    // profile to open (see handleCellClick). The class takes
+                    // the pointer's promise back off it.
+                    cell.player.overall_rank === null ? 'board-cell-flat' : '',
                     // Absent on the live room's board (no label, no class),
                     // so /draft keeps drawing exactly the cell it always has.
                     isLabelled(cell.made_by) ? `board-cell-by-${cell.made_by}` : '',
@@ -294,6 +254,7 @@ export default function DraftBoardGrid({ board, onOpenPlayer }: DraftBoardGridPr
                     .filter(Boolean).join(' ')}
                   aria-label={`${cell.player.name}, ${cell.player.position || 'unknown position'}, pick ${cell.round}.${pickInRound}`
                     + (isLabelled(cell.made_by) ? `, ${MAKER_LABEL[cell.made_by]}` : '')}
+                  title={isLabelled(cell.made_by) ? MAKER_LABEL[cell.made_by] : undefined}
                   onClick={() => handleCellClick(cell)}
                   onMouseEnter={(e) => showPopover(cell, e)}
                   onMouseLeave={() => setHover(null)}
@@ -303,7 +264,6 @@ export default function DraftBoardGrid({ board, onOpenPlayer }: DraftBoardGridPr
                   <div className="board-cell-top">
                     {posBadge(cell.player.position)}
                     <span className="board-cell-meta">
-                      {makerMark(cell.made_by)}
                       {adpDelta(cell.player.value)}
                       <span className="board-cell-team mono">{cell.player.team ?? ''}</span>
                     </span>
@@ -319,7 +279,20 @@ export default function DraftBoardGrid({ board, onOpenPlayer }: DraftBoardGridPr
         })}
       </div>
 
-      {hover && <BoardPopover player={hover.cell.player} style={popoverStyle(hover.rect)} />}
+      {/* A CONDENSED PROFILE, not a list of fields. What was here read
+          "#41 overall · Tier 4 · VOR 12.3" -- internal quantities a drafter
+          has no feel for, and none of them the question somebody hovering a
+          pick is asking. See BoardPeek. */}
+      {/* Portalled to the body: the peek is `position: fixed` in viewport
+          coordinates, but any ancestor that masks, transforms or scrolls
+          (the room's main column, the landing page's faded demo) would
+          otherwise clip it at its own edge -- which is exactly where the
+          rightmost column's peeks land. */}
+      {hover && createPortal(
+        <BoardPeek player={hover.cell.player} pick={hover.cell.overall}
+                   style={popoverStyle(hover.rect)} />,
+        document.body,
+      )}
     </div>
   )
 }

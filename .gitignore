@@ -183,3 +183,9 @@ web/dist/
 # design canvas working files (mockups, not app source)
 .design/
 auto_refit_daemon.out
+
+# `make deploy-data` output: compressed copies of data/, headed for the
+# deployment's volume. Same reason data/ itself is ignored -- these are large,
+# regenerated, and one of them is a copy of the encrypted credential store's
+# neighbour rather than anything a repository should carry.
+deploy/

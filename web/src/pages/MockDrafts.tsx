@@ -208,7 +208,16 @@ function MakerTally({ tally }: { tally: Tally }) {
 export default function MockDrafts() {
   const [drafts, setDrafts] = useState<MockDraft[] | null>(null)
   const [listError, setListError] = useState<string | null>(null)
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  // Seeded from `?draft=<id>` so another page (the archive's draft list) can
+  // link straight to one board. Null when the URL names nothing, and then
+  // the effect below opens the first room in the list as before.
+  const [selectedId, setSelectedId] = useState<string | null>(() => {
+    try {
+      return new URLSearchParams(window.location.search).get('draft')
+    } catch {
+      return null
+    }
+  })
   // Kept in its own slot beside the list's, the same split /draft makes: a
   // hiccup fetching one board must not blank the list of rooms, and a
   // hiccup fetching the list must not blank the board being read.
@@ -331,7 +340,16 @@ export default function MockDrafts() {
   return (
     <div className="mocks-page">
       <header className="draft-topbar">
-        <Link to="/" className="draft-topbar-title"><Logo /> Draft Assistant</Link>
+        <Link to="/" className="draft-topbar-title"><Logo /> ESPN Draft Assist</Link>
+        <span className="draft-topbar-sep" aria-hidden="true" />
+        {/* The same three tabs every page carries, so the bar does not slim
+            down on the way from the archive to one of its boards. Archive
+            is the one lit: this is its reading room. */}
+        <nav className="draft-topbar-tabs" aria-label="Views">
+          <Link className="draft-tab" to="/">Drafts</Link>
+          <Link className="draft-tab is-active" to="/archive" aria-current="page">Archive</Link>
+          <Link className="draft-tab" to="/live">Live</Link>
+        </nav>
         <span className="draft-topbar-sep" aria-hidden="true" />
         <span className="mocks-title">Mock drafts</span>
         {drafts !== null && drafts.length > 0 && (

@@ -1,0 +1,137 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap">
+  <style>
+    body {
+      margin: 0;
+      background: #0a0b0e;
+      color: #98a0b0;
+      font: 13px/1.45 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: #ffb454; text-decoration: none; }
+    a:hover { color: #ffc57e; }
+    .mono { font-family: 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace; }
+    .cell { display: flex; align-items: center; justify-content: center; height: 30px; border-right: 1px solid #262932; border-bottom: 1px solid #262932; font-family: 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace; font-size: 11px; color: #565b69; }
+    .cell.mine { background: rgba(255, 180, 84, 0.1); color: #ffb454; border-left: 2px solid #ffb454; border-right: 2px solid #ffb454; }
+    .rowlab { display: flex; align-items: center; justify-content: space-between; gap: 4px; height: 30px; padding: 0 7px; border-right: 1px solid #262932; border-bottom: 1px solid #262932; background: #121319; font-family: 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace; font-size: 10px; color: #565b69; }
+    .head { display: flex; align-items: center; justify-content: space-between; gap: 5px; height: 40px; padding: 0 8px; background: #121319; border-right: 1px solid #262932; border-bottom: 1px solid #262932; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; color: #98a0b0; overflow: hidden; white-space: nowrap; }
+  </style>
+</helmet>
+
+<div style="width: 1440px; height: 900px; display: flex; flex-direction: column; background: #0a0b0e; overflow: hidden;">
+
+  <div style="display: flex; align-items: center; gap: 16px; height: 44px; padding: 0 16px; background: #121319; border-bottom: 1px solid #262932; flex-shrink: 0;">
+    <div style="display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #e8eaef;">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><ellipse cx="8" cy="8" rx="7" ry="4.2" transform="rotate(-38 8 8)" stroke="#ffb454" stroke-width="1.4"/><path d="M5.6 10.4L10.4 5.6" stroke="#ffb454" stroke-width="1.4"/></svg>
+      ESPN Draft Assist
+    </div>
+    <div style="width: 1px; height: 18px; background: #262932;"></div>
+    <div style="align-self: stretch; display: flex;">
+      <div style="display: flex; align-items: center; padding: 0 16px; font-size: 12px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: #565b69; border-bottom: 2px solid transparent;">Drafts</div>
+      <div style="display: flex; align-items: center; padding: 0 16px; font-size: 12px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: #ffb454; background: #1b1d25; border-bottom: 2px solid #ffb454;">Waiting room</div>
+    </div>
+    <div style="width: 1px; height: 18px; background: #262932;"></div>
+    <div style="font-size: 12px; color: #98a0b0;">14 teams · PPR · snake · 16 rounds · 30s a pick</div>
+    <div style="flex-grow: 1;"></div>
+    <div class="mono" style="font-size: 12px; color: #565b69;"><span style="color: #e8eaef; font-weight: 700;">11</span> / 14 seats</div>
+  </div>
+
+  <!-- the clock, the seat, and the commitment: one strip, everything in it -->
+  <div style="display: flex; align-items: center; gap: 28px; padding: 14px 16px; border-bottom: 1px solid #262932; background: #121319;">
+    <div style="display: flex; align-items: baseline; gap: 12px;">
+      <div class="mono" style="font-size: 40px; font-weight: 700; line-height: 1; letter-spacing: -0.04em; color: #ffb454; font-variant-numeric: tabular-nums;">2:35</div>
+      <div style="font-size: 12px; color: #565b69;">until the first pick</div>
+    </div>
+    <div style="width: 1px; height: 34px; background: #262932;"></div>
+    <div style="flex: 1 1 auto; min-width: 0;">
+      <div style="font-size: 14px; color: #98a0b0;"><span style="color: #e8eaef; font-weight: 600;">Seat 6</span> picks <span class="mono" style="color: #e8eaef;">#6</span>, <span class="mono" style="color: #e8eaef;">#23</span>, <span class="mono" style="color: #e8eaef;">#34</span> — then every 17 or 11 picks</div>
+      <div style="margin-top: 2px; font-size: 11px; color: #565b69;">Read a column to compare seats. Three are still open.</div>
+    </div>
+    <div style="display: flex; align-items: center; gap: 14px;">
+      <div style="max-width: 30ch; text-align: right; font-size: 11px; line-height: 1.45; color: #565b69;">Final — a seat cannot be swapped once taken.</div>
+      <div style="padding: 11px 22px; border: 1px solid #ffb454; border-radius: 3px; background: #ffb454; color: #10110f; font-size: 14px; font-weight: 700;">Take seat 6</div>
+    </div>
+  </div>
+
+  <!-- the board itself: seats across, rounds down, the pick in every cell -->
+  <div style="flex: 1 1 auto; min-height: 0; margin: 16px; border: 1px solid #262932; border-radius: 3px; background: #121319; overflow: hidden;">
+    <div style="display: grid; grid-template-columns: 46px repeat(14, minmax(0, 1fr));">
+      <div style="height: 40px; background: #121319; border-right: 1px solid #262932; border-bottom: 1px solid #262932;"></div>
+      <div class="head">Mike's M…</div>
+      <div class="head">Riley's R…</div>
+      <div class="head">Owen's O…</div>
+      <div class="head" style="color: #98a0b0;">Seat 4 <span style="padding: 0 4px; border: 1px solid #565b69; border-radius: 3px; font-size: 9px; color: #565b69;">Open</span></div>
+      <div class="head">Bob's B…</div>
+      <div class="head" style="background: rgba(255, 180, 84, 0.12); color: #ffb454; border-bottom-color: #ffb454;">Seat 6 <span style="padding: 0 4px; border: 1px solid #ffb454; border-radius: 3px; font-size: 9px;">Picked</span></div>
+      <div class="head">James's S…</div>
+      <div class="head">Dane's D…</div>
+      <div class="head">Marco's M…</div>
+      <div class="head">James's F…</div>
+      <div class="head">Matthew's…</div>
+      <div class="head" style="color: #98a0b0;">Seat 12 <span style="padding: 0 4px; border: 1px solid #565b69; border-radius: 3px; font-size: 9px; color: #565b69;">Open</span></div>
+      <div class="head">Connor's C…</div>
+      <div class="head">Will's W…</div>
+
+      <div class="rowlab"><span>1</span><span style="color: #565b69;">→</span></div>
+      <div class="cell">1</div><div class="cell">2</div><div class="cell">3</div><div class="cell">4</div><div class="cell">5</div><div class="cell mine">6</div><div class="cell">7</div><div class="cell">8</div><div class="cell">9</div><div class="cell">10</div><div class="cell">11</div><div class="cell">12</div><div class="cell">13</div><div class="cell">14</div>
+
+      <div class="rowlab" style="background: rgba(27, 29, 37, 0.4);"><span>2</span><span style="color: #565b69;">←</span></div>
+      <div class="cell" style="background: rgba(27, 29, 37, 0.4);">28</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">27</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">26</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">25</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">24</div><div class="cell mine">23</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">22</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">21</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">20</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">19</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">18</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">17</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">16</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">15</div>
+
+      <div class="rowlab"><span>3</span><span style="color: #565b69;">→</span></div>
+      <div class="cell">29</div><div class="cell">30</div><div class="cell">31</div><div class="cell">32</div><div class="cell">33</div><div class="cell mine">34</div><div class="cell">35</div><div class="cell">36</div><div class="cell">37</div><div class="cell">38</div><div class="cell">39</div><div class="cell">40</div><div class="cell">41</div><div class="cell">42</div>
+
+      <div class="rowlab" style="background: rgba(27, 29, 37, 0.4);"><span>4</span><span style="color: #565b69;">←</span></div>
+      <div class="cell" style="background: rgba(27, 29, 37, 0.4);">56</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">55</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">54</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">53</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">52</div><div class="cell mine">51</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">50</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">49</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">48</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">47</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">46</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">45</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">44</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">43</div>
+
+      <div class="rowlab"><span>5</span><span style="color: #565b69;">→</span></div>
+      <div class="cell">57</div><div class="cell">58</div><div class="cell">59</div><div class="cell">60</div><div class="cell">61</div><div class="cell mine">62</div><div class="cell">63</div><div class="cell">64</div><div class="cell">65</div><div class="cell">66</div><div class="cell">67</div><div class="cell">68</div><div class="cell">69</div><div class="cell">70</div>
+
+      <div class="rowlab" style="background: rgba(27, 29, 37, 0.4);"><span>6</span><span style="color: #565b69;">←</span></div>
+      <div class="cell" style="background: rgba(27, 29, 37, 0.4);">84</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">83</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">82</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">81</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">80</div><div class="cell mine">79</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">78</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">77</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">76</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">75</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">74</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">73</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">72</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">71</div>
+
+      <div class="rowlab"><span>7</span><span style="color: #565b69;">→</span></div>
+      <div class="cell">85</div><div class="cell">86</div><div class="cell">87</div><div class="cell">88</div><div class="cell">89</div><div class="cell mine">90</div><div class="cell">91</div><div class="cell">92</div><div class="cell">93</div><div class="cell">94</div><div class="cell">95</div><div class="cell">96</div><div class="cell">97</div><div class="cell">98</div>
+
+      <div class="rowlab" style="background: rgba(27, 29, 37, 0.4);"><span>8</span><span style="color: #565b69;">←</span></div>
+      <div class="cell" style="background: rgba(27, 29, 37, 0.4);">112</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">111</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">110</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">109</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">108</div><div class="cell mine">107</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">106</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">105</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">104</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">103</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">102</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">101</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">100</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">99</div>
+
+      <div class="rowlab"><span>9</span><span style="color: #565b69;">→</span></div>
+      <div class="cell">113</div><div class="cell">114</div><div class="cell">115</div><div class="cell">116</div><div class="cell">117</div><div class="cell mine">118</div><div class="cell">119</div><div class="cell">120</div><div class="cell">121</div><div class="cell">122</div><div class="cell">123</div><div class="cell">124</div><div class="cell">125</div><div class="cell">126</div>
+
+      <div class="rowlab" style="background: rgba(27, 29, 37, 0.4);"><span>10</span><span style="color: #565b69;">←</span></div>
+      <div class="cell" style="background: rgba(27, 29, 37, 0.4);">140</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">139</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">138</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">137</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">136</div><div class="cell mine">135</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">134</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">133</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">132</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">131</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">130</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">129</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">128</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">127</div>
+
+      <div class="rowlab"><span>11</span><span style="color: #565b69;">→</span></div>
+      <div class="cell">141</div><div class="cell">142</div><div class="cell">143</div><div class="cell">144</div><div class="cell">145</div><div class="cell mine">146</div><div class="cell">147</div><div class="cell">148</div><div class="cell">149</div><div class="cell">150</div><div class="cell">151</div><div class="cell">152</div><div class="cell">153</div><div class="cell">154</div>
+
+      <div class="rowlab" style="background: rgba(27, 29, 37, 0.4);"><span>12</span><span style="color: #565b69;">←</span></div>
+      <div class="cell" style="background: rgba(27, 29, 37, 0.4);">168</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">167</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">166</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">165</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">164</div><div class="cell mine">163</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">162</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">161</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">160</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">159</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">158</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">157</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">156</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">155</div>
+
+      <div class="rowlab"><span>13</span><span style="color: #565b69;">→</span></div>
+      <div class="cell">169</div><div class="cell">170</div><div class="cell">171</div><div class="cell">172</div><div class="cell">173</div><div class="cell mine">174</div><div class="cell">175</div><div class="cell">176</div><div class="cell">177</div><div class="cell">178</div><div class="cell">179</div><div class="cell">180</div><div class="cell">181</div><div class="cell">182</div>
+
+      <div class="rowlab" style="background: rgba(27, 29, 37, 0.4);"><span>14</span><span style="color: #565b69;">←</span></div>
+      <div class="cell" style="background: rgba(27, 29, 37, 0.4);">196</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">195</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">194</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">193</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">192</div><div class="cell mine">191</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">190</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">189</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">188</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">187</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">186</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">185</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">184</div><div class="cell" style="background: rgba(27, 29, 37, 0.4);">183</div>
+
+      <div class="rowlab"><span>15</span><span style="color: #565b69;">→</span></div>
+      <div class="cell">197</div><div class="cell">198</div><div class="cell">199</div><div class="cell">200</div><div class="cell">201</div><div class="cell mine">202</div><div class="cell">203</div><div class="cell">204</div><div class="cell">205</div><div class="cell">206</div><div class="cell">207</div><div class="cell">208</div><div class="cell">209</div><div class="cell">210</div>
+
+      <div class="rowlab" style="background: rgba(27, 29, 37, 0.4); border-bottom: 0;"><span>16</span><span style="color: #565b69;">←</span></div>
+      <div class="cell" style="background: rgba(27, 29, 37, 0.4); border-bottom: 0;">224</div><div class="cell" style="background: rgba(27, 29, 37, 0.4); border-bottom: 0;">223</div><div class="cell" style="background: rgba(27, 29, 37, 0.4); border-bottom: 0;">222</div><div class="cell" style="background: rgba(27, 29, 37, 0.4); border-bottom: 0;">221</div><div class="cell" style="background: rgba(27, 29, 37, 0.4); border-bottom: 0;">220</div><div class="cell mine" style="border-bottom: 0;">219</div><div class="cell" style="background: rgba(27, 29, 37, 0.4); border-bottom: 0;">218</div><div class="cell" style="background: rgba(27, 29, 37, 0.4); border-bottom: 0;">217</div><div class="cell" style="background: rgba(27, 29, 37, 0.4); border-bottom: 0;">216</div><div class="cell" style="background: rgba(27, 29, 37, 0.4); border-bottom: 0;">215</div><div class="cell" style="background: rgba(27, 29, 37, 0.4); border-bottom: 0;">214</div><div class="cell" style="background: rgba(27, 29, 37, 0.4); border-bottom: 0;">213</div><div class="cell" style="background: rgba(27, 29, 37, 0.4); border-bottom: 0;">212</div><div class="cell" style="background: rgba(27, 29, 37, 0.4); border-bottom: 0;">211</div>
+    </div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

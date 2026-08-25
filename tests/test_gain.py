@@ -317,8 +317,8 @@ def test_available_by_vor_empty_when_nobody_is_left():
     out = available_by_vor(pool, np.array([True]))
     assert out.empty
     assert list(out.columns) == ["player_id", "position", "proj_points",
-                                 "vor_points", "gain_now", "plan_steer",
-                                 "survive_pct", "fills", "rank"]
+                                 "vor_points", "gain_now", "gain_next",
+                                 "edge_next", "survive_pct", "fills", "rank"]
 
 
 class _pool:
@@ -331,67 +331,81 @@ class _pool:
         self.vor = np.array(vor, dtype=float)
 
 
-def test_plan_steer_is_absent_and_inert_without_a_plan():
-    """Every existing caller passes no plan_bias, so the default path must be
-    bit-identical to what it was before steering existed -- not merely
-    similar. A steer that leaks in at 0.0-ish rather than exactly 0.0 would
-    reorder ties silently."""
-    pool = _pool(player_id=["a", "b", "c"], position=["RB", "WR", "QB"],
-                 points=[200.0, 190.0, 260.0], vor=[50.0, 48.0, 55.0])
-    taken = np.zeros(3, dtype=bool)
-    surv = np.array([0.5, 0.5, 0.5])
-    out = rank_available(pool, settings(), taken, {}, surv)
-    assert list(out["plan_steer"]) == [0.0, 0.0, 0.0]
-    same = rank_available(pool, settings(), taken, {}, surv, plan_bias={})
-    pd.testing.assert_frame_equal(out, same)
-    pd.testing.assert_frame_equal(
-        out, rank_available(pool, settings(), taken, {}, surv, plan_bias=None))
-
-
-def test_plan_steer_moves_the_order_without_touching_the_reported_gain():
-    """`gain_now` is displayed in the room and read as a points figure. The
-    steer is allowed to change WHERE a row sorts and never what its gain
-    says it is -- otherwise the number the user checks the tool against
-    quietly stops being the measured one."""
-    pool = _pool(player_id=["rb", "wr"], position=["RB", "WR"],
-                 points=[200.0, 190.0], vor=[50.0, 46.0])
+def test_the_cost_of_waiting_is_priced_at_my_own_next_turn():
+    """`gain_now` steps to the turn the ranking is measured against, which is
+    a full round out. The cards report a second number -- what he is worth
+    over the best at his position expected to survive to MY NEXT PICK -- and
+    it has to be computed from the display survival, not the ranking's."""
+    pool = _pool(player_id=["star", "backup"], position=["RB", "RB"],
+                 points=[300.0, 250.0], vor=[60.0, 40.0])
     taken = np.zeros(2, dtype=bool)
-    surv = np.array([0.5, 0.5])
-    plain = rank_available(pool, settings(), taken, {}, surv)
-    assert list(plain["player_id"]) == ["rb", "wr"], "RB leads unaided"
+    # Priced against a distant turn nobody survives, versus a next turn the
+    # backup is a coin flip to reach.
+    out = rank_available(pool, settings(), taken, {}, np.array([0.0, 0.0]),
+                         survive_display=np.array([0.5, 0.5]))
+    row = out[out["player_id"] == "star"].iloc[0]
+    # Against the distant turn the position is gone, so taking him now is
+    # worth his whole value.
+    assert row["gain_now"] == pytest.approx(60.0)
+    # Against my own next turn the backup survives half the time, so waiting
+    # costs the difference weighted by that: 60 - (0.5*60 + 0.5*0.5*40).
+    assert row["gain_next"] == pytest.approx(60.0 - (0.5 * 60 + 0.5 * 0.5 * 40))
 
-    steered = rank_available(pool, settings(), taken, {}, surv,
-                             plan_bias={"WR": 1.0})
-    assert list(steered["player_id"]) == ["wr", "rb"], "the plan moved it"
-    # ...but every gain_now is the same number it was, per player.
-    before = dict(zip(plain["player_id"], plain["gain_now"]))
-    after = dict(zip(steered["player_id"], steered["gain_now"]))
-    assert before == after
-    assert dict(zip(steered["player_id"], steered["plan_steer"]))["rb"] == 0.0
 
-
-def test_plan_steer_is_bounded_by_a_real_edge():
-    """The steer is priced at PLAN_STEER_POINTS so that a genuine gap still
-    wins outright -- the cliffs it is derived from run to 86 points, and a
-    plan must not talk you off a player who is that much better."""
-    from scoring.gain import PLAN_STEER_POINTS
-    pool = _pool(player_id=["rb", "wr"], position=["RB", "WR"],
-                 points=[260.0, 190.0], vor=[50.0 + 2 * PLAN_STEER_POINTS, 46.0])
+def test_the_cost_of_waiting_defaults_to_the_ranking_turn():
+    """No display array means one survival doing both jobs, and the two
+    numbers agree -- an unweighted `gain_now`."""
+    pool = _pool(player_id=["a", "b"], position=["RB", "RB"],
+                 points=[300.0, 250.0], vor=[60.0, 40.0])
     out = rank_available(pool, settings(), np.zeros(2, dtype=bool), {},
-                         np.array([0.5, 0.5]), plan_bias={"WR": 1.0})
-    assert list(out["player_id"]) == ["rb", "wr"]
+                         np.array([0.4, 0.4]))
+    row = out[out["player_id"] == "a"].iloc[0]
+    assert row["gain_next"] == pytest.approx(row["gain_now"])
 
 
-def test_plan_steer_cannot_resurrect_a_capped_position():
-    """A capped row carries NEED_WEIGHTS["capped"] == 0.0, and the steer is
-    weighted by the same factor, so full plan confidence in a position I have
-    no room for still adds exactly nothing. Without that weighting the steer
-    would lift unpickable rows off the bottom of the board."""
-    pool = _pool(player_id=["k1", "rb"], position=["K", "RB"],
-                 points=[130.0, 200.0], vor=[20.0, 5.0])
-    out = rank_available(pool, settings(), np.zeros(2, dtype=bool),
-                         {"K": 1}, np.array([0.9, 0.9]),
-                         plan_bias={"K": 1.0})
-    assert list(out["player_id"]) == ["rb", "k1"], "capped K still sorts last"
-    steer = dict(zip(out["player_id"], out["plan_steer"]))
-    assert steer["k1"] == 0.0
+def test_edge_next_excludes_the_player_himself():
+    """At the wheel everyone survives to my next turn, so `gain_next` reads 0
+    for every card -- the expected best INCLUDES the player being priced. The
+    on-the-clock figure has to exclude him: his value over the best OTHER
+    player at his position expected at my next turn."""
+    pool = _pool(player_id=["star", "backup"], position=["RB", "RB"],
+                 points=[300.0, 250.0], vor=[60.0, 40.0])
+    out = rank_available(pool, settings(), np.zeros(2, dtype=bool), {},
+                         np.array([1.0, 1.0]),
+                         survive_display=np.array([1.0, 1.0]))
+    star = out[out["player_id"] == "star"].iloc[0]
+    backup = out[out["player_id"] == "backup"].iloc[0]
+    # The degenerate figure this field exists to replace.
+    assert star["gain_next"] == pytest.approx(0.0)
+    # Star over the only other RB; backup UNDER the star by the same gap.
+    assert star["edge_next"] == pytest.approx(20.0)
+    assert backup["edge_next"] == pytest.approx(-20.0)
+
+
+def test_edge_next_prices_the_others_at_my_next_turn():
+    """Computed from the display survival (my very next turn), same as
+    `gain_next` -- not from the ranking's distant-horizon survival."""
+    pool = _pool(player_id=["star", "backup"], position=["RB", "RB"],
+                 points=[300.0, 250.0], vor=[60.0, 40.0])
+    out = rank_available(pool, settings(), np.zeros(2, dtype=bool), {},
+                         np.array([0.0, 0.0]),
+                         survive_display=np.array([1.0, 0.5]))
+    star = out[out["player_id"] == "star"].iloc[0]
+    # Best other RB at my next turn: backup at half odds = 0.5 * 40.
+    assert star["edge_next"] == pytest.approx(60.0 - 0.5 * 40.0)
+
+
+def test_edge_next_is_his_whole_value_when_he_is_the_position():
+    pool = _pool(player_id=["only"], position=["TE"],
+                 points=[200.0], vor=[35.0])
+    out = rank_available(pool, settings(), np.zeros(1, dtype=bool), {},
+                         np.array([1.0]))
+    assert out.iloc[0]["edge_next"] == pytest.approx(35.0)
+
+
+def test_edge_next_null_in_the_vor_only_fallback():
+    """Same contract as gain_now/gain_next: no roster, no recommendation --
+    None, never a fabricated 0.0."""
+    pool = _pool(player_id=["a"], position=["RB"], points=[200.0], vor=[10.0])
+    out = available_by_vor(pool, np.zeros(1, dtype=bool))
+    assert out.iloc[0]["edge_next"] is None

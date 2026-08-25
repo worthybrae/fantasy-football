@@ -3,6 +3,13 @@ pandas>=1.5
 duckdb>=0.10
 fastapi>=0.110
 uvicorn>=0.29
+# The draft socket's client (pipeline/draft_socket.py, imported by
+# api/live.py at module scope). Present in a dev venv by accident -- something
+# else pulls it in -- and absent from a clean install, where it took the whole
+# API down at import with `ModuleNotFoundError: No module named 'websockets'`.
+# Found by building the deployment image, which is the first clean install
+# this project ever had.
+websockets>=12.0
 requests>=2.31
 pytest>=8.0
 httpx>=0.27

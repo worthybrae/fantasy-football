@@ -692,57 +692,65 @@ class CredentialStore:
                 cookie: str | None = None) -> MintedSession:
         """Take custody of one ESPN session and mint a browser session for it.
 
-        THE WRITE PATH NEEDS AUTHORIZATION TOO, and getting that wrong is
-        worse than getting the read path wrong. SWID is public -- it is in the
-        invite POST's query string and the draft socket's JOIN url -- so an
-        upsert keyed on the CLIENT'S `swid` field lets a stranger post their
-        own `espn_s2` under a victim's SWID and replace the victim's stored
-        session. The victim is not merely logged out: their browser keeps a
-        valid cookie, which now resolves to the ATTACKER'S ESPN account, so
-        the next feature that acts on a resolved credential acts on the wrong
+        THE ROW IS KEYED ON THE SESSION, NOT ON THE ACCOUNT, and that single
+        choice is what makes this write path safe without asking ESPN
+        anything.
+
+        WHAT IT IS DEFENDING AGAINST, because the danger is real and has not
+        gone away: SWID is public. It rides in the invite POST's query string
+        and the draft socket's JOIN url, so a row keyed on a CLAIMED SWID lets
+        a stranger post their own `espn_s2` under a victim's id and replace
+        what is stored. The victim is not merely logged out -- their browser
+        keeps a valid cookie that now resolves to the ATTACKER'S ESPN account,
+        so the next feature to act on a resolved credential acts on the wrong
         account while looking perfectly healthy.
 
-        Two independent locks, because either alone leaves a hole.
+        THE OLD DEFENCE, AND WHY IT IS GONE. It was to make ESPN name the
+        owner (`pipeline/espn_identity.py`) and key the row on ESPN'S ANSWER
+        rather than the caller's claim. That was the right defence for a row
+        keyed by name, and it fails closed -- which is exactly what it now
+        does on every request, so it is worth stating plainly why rather than
+        leaving a mystery 403 behind: measured against a real account,
+        `fan.api.espn.com/apis/v2/fans/{SWID}` returns the same profile with
+        NO cookies at all. It is a public endpoint. It cannot prove ownership
+        of anything, `verify_account` refuses rather than pretend it can, and
+        no other ESPN endpoint was found that distinguishes -- a private
+        league proves membership in a league, not identity, and it answers 404
+        for anyone whose leagues are public.
 
-        1. THE ACCOUNT IS PROVEN, NOT CLAIMED. `self._verifier` asks ESPN who
-           the presented `espn_s2` actually belongs to, and the row is keyed on
-           ESPN'S ANSWER. The `swid` argument is only a hint about which
-           profile to ask for; it is never what gets hashed. So a caller who
-           does not hold a working session for an account cannot get a row
-           written under it at all, and the attack above cannot start. Fails
-           closed: if ESPN cannot be reached, nothing is stored.
+        So the name stops being a key. `HMAC(espn_s2)` is one: the id is
+        derived from the SECRET, which only the browser holding it can
+        present. There is no name left to squat on, so the attack above has
+        nowhere to start -- a caller can only ever write the row their own
+        session hashes to, and a stranger armed with a victim's SWID hashes to
+        a row that has nothing to do with them.
 
-        2. REPLACING A STORED SECRET NEEDS THE COOKIE FOR IT. Verification is
-           one endpoint's behaviour away from being wrong, so it is not the
-           only thing standing between a stranger and another browser's
-           session. A connect that presents no cookie for an account already
-           held here does NOT overwrite what is stored -- it attaches a new
-           browser to the credential that is already there.
+        WHAT THIS NARROWS, STATED SO NOBODY REDISCOVERS IT AS A BUG. ESPN
+        reissues `espn_s2` per sign-in, so a second browser gets its own row
+        instead of attaching to an existing one, and "disconnect everywhere"
+        means every browser holding THIS stored session rather than every
+        browser this person has ever used. Grouping rows by the account inside
+        the blob would restore the old meaning and rebuild exactly the
+        name-keyed structure this change exists to remove.
 
-           That is deliberately an attach rather than a refusal, and the
-           difference matters. Refusing would break the ordinary case this
-           design exists to support: the same person clicking the bookmarklet
-           from a second browser, which has no cookie yet and whose ESPN
-           session is usually a different `espn_s2` because ESPN reissues
-           them. Attaching lets that browser work immediately, while the
-           stored secret -- the thing every other browser resolves through --
-           can only be changed by someone who already holds a cookie for it.
-           Nothing is retargeted, and nobody is evicted.
-
-           If the stored secret has genuinely gone stale, ESPN answers 401 and
-           `forget_if_unauthorized` deletes the credential; the next connect
-           then creates it fresh. The system heals without ever letting an
-           unauthenticated caller rewrite a live one.
+        PRESENTING THE SECRET IS THE AUTHORIZATION. A connect carrying an
+        `espn_s2` that is already stored is, necessarily, from somebody who
+        holds that session, so it refreshes the row and mints a new browser
+        cookie. The cookie is still read, for the one thing it says that the
+        secret does not: a browser that already resolves to this credential is
+        attaching rather than re-storing, and rewriting an identical blob
+        would be work for nothing.
         """
         if not swid or not espn_s2:
             # Storing half a session buys nothing and costs the same custody
             # obligations, so it is refused rather than half-written.
             raise ValueError("both swid and espn_s2 are required")
-        # BEFORE anything is written, and before the database file is even
-        # opened: a caller who cannot prove the account must leave no trace.
-        owner = canonical_swid(self._verifier(swid, espn_s2))
+        # The account id is still normalised and still stored -- it is what
+        # every ESPN call made on this credential's behalf has to send. It is
+        # simply no longer what the row is FILED under.
+        owner = canonical_swid(swid)
         if not owner:
-            raise OwnershipUnproven("ESPN named no account for that session")
+            raise ValueError("swid is not an ESPN account id")
 
         now = _utc(now)
         key = self.current_key
@@ -756,10 +764,10 @@ class CredentialStore:
         conn = _connect(self.path)
 
         with _CONN_LOCK:
-            # An existing row for this account, possibly under an older key
+            # An existing row for this SESSION, possibly under an older key
             # version and therefore under a DIFFERENT id.
             previous = None
-            for _candidate_key, candidate_id in self._candidate_ids(owner):
+            for _candidate_key, candidate_id in self._candidate_ids(espn_s2):
                 row = conn.execute(
                     "SELECT id, created_at FROM espn_credential WHERE id = ?",
                     [candidate_id]).fetchone()
@@ -767,19 +775,27 @@ class CredentialStore:
                     previous = row
                     break
 
-            # Note what is compared: the cookie must resolve to THIS
-            # credential, not merely to some credential -- one user's valid
-            # cookie must never authorise rewriting another user's row.
-            authorised = (previous is not None and holder is not None
-                          and holder.credential_id == previous[0])
+            # THE SAME SECRET UNDER THE SAME KEY IS THE SAME ROW, and there is
+            # nothing to write: the blob would be byte-identical, and
+            # rewriting it would churn ciphertext (and leave the old copy in a
+            # freed block) to store what is already there. This is the
+            # ordinary case of somebody clicking the bookmarklet twice, or a
+            # second browser sharing one ESPN session.
+            #
+            # A row found under a DIFFERENT id is the same secret under an
+            # older key version -- rotation catching up -- which does need
+            # writing, below.
+            fresh_id = self._row_id(espn_s2, key)
+            attached = previous is not None and previous[0] == fresh_id
 
-            if previous is not None and not authorised:
+            dropped: set = set()
+            if attached:
                 # Attach only. The stored secret, its key version and its
                 # created_at are all left exactly as they were.
                 credential_id = previous[0]
                 replaced = False
             else:
-                credential_id = self._row_id(owner, key)
+                credential_id = fresh_id
                 blob = key.fernet.encrypt(
                     json.dumps({"swid": owner, "espn_s2": str(espn_s2)},
                                separators=(",", ":")).encode("utf-8")
@@ -791,17 +807,32 @@ class CredentialStore:
                     "INSERT INTO espn_credential VALUES (?, ?, ?, ?, ?, ?)",
                     [credential_id, blob, key.version, created_at, now,
                      expires_at])
-                if previous and previous[0] != credential_id:
-                    # Rotation caught up with this user: their row moves to the
-                    # new key version, so its id changes. Their OTHER browsers
-                    # are repointed rather than orphaned -- the two-table split
-                    # exists precisely so a second browser is not evicted, and
-                    # a key rotation is not a reason to start evicting them.
+                # Rows this connect supersedes, both of which have to go rather
+                # than linger: a stored `espn_s2` is a LIVE ESPN session for as
+                # long as ESPN honours it, so leaving one behind is leaving a
+                # working credential on disk that nobody is using and nobody
+                # will notice.
+                #
+                #   `previous` -- the same secret under an older key version.
+                #   Rotation caught up with this user, so the row moves and
+                #   takes its browsers with it rather than evicting them.
+                #
+                #   `holder` -- the credential the CALLER'S COOKIE resolves to,
+                #   when ESPN has reissued their `espn_s2` and this is
+                #   therefore a different row. Superseding it is authorised by
+                #   that cookie, which is the password to the very row being
+                #   dropped; without this the old session would sit encrypted
+                #   on disk until the reaper reached it a month later.
+                dropped = {row for row in
+                           (previous[0] if previous else None,
+                            holder.credential_id if holder else None)
+                           if row and row != credential_id}
+                for stale in dropped:
                     conn.execute(
                         "UPDATE espn_session SET credential_id = ? "
-                        "WHERE credential_id = ?", [credential_id, previous[0]])
+                        "WHERE credential_id = ?", [credential_id, stale])
                     conn.execute("DELETE FROM espn_credential WHERE id = ?",
-                                 [previous[0]])
+                                 [stale])
                 replaced = True
 
             # 256 bits from the OS CSPRNG. This value is the password to a
@@ -826,12 +857,15 @@ class CredentialStore:
             # sitting in a WAL that nothing will fold in for months. See
             # `_flush`.
             _flush(conn, self.path)
-        if replaced and previous is not None:
-            # A replaced credential leaves the SUPERSEDED ciphertext in a
-            # freed block, which is the same residue a delete leaves and the
-            # same problem: ESPN reissues `espn_s2`, so the old one is still a
-            # live session for as long as ESPN honours it. Outside the lock
-            # because `_compact` takes it again and does its own bookkeeping.
+        if dropped:
+            # A superseded credential leaves its ciphertext in a freed block,
+            # which is the same residue a delete leaves and the same problem:
+            # ESPN reissues `espn_s2`, so the old one is still a live session
+            # for as long as ESPN honours it. Keyed on whether a row was
+            # actually dropped rather than on `replaced`, because a first-ever
+            # connect also writes a row and has nothing to compact away.
+            # Outside the lock because `_compact` takes it again and does its
+            # own bookkeeping.
             _compact(self.path)
         return MintedSession(cookie=minted, credential_id=credential_id,
                              session_id=session_id, expires_at=expires_at,
