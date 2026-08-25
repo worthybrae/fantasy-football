@@ -673,6 +673,34 @@ class CredentialStore:
         return hmac.new(key.index_key, str(value).encode("utf-8"),
                         sha256).hexdigest()
 
+    def account_id(self, swid: str) -> str:
+        """The id anything per-account keys its own rows on.
+
+        PUBLIC ON PURPOSE, and narrow on purpose. `api/billing.py` needs a
+        stable handle for an ESPN account so a purchase can be attached to
+        one, and the choice is between inventing a second identifier (another
+        table, another thing to keep in step, another readable list of who
+        uses this) or lending out the one already computed here.
+
+        What it hands over is an HMAC under the current key. It reveals no
+        SWID, cannot be reversed, and cannot be tested for membership by
+        anybody without the key -- so a table keyed by it inherits the
+        property this module exists to provide, without that table having to
+        hold any ESPN material at all.
+        """
+        return self._row_id(swid, self.current_key)
+
+    def account_ids(self, swid: str) -> list:
+        """Every id this account could have rows under, newest key first.
+
+        The plural is key rotation, and callers must read across all of them
+        for the same reason `resolve` does: a row written under version 1
+        keeps its version-1 id forever. Reading the list and writing
+        `account_id` above is the same lazy-rotation bargain the credential
+        rows make -- nothing is rewritten, and nothing is orphaned.
+        """
+        return [row_id for _key, row_id in self._candidate_ids(swid)]
+
     def _candidate_ids(self, value: str):
         """(key, id) for every known key version, newest first.
 

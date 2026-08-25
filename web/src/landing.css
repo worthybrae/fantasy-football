@@ -2738,3 +2738,112 @@ button.wr-seat:focus-visible {
 @media (prefers-reduced-motion: reduce) {
   .db-go.db-go-paid::after { animation: none; }
 }
+
+/* -- the paywall (Paywall.tsx) --------------------------------------------
+
+   THE ONLY SCREEN IN THIS PRODUCT THAT ASKS FOR MONEY, and it is drawn like
+   the connect screen it replaces rather than like a marketing page: one card,
+   centred, no navigation, nothing to read past the decision. A drafter is
+   here with a clock running. */
+.pw {
+  min-height: 100svh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+  background: var(--bg-0);
+}
+
+.pw-card {
+  width: min(440px, 100%);
+  padding: var(--space-5) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-1);
+  text-align: center;
+}
+
+.pw-eyebrow {
+  color: var(--text-3);
+}
+
+.pw-title {
+  margin: 6px 0 12px;
+  font-size: var(--text-xl);
+  color: var(--text-1);
+}
+
+.pw-body {
+  margin: 0 0 14px;
+  font-size: var(--text-md);
+  line-height: 1.55;
+  color: var(--text-2);
+}
+
+/* The one figure on the card that is a fact rather than an offer. Mono,
+   because it is an id and a year, and quiet because nobody is deciding on
+   it -- it is here so the buyer can see WHICH draft this unlocks. */
+.pw-league {
+  margin: 0 0 18px;
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+
+.pw-pay {
+  width: 100%;
+  padding: 11px 16px;
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: #10110f;
+  font: inherit;
+  font-size: var(--text-md);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.pw-pay:hover {
+  background: color-mix(in srgb, var(--accent) 85%, #ffffff);
+}
+
+.pw-quiet {
+  margin-top: 10px;
+  padding: 8px 12px;
+  border: 0;
+  background: none;
+  color: var(--text-3);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.pw-quiet:hover {
+  color: var(--text-2);
+}
+
+.pw-waiting {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+
+.pw-error {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--fail);
+  border-radius: var(--radius);
+  font-size: var(--text-sm);
+  color: var(--fail);
+}
+
+/* Said once, small, and true: the card never touches this server, because
+   Stripe's own page is where it is typed. */
+.pw-fine {
+  margin: 16px 0 0;
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}

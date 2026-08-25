@@ -239,9 +239,12 @@ means moving the mutable tables to Postgres first.
 
 1. Create a service from this repository. `railway.toml` selects the
    Dockerfile; no build configuration is needed.
-2. Attach a volume mounted at `/data`. The image expects both databases there
-   (`DRAFT_DB_PATH`, `ESPN_CUSTODY_DB_PATH`), and without a volume they are
-   written into the container's own filesystem and lost on every redeploy.
+2. Attach a volume mounted at **`/app/data`** — not `/data`. The code looks
+   for `data/` relative to its working directory, and two of the things it
+   keeps there cannot be redirected by configuration at all: the farm's ESPN
+   login (`espn_state.json`) and the per-draft databases in `leagues/`.
+   Mounting where the code already looks makes all of it persistent with no
+   environment variable and no code change.
 3. Set the variables below.
 4. Deploy. The healthcheck (`/api/landing/status`) answers 200 against an
    empty database, so the service goes healthy before any data is uploaded.
@@ -252,8 +255,16 @@ means moving the mutable tables to Postgres first.
 | --- | --- | --- |
 | `ESPN_CUSTODY_KEYS` | generated, see above | Without it, nothing can store or read a credential |
 | `ESPN_CUSTODY_TRUST_FORWARDED_PROTO` | `1` | **Required behind Railway.** See below |
-| `DRAFT_DB_PATH` | `/data/nfl.duckdb` | Set by the image; override only to move it |
-| `ESPN_CUSTODY_DB_PATH` | `/data/custody/custody.duckdb` | Same |
+| `DRAFT_DB_PATH` | `/app/data/nfl.duckdb` | Set by the image; override only to move it |
+| `ESPN_CUSTODY_DB_PATH` | `/app/data/custody/custody.duckdb` | Same |
+| `RUN_REFRESH_ON_BOOT` | `1` | Set by the image. The server refreshes its own data |
+| `REFRESH_MAX_AGE_HOURS` | `24` | How stale the oldest source may get first |
+| `RUN_FARM` | `1` | **Off by default.** Needs the login variable below |
+| `FARM_ESPN_STATE_B64` | `make farm-secret` | The farm's ESPN login. A live session — host's variable store only |
+| `STRIPE_SECRET_KEY` | `rk_live_…` | **Off by default.** Absent, every draft is free — see Charging for it |
+| `STRIPE_PRICE_ID` | `price_…` | The $9.99 price, made in the Stripe Dashboard |
+| `STRIPE_WEBHOOK_SECRET` | `whsec_…` | Required with the key. Without it the webhook refuses everything |
+| `PUBLIC_BASE_URL` | `https://…` | Where Stripe sends a buyer back to. Behind a proxy the app cannot work this out itself |
 
 `ESPN_CUSTODY_TRUST_FORWARDED_PROTO` is the one that will waste an evening if
 it is missed. Railway terminates TLS at its edge and forwards plain HTTP to
@@ -262,6 +273,57 @@ connect as insecure transport — a 400 with a message about plaintext, on a
 site that is plainly served over HTTPS. The switch is off by default because
 `X-Forwarded-Proto` is forgeable when nothing overwrites it; a proxy that does
 overwrite it is exactly the case it exists for.
+
+### Charging for it
+
+Off unless `STRIPE_SECRET_KEY` is set. Without it every draft is free, the
+gate is a no-op and no billing database is ever created — which is what every
+local checkout and the whole test suite runs as.
+
+With it, one real league's draft costs $9.99 for the season. Mock drafts stay
+free: they are the trial, and charging for the trial is charging for the sales
+pitch. `api/billing.py` has the reasoning; the shape is:
+
+1. **Make the price.** Stripe Dashboard → Products → one product, one
+   **one-time** price of $9.99 USD. Copy the `price_…` id into
+   `STRIPE_PRICE_ID`. Nothing in this codebase creates a price — a price has
+   tax and reporting attached to it, and a program that can make one can make
+   a second one by accident.
+2. **Make the webhook.** Dashboard → Webhooks → point it at
+   `https://<your host>/api/billing/webhook` and send exactly four events:
+   `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
+   `checkout.session.async_payment_failed`, `charge.refunded`. Copy the
+   `whsec_…` into `STRIPE_WEBHOOK_SECRET`.
+3. **Use a restricted key.** `rk_` with write access to Checkout Sessions and
+   nothing else. This integration creates sessions and reads no customer data,
+   so a full `sk_` here is a key worth far more to whoever steals it than it
+   is to us.
+
+Access is granted by the **webhook**, never by the success page: somebody
+whose browser dies during the redirect has still paid, and a success page that
+grants access is a success page anybody can visit. Refunds revoke it.
+
+Test it before pointing it at anything live:
+
+```bash
+stripe listen --forward-to localhost:8000/api/billing/webhook
+# then use the test key + test price, and card 4242 4242 4242 4242
+```
+
+**What a purchase is attached to.** There are no accounts here. The
+entitlement is keyed by the same HMAC of the ESPN SWID that indexes the
+credential store (`CredentialStore.account_id`), so the row identifies nobody
+without the custody key, and the email lives on Stripe's side where a receipt
+can actually be sent from. The practical consequence: an ESPN account has to
+be connected before anything can be bought, because otherwise there is nothing
+to attach the payment to.
+
+**Which drafts are free.** Every room ESPN's mock lobby has listed while this
+deployment has been running, plus every room we seated somebody in ourselves.
+Both are written to `data/billing.duckdb` and survive a redeploy. If ESPN's
+directory cannot be read at all, the draft goes through free — blocking
+somebody out of a free mock on draft night because a third party is down is a
+worse failure than a missed sale.
 
 ### Putting the data there
 
@@ -281,11 +343,48 @@ Two databases, and they are not the same kind of thing:
 Both files gzip to about a quarter of their size, which is worth doing over a
 volume connection.
 
-### What stays on your machine
+### The server keeps itself current
 
-`make farm-mocks` and the auto-refit daemon are not part of the deployment.
-They write DuckDB files, and on the web host they would contend for the same
-write lock the API holds. Run them locally, then upload the corpus.
+`RUN_REFRESH_ON_BOOT=1` is set in the image, so a fresh deployment pulls its
+own data rather than waiting for an upload. It is not a refresh on every
+start: the loop reads `meta` and runs only when the **oldest** source is past
+`REFRESH_MAX_AGE_HOURS`, so pushing a CSS fix does not cost 223 news queries.
+The first run takes minutes, and the site is up and honestly empty for the
+duration — the healthcheck answers throughout, so the deploy does not roll
+back.
+
+### Farming from the server
+
+`RUN_FARM=1` plays ESPN mock drafts into the corpus from the deployment
+itself, one at a time, forever. It needs one thing the server cannot make for
+itself: `data/espn_state.json`, the farm account's ESPN login, written by an
+actual browser doing an actual sign-in.
+
+That does not get uploaded. It travels as a variable:
+
+```bash
+make farm-secret     # prints the value — a live ESPN session, treat it as one
+```
+
+Paste the output into `FARM_ESPN_STATE_B64` and set `RUN_FARM=1`. The server
+writes the file to the volume at 0600 on boot, before the farm starts.
+
+Rotating an expired login is the same two steps — new value, redeploy — with
+no shell and no file transfer. The variable deliberately **overwrites** any
+file already on the volume, because a dead session sitting there is exactly
+the case this exists to fix. A bad or truncated value costs the farm and
+nothing else: the site still comes up, and the boot log says what was wrong.
+
+Two things to know before switching it on:
+
+- **ESPN sees a datacenter IP.** The farm has only ever run from a home
+  connection. Whether ESPN's mock lobby minds is not something this codebase
+  can predict — you find out within a draft or two.
+- **The volume grows.** Every farmed draft leaves a database in
+  `data/leagues/`. Nothing prunes them yet.
+
+The auto-refit daemon stays local. It is a research loop, not something a
+web host should be spending CPU on.
 
 ## How scoring works
 

@@ -22,3 +22,9 @@ pypdf>=4.0
 # the one code path where a subtle mistake is unrecoverable for users who
 # cannot be contacted (ESPN's fan API returns no email).
 cryptography>=42.0
+
+# Stripe, for api/billing.py -- the one thing this product charges for. Capped
+# at the major version rather than left to float: an SDK bump can move the API
+# version it defaults to, and a webhook that starts failing on a day nobody
+# touched the code is the failure mode being avoided.
+stripe>=15.4,<16

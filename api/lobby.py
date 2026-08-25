@@ -457,12 +457,37 @@ def _refresh_rows(fetch=None, season: int = CURRENT_SEASON):
     # emptying and refilling.
     if rows is not None:
         _track_seats(rows)
+        # AND EVERY ROOM HERE IS A MOCK, which is a fact worth keeping past
+        # the moment the room closes. `api/billing.py` charges for real
+        # league drafts and not for these; the directory only lists what is
+        # open right now, so a mock somebody joined an hour ago would look
+        # like a real league by the time they connect unless somebody wrote
+        # it down. Best-effort and never in the way of serving the lobby.
+        try:
+            from api import billing
+            billing.note_mock_rooms([r.get("leagueId") for r in rows])
+        except Exception:      # noqa: BLE001
+            pass
 
     with _cache_lock:
         _cache["rows"] = rows
         _cache["cached"] = True
         _cache["expires_at"] = time.monotonic() + _CACHE_TTL_SECONDS
     return rows
+
+
+def cached_rows():
+    """The directory rows already in memory, or None. NEVER fetches.
+
+    `_cached_rows` reads through to ESPN on a miss, which is right for an
+    endpoint and wrong for a caller on somebody else's request path --
+    `api/billing.py` asks whether a league id is one of ESPN's mock rooms
+    while a draft connect is waiting, and that question is not worth a
+    blocking HTTP call to a third party. None means "not known right now",
+    which every caller has to have an answer for anyway.
+    """
+    with _cache_lock:
+        return _cache["rows"] if _cache["cached"] else None
 
 
 def _note_demand(now: float | None = None) -> None:

@@ -794,6 +794,12 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
     from api.custody import register_custody_routes
     register_custody_routes(app)
 
+    # Billing. Mounted unconditionally: with no Stripe key in the environment
+    # it answers "nothing is for sale here" and gates nothing, which is every
+    # local checkout and the whole test suite. See api/billing.py.
+    from api.billing import register_billing_routes
+    register_billing_routes(app)
+
     # Upcoming drafts and server-side token minting. Registered after custody
     # because it reads through it: the session these routes act as is the one
     # `custody_for` resolves, and only in its total absence this machine's own
@@ -824,6 +830,19 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
     # error.
     from api.static import register_spa
     register_spa(app)
+
+    # Background work this instance does to itself: refreshing its own data,
+    # and farming mock drafts into the corpus. Both off unless switched on,
+    # so a local `make up` and every test import start nothing -- see
+    # api/jobs.py, which also explains why these are threads in this process
+    # rather than a second service (DuckDB's per-process file lock, and a
+    # volume that attaches to exactly one service).
+    #
+    # LAST, and after the routes: `start_jobs` never blocks, but a first
+    # refresh runs for minutes, and the healthcheck has to be answerable
+    # throughout it.
+    from api.jobs import start_jobs
+    start_jobs(conn)
 
     return app
 

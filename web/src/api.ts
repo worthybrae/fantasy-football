@@ -644,6 +644,22 @@ export interface TokenConnectParams {
   season: string
 }
 
+/** The connect was refused because this draft has not been paid for.
+ *
+ *  Its own class, not a message: the page has to draw a price and a button
+ *  rather than an error, and it needs the league and season to offer checkout
+ *  for the draft that was actually refused. See api/billing.py. */
+export class PaymentRequired extends Error {
+  leagueId: string
+  season: number
+  constructor(leagueId: string, season: number, message: string) {
+    super(message)
+    this.name = 'PaymentRequired'
+    this.leagueId = leagueId
+    this.season = season
+  }
+}
+
 // The bookmarklet path's connect. The server opens ESPN's draft socket
 // directly from these values (no browser window on the server), so this both
 // starts the listener and returns the resolved slot -- one call, not a
@@ -656,10 +672,75 @@ export async function connectWithToken(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params),
   })
+  // 402 is the one refusal that is not a failure: the request was fine and
+  // the draft costs money. It arrives with a structured body (the league and
+  // the season) because the page's next move is a checkout for that draft.
+  if (res.status === 402) {
+    const body = await res.json().catch(() => null)
+    const detail = body?.detail ?? {}
+    throw new PaymentRequired(
+      String(detail.league_id ?? params.leagueId),
+      Number(detail.season ?? params.season),
+      detail.message ?? 'This draft has not been paid for.')
+  }
   if (!res.ok) {
     throw new Error(await detailText(res))
   }
   return res.json()
+}
+
+// -- billing ---------------------------------------------------------------
+//
+// Mock drafts are free and real ones are $9.99 for the season (api/billing.py).
+// An instance with no Stripe key sells nothing, and every one of these
+// answers says so rather than pretending: `enabled: false` is the local
+// checkout, the test suite, and anybody running this themselves.
+
+export interface BillingStatus {
+  /** Whether this instance sells anything at all. */
+  enabled: boolean
+  /** Whether THIS draft has to be paid for before it can be connected. */
+  required: boolean
+  /** Whether it already has been. True for every mock. */
+  entitled: boolean
+  reason?: string
+}
+
+export async function fetchBillingStatus(
+  leagueId: string, season?: string | number | null,
+): Promise<BillingStatus> {
+  const query = new URLSearchParams({ leagueId })
+  if (season) query.set('season', String(season))
+  const res = await fetch(`/api/billing/status?${query}`)
+  // Unreadable means "do not put a paywall in front of anybody": the gate on
+  // the server is the thing that actually decides, and this endpoint only
+  // decides what to draw.
+  if (!res.ok) return { enabled: false, required: false, entitled: true }
+  return res.json()
+}
+
+/** Open a Stripe Checkout for one draft. Returns the URL to send them to.
+ *
+ *  IN A POPUP, at the call site, rather than by navigating this tab. The
+ *  bookmarklet's token lives in memory on the page that received it (it is
+ *  wiped from the address bar on arrival, deliberately), so navigating away
+ *  to Stripe would destroy the one copy of it and cost the user a second trip
+ *  through the bookmark after paying. */
+export async function startCheckout(
+  leagueId: string, season?: string | number | null, returnTo?: string,
+): Promise<string> {
+  const res = await fetch('/api/billing/checkout', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      leagueId,
+      season: season ? String(season) : null,
+      returnTo: returnTo ?? '/',
+    }),
+  })
+  if (!res.ok) throw new Error(await detailText(res))
+  const body = await res.json()
+  return String(body.url)
 }
 
 // -- the live mock draft the landing page opens with -----------------------

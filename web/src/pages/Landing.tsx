@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
+import { PaymentRequired } from '../api'
+import Paywall from '../components/Paywall'
 import { connectEspnAccount, connectWithToken, fetchConnectProgress, fetchLiveState,
          fetchUpcomingDrafts,
          type ConnectProgress, type LiveState, type TokenConnectParams,
@@ -33,7 +35,7 @@ import '../landing.css'
 // own failure (ConnectScreen's Failed), because a failure that names the
 // stage it died on and how far it got is worth more than a one-line band on
 // a page the user was not looking at.
-type Gate = 'connecting' | 'idle' | 'live'
+type Gate = 'connecting' | 'idle' | 'live' | 'paywall'
 
 // How often the connect screen asks the helper what it is doing. Far faster
 // than the room's own 2.5s poll, and it can afford to be: GET
@@ -115,6 +117,11 @@ function sessionFromHash(hash: string) {
 
 export default function Landing() {
   const [gate, setGate] = useState<Gate>('idle')
+  // The draft the server refused for want of payment, if it did. Held rather
+  // than read off `paramsRef` so the paywall names the league the SERVER
+  // named -- the two agree today, and a screen that charges for a draft
+  // should not depend on that staying true.
+  const [owed, setOwed] = useState<{ leagueId: string; season: number } | null>(null)
   // What the room is showing: a draft going on now, or one from the archive
   // being replayed because none is. Held here for one reason -- the welcome
   // card says "running now", and it must stop saying it when that stops
@@ -175,6 +182,19 @@ export default function Landing() {
   // measured) or its own POST has settled.
   const ownRecordRef = useRef(false)
 
+  // BACK FROM STRIPE, IN THE POPUP. `success_url` lands here with `?paid=1`;
+  // if this window was opened by the page that started the checkout, its only
+  // job is to say so and get out of the way. The opener re-checks with the
+  // server before believing it -- this only saves it a poll.
+  useEffect(() => {
+    if (!new URLSearchParams(window.location.search).has('paid')) return
+    if (!window.opener) return
+    try {
+      window.opener.postMessage('billing:paid', window.location.origin)
+      window.close()
+    } catch { /* a browser that will not let a popup close itself */ }
+  }, [])
+
   useEffect(() => {
     // Arrived from the bookmarklet? It may carry two things, and they are
     // independent: an account session to connect, and a draft to join.
@@ -224,6 +244,14 @@ export default function Landing() {
       .then(() => { ownRecordRef.current = true; setSessionReady(true) })
       .catch((e) => {
         ownRecordRef.current = true
+        // A refusal for money is not a failure to report -- the request was
+        // fine and the draft costs $9.99 (api/billing.py). It gets a screen
+        // with a price on it rather than a red error under a stage list.
+        if (e instanceof PaymentRequired) {
+          setOwed({ leagueId: e.leagueId, season: e.season })
+          setGate('paywall')
+          return
+        }
         setError(e instanceof Error ? e.message : String(e))
       })
   }, [gate, attempt])
@@ -401,6 +429,20 @@ export default function Landing() {
         onEnter={() => navigate('/draft')}
         onRetry={retry}
         onBack={() => { paramsRef.current = null; setGate('idle') }}
+      />
+    )
+  }
+
+  // Paid for, but not yet. The connect is still in memory -- that is the
+  // whole reason checkout happens in a popup (see Paywall) -- so paying
+  // re-runs it rather than sending the user back through the bookmark.
+  if (gate === 'paywall' && owed !== null) {
+    return (
+      <Paywall
+        leagueId={owed.leagueId}
+        season={owed.season}
+        onPaid={() => { setOwed(null); retry() }}
+        onBack={() => { paramsRef.current = null; setOwed(null); setGate('idle') }}
       />
     )
   }

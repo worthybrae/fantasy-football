@@ -46,6 +46,7 @@ from pipeline import credentials as cred
 from pipeline import espn_drafts as drafts
 from pipeline import espn_mock_lobby as lobby
 
+from api import billing
 from api import lobby as lobby_rooms
 from scoring.config import CURRENT_SEASON
 
@@ -459,6 +460,11 @@ def register_draft_routes(app, store=None, fetch=None, post=None):
                 status_code=502,
                 detail=f"ESPN would not seat you in room {body.leagueId}: "
                        f"{exc}") from None
+        # This room is a mock, and the gate in api/billing.py has to know it
+        # without asking ESPN on the connect path -- a wrong answer there
+        # charges somebody for a free draft. Recorded after the seat rather
+        # than before it: a join ESPN refused is not a room anybody entered.
+        billing.note_mock_room(body.leagueId)
         try:
             token = drafts.mint_draft_token(body.leagueId, team_id, year,
                                             session.cookies, fetch=fetch)

@@ -55,12 +55,29 @@ COPY bookmarklet/ ./bookmarklet/
 COPY --from=web /build/dist ./web/dist
 ENV WEB_DIST_PATH=/app/web/dist
 
-# Both databases live on the mounted volume. Named here rather than left to
-# the platform so that a container started with no volume fails by creating
-# an empty database in a directory it owns, instead of silently writing into
-# the image's own filesystem and losing every stored session on redeploy.
-ENV DRAFT_DB_PATH=/data/nfl.duckdb \
-    ESPN_CUSTODY_DB_PATH=/data/custody/custody.duckdb
+# THE VOLUME MOUNTS AT /app/data, NOT /data, AND THAT IS THE WHOLE POINT.
+#
+# This started as /data with two env vars pointing at it, which moved the two
+# databases and quietly left everything else behind. The farm keeps FOUR more
+# things under `data/`, and two of them cannot be redirected at all:
+#
+#   data/espn_state.json   the farm's ESPN login. NOT overridable
+#                          (espn_league.STATE_PATH is a constant). Written at
+#                          boot from FARM_ESPN_STATE_B64 (api/seed_state.py),
+#                          but onto the volume, so it survives a redeploy
+#                          even if the variable is later removed.
+#   data/leagues/          per-draft databases. NOT overridable
+#                          (leagues.LEAGUES_ROOT is a constant).
+#   data/draft_corpus.duckdb, data/farm-claims/, data/farm-live/
+#                          overridable, but there is no reason to.
+#
+# Mounting the volume where the code already looks makes every one of them
+# persistent with no env var and no code change. The two paths below are then
+# only restating the defaults, kept explicit so `docker run` without a volume
+# is obvious rather than mysterious.
+ENV DRAFT_DB_PATH=/app/data/nfl.duckdb \
+    ESPN_CUSTODY_DB_PATH=/app/data/custody/custody.duckdb \
+    BILLING_DB_PATH=/app/data/billing.duckdb
 
 # Railway (and every other proxy-fronted host) terminates TLS at the edge, so
 # the app itself sees http:// and the credential guard would refuse every
@@ -68,6 +85,12 @@ ENV DRAFT_DB_PATH=/data/nfl.duckdb \
 # because the header is forgeable when nothing overwrites it; a platform
 # whose proxy DOES overwrite it is exactly the case the switch is for.
 ENV ESPN_CUSTODY_TRUST_FORWARDED_PROTO=1
+
+# A deployment refreshes its own data: nobody is going to type `make refresh`
+# at it, and its volume starts empty. The farm is left OFF here and switched
+# on per-environment instead -- it needs an ESPN login on the volume, and an
+# instance without one should not spend its life retrying. See api/jobs.py.
+ENV RUN_REFRESH_ON_BOOT=1
 
 # `$PORT` is assigned by the platform, so a shell has to expand it -- exec
 # form alone would hand uvicorn the literal string. `exec` then replaces that

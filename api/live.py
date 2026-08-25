@@ -277,6 +277,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from websockets.exceptions import ConnectionClosed
 
+from api import billing
 from api.custody import (abandon_custody, establish_custody,
                          require_secure, set_session_cookie)
 from pipeline import credentials as custody
@@ -3429,6 +3430,14 @@ def register_live_routes(app, conn, db_path):
         # credential, not the route.
         if body.espn_s2 or request.cookies.get(custody.COOKIE_NAME):
             require_secure(request)
+        # AND THE OTHER GATE, before any work: a real league's draft is paid
+        # for, a mock is free, and an instance with no Stripe key sells
+        # nothing and lets everything through (api/billing.py). Raises 402
+        # naming the league, which is what the page needs to offer the right
+        # checkout. Second, not first: a request that is refused for being
+        # plaintext must be refused for that reason, whatever else is wrong
+        # with it.
+        billing.require_paid(request, body.leagueId, body.season)
         progress, _seq = _new_progress(token_path=True, league_id=body.leagueId)
         progress.begin("token")
         # NOTHING about this step reaches ESPN: the token is a per-draft nonce

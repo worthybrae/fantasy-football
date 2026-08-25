@@ -2,7 +2,7 @@
 # One-time setup: make setup && make refresh
 # Draft night:    make up   (then open http://localhost:5173)
 
-.PHONY: setup refresh api web up test build image deploy-data espn-import fit-managers fit-prior score-ladder espn-ladder sim mock-backfill farm-mocks corpus-report
+.PHONY: setup refresh api web up test build image deploy-data farm-secret espn-import fit-managers fit-prior score-ladder espn-ladder sim mock-backfill farm-mocks corpus-report
 
 setup: ## create venv, install python + web deps
 	python3 -m venv .venv
@@ -138,4 +138,15 @@ deploy-data: ## pack the databases the deployed volume needs into deploy/
 	gzip -c data/draft_corpus.duckdb > deploy/draft_corpus.duckdb.gz
 	@ls -lh deploy/
 	@echo
-	@echo "Upload these to the volume's /data -- see README, 'Putting the data there'."
+	@echo "Upload these to the volume's /app/data -- see README, 'Putting the data there'."
+
+farm-secret: ## print the FARM_ESPN_STATE_B64 value to paste into the host's variables
+	# The farm's ESPN login, packed for an environment variable. It is a
+	# browser-written file (data/espn_state.json) that a server cannot
+	# generate and a hosting platform has no file manager to receive, so it
+	# travels as a variable instead -- see api/seed_state.py.
+	#
+	# THIS PRINTS A LIVE ESPN SESSION. It goes into the host's variable store
+	# and nowhere else: not a commit, not a chat window, not a ticket.
+	@test -f data/espn_state.json || { echo "No data/espn_state.json -- log in once locally first"; exit 1; }
+	@.venv/bin/python -c "import base64,gzip;print(base64.b64encode(gzip.compress(open('data/espn_state.json','rb').read())).decode())"
