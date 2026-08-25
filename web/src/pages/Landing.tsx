@@ -511,7 +511,6 @@ export default function Landing() {
     return (
       <Dashboard
         leagues={account.leagues}
-        source={account.source ?? null}
         onJoin={joinDraft}
         onOpenRoom={(leagueId) => navigate(
           `/room/${encodeURIComponent(leagueId)}`

@@ -743,50 +743,10 @@
 
 /* THE HEADER IS THE ROOM'S HEADER. `.draft-topbar` and its parts live in
    App.css and are used verbatim here (see Dashboard.tsx): same 44px bar, same
-   flush-left uppercase wordmark, same separator/spacer rhythm, same status
-   pill in the same corner. Nothing is redefined -- a second set of rules that
-   merely resembled the room's would drift from it on the first change to
-   either. What follows is only what this bar has that the room's does not. */
-
-/* The session, wearing the room's connection pill. A pill in the room is a
-   readout; this one is a control, so it gets the affordances a control needs
-   and keeps everything else the pill already decides -- shape, mono type,
-   `--ok` tone, the dot. */
-.db-session {
-  border: 0;
-  font: inherit;
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  cursor: pointer;
-}
-
-.db-session:focus-visible {
-  outline: 2px solid var(--accent-border);
-  outline-offset: 2px;
-}
-
-/* What the click does, revealed on hover rather than printed beside the
-   state. Signing out is not something anybody is looking for while they read
-   a page about drafting, and a permanent "Disconnect" next to a permanent
-   "Signed in" is two labels for one fact. Width and all: it is laid out at
-   all times and only faded, so the bar does not reflow under the pointer. */
-.db-session-out {
-  margin-left: 2px;
-  text-transform: uppercase;
-  opacity: 0;
-  transition: opacity 120ms ease-out;
-}
-
-.db-session:hover .db-session-out,
-.db-session:focus-visible .db-session-out {
-  opacity: 0.7;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .db-session-out { transition: none; }
-}
+   flush-left uppercase wordmark, same separator/spacer rhythm. Nothing is
+   redefined -- a second set of rules that merely resembled the room's would
+   drift from it on the first change to either. What follows is only what
+   this bar has that the room's does not. */
 
 /* THE PAGE HAD A HERO AND DOES NOT ANY MORE. A display-sized countdown
    across the top spent a third of the screen restating the first row of the

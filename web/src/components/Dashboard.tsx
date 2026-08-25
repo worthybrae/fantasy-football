@@ -1,8 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { disconnectEspn, mintDraftToken,
-         type TokenConnectParams, type UpcomingDraft } from '../api'
-import { forgetAccount } from '../lib/accountCache'
+import { mintDraftToken, type TokenConnectParams, type UpcomingDraft } from '../api'
 import { calendarLabel, countdownTo, secondsUntil } from '../lib/countdown'
 import { Logo } from './Logo'
 import MockLobby from './MockLobby'
@@ -29,8 +27,8 @@ import MockLobby from './MockLobby'
 // connect screen, the retry and the board are one path with two doors into it.
 
 // Seeing the page as a stranger sees it, without destroying anything to do
-// it. A connected account can simply be disconnected -- that is a real control
-// with a real endpoint behind it. THIS MACHINE'S OWN ESPN LOGIN cannot: it is
+// it. There is no sign-out control on this page: a connected account's
+// session could be cleared, but THIS MACHINE'S OWN ESPN LOGIN cannot -- it is
 // a file the importer wrote (`data/espn_state.json`), no cookie reaches it,
 // and "log out" would have to mean deleting a login the user may well want on
 // their next refresh.
@@ -78,19 +76,14 @@ function leagueFormat(league: UpcomingDraft): string {
     .filter(Boolean).join(' · ')
 }
 
-export default function Dashboard({ leagues, source, onJoin, onOpenRoom }: {
+export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
   leagues: UpcomingDraft[]
-  /** Where the session came from: an account this browser connected, or this
-   *  machine's own saved login. It decides what the sign-out control can
-   *  honestly offer. */
-  source: 'connected' | 'local' | null
   onJoin: (params: TokenConnectParams) => void
   /** Opens a mock room's waiting room: seats, countdown, who is in. */
   onOpenRoom: (leagueId: string) => void
 }) {
   const [joining, setJoining] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [gone, setGone] = useState(false)
   // How many rooms the lobby is offering, reported UP by the list that reads
   // it. The bar states it because the room's own bar states what the room
   // holds in that position -- and a second fetch of the same endpoint, purely
@@ -112,21 +105,6 @@ export default function Dashboard({ leagues, source, onJoin, onOpenRoom }: {
   // drafting has nothing to count down, so it is the NEXT one that decides.
   const now = useNow(soonestSeconds !== null && soonestSeconds < 3600)
 
-
-  // Disconnect. Only offered on a CONNECTED account (see the pill below):
-  // the cookie is cleared server-side and the stored row with it. A local
-  // login gets no button at all -- it is not this page's to delete.
-  const signOut = useCallback(async () => {
-    try {
-      await disconnectEspn()
-    } catch {
-      // The endpoint clears the cookie even when it refuses, so there is
-      // nothing left for this browser either way.
-    }
-    forgetAccount()
-    setGone(true)
-  }, [])
-
   const join = useCallback(async (league: UpcomingDraft) => {
     if (!league.team_id) return
     setJoining(league.league_id)
@@ -144,27 +122,17 @@ export default function Dashboard({ leagues, source, onJoin, onOpenRoom }: {
     }
   }, [onJoin])
 
-  // A disconnect that has already happened: the session is gone, so what
-  // belongs on screen is the page a visitor gets. Reloading is how it gets
-  // there -- Landing's own probe is what decides which page this is, and it
-  // runs on load.
-  if (gone) {
-    window.location.assign(window.location.pathname)
-    return null
-  }
-
   return (
     <main className="db">
       {/* THE ROOM'S OWN BAR, not a second one that resembles it. Same
           `.draft-topbar` classes, same 44px height, same flush-left
-          uppercase wordmark, same separator/spacer rhythm, and the session
-          state sits exactly where the room's connection pill does -- so
-          walking from this page into a draft does not change the furniture,
-          it only changes what is under it.
+          uppercase wordmark, same separator/spacer rhythm -- so walking from
+          this page into a draft does not change the furniture, it only
+          changes what is under it.
 
-          What differs is only what there is to say: no tabs (there is one
-          view), no pick counter (nothing is drafting yet), and the counts
-          this page actually holds in the league line's place. */}
+          What differs is only what there is to say: no pick counter (nothing
+          is drafting yet), no connection pill (nothing is listening), and the
+          counts this page actually holds in the league line's place. */}
       <header className="draft-topbar">
         <span className="draft-topbar-title"><Logo /> ESPN Draft Assist</span>
         <span className="draft-topbar-sep" aria-hidden="true" />
@@ -188,33 +156,6 @@ export default function Dashboard({ leagues, source, onJoin, onOpenRoom }: {
           {roomCount !== null && ` · ${roomCount} mock rooms open`}
         </span>
         <span className="draft-topbar-spacer" />
-        {/* The session, in the room's own status-pill vocabulary: a dot and
-            two words, `--ok` toned, in the exact position the draft room puts
-            "listening". A reader learns one shape for "the connection behind
-            this page is good" and reads it in both places.
-
-            It is a BUTTON, because unlike the room's pill this one does
-            something -- the dot is the state and the click is the way out of
-            it, which is one control rather than a label with a second control
-            beside it repeating what it refers to.
-
-            Only for a CONNECTED account. The machine's own local login used
-            to show a "THIS COMPUTER / preview" pill here; it was operator
-            chrome on a page every screenshot goes out from, and the preview
-            is still reachable as `?signedout=1` for whoever knows to want
-            it. */}
-        {source === 'connected' && (
-          <button
-            type="button"
-            className="draft-status-pill draft-status-pill-ok db-session"
-            onClick={signOut}
-            title="Signed in to ESPN. Click to disconnect this browser."
-          >
-            <span className="draft-status-dot" aria-hidden="true" />
-            SIGNED IN
-            <span className="db-session-out" aria-hidden="true">disconnect</span>
-          </button>
-        )}
       </header>
 
       {/* The one failure this page can hit: ESPN refused to mint a token for
