@@ -1,0 +1,8 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /draft
+Disallow: /live
+Disallow: /room/
+
+Sitemap: https://espnfantasydraft.com/sitemap.xml
