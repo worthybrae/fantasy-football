@@ -1184,6 +1184,38 @@ def _board_cell(player_id, pick_no, teams: int, slots: list, by_id: dict,
     return {"overall": overall, "round": rnd, "slot": slot, "player": player}
 
 
+def _billing_state(request, session) -> dict:
+    """What this room costs the reader, for the state payload.
+
+    `enabled` false is every local checkout and every instance nobody has put
+    a Stripe key on: the room behaves exactly as it always has. `required` is
+    the only key the page acts on.
+
+    THE SEASON IS `CURRENT_SEASON`, not a field on the session, because a
+    session does not carry one -- and the entitlement was bought against the
+    same constant on the dashboard, so the two agree by construction. A
+    session for some other season would be a draft nobody can run here
+    anyway.
+
+    Never raises. A billing database that cannot be read must not take the
+    draft room down mid-draft; an unreadable one answers "not required",
+    which fails toward the drafter.
+    """
+    try:
+        if not billing.enabled():
+            return {"enabled": False, "required": False, "entitled": True}
+        league_id = getattr(session, "league_id", None)
+        if billing.is_free_draft(league_id):
+            return {"enabled": True, "required": False, "entitled": True,
+                    "reason": "mock"}
+        paid = billing.entitled(billing._account_ids(request),
+                                league_id, CURRENT_SEASON)
+        return {"enabled": True, "required": not paid, "entitled": paid,
+                "league_id": str(league_id), "season": int(CURRENT_SEASON)}
+    except Exception:      # noqa: BLE001 -- see the docstring
+        return {"enabled": False, "required": False, "entitled": True}
+
+
 def _league_settings_payload(settings) -> dict:
     """The session's real league shape, as /api/live/state's `settings` key
     serves it -- the rail's RosterPanel/ClockPanel read teams/rounds/starter
@@ -2608,12 +2640,18 @@ def register_live_routes(app, conn, db_path):
                 "seed": session.seed}
 
     @app.get("/api/live/state")
-    def live_state():
+    def live_state(request: Request):
         now = datetime.now(timezone.utc)
         with lock:
             session = state["session"]
             if session is None:
                 return {"active": False, "picks_made": 0, "on_the_clock": None,
+                        # No session, nothing to charge for. Same "present
+                        # with a null/false value" convention as the rest of
+                        # this branch -- the room reads it on every poll and
+                        # an absent key would read as unpaid.
+                        "billing": {"enabled": billing.enabled(),
+                                    "required": False, "entitled": True},
                         "candidates": [], "candidates_as_of_pick": None,
                         # Same "present with a null/false value, never
                         # omitted" convention the rest of this branch
@@ -2845,6 +2883,13 @@ def register_live_routes(app, conn, db_path):
                                    and horizon_pick > len(slots))
         return {
             "active": True,
+            # WHETHER THIS ROOM CAN BE DRAFTED FROM, answered here rather than
+            # left to the page to work out. The room polls this endpoint
+            # already, the server is the only side that knows which league
+            # this session belongs to, and putting the verdict in the state
+            # means the moment a payment lands the buttons come alive on the
+            # next poll with nothing else to wire up.
+            "billing": _billing_state(request, session),
             "picks_made": int(picks_made),
             "on_the_clock": on_clock,
             "horizon_pick": (None if horizon_pick is None
@@ -3070,7 +3115,7 @@ def register_live_routes(app, conn, db_path):
         }
 
     @app.post("/api/live/select")
-    def live_select(body: SelectBody):
+    def live_select(body: SelectBody, request: Request):
         """Make the pick: send SELECT on the live draft socket and wait for
         ESPN's own SELECTED to confirm it landed.
 
@@ -3104,6 +3149,16 @@ def register_live_routes(app, conn, db_path):
             active_conn = state["league_conn"] or conn
             if session is None:
                 raise HTTPException(status_code=409, detail="no live draft session")
+            # THE PAYWALL IS HERE, on the act rather than at the door. Looking
+            # at a room is free; putting a pick into somebody's real draft is
+            # the paid feature (api/billing.py). Mocks and unconfigured
+            # instances pass straight through.
+            #
+            # Before the socket check on purpose: "you have not paid for this"
+            # is a true and actionable answer whatever the socket is doing,
+            # and a 503 about a connection would send the reader to fix the
+            # wrong thing.
+            billing.require_paid(request, session.league_id, CURRENT_SEASON)
             if socket is None or not socket.alive():
                 raise HTTPException(
                     status_code=503, detail="the draft socket is not connected")
@@ -3206,7 +3261,7 @@ def register_live_routes(app, conn, db_path):
             "before picking again")
 
     @app.post("/api/live/autodraft")
-    def live_autodraft(body: AutodraftBody):
+    def live_autodraft(body: AutodraftBody, request: Request):
         """Turn ESPN's autodraft on or off, and report only what ESPN
         confirmed.
 
@@ -3260,6 +3315,10 @@ def register_live_routes(app, conn, db_path):
             listener = state["listener"]
             if session is None:
                 raise HTTPException(status_code=409, detail="no live draft session")
+            # Same gate as live_select, and for the same reason: this is the
+            # tool reaching into somebody's real draft on ESPN. Free in a
+            # mock, free with no Stripe key.
+            billing.require_paid(request, session.league_id, CURRENT_SEASON)
             if socket is None or not socket.alive():
                 raise HTTPException(
                     status_code=503, detail="the draft socket is not connected")
@@ -3430,14 +3489,11 @@ def register_live_routes(app, conn, db_path):
         # credential, not the route.
         if body.espn_s2 or request.cookies.get(custody.COOKIE_NAME):
             require_secure(request)
-        # AND THE OTHER GATE, before any work: a real league's draft is paid
-        # for, a mock is free, and an instance with no Stripe key sells
-        # nothing and lets everything through (api/billing.py). Raises 402
-        # naming the league, which is what the page needs to offer the right
-        # checkout. Second, not first: a request that is refused for being
-        # plaintext must be refused for that reason, whatever else is wrong
-        # with it.
-        billing.require_paid(request, body.leagueId, body.season)
+        # NO PAYWALL HERE, DELIBERATELY. Connecting is looking; the money is
+        # charged for ACTING (see live_select and live_autodraft below).
+        # Somebody who has not paid still gets the room, the board and the
+        # clock -- what they do not get is this tool putting a pick into
+        # their draft.
         progress, _seq = _new_progress(token_path=True, league_id=body.leagueId)
         progress.begin("token")
         # NOTHING about this step reaches ESPN: the token is a per-draft nonce

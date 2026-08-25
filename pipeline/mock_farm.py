@@ -1688,13 +1688,48 @@ def open_board_db(path: str | None = None, out=print):
     try:
         return duckdb.connect(target, read_only=True)
     except Exception as exc:                    # noqa: BLE001
-        if "lock" not in str(exc).lower():
+        # TWO WAYS TO BE REFUSED, and both mean the same thing here: somebody
+        # else has this file open on terms we cannot join, so copy it.
+        #
+        #   "lock"          another PROCESS holds the write lock. The dev API,
+        #                   or the deployed one, keeping a connection for its
+        #                   whole life.
+        #   "configuration" the same PROCESS already has it open read-write.
+        #                   DuckDB caches one instance per file per process
+        #                   and every connection to it must agree on the
+        #                   configuration, so `read_only=True` is refused
+        #                   outright rather than queued.
+        #
+        # Only the first was matched here for a long time, so an in-process
+        # caller got the raw ConnectionException instead of the snapshot this
+        # function exists to provide.
+        why = str(exc).lower()
+        if "lock" not in why and "configuration" not in why:
             raise
         snapshot = str(Path(tempfile.mkdtemp(prefix="mock-farm-")) /
                        Path(target).name)
-        out(f"{target} is locked by another process ({exc.__class__.__name__})"
+        out(f"{target} is held by another connection ({exc.__class__.__name__})"
             f" -- reading a snapshot copy at {snapshot}")
         shutil.copy2(target, snapshot)
+        # THE WRITE-AHEAD LOG MUST COME TOO, and leaving it behind was a real
+        # outage. DuckDB does not fold a commit into the database file
+        # immediately; it appends to `<name>.wal` and folds it in at a
+        # checkpoint, which a long-lived connection may not reach for hours.
+        # A fresh deployment is the worst case: the volume showed a 24 MB
+        # `nfl.duckdb` beside a 5.7 MB `nfl.duckdb.wal`, and EVERY table the
+        # refresh had just written was in the second file. Copying only the
+        # first produced a database that opened perfectly and contained
+        # nothing --
+        #
+        #     Catalog Error: Table with name players does not exist!
+        #
+        # -- so the farm built a board of `0 pool players, 0 selectable`,
+        # joined real ESPN rooms it could not pick in, and recorded a draft
+        # with zero picks into the corpus. DuckDB replays the log when it
+        # opens the copy, so bringing it along is the whole fix.
+        wal = Path(str(target) + ".wal")
+        if wal.exists():
+            shutil.copy2(wal, snapshot + ".wal")
         return duckdb.connect(snapshot, read_only=True)
 
 

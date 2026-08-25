@@ -277,3 +277,102 @@ def test_billing_switched_off_gates_nothing(monkeypatch):
 ])
 def test_only_a_path_on_this_site_survives(raw, expected):
     assert billing._return_to(raw) == expected
+
+
+def test_every_mock_the_corpus_remembers_is_free(tmp_path, monkeypatch):
+    """A mock that has already closed is the case the two live tests miss:
+    ESPN drops the room from its directory the moment it fills, and the
+    farm's own rooms never touch mock-join. The corpus has known all along
+    which drafts were mocks."""
+    import duckdb
+    from pipeline import draft_log as dl
+
+    corpus = tmp_path / "corpus.duckdb"
+    conn = duckdb.connect(str(corpus))
+    conn.execute("CREATE TABLE draft_log (draft_id VARCHAR, source VARCHAR, "
+                 "league_id VARCHAR)")
+    conn.execute("INSERT INTO draft_log VALUES ('a', ?, '1802561235'), "
+                 "('b', 'espn_live', '999')", [dl.SOURCE_MOCK])
+    conn.close()
+    monkeypatch.setattr(dl, "CORPUS_PATH", str(corpus))
+    billing.reset_for_tests(str(tmp_path / "seeded.duckdb"))
+    monkeypatch.setattr("api.lobby.cached_rows", lambda: [])
+
+    assert billing.is_free_draft("1802561235") is True
+    # And a real league in the same corpus is still a real league.
+    assert billing.is_free_draft("999") is False
+
+
+def test_a_corpus_that_cannot_be_read_is_not_fatal(tmp_path, monkeypatch):
+    """The farm writes that file as drafts finish. A lock held by it is not a
+    reason to fail a request -- the two live tests still work."""
+    from pipeline import draft_log as dl
+
+    monkeypatch.setattr(dl, "CORPUS_PATH", str(tmp_path / "not-here.duckdb"))
+    billing.reset_for_tests(str(tmp_path / "unseeded.duckdb"))
+    monkeypatch.setattr("api.lobby.cached_rows", lambda: [{"leagueId": 555}])
+
+    assert billing.is_free_draft("555") is True
+    assert billing.is_free_draft("999") is False
+
+
+# -- who the buyer is --------------------------------------------------------
+
+
+class _LocalRequest:
+    """A request straight off the loopback interface, no proxy in front."""
+    cookies: dict = {}
+    headers: dict = {}
+
+    class client:
+        host = "127.0.0.1"
+
+
+class _ProxiedRequest:
+    """The same address, but forwarded -- which is what a deployment looks
+    like from inside the container."""
+    cookies: dict = {}
+    headers = {"x-forwarded-for": "203.0.113.7"}
+
+    class client:
+        host = "127.0.0.1"
+
+
+class _RemoteRequest:
+    cookies: dict = {}
+    headers: dict = {}
+
+    class client:
+        host = "203.0.113.7"
+
+
+def test_the_owners_own_machine_can_buy_without_connecting(monkeypatch):
+    """A local checkout reaches its leagues from a saved ESPN login with no
+    cookie anywhere (the dashboard reports source "local"), so there is
+    nothing for `custody_for` to resolve -- and the person running it IS the
+    account."""
+    monkeypatch.setattr("api.custody.custody_for", lambda request, store=None: None)
+    monkeypatch.setattr("pipeline.espn_drafts.saved_session",
+                        lambda: ("{OWNER-SWID}", "espn_s2_value"))
+    monkeypatch.setattr(billing, "_custody_store",
+                        lambda store=None: type("S", (), {
+                            "account_ids": staticmethod(lambda swid: [f"id:{swid}"])})())
+
+    assert billing._account_ids(_LocalRequest()) == ["id:{OWNER-SWID}"]
+
+
+def test_a_forwarded_request_may_not_use_the_local_login(monkeypatch):
+    """THE ONE THAT MATTERS. That same file on the deployment is the FARM's
+    ESPN login. Honouring it there would resolve every visitor on earth to
+    one account: a single $9.99 would unlock the product for everybody, and
+    anybody could spend what somebody else bought.
+
+    A loopback address alone is not proof -- a proxy beside the app can
+    present one -- so a request carrying forwarding headers is refused even
+    from 127.0.0.1."""
+    monkeypatch.setattr("api.custody.custody_for", lambda request, store=None: None)
+    monkeypatch.setattr("pipeline.espn_drafts.saved_session",
+                        lambda: ("{FARM-SWID}", "espn_s2_value"))
+
+    assert billing._account_ids(_ProxiedRequest()) == []
+    assert billing._account_ids(_RemoteRequest()) == []

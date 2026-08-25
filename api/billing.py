@@ -163,7 +163,48 @@ def _db():
                     league_id VARCHAR PRIMARY KEY,
                     seen_at TIMESTAMP NOT NULL)""")
             _conn = conn
+            _seed_mocks_from_corpus(conn)
     return _conn
+
+
+def _seed_mocks_from_corpus(conn) -> None:
+    """Every mock draft ever recorded is a mock room, and the corpus knows.
+
+    THE GAP THIS CLOSES. The two live tests -- rooms we seated somebody in,
+    and rooms ESPN's directory currently lists -- miss the same case: a mock
+    that has already closed. ESPN drops a room from the directory the moment
+    it fills or starts, and the farm's own rooms never touch mock-join at
+    all, so a reader connecting to one of those would be asked to pay for a
+    free draft. That is the failure this module's free/paid rule is written
+    to avoid.
+
+    `draft_log` has the answer and has had it all along: every row with
+    source `mock` is a mock, with its league id, going back to the first
+    draft ever recorded. Read once per process, at the moment the tables are
+    created.
+
+    Best-effort and read-only. The farm writes that file as drafts finish,
+    and a lock held by it is not a reason to fail a request -- the seed is an
+    improvement on two tests that still work without it.
+    """
+    try:
+        from pipeline import draft_log as dl
+        corpus = duckdb.connect(dl.CORPUS_PATH, read_only=True)
+    except Exception:      # noqa: BLE001 -- no corpus yet, or the farm has it
+        return
+    try:
+        rows = corpus.execute(
+            "SELECT DISTINCT league_id FROM draft_log "
+            "WHERE source = ? AND league_id IS NOT NULL",
+            [dl.SOURCE_MOCK]).fetchall()
+        if rows:
+            conn.executemany(
+                "INSERT INTO mock_room VALUES (?, ?) ON CONFLICT DO NOTHING",
+                [[str(r[0]), _now()] for r in rows])
+    except Exception:      # noqa: BLE001 -- an older corpus without the
+        pass               # column, a partial write: the live tests remain
+    finally:
+        corpus.close()
 
 
 def _now() -> datetime:
@@ -303,6 +344,49 @@ def is_free_draft(league_id) -> bool:
 # -- entitlements ------------------------------------------------------------
 
 
+def _is_local_request(request: Request) -> bool:
+    """Is this request genuinely from the machine the server runs on.
+
+    WHY THIS QUESTION IS ASKED AT ALL. `pipeline/espn_drafts.saved_session`
+    is the owner's own ESPN login, kept in a file, and it is how a local
+    checkout reaches its leagues without ever connecting anything (the
+    dashboard reports `source: "local"`). There is no cookie in that flow, so
+    `custody_for` has nothing to resolve and a purchase has nothing to attach
+    to -- which is a 401 on the one machine where the person IS the account.
+
+    WHY IT MUST BE THIS NARROW. That same file exists on the deployment: it
+    is the FARM's ESPN login, uploaded as `FARM_ESPN_STATE_B64`. If billing
+    accepted it as an identity there, every visitor on earth would resolve to
+    the same account -- one person's $9.99 would unlock the product for
+    everybody, and anybody could spend what somebody else bought. So the
+    local login is honoured only where it means what it says.
+
+    TWO CONDITIONS, because either alone can be arranged. A loopback client
+    address is not proof on its own: a proxy running beside the app can
+    present one. A request that came through any proxy carries forwarding
+    headers, and a direct one does not. Both together are as close to "this
+    request did not come off a network" as the app can get.
+    """
+    client = getattr(request, "client", None)
+    host = getattr(client, "host", None)
+    if host not in ("127.0.0.1", "::1", "localhost"):
+        return False
+    return not any(h in request.headers for h in
+                   ("x-forwarded-for", "x-forwarded-proto", "forwarded"))
+
+
+def _local_swid(request: Request):
+    """The owner's own ESPN account, on the owner's own machine. Else None."""
+    if not _is_local_request(request):
+        return None
+    try:
+        from pipeline import espn_drafts
+        saved = espn_drafts.saved_session()
+    except Exception:      # noqa: BLE001 -- no file, unreadable file
+        return None
+    return saved[0] if saved else None
+
+
 def _account_ids(request: Request, store=None) -> list:
     """Every id this browser's ESPN account could hold rows under.
 
@@ -317,9 +401,12 @@ def _account_ids(request: Request, store=None) -> list:
     connected -- and every caller treats it as "not entitled".
     """
     resolved = custody_for(request, store)
-    if resolved is None:
+    # The connected path: a cookie this browser was given, resolving to a
+    # stored ESPN session. Every visitor to a deployment is this.
+    swid = resolved.swid if resolved is not None else _local_swid(request)
+    if swid is None:
         return []
-    return _custody_store(store).account_ids(resolved.swid)
+    return _custody_store(store).account_ids(swid)
 
 
 def entitled(account_ids: list, league_id, season: int) -> bool:

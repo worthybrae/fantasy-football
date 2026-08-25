@@ -112,6 +112,7 @@ export default function Dashboard({ leagues, source, onJoin, onOpenRoom }: {
   // drafting has nothing to count down, so it is the NEXT one that decides.
   const now = useNow(soonestSeconds !== null && soonestSeconds < 3600)
 
+
   // Disconnect. Only offered on a CONNECTED account (see the pill below):
   // the cookie is cleared server-side and the stored row with it. A local
   // login gets no button at all -- it is not this page's to delete.
@@ -348,11 +349,18 @@ export default function Dashboard({ leagues, source, onJoin, onOpenRoom }: {
                           View the room
                         </button>
                       ) : (
+                        // Locked because ESPN has not opened the room, and
+                        // for no other reason. The paywall lives INSIDE the
+                        // room now (DraftRoom): a reader gets the board, the
+                        // clock and the ranking before being asked for
+                        // anything, which is a better place to ask than a
+                        // list of leagues they have not seen this tool work
+                        // on yet.
                         <button
                           type="button"
                           className="db-go db-league-go db-go-paid"
                           disabled
-                          title="Draft night is the paid feature. The room opens when ESPN starts the draft."
+                          title="The room opens when ESPN starts the draft."
                         >
                           <span className="db-paid-coin" aria-hidden="true">
                             <svg viewBox="0 0 24 24">

@@ -2690,9 +2690,25 @@ button.wr-seat:focus-visible {
   color: var(--accent);
 }
 
+/* Disabled means ENTERING is locked, not that the button is dead: a real
+   league's draft can be bought in August and entered in September, and only
+   ESPN's clock decides the second half of that. Full opacity because it is
+   still the row's headline control, not a greyed-out leftover. */
 .db-go.db-go-paid:disabled {
   opacity: 1;
   cursor: not-allowed;
+}
+
+/* And when it IS a till (Dashboard.tsx: the server says this draft is
+   unpaid), it behaves like every other control that does something. */
+.db-go.db-go-paid:not(:disabled) {
+  cursor: pointer;
+}
+
+.db-go.db-go-paid:not(:disabled):hover {
+  background: linear-gradient(135deg,
+    color-mix(in srgb, var(--accent) 32%, var(--bg-2)),
+    color-mix(in srgb, var(--accent) 12%, var(--bg-2)));
 }
 
 .db-go.db-go-paid::after {
@@ -2745,6 +2761,20 @@ button.wr-seat:focus-visible {
    the connect screen it replaces rather than like a marketing page: one card,
    centred, no navigation, nothing to read past the decision. A drafter is
    here with a clock running. */
+/* OVER THE ROOM, not instead of it. The board, the clock and the ranked list
+   stay visible behind the scrim, because they are what the reader is being
+   asked to pay for and a plain background would hide the argument. Blurred
+   just enough to keep the card readable over a moving board -- the same
+   bargain `.player-overlay` already makes. */
+.pw.is-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  min-height: 0;
+  background: rgba(10, 11, 14, 0.72);
+  backdrop-filter: blur(3px);
+}
+
 .pw {
   min-height: 100svh;
   display: flex;

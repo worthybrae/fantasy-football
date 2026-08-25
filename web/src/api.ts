@@ -333,6 +333,12 @@ export interface RosterPlayer {
 
 export interface LiveState {
   active: boolean
+  /** Whether this room can be drafted from, and what it costs if not. Comes
+   *  down with every poll (api/live.py's `_billing_state`), so the moment a
+   *  payment lands the buttons come alive on the next one. `enabled: false`
+   *  is every instance nobody has put a Stripe key on -- the room behaves
+   *  exactly as it always has. */
+  billing?: BillingStatus & { league_id?: string; season?: number }
   picks_made: number
   on_the_clock: number | null
   // Absent (not merely null) on the `active: false` response -- see

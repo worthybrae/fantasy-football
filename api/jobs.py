@@ -173,6 +173,28 @@ def _run_refresh() -> None:
     from pipeline import refresh
     refresh.main()
 
+    # FOLD THE WRITES INTO THE FILE. DuckDB appends a commit to `<name>.wal`
+    # and only merges it at a checkpoint, which a connection held for the
+    # life of the process may not reach for hours. Everything that reads this
+    # database as a FILE rather than through this connection sees only what
+    # has been folded in -- and the farm is exactly that reader: it copies
+    # the file when it cannot open it (`mock_farm.open_board_db`).
+    #
+    # That copy now brings the WAL along, so this is belt and braces rather
+    # than the fix. It is still worth doing: it bounds how far the file can
+    # lag behind reality, which matters for anything that copies the volume
+    # -- a backup, a download, a support request asking for the database.
+    #
+    # Failure here is not a failed refresh. The data is committed either way;
+    # an un-checkpointed database is merely one whose recent history is in
+    # the sidecar.
+    try:
+        from pipeline.db import get_conn
+        get_conn().execute("CHECKPOINT")
+    except Exception as exc:      # noqa: BLE001 -- see above
+        print(f"refresh: could not checkpoint ({exc!r}) -- "
+              f"data is committed, the file just lags its WAL", flush=True)
+
 
 def _refresh_loop(conn, max_age_hours: float, ready=None) -> None:
     while True:

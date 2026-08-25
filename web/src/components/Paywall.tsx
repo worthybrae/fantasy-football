@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import { fetchBillingStatus, startCheckout } from '../api'
 
 // THE ONE THING THAT COSTS MONEY, asked for at the only moment it makes
@@ -28,13 +29,25 @@ const POLL_MS = 2000
  *  abandoned and polling is just noise. */
 const GIVE_UP_MS = 600_000
 
-export default function Paywall({ leagueId, season, onPaid, onBack }: {
+export default function Paywall({ leagueId, season, onPaid, onBack,
+                                  overlay = false, title, body, backLabel,
+                                  payLabel }: {
   leagueId: string
   season: number
   /** The payment landed. The caller retries whatever was refused. */
   onPaid: () => void
   /** Give up and go back, without paying. */
   onBack: () => void
+  /** Over a running draft room rather than in place of a page: a scrim
+   *  instead of a background, so the board is visible behind it and the
+   *  reader can see what they are being asked to pay for. */
+  overlay?: boolean
+  /** Wording, for the two places this appears. The connect path is asking
+   *  "unlock this draft"; the room is asking "start drafting from it". */
+  title?: string
+  body?: ReactNode
+  backLabel?: string
+  payLabel?: string
 }) {
   const [waiting, setWaiting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -103,15 +116,19 @@ export default function Paywall({ leagueId, season, onPaid, onBack }: {
   }
 
   return (
-    <div className="pw">
+    <div className={`pw${overlay ? ' is-overlay' : ''}`}>
       <div className="pw-card">
         <p className="draft-cap pw-eyebrow">This one is a real league</p>
-        <h1 className="pw-title">Unlock this draft</h1>
+        <h1 className="pw-title">{title ?? 'Unlock this draft'}</h1>
         <p className="pw-body">
-          Mock drafts are free, and always will be. A real league&rsquo;s draft is
-          a one-off <strong>$9.99</strong> for the season: the live board, the
-          survival model, and every panel behind it, for as long as this draft
-          is running.
+          {body ?? (
+            <>
+              Mock drafts are free, and always will be. A real league&rsquo;s
+              draft is a one-off <strong>$9.99</strong> for the season: the
+              live board, the survival model, and every panel behind it, for
+              as long as this draft is running.
+            </>
+          )}
         </p>
         <p className="mono pw-league">
           league {leagueId} · {season}
@@ -133,10 +150,10 @@ export default function Paywall({ leagueId, season, onPaid, onBack }: {
         ) : (
           <>
             <button type="button" className="pw-pay" onClick={pay}>
-              Pay $9.99 and connect
+              {payLabel ?? 'Pay $9.99 and connect'}
             </button>
             <button type="button" className="pw-quiet" onClick={onBack}>
-              Not now
+              {backLabel ?? 'Not now'}
             </button>
           </>
         )}

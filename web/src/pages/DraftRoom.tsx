@@ -9,6 +9,7 @@ import RosterPanel, { type RosterSlot } from '../components/draft/RosterPanel'
 import TopThree from '../components/draft/TopThree'
 import AvailableList from '../components/draft/AvailableList'
 import ConfirmPick, { type PickStatus } from '../components/draft/ConfirmPick'
+import Paywall from '../components/Paywall'
 import PickTicker from '../components/draft/PickTicker'
 import PlayerOverlay, { type OverlayTarget } from '../components/draft/PlayerOverlay'
 import { seedFromBoardPlayer, seedFromCandidate, seedFromPlayer } from '../components/draft/playerSeed'
@@ -208,6 +209,10 @@ export default function DraftRoom() {
   // open at all; ConfirmPick only ever mounts while this is non-null (see
   // the render below), so it never has to handle a null candidate itself.
   const [confirming, setConfirming] = useState<LiveCandidate | null>(null)
+  // The lock, readable from a callback that captures nothing. `handleDraftClick`
+  // is deliberately identity-stable (it is passed to memoized lists), so the
+  // value has to reach it through a ref rather than through its closure.
+  const lockedRef = useRef(false)
   const [pickStatus, setPickStatus] = useState<PickStatus>('idle')
   const [pickError, setPickError] = useState<string | null>(null)
 
@@ -400,6 +405,17 @@ export default function DraftRoom() {
   // since this is recomputed from every 2.5s poll. Deliberately NOT the same
   // test as ClockPanel's `youAreUp`, which is about whose turn it is and
   // stays true while the socket is down.
+  // WHAT THIS ROOM COSTS, straight off the poll (api/live.py's
+  // `_billing_state`). `required` is the only field acted on: false covers a
+  // mock, a paid draft, and every instance with no Stripe key at all.
+  const locked = state?.billing?.required === true
+  // Dismissed for now. The room stays readable -- the whole reason the gate
+  // moved in here is that somebody should see the board working before being
+  // asked for anything -- and the topbar keeps a way back to it.
+  const [payDismissed, setPayDismissed] = useState(false)
+  lockedRef.current = locked
+  // A payment landing re-locks nothing: the next poll carries `required:
+  // false` and every disabled control comes back on its own.
   const isMyTurn = !!state?.active && state.on_the_clock !== null
     && state.on_the_clock === state.my_slot && state.socket_alive
 
@@ -550,6 +566,14 @@ export default function DraftRoom() {
   // Same reason as handleOpenCandidate. Captures nothing but state setters,
   // which React guarantees are stable, so this identity never changes.
   const handleDraftClick = useCallback((c: LiveCandidate) => {
+    // Unpaid: the ask, not the confirm dialog. The buttons are already
+    // disabled while locked, so this is the belt to that pair of braces --
+    // the profile popup and the board both end up here, and one of them
+    // growing its own path back is a matter of time.
+    if (lockedRef.current) {
+      setPayDismissed(false)
+      return
+    }
     setConfirming(c)
     setPickStatus('idle')
     setPickError(null)
@@ -658,6 +682,32 @@ export default function DraftRoom() {
         {!state ? 'Loading' : !state.active ? 'Not connected' : connectionLabel}.
       </div>
 
+      {/* THE ASK, over a room the reader can already see working. It is
+          dismissible on purpose: the argument for paying is the board behind
+          it, and a modal nobody can get past is a modal that gets closed by
+          closing the tab. What it leaves behind is a topbar button, so the
+          decision is always one click away rather than gone. */}
+      {locked && !payDismissed && state?.billing?.league_id && (
+        <Paywall
+          overlay
+          leagueId={state.billing.league_id}
+          season={state.billing.season ?? new Date().getFullYear()}
+          title="Draft from this board"
+          body={(
+            <>
+              Look around as long as you like. Sending a pick into a real
+              league&rsquo;s draft is a one-off <strong>$9.99</strong> for the
+              season: this board, the survival model, and every panel behind
+              it, for as long as the draft is running.
+            </>
+          )}
+          payLabel="Pay $9.99 and draft"
+          backLabel="Keep looking"
+          onPaid={() => setPayDismissed(true)}
+          onBack={() => setPayDismissed(true)}
+        />
+      )}
+
       <header className="draft-topbar">
         {/* The room's only way out. App.tsx routes one way (/ -> /draft) and
             nothing here linked back, so a user whose listener died had no
@@ -738,6 +788,18 @@ export default function DraftRoom() {
           </span>
         )}
         <span className="draft-topbar-spacer" />
+        {/* Only while there is something to buy, and only once the ask has
+            been dismissed -- two of these on screen at once would be the page
+            asking twice. */}
+        {locked && payDismissed && (
+          <button
+            type="button"
+            className="draft-topbar-unlock"
+            onClick={() => setPayDismissed(false)}
+          >
+            Unlock drafting · $9.99
+          </button>
+        )}
         {/* The archive: what hundreds of recorded drafts do from a seat.
             Reachable from the room because that is where somebody is when
             they wonder whether a run is normal -- and it is research rather
@@ -859,7 +921,7 @@ export default function DraftRoom() {
                   candidates={state?.candidates ?? []}
                   players={players}
                   onDraft={handleDraftClick}
-                  isMyTurn={isMyTurn}
+                  isMyTurn={isMyTurn && !locked}
                   horizonLabel={horizonLabel}
                   nextPickLabel={nextPickLabel}
                   pickNo={thisPickNo}
@@ -871,7 +933,7 @@ export default function DraftRoom() {
                   candidates={state?.candidates ?? []}
                   players={players}
                   onDraft={handleDraftClick}
-                  isMyTurn={isMyTurn}
+                  isMyTurn={isMyTurn && !locked}
                   onOpenPlayer={handleOpenCandidate}
                   draftedIds={draftedIds}
                   settings={state?.settings}
