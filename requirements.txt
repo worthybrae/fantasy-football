@@ -28,3 +28,8 @@ cryptography>=42.0
 # version it defaults to, and a webhook that starts failing on a day nobody
 # touched the code is the failure mode being avoided.
 stripe>=15.4,<16
+
+# Jinja2, for api/seo.py -- the server-rendered ADP pages a crawler reads
+# without running the SPA. FastAPI's own templating extra; pinned to the
+# major so a template syntax change cannot arrive with a redeploy.
+jinja2>=3.1,<4
