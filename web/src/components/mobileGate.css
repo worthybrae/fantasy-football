@@ -1,0 +1,92 @@
+/* The desktop-only page a phone gets instead of the app. One column, the
+   page's own tokens, nothing wider than the viewport. */
+.mg {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 28px 20px 40px;
+  padding-top: max(28px, env(safe-area-inset-top));
+  gap: 14px;
+  background: var(--bg-0);
+}
+
+.mg-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-1);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin-bottom: 18px;
+}
+
+.mg-title {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+  color: var(--text-1);
+  text-wrap: balance;
+}
+
+.mg-lede {
+  max-width: 34ch;
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--text-2);
+  text-wrap: pretty;
+}
+
+.mg-figure {
+  margin: 12px 0 4px;
+  width: 100%;
+  max-width: 440px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mg-video {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-1);
+  box-shadow: 0 18px 40px -20px rgba(0, 0, 0, 0.8);
+}
+
+.mg-caption {
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  color: var(--text-3);
+}
+
+.mg-send {
+  margin-top: 8px;
+  padding: 13px 26px;
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: #10110f;
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.mg-send:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 3px;
+}
+
+.mg-url {
+  font-size: var(--text-sm);
+  color: var(--text-3);
+  overflow-wrap: anywhere;
+  user-select: all;
+  -webkit-user-select: all;
+}
