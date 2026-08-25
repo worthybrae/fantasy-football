@@ -42,10 +42,13 @@ def _profile(*entries):
     return json.dumps({"preferences": list(entries)})
 
 
-def _client(fetch, store=None):
+def _client(fetch, store=None, client=("127.0.0.1", 50000)):
     app = FastAPI()
     drafts_api.register_draft_routes(app, store=store, fetch=fetch)
-    return TestClient(app)
+    # Loopback by default: the local-login tests below are about the owner's
+    # own machine, and `session_for` only reaches for the saved login from
+    # there (see `test_the_saved_login_is_invisible_off_the_machine`).
+    return TestClient(app, client=client)
 
 
 def _local(monkeypatch, swid="{ABC}", espn_s2="s2value"):
@@ -74,6 +77,24 @@ def test_the_local_login_serves_the_owners_upcoming_drafts(monkeypatch):
     assert body["leagues"][0]["draft_at"].endswith("Z")
     # And the team, without which the row could not be a join button.
     assert body["leagues"][0]["team_id"] == "6"
+
+
+def test_the_saved_login_is_invisible_off_the_machine(monkeypatch):
+    """THE ONE THAT MATTERS. On the deployment `data/espn_state.json` is the
+    FARM's login (`FARM_ESPN_STATE_B64`), and for a while any cookieless
+    request was answered with it: every visitor was `connected`, saw the
+    owner's leagues, and the landing page drew the dashboard for them
+    instead of the introduction. A request that arrived through a proxy
+    (forwarding headers) or from any address but loopback is a stranger."""
+    _local(monkeypatch)
+    fetch = _fetcher({"/apis/v2/profile": (200, _profile(_entry("1")))})
+    proxied = _client(fetch).get("/api/espn/drafts",
+                                 headers={"x-forwarded-for": "203.0.113.7"})
+    assert proxied.status_code == 200
+    assert proxied.json() == {"connected": False, "leagues": []}
+    remote = _client(fetch, client=("203.0.113.7", 40000)).get("/api/espn/drafts")
+    assert remote.status_code == 200
+    assert remote.json() == {"connected": False, "leagues": []}
 
 
 def test_the_league_list_is_reused_rather_than_refetched(monkeypatch):
@@ -193,7 +214,7 @@ def test_joining_a_mock_takes_the_seat_then_mints_for_it(monkeypatch):
     app = FastAPI()
     drafts_api.register_draft_routes(app, fetch=fetch,
                                      post=_poster('[{"teamId": 5}]', seen))
-    body = TestClient(app).post("/api/espn/mock-join",
+    body = TestClient(app, client=("127.0.0.1", 50000)).post("/api/espn/mock-join",
                                 json={"leagueId": "999"}).json()
 
     assert body["teamId"] == "5"
@@ -211,7 +232,7 @@ def test_joining_a_mock_needs_a_session(monkeypatch):
     app = FastAPI()
     drafts_api.register_draft_routes(app, fetch=_fetcher({}),
                                      post=_poster('[{"teamId": 5}]'))
-    assert TestClient(app).post("/api/espn/mock-join",
+    assert TestClient(app, client=("127.0.0.1", 50000)).post("/api/espn/mock-join",
                                 json={"leagueId": "999"}).status_code == 401
 
 
@@ -226,7 +247,7 @@ def test_a_room_that_filled_first_is_the_upstream_refusing(monkeypatch):
 
     app = FastAPI()
     drafts_api.register_draft_routes(app, fetch=_fetcher({}), post=post)
-    response = TestClient(app).post("/api/espn/mock-join",
+    response = TestClient(app, client=("127.0.0.1", 50000)).post("/api/espn/mock-join",
                                     json={"leagueId": "999"})
 
     assert response.status_code == 502
@@ -300,7 +321,7 @@ def test_joining_a_chosen_seat_asks_espn_for_that_seat(monkeypatch):
     app = FastAPI()
     drafts_api.register_draft_routes(app, fetch=fetch,
                                      post=_poster('[{"teamId": 7}]', seen))
-    body = TestClient(app).post("/api/espn/mock-join",
+    body = TestClient(app, client=("127.0.0.1", 50000)).post("/api/espn/mock-join",
                                 json={"leagueId": "999", "teamId": "7"}).json()
 
     assert seen[0][1] == [{"teamId": 7}]
@@ -316,6 +337,6 @@ def test_no_chosen_seat_still_means_any_open_seat(monkeypatch):
     app = FastAPI()
     drafts_api.register_draft_routes(app, fetch=fetch,
                                      post=_poster('[{"teamId": 2}]', seen))
-    TestClient(app).post("/api/espn/mock-join", json={"leagueId": "999"})
+    TestClient(app, client=("127.0.0.1", 50000)).post("/api/espn/mock-join", json={"leagueId": "999"})
 
     assert seen[0][1] == [{"teamId": -1}]

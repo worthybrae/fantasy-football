@@ -344,7 +344,7 @@ def is_free_draft(league_id) -> bool:
 # -- entitlements ------------------------------------------------------------
 
 
-def _is_local_request(request: Request) -> bool:
+def is_local_request(request: Request) -> bool:
     """Is this request genuinely from the machine the server runs on.
 
     WHY THIS QUESTION IS ASKED AT ALL. `pipeline/espn_drafts.saved_session`
@@ -360,6 +360,12 @@ def _is_local_request(request: Request) -> bool:
     the same account -- one person's $9.99 would unlock the product for
     everybody, and anybody could spend what somebody else bought. So the
     local login is honoured only where it means what it says.
+
+    SHARED WITH `api/drafts.session_for`, which is the same question with a
+    worse answer when it goes wrong: there, honouring the farm's login for a
+    stranger served every visitor the owner's league list, so the landing
+    page took them all for the owner and drew the dashboard instead of the
+    introduction.
 
     TWO CONDITIONS, because either alone can be arranged. A loopback client
     address is not proof on its own: a proxy running beside the app can
@@ -377,7 +383,7 @@ def _is_local_request(request: Request) -> bool:
 
 def _local_swid(request: Request):
     """The owner's own ESPN account, on the owner's own machine. Else None."""
-    if not _is_local_request(request):
+    if not is_local_request(request):
         return None
     try:
         from pipeline import espn_drafts

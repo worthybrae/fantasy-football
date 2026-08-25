@@ -12,8 +12,13 @@ WHERE THE SESSION COMES FROM, IN PRIORITY ORDER, AND WHY THE ORDER IS FIXED:
      and nothing else -- never by a SWID in a body, which is the account
      takeover `pipeline/espn_identity.py`'s docstring exists to prevent.
   2. The machine owner's own saved login (`data/espn_state.json`), and ONLY
-     when the request presented no cookie at all. That file is one login, on
-     one machine, put there by the owner running the importer's sign-in flow.
+     when the request presented no cookie at all AND came off the machine
+     itself (`api/billing.is_local_request`: loopback, no forwarding headers).
+     That file is one login, on one machine, put there by the owner running
+     the importer's sign-in flow -- except on the deployment, where the same
+     path holds the FARM's login (`FARM_ESPN_STATE_B64`). A request that
+     reached a container through Railway's edge is never the machine's own,
+     so the file is invisible to it, and a stranger is a stranger.
 
 Getting that order backwards would be the whole bug: a visitor whose cookie
 had expired would silently be served the OWNER'S leagues and could join the
@@ -122,6 +127,12 @@ def session_for(request: Request, store=None) -> Session | None:
         if resolved is None:
             return None
         return Session(resolved.swid, resolved.espn_s2, "connected", resolved)
+    # Off the network, the file is not this request's login. On the
+    # deployment it is the farm's, and every visitor was being served the
+    # owner's leagues -- connected, dashboard, no introduction -- for want
+    # of this line.
+    if not billing.is_local_request(request):
+        return None
     local = drafts.saved_session()
     if local is None:
         return None
