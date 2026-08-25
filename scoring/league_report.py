@@ -256,3 +256,184 @@ def draft_grades(picks: pd.DataFrame, teams: int) -> list:
     for i, g in enumerate(out):
         g["grade"] = letter(i, n)
     return out
+
+
+def _all_historical_picks(conn) -> pd.DataFrame:
+    picks = read_table(conn, "draft_picks")
+    if picks.empty:
+        return pd.DataFrame(columns=PICK_COLUMNS)
+    frames = [historical_picks(conn, int(s)) for s in sorted(picks["season"].unique())]
+    frames = [f for f in frames if not f.empty]
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=PICK_COLUMNS)
+
+
+def _model_notes(conn, manager: str) -> list:
+    profiles = read_table(conn, "manager_profiles")
+    if profiles.empty or "summary" not in profiles.columns:
+        return []
+    mine = profiles[(profiles["manager"] == manager) & profiles["summary"].notna()]
+    return [str(s) for s in mine["summary"].tolist() if str(s).strip()]
+
+
+def _num(value):
+    return None if value is None or pd.isna(value) else float(value)
+
+
+def team_profiles(conn) -> list:
+    """One record per manager: seasons finished, titles, and draft habits."""
+    standings = read_table(conn, "league_standings")
+    picks = _all_historical_picks(conn)
+    managers = []
+    for m in (standings["manager"].tolist() if not standings.empty else []) + (
+            picks["manager"].tolist() if not picks.empty else []):
+        if m not in managers:
+            managers.append(m)
+    out = []
+    for manager in managers:
+        mine = (standings[standings["manager"] == manager].sort_values("season")
+                if not standings.empty else pd.DataFrame())
+        seasons = []
+        for _, row in mine.iterrows():
+            seasons.append({
+                "season": int(row["season"]),
+                "wins": None if pd.isna(row["wins"]) else int(row["wins"]),
+                "losses": None if pd.isna(row["losses"]) else int(row["losses"]),
+                "ties": None if pd.isna(row["ties"]) else int(row["ties"]),
+                "points_for": _num(row["points_for"]),
+                "final_rank": None if pd.isna(row["final_rank"]) else int(row["final_rank"]),
+                "playoff_seed": None if pd.isna(row["playoff_seed"]) else int(row["playoff_seed"]),
+            })
+        done = [s for s in seasons if s["final_rank"] is not None]
+        games = sum((s["wins"] or 0) + (s["losses"] or 0) + (s["ties"] or 0) for s in done)
+        wins = sum((s["wins"] or 0) + 0.5 * (s["ties"] or 0) for s in done)
+        ppg_games = [(s["points_for"], (s["wins"] or 0) + (s["losses"] or 0) + (s["ties"] or 0))
+                     for s in done if s["points_for"] is not None]
+        ppg_total_games = sum(g for _, g in ppg_games)
+        my_picks = picks[picks["manager"] == manager] if not picks.empty else pd.DataFrame()
+        graded = my_picks[my_picks["value"].notna()] if not my_picks.empty else pd.DataFrame()
+        firsts = {}
+        if not my_picks.empty:
+            for _, season_picks in my_picks.groupby("season"):
+                pos = season_picks.sort_values("overall_pick").iloc[0]["position"]
+                if pos is not None and not pd.isna(pos):
+                    firsts[str(pos)] = firsts.get(str(pos), 0) + 1
+        team_name = None
+        if not mine.empty and "team_name" in mine.columns:
+            names = mine["team_name"].dropna()
+            team_name = str(names.iloc[-1]) if not names.empty else None
+        if team_name is None and not my_picks.empty:
+            team_name = str(my_picks.sort_values("season").iloc[-1]["team_name"])
+        out.append({
+            "manager": str(manager),
+            "team_name": team_name or str(manager),
+            "seasons": seasons,
+            "titles": [s["season"] for s in done if s["final_rank"] == 1],
+            "playoffs": [s["season"] for s in seasons if s["playoff_seed"] is not None],
+            "completed": len(done),
+            "win_pct": (wins / games) if games else None,
+            "avg_finish": round(sum(s["final_rank"] for s in done) / len(done), 2) if done else None,
+            "ppg": round(sum(p for p, _ in ppg_games) / ppg_total_games, 1) if ppg_total_games else None,
+            "drafts": int(my_picks["season"].nunique()) if not my_picks.empty else 0,
+            "mean_value": round(float(graded["value"].astype(float).mean()), 2) if len(graded) else None,
+            "steal_rate": round(float((graded["verdict"] == "steal").mean()), 3) if len(graded) else None,
+            "reach_rate": round(float((graded["verdict"] == "reach").mean()), 3) if len(graded) else None,
+            "first_pick_positions": firsts,
+            "career_best": _pick_record(graded.loc[graded["value"].astype(float).idxmax()]) if len(graded) else None,
+            "career_worst": _pick_record(graded.loc[graded["value"].astype(float).idxmin()]) if len(graded) else None,
+            "model_notes": _model_notes(conn, manager),
+        })
+    return out
+
+
+def _z(values: list) -> list:
+    present = [v for v in values if v is not None]
+    if len(present) < 2:
+        return [0.0 for _ in values]
+    mean = sum(present) / len(present)
+    var = sum((v - mean) ** 2 for v in present) / len(present)
+    sd = math.sqrt(var)
+    if sd == 0:
+        return [0.0 for _ in values]
+    return [0.0 if v is None else (v - mean) / sd for v in values]
+
+
+def power_rankings(grades: list, profiles: list) -> list:
+    """Blend this draft (`DRAFT_WEIGHT`) with career finish (`HISTORY_WEIGHT`),
+    each z-scored across the field; a manager with no completed seasons has
+    no history term to blend in, so their score is the draft term alone."""
+    by_manager = {p["manager"]: p for p in profiles}
+    draft_z = _z([g["value_per_pick"] for g in grades])
+    history = [by_manager.get(g["manager"], {}).get("win_pct") for g in grades]
+    completed = [by_manager.get(g["manager"], {}).get("completed", 0) for g in grades]
+    history_z = _z(history)
+    rows = []
+    for g, dz, hz, done in zip(grades, draft_z, history_z, completed):
+        first_year = not done
+        score = DRAFT_WEIGHT * dz + HISTORY_WEIGHT * (0.0 if first_year else hz)
+        rows.append({"manager": g["manager"], "team_name": g["team_name"],
+                     "score": round(score, 3), "first_year": first_year,
+                     "_tiebreak": g["value_total"]})
+    rows.sort(key=lambda r: (-r["score"], -r["_tiebreak"]))
+    for i, r in enumerate(rows):
+        r["rank"] = i + 1
+        del r["_tiebreak"]
+    return rows
+
+
+def build_facts(conn, league_id: str, season: int, picks: pd.DataFrame | None = None) -> dict:
+    """The report, numbers only. `picks` overrides the historical read for a
+    season the room just drafted (see `live_picks`)."""
+    settings = settings_for(conn, season)
+    frame = picks if picks is not None else historical_picks(conn, season)
+    base = {"league_id": str(league_id), "season": int(season),
+            "league_name": league_name(conn, league_id),
+            "teams": int(settings.teams) or int(frame["manager"].nunique() if not frame.empty else 0),
+            "generated_at": None, "model": None, "intro": None}
+    if frame.empty or frame["value"].notna().sum() == 0:
+        return {**base, "status": "failed",
+                "reason": f"no graded picks for {season}: the draft is not imported, "
+                          "or no ADP is on file for that year",
+                "power_rankings": [], "report_cards": [], "profiles": []}
+    grades = draft_grades(frame, base["teams"] or int(frame["manager"].nunique()))
+    profiles = team_profiles(conn)
+    known = {p["manager"] for p in profiles}
+    for g in grades:
+        if g["manager"] not in known:
+            profiles.append({"manager": g["manager"], "team_name": g["team_name"],
+                             "seasons": [], "titles": [], "playoffs": [], "completed": 0,
+                             "win_pct": None, "avg_finish": None, "ppg": None, "drafts": 0,
+                             "mean_value": None, "steal_rate": None, "reach_rate": None,
+                             "first_pick_positions": {}, "career_best": None,
+                             "career_worst": None, "model_notes": []})
+    graded_managers = {g["manager"] for g in grades}
+    profiles = [p for p in profiles if p["manager"] in graded_managers]
+    for g in grades:
+        g["nickname"] = None
+        g["blurb"] = None
+    ranks = power_rankings(grades, profiles)
+    for r in ranks:
+        r["line"] = None
+    return {**base, "status": "ready", "power_rankings": ranks,
+            "report_cards": grades, "profiles": profiles}
+
+
+def merge_prose(facts: dict, prose: dict | None, model: str | None) -> dict:
+    """Lay the writer's words onto the numbers. No prose is a complete
+    report with a different status, not an error."""
+    if facts.get("status") == "failed":
+        return facts
+    facts["model"] = model if prose is not None else None
+    if prose is None:
+        facts["status"] = "numbers_only"
+        return facts
+    cards = {c["manager"]: c for c in prose.get("cards", [])}
+    lines = {r["manager"]: r for r in prose.get("rankings", [])}
+    facts["intro"] = prose.get("intro")
+    for card in facts["report_cards"]:
+        got = cards.get(card["manager"], {})
+        card["nickname"] = got.get("nickname")
+        card["blurb"] = got.get("blurb")
+    for row in facts["power_rankings"]:
+        row["line"] = lines.get(row["manager"], {}).get("line")
+    facts["status"] = "ready"
+    return facts

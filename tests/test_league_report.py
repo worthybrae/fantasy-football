@@ -209,3 +209,113 @@ def test_draft_grades_rank_teams(tmp_path):
 def test_draft_grades_with_no_gradeable_picks():
     from scoring.league_report import draft_grades, PICK_COLUMNS
     assert draft_grades(pd.DataFrame(columns=PICK_COLUMNS), 8) == []
+
+
+def test_team_profiles_summarise_history(tmp_path):
+    from scoring.league_report import team_profiles
+    conn = seed_league(str(tmp_path / "t.duckdb"))
+    profiles = {p["manager"]: p for p in team_profiles(conn)}
+    m1 = profiles["m1"]
+    assert m1["team_name"] == "Team 1"
+    assert [s["season"] for s in m1["seasons"]] == [2024, 2025]
+    assert m1["titles"] == [2024] and m1["playoffs"] == [2024]
+    assert m1["completed"] == 1
+    assert m1["win_pct"] == pytest.approx(9 / 14)
+    assert m1["avg_finish"] == 1.0
+    assert m1["drafts"] == 2
+    # Both seasons repeat the same snake draft, so team 1's own first pick of
+    # each season is the one exception (value 0, "market") among its 14
+    # career picks -- 12 of 14 are the seed's +10 steal, giving a mean of
+    # 60/7 (~8.57) and a steal rate of 6/7 (~0.857), not the "> 9"/"> 0.9"
+    # the brief's comment implied by (wrongly) treating "every pick but the
+    # first" as true career-wide rather than per-season.
+    assert m1["mean_value"] > 8        # every pick but the first is +10
+    assert m1["steal_rate"] > 0.8 and m1["reach_rate"] == 0.0
+    assert m1["first_pick_positions"] == {"WR": 2}
+    assert m1["career_best"]["value"] == 10.0
+    m5 = profiles["m5"]
+    assert m5["playoffs"] == [] and m5["titles"] == []
+    assert m5["mean_value"] == pytest.approx(0.0)
+
+
+def test_team_profiles_without_standings_still_have_draft_habits(tmp_path):
+    from scoring.league_report import team_profiles
+    conn = seed_league(str(tmp_path / "t.duckdb"))
+    conn.execute("DROP TABLE league_standings")
+    profiles = {p["manager"]: p for p in team_profiles(conn)}
+    assert profiles["m8"]["seasons"] == [] and profiles["m8"]["win_pct"] is None
+    assert profiles["m8"]["reach_rate"] == 1.0
+
+
+def test_power_rankings_blend_draft_and_history():
+    from scoring.league_report import power_rankings
+    grades = [{"manager": "a", "team_name": "A", "value_per_pick": 5.0, "value_total": 50},
+              {"manager": "b", "team_name": "B", "value_per_pick": 0.0, "value_total": 0},
+              {"manager": "c", "team_name": "C", "value_per_pick": -5.0, "value_total": -50}]
+    profiles = [{"manager": "a", "win_pct": 0.2, "completed": 3},
+                {"manager": "b", "win_pct": 0.9, "completed": 3},
+                {"manager": "c", "win_pct": None, "completed": 0}]
+    ranks = power_rankings(grades, profiles)
+    assert [r["manager"] for r in ranks] == ["b", "a", "c"]
+    assert ranks[0]["rank"] == 1
+    c = next(r for r in ranks if r["manager"] == "c")
+    assert c["first_year"] is True
+    # With equal drafts, history decides.
+    tie = [{"manager": m, "team_name": m, "value_per_pick": 0.0, "value_total": 0} for m in "ab"]
+    assert power_rankings(tie, profiles)[0]["manager"] == "b"
+
+
+def test_build_facts_assembles_the_document(tmp_path):
+    from scoring.league_report import build_facts
+    conn = seed_league(str(tmp_path / "t.duckdb"))
+    facts = build_facts(conn, "424242", 2024)
+    assert facts["status"] == "ready"
+    assert facts["league_id"] == "424242" and facts["season"] == 2024
+    assert facts["league_name"] == "Test League" and facts["teams"] == TEAMS
+    assert len(facts["report_cards"]) == TEAMS and len(facts["power_rankings"]) == TEAMS
+    assert len(facts["profiles"]) == TEAMS
+    assert facts["report_cards"][0]["grade"] == "A"
+    assert facts["intro"] is None and facts["report_cards"][0]["blurb"] is None
+    json.dumps(facts)      # must be plain JSON
+
+
+def test_build_facts_fails_with_a_reason_without_picks(tmp_path):
+    from scoring.league_report import build_facts
+    conn = seed_league(str(tmp_path / "t.duckdb"), seasons=(2024,))
+    facts = build_facts(conn, "1", 2023)
+    assert facts["status"] == "failed" and "no graded picks" in facts["reason"]
+
+
+def test_build_facts_takes_live_picks(tmp_path):
+    from scoring.league_report import build_facts, live_picks
+    conn = seed_league(str(tmp_path / "t.duckdb"))
+    settings = _settings(2026)
+    board = {"x": {"player_id": "x", "name": "X", "position": "RB", "market_rank": 20.0}}
+    # Overall pick 32 is team 1's (m1's) own slot in this 8-team/7-round snake
+    # draft (see test_historical_picks_join_adp_and_names / snake_slots) --
+    # pick 1 can never grade as a steal (there is no rank below 1 for the
+    # market to have missed), so this is the smallest change that actually
+    # exercises a steal end to end: 32 - 20 = 12, past the 8-slot threshold.
+    picks = live_picks([("x", 32)], board, settings, {1: ("m1", "Team 1")}, {}, 2026)
+    facts = build_facts(conn, "424242", 2026, picks=picks)
+    assert facts["status"] == "ready"
+    assert facts["report_cards"][0]["manager"] == "m1"
+    assert facts["report_cards"][0]["best_pick"]["verdict"] == "steal"
+
+
+def test_merge_prose_fills_or_marks_numbers_only():
+    from scoring.league_report import merge_prose
+    facts = {"status": "ready", "intro": None,
+             "report_cards": [{"manager": "m1", "nickname": None, "blurb": None}],
+             "power_rankings": [{"manager": "m1", "line": None}]}
+    done = merge_prose(dict(facts), {"intro": "hi", "cards": [
+        {"manager": "m1", "nickname": "The Thief", "blurb": "Stole."}],
+        "rankings": [{"manager": "m1", "line": "Top."}]}, "claude-haiku-4-5")
+    assert done["status"] == "ready" and done["model"] == "claude-haiku-4-5"
+    assert done["intro"] == "hi"
+    assert done["report_cards"][0]["nickname"] == "The Thief"
+    assert done["power_rankings"][0]["line"] == "Top."
+    quiet = merge_prose(dict(facts), None, None)
+    assert quiet["status"] == "numbers_only" and quiet["model"] is None
+    failed = merge_prose({"status": "failed", "reason": "x"}, None, None)
+    assert failed["status"] == "failed"
