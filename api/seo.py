@@ -365,3 +365,21 @@ def register_seo_routes(app, conn=None):
             provenance=_provenance(d),
             breadcrumbs=_crumbs(("ADP", "/adp"), (p["position"], f"/adp/{p['position'].lower()}"),
                                 (p["name"], f"/adp/{p['slug']}"))))
+
+    @app.get("/sitemap.xml")
+    def sitemap():
+        d = data()
+        stamp = d["updated"].isoformat() if d["updated"] else None
+        urls = ["/", "/mocks", "/adp"]
+        if d["drafts"]:
+            present = sorted({p["position"] for p in d["players"]}, key=POSITIONS.index)
+            urls += [f"/adp/{pos.lower()}" for pos in present]
+            urls += [f"/adp/round/{n}" for n in range(1, d["rounds"] + 1)]
+            urls += [f"/adp/{p['slug']}" for p in d["players"]]
+        body = ['<?xml version="1.0" encoding="UTF-8"?>',
+                '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
+        for path in urls:
+            body.append("<url><loc>%s%s</loc>%s</url>" % (
+                SITE, path, f"<lastmod>{stamp}</lastmod>" if stamp else ""))
+        body.append("</urlset>")
+        return Response(content="\n".join(body), media_type="application/xml")

@@ -223,3 +223,53 @@ def test_an_empty_corpus_still_serves_the_index(tmp_path, monkeypatch, board):
     r = c.get("/adp")
     assert r.status_code == 200 and "No drafts recorded yet" in r.text
     assert c.get("/adp/dandre-swift").status_code == 404
+
+
+# -- the sitemap and the registration order ----------------------------------
+
+def test_the_sitemap_lists_every_page_once(corpus, board):
+    r = _client(board).get("/sitemap.xml")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/xml")
+    root = ET.fromstring(r.text)
+    ns = {"s": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+    locs = [u.find("s:loc", ns).text for u in root.findall("s:url", ns)]
+    assert len(locs) == len(set(locs))
+    assert "https://espnfantasydraft.com/" in locs
+    assert "https://espnfantasydraft.com/adp" in locs
+    assert "https://espnfantasydraft.com/adp/dandre-swift" in locs
+    assert "https://espnfantasydraft.com/adp/josh-allen-2" in locs
+    assert "https://espnfantasydraft.com/adp/round/2" in locs
+    assert "https://espnfantasydraft.com/adp/round/3" not in locs   # two rounds
+    assert "https://espnfantasydraft.com/adp/rb" in locs
+    assert "https://espnfantasydraft.com/adp/k" not in locs   # fixture drafts only RB and WR
+    mods = {u.find("s:lastmod", ns).text for u in root.findall("s:url", ns)}
+    assert mods == {"2026-08-24"}
+
+
+def test_an_empty_corpus_sitemap_has_only_the_static_pages(tmp_path, monkeypatch, board):
+    path = tmp_path / "empty.duckdb"
+    dl.corpus_conn(str(path)).close()
+    monkeypatch.setattr(market.dl, "CORPUS_PATH", str(path))
+    market._CACHE.clear()
+    root = ET.fromstring(_client(board).get("/sitemap.xml").text)
+    ns = {"s": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+    locs = [u.find("s:loc", ns).text for u in root.findall("s:url", ns)]
+    assert locs == ["https://espnfantasydraft.com/", "https://espnfantasydraft.com/mocks",
+                    "https://espnfantasydraft.com/adp"]
+
+
+def test_the_pages_are_reachable_with_the_spa_mounted(corpus, board, tmp_path):
+    """`register_spa`'s fallback matches every path. These routes must be
+    registered first, and the SPA must still answer everything else."""
+    from api.static import register_spa
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("<html>spa</html>", encoding="utf-8")
+    app = FastAPI()
+    seo.register_seo_routes(app, conn=board)
+    assert register_spa(app, dist)
+    c = TestClient(app)
+    assert "D'Andre Swift" in html.unescape(c.get("/adp").text)
+    assert c.get("/sitemap.xml").headers["content-type"].startswith("application/xml")
+    assert c.get("/mocks").text == "<html>spa</html>"

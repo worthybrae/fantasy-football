@@ -837,6 +837,12 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
     from api.market import register_market_routes
     register_market_routes(app, conn)
 
+    # The crawlable site: ADP pages rendered from the corpus as plain HTML,
+    # and the sitemap. Before the SPA, whose fallback would otherwise answer
+    # every one of these paths with index.html -- see api/seo.py.
+    from api.seo import register_seo_routes
+    register_seo_routes(app, conn)
+
     # THE BUILT FRONTEND, LAST. Its fallback route matches every path there
     # is, so anything registered after it would be unreachable -- see
     # api/static.py, which also explains why the SPA is served from this
