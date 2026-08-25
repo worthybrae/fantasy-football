@@ -9,6 +9,8 @@ prose against the dict `build_facts` returns; `api/reports.py` stores it.
 """
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 
 from pipeline.db import read_table
@@ -58,7 +60,11 @@ def pick_value(overall_pick: int, market_rank, last_pick: int):
 def verdict(value, teams: int):
     if pd.isna(value):
         return None
-    slots = round(value)
+    # `math.floor(value + 0.5)`, not Python's `round` -- `round` uses
+    # banker's rounding (round(2.5) == 2, round(-7.5) == -8), which disagrees
+    # with PickTicker.tsx's `Math.round` (round half toward +infinity: 2.5 ->
+    # 3, -7.5 -> -7) at real, plausible half-integer ADP deltas.
+    slots = math.floor(value + 0.5)
     size = abs(slots)
     rnd = max(2, int(teams))
     if size <= ON_MARKET_SLOTS:
@@ -103,7 +109,11 @@ def names_for(conn) -> dict:
             out[int(row["team_id"])] = (str(row["manager"]), row.get("team_name"))
     teams = read_table(conn, "draft_teams")
     if not teams.empty:
-        for _, row in teams.sort_values("season").iterrows():
+        # Descending, so the "first wins" guard below keeps the NEWEST
+        # season for a team_id standings never covered -- sorted ascending,
+        # that same guard would instead lock in the oldest one, the reverse
+        # of this function's contract.
+        for _, row in teams.sort_values("season", ascending=False).iterrows():
             tid = int(row["team_id"])
             if tid not in out:
                 out[tid] = (str(row["manager"]), None)

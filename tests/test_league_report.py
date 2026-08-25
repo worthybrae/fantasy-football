@@ -76,6 +76,15 @@ def test_verdict_bands_match_the_ticker():
     assert verdict(-8, 8) == "reach"
     # `round` floors at 2, so a 1-team league still has bands.
     assert verdict(2.4, 1) == "market" and verdict(3, 1) == "steal"
+    # JS `Math.round` rounds half AWAY FROM ZERO on the negative side but
+    # toward +infinity overall (-2.5 -> -2, 2.5 -> 3), not Python's banker's
+    # rounding (round(2.5) == 2, round(-2.5) == -2 too, but round(7.5) == 8
+    # while round(-7.5) == -8) -- these four pin the exact half-integer
+    # inputs where the two disagree.
+    assert verdict(2.5, 8) == "value"
+    assert verdict(-2.5, 8) == "market"
+    assert verdict(7.5, 8) == "steal"
+    assert verdict(-7.5, 8) == "early"
 
 
 def test_pick_value_is_null_past_the_last_pick():
@@ -89,6 +98,30 @@ def test_letter_cut_points_scale_with_team_count():
     from scoring.league_report import letter
     assert [letter(r, 8) for r in range(8)] == ["A", "B", "B", "C", "C", "D", "D", "F"]
     assert [letter(r, 10) for r in range(10)] == ["A", "B", "B", "C", "C", "C", "D", "D", "F", "F"]
+
+
+def test_names_for_prefers_the_newest_season(tmp_path):
+    from scoring.league_report import names_for
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    # Team 1 is only in draft_teams (no league_standings row ever covers it):
+    # the fallback loop must still pick the newest season, not the oldest.
+    write_table(conn, "draft_teams", pd.DataFrame([
+        {"season": 2023, "team_id": 1, "manager": "old", "slot": 1},
+        {"season": 2025, "team_id": 1, "manager": "new", "slot": 1},
+    ]))
+    # Team 2 is only in league_standings, covering the other path in the
+    # same call.
+    write_table(conn, "league_standings", pd.DataFrame([
+        {"season": 2024, "team_id": 2, "manager": "s-old", "team_name": "Old Team 2",
+         "wins": 0, "losses": 0, "ties": 0, "points_for": 0.0, "points_against": 0.0,
+         "playoff_seed": None, "final_rank": None},
+        {"season": 2025, "team_id": 2, "manager": "s-new", "team_name": "New Team 2",
+         "wins": 0, "losses": 0, "ties": 0, "points_for": 0.0, "points_against": 0.0,
+         "playoff_seed": None, "final_rank": None},
+    ]))
+    names = names_for(conn)
+    assert names[1] == ("new", None)
+    assert names[2] == ("s-new", "New Team 2")
 
 
 def test_historical_picks_join_adp_and_names(tmp_path):
