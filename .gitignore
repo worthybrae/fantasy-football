@@ -189,3 +189,7 @@ auto_refit_daemon.out
 # regenerated, and one of them is a copy of the encrypted credential store's
 # neighbour rather than anything a repository should carry.
 deploy/
+
+# Session scratch: SDD ledgers and Claude Code worktrees
+.superpowers/
+.claude/worktrees/
