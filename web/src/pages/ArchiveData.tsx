@@ -34,8 +34,8 @@ const PER_PAGE = 24
 
 export default function ArchiveData() {
   useDocumentMeta({
-    title: 'The draft archive – ESPN Draft Assist',
-    description: 'What hundreds of recorded ESPN mock drafts do from each seat: who is taken at your turn, and who is still there at the next one.',
+    title: 'The draft archive, as data – ESPN Draft Assist',
+    description: 'Every recorded ESPN mock draft as raw figures: picks, rounds and seats, with the whole archive available to download.',
   })
   const navigate = useNavigate()
   const [drafts, setDrafts] = useState<MockDraft[] | null>(null)
