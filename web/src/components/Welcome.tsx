@@ -315,7 +315,7 @@ export default function Welcome({ onStart, live = false, askedAt = 0 }: {
           // Why they are looking at this card, said before the pitch: they
           // reached for the archive and were sent here instead.
           <p className="wc-why">
-            The draft archive is free. It needs an account so it knows which
+            The draft data is free. It needs an account so it knows which
             seat to read it from.
           </p>
         )}

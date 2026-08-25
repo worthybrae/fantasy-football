@@ -352,7 +352,7 @@ export default function MockDrafts() {
             is the one lit: this is its reading room. */}
         <nav className="draft-topbar-tabs" aria-label="Views">
           <Link className="draft-tab" to="/">Drafts</Link>
-          <Link className="draft-tab is-active" to="/archive" aria-current="page">Archive</Link>
+          <Link className="draft-tab is-active" to="/archive" aria-current="page">Data</Link>
           <Link className="draft-tab" to="/live">Live</Link>
         </nav>
         <span className="draft-topbar-sep" aria-hidden="true" />

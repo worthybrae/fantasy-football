@@ -189,7 +189,7 @@ export default function WaitingRoom({ leagueId, season, onJoin }: {
             active tab -- a waiting room is part of getting into a draft. */}
         <nav className="draft-topbar-tabs" aria-label="Views">
           <Link className="draft-tab is-active" to="/" aria-current="page">Drafts</Link>
-          <Link className="draft-tab" to="/archive">Archive</Link>
+          <Link className="draft-tab" to="/archive">Data</Link>
           <Link className="draft-tab" to="/live">Live</Link>
         </nav>
         <span className="draft-topbar-sep" aria-hidden="true" />
@@ -295,7 +295,7 @@ export default function WaitingRoom({ leagueId, season, onJoin }: {
                     a question about a room that may not be one, and a number
                     without its source is a number a reader cannot weigh. */}
                 <span className="wr-source">
-                  {archive === null ? 'reading the archive…'
+                  {archive === null ? 'reading the data…'
                     : `who went there in ${archive.drafts} recorded ${archive.teams}-team mocks · people's picks only`}
                 </span>
               </div>
@@ -324,7 +324,7 @@ export default function WaitingRoom({ leagueId, season, onJoin }: {
                       {options.length === 0 ? (
                         <span className="wr-pick-none">
                           {row === undefined ? '—'
-                            : 'no record — the archive stops before this pick'}
+                            : 'no record — the data stops before this pick'}
                         </span>
                       ) : (
                         <div className="wr-pick-options">

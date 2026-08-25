@@ -98,11 +98,11 @@ function Corpus({ drafts, overview, connected, onNeedAccount }: {
           alternative -- letting them through and refusing at the far end --
           spends a click to say no. */}
       {connected
-        ? <Link className="lp-cta ben-corpus-cta" to="/archive">Open the archive</Link>
+        ? <Link className="lp-cta ben-corpus-cta" to="/archive">Open the draft data</Link>
         : (
           <button type="button" className="lp-cta ben-corpus-cta"
                   onClick={onNeedAccount}>
-            Open the archive
+            Open the draft data
           </button>
         )}
     </section>

@@ -147,7 +147,7 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
             arriving here from the archive lands on it already selected. */}
         <nav className="draft-topbar-tabs" aria-label="Views">
           <Link className="draft-tab is-active" to="/" aria-current="page">Drafts</Link>
-          <Link className="draft-tab" to="/archive">Archive</Link>
+          <Link className="draft-tab" to="/archive">Data</Link>
           <Link className="draft-tab" to="/live">Live</Link>
         </nav>
         <span className="draft-topbar-sep" aria-hidden="true" />

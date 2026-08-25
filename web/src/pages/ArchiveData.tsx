@@ -34,7 +34,7 @@ const PER_PAGE = 24
 
 export default function ArchiveData() {
   useDocumentMeta({
-    title: 'The draft archive, as data – ESPN Draft Assist',
+    title: 'Draft data, as a table – ESPN Draft Assist',
     description: 'Every recorded ESPN mock draft as raw figures: picks, rounds and seats, with the whole archive available to download.',
   })
   const navigate = useNavigate()
@@ -85,25 +85,25 @@ export default function ArchiveData() {
         <span className="draft-topbar-sep" aria-hidden="true" />
         <nav className="draft-topbar-tabs" aria-label="Views">
           <Link className="draft-tab" to="/">Drafts</Link>
-          <Link className="draft-tab is-active" to="/archive" aria-current="page">Archive</Link>
+          <Link className="draft-tab is-active" to="/archive" aria-current="page">Data</Link>
           <Link className="draft-tab" to="/live">Live</Link>
         </nav>
         <span className="draft-topbar-sep" aria-hidden="true" />
         <span className="draft-topbar-league">
           {drafts === null
-            ? 'Reading the archive…'
+            ? 'Reading the data…'
             : `${drafts.length} drafts${live > 0 ? ` · ${live} live` : ''}`}
         </span>
         <span className="draft-topbar-spacer" />
-        <Link className="draft-topbar-link" to="/archive">← Back to the archive</Link>
+        <Link className="draft-topbar-link" to="/archive">← Back to draft data</Link>
       </header>
 
       <main className="mk" aria-busy={account === null}>
         {account !== null && !signedIn && (
           <section className="mk-panel mk-gate">
-            <h2 className="mk-h2">The archive needs a signed-in account.</h2>
+            <h2 className="mk-h2">Draft data needs a signed-in account.</h2>
             <p className="mk-gate-copy">
-              The draft archive is free. To prevent abuse, you can only read
+              Draft data is free. To prevent abuse, you can only read
               it with a connected ESPN account. Connect once with the Draft
               Assistant bookmark. Then come back to this page.
             </p>
@@ -181,7 +181,7 @@ export default function ArchiveData() {
             {/* No panel around the cards: they float on the page, each its
                 own object, the way the tiles above do. */}
             <section className="mkd-drafts" aria-label="Recorded drafts">
-              {drafts === null && !error && <p className="mk-loading">Reading the archive…</p>}
+              {drafts === null && !error && <p className="mk-loading">Reading the data…</p>}
               {drafts !== null && drafts.length === 0 && (
                 <p className="mk-loading">No drafts recorded yet.</p>
               )}

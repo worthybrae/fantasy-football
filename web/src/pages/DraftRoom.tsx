@@ -806,7 +806,7 @@ export default function DraftRoom() {
             Reachable from the room because that is where somebody is when
             they wonder whether a run is normal -- and it is research rather
             than a draft view, so it is a link out and not a third tab. */}
-        <Link className="draft-topbar-link" to="/archive">Archive</Link>
+        <Link className="draft-topbar-link" to="/archive">Data</Link>
         {state?.active && totalPicks !== null && (
           <span className="draft-topbar-pick mono">
             PICK <strong>{thisPickNo ?? '—'}</strong> / {totalPicks}

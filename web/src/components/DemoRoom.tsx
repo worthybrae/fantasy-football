@@ -292,7 +292,7 @@ export default function DemoRoom({ onMode, live = false, site = false }: {
           <>
             <nav className="draft-topbar-tabs" aria-label="Views">
               <Link className="draft-tab" to="/">Drafts</Link>
-              <Link className="draft-tab" to="/archive">Archive</Link>
+              <Link className="draft-tab" to="/archive">Data</Link>
               <Link className="draft-tab is-active" to="/live" aria-current="page">Live</Link>
             </nav>
             <span className="draft-topbar-sep" aria-hidden="true" />

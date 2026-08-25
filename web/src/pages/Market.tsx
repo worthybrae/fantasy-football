@@ -157,7 +157,7 @@ function topPicks(turn: MarketTurn) {
 
 export default function Market() {
   useDocumentMeta({
-    title: 'The draft archive – ESPN Draft Assist',
+    title: 'Draft data – ESPN Draft Assist',
     description: 'What hundreds of recorded ESPN mock drafts do from each seat: who is taken at your turn, and who is still there at the next one.',
   })
   const navigate = useNavigate()
@@ -249,22 +249,22 @@ export default function Market() {
           <span className="draft-topbar-sep" aria-hidden="true" />
           <nav className="draft-topbar-tabs" aria-label="Views">
             <Link className="draft-tab" to="/">Drafts</Link>
-            <Link className="draft-tab is-active" to="/archive" aria-current="page">Archive</Link>
+            <Link className="draft-tab is-active" to="/archive" aria-current="page">Data</Link>
             <Link className="draft-tab" to="/live">Live</Link>
           </nav>
           <span className="draft-topbar-sep" aria-hidden="true" />
           <span className="draft-topbar-league">
             {overview
               ? `${overview.drafts} drafts · ${overview.picks.toLocaleString()} picks`
-              : 'Reading the archive…'}
+              : 'Reading the data…'}
           </span>
         </header>
         <main className="mk" aria-busy={account === null}>
           {account !== null && (
             <section className="mk-panel mk-gate">
-              <h2 className="mk-h2">The archive needs a signed-in account.</h2>
+              <h2 className="mk-h2">Draft data needs a signed-in account.</h2>
               <p className="mk-gate-copy">
-                The draft archive is free. To prevent abuse, you can only read
+                Draft data is free. To prevent abuse, you can only read
                 it with a connected ESPN account. Connect once with the Draft
                 Assistant bookmark. Then come back to this page.
               </p>
@@ -295,14 +295,14 @@ export default function Market() {
         <span className="draft-topbar-sep" aria-hidden="true" />
         <nav className="draft-topbar-tabs" aria-label="Views">
           <Link className="draft-tab" to="/">Drafts</Link>
-          <Link className="draft-tab is-active" to="/archive" aria-current="page">Archive</Link>
+          <Link className="draft-tab is-active" to="/archive" aria-current="page">Data</Link>
           <Link className="draft-tab" to="/live">Live</Link>
         </nav>
         <span className="draft-topbar-sep" aria-hidden="true" />
         <span className="draft-topbar-league">
           {overview
             ? `${overview.drafts} drafts · ${overview.picks.toLocaleString()} picks`
-            : 'Reading the archive…'}
+            : 'Reading the data…'}
         </span>
         {/* The one thing on this page every number below depends on, kept
             in view once the control itself has scrolled away. */}
@@ -315,7 +315,7 @@ export default function Market() {
       <main className="mk">
         <header className="mk-mast">
           <div className="mk-mast-say">
-            <h1 className="mk-title">The draft archive</h1>
+            <h1 className="mk-title">Draft data</h1>
             <p className="mk-lede">
               Not an average draft position. The whole distribution, from the
               seat you are actually sitting in.
@@ -370,7 +370,7 @@ export default function Market() {
         <div className="mk-cols">
           <section className="mk-panel">
             <h2 className="mk-h2">Your turns, and what the room does with them</h2>
-            {!slot && !error && <p className="mk-loading">Reading the archive…</p>}
+            {!slot && !error && <p className="mk-loading">Reading the data…</p>}
             <ol className="mk-turns">
               {(slot?.turns ?? []).map((turn) => (
                 <li className="mk-turn" key={turn.pick_no}>
