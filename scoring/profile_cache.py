@@ -155,7 +155,7 @@ from scoring.board import _norm_name
 # second, divergent "has the data changed" signal is worse than reusing the
 # board's -- and it is: two keys that disagree by one table would show a
 # profile assembled half from before a refresh and half from after.
-from scoring.board_cache import _db_key, _meta_key
+from scoring.board_cache import _db_key, _meta_key, get_or_build
 from scoring.config import CURRENT_SEASON
 from scoring.oline import (LINE_QUALITY_COLUMNS, LINE_UNITS_COLUMNS,
                            _ol_snaps_with_gsis, line_units, line_quality,
@@ -208,6 +208,7 @@ _MAX_ENTRIES = 4
 
 _lock = threading.Lock()
 _cache: "OrderedDict[tuple, ProfileFrames]" = OrderedDict()
+_inflight: "dict[tuple, threading.Event]" = {}
 
 
 @dataclass(frozen=True)
@@ -724,24 +725,10 @@ def cached_profile_frames(conn, rules: dict | None = None) -> ProfileFrames:
     rules_key = None if rules is None else tuple(sorted(rules.items()))
     key = (_db_key(conn), _meta_key(conn), rules_key)
 
-    with _lock:
-        hit = _cache.get(key)
-        if hit is not None:
-            _cache.move_to_end(key)
-            return hit.copy()
-
-    # Built outside the lock, exactly as board_cache builds boards outside
-    # its own: two racing requests on a cold cache both do the work and the
-    # later one wins the slot, which wastes a build but never serializes
-    # concurrent profile clicks behind one mutex.
-    frames = _build(conn, rules)
-
-    with _lock:
-        _cache[key] = frames
-        _cache.move_to_end(key)
-        while len(_cache) > _MAX_ENTRIES:
-            _cache.popitem(last=False)
-
+    # Single-flight, for the reason board_cache.get_or_build gives: eight
+    # simultaneous misses on this key were eight 1.67 GB builds.
+    frames = get_or_build(_cache, _inflight, _lock, key,
+                          lambda: _build(conn, rules), _MAX_ENTRIES)
     return frames.copy()
 
 

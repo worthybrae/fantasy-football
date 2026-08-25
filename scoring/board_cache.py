@@ -106,6 +106,62 @@ _MAX_ENTRIES = 16
 
 _lock = threading.Lock()
 _cache: "OrderedDict[tuple, pd.DataFrame]" = OrderedDict()
+_inflight: "dict[tuple, threading.Event]" = {}
+
+
+def get_or_build(cache, inflight, lock, key, build, max_entries):
+    """LRU lookup with single-flight: one build per key at a time.
+
+    Shared by this cache and scoring/profile_cache.py, which has the same
+    shape and had the same hole. On a miss, the first caller builds; every
+    other caller that misses the same key while that build is running WAITS
+    for it and takes its result, rather than starting a build of its own.
+    Different keys still build concurrently -- nothing here serializes
+    /api/players load across weight profiles (see test_concurrent_requests).
+
+    WHY THIS EXISTS. A hover tip over eight players in a freshly-connected
+    draft is eight `build_profile` calls in the same second, every one a miss
+    on the same key. Each miss built the whole board and the whole set of
+    profile frames itself -- measured at 5.4s and 1.67 GB peak RSS for one
+    build on data/nfl.duckdb -- so eight hovers were eight of those at once.
+    On 2026-08-25 at 09:50:31Z that killed the production container: the
+    Railway edge log shows 35 profile requests answered 502 ("connection
+    closed unexpectedly" after 6-28s in flight, then "connection refused"
+    until the restart 16s later), and every one of them reached the browser
+    as "Could not load this player." With single-flight the same eight
+    hovers cost one build and seven waits.
+
+    A build that raises releases its waiters, and the next of them to wake
+    becomes the builder (the loop re-checks the cache and the in-flight
+    table), so one failed build never strands the rest. Returns the stored
+    object; callers copy it, as they did before.
+    """
+    while True:
+        with lock:
+            hit = cache.get(key)
+            if hit is not None:
+                cache.move_to_end(key)
+                return hit
+            pending = inflight.get(key)
+            if pending is None:
+                pending = inflight[key] = threading.Event()
+                break
+        pending.wait()
+    try:
+        built = build()
+    except BaseException:
+        with lock:
+            inflight.pop(key, None)
+        pending.set()
+        raise
+    with lock:
+        cache[key] = built
+        cache.move_to_end(key)
+        while len(cache) > max_entries:
+            cache.popitem(last=False)
+        inflight.pop(key, None)
+    pending.set()
+    return built
 
 
 def _weights_key(weights: dict | None) -> tuple:
@@ -184,27 +240,13 @@ def cached_build_board(conn, weights: dict | None = None,
         _sim_key(conn),
     )
 
-    with _lock:
-        cached = _cache.get(key)
-        if cached is not None:
-            _cache.move_to_end(key)
-            return cached.copy()
-
-    # Miss: build outside the lock. Two requests racing on the same brand-new
-    # key both build independently and whichever finishes last wins the slot
-    # below -- a duplicated 1.6-1.9s build in the rare case of a true race,
-    # not a correctness problem, and far cheaper than serializing every board
-    # build behind one lock (which would turn concurrent /api/players load
-    # into a queue -- see test_concurrent_requests / test_concurrent_players_
-    # requests_during_running_sim, which fire real concurrent bursts).
-    board = build_board(conn, weights, settings)
-
-    with _lock:
-        _cache[key] = board
-        _cache.move_to_end(key)
-        while len(_cache) > _MAX_ENTRIES:
-            _cache.popitem(last=False)
-
+    # Miss: build outside the lock, but once per key -- a second request
+    # arriving during the build waits for it instead of duplicating it. That
+    # "rare race" was not rare: a hover across a column of players is a burst
+    # of misses on one key. See get_or_build.
+    board = get_or_build(_cache, _inflight, _lock, key,
+                         lambda: build_board(conn, weights, settings),
+                         _MAX_ENTRIES)
     return board.copy()
 
 

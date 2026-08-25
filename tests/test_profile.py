@@ -1,4 +1,5 @@
 import dataclasses
+import time
 
 import pandas as pd
 from pipeline.db import get_conn, record_freshness, write_table
@@ -573,6 +574,94 @@ def test_cached_build_board_lru_is_bounded(tmp_path):
                    "schedule": 0.2, "durability": 0.2 - i * 1e-4}
         cached_build_board(conn, weights)
     assert len(_cache) <= _MAX_ENTRIES
+
+
+def test_cached_build_board_concurrent_misses_build_once(tmp_path, monkeypatch):
+    """Eight hover tips over eight players in a freshly-connected draft all
+    miss the board cache at once. Without single-flight each request built
+    its own copy of the same board -- measured at 5.4s and 1.67 GB peak per
+    build on data/nfl.duckdb -- and eight of those in parallel killed the
+    production container (Railway edge log, 2026-08-25 09:50:31Z: 35 profile
+    requests 502 "connection closed unexpectedly"). Concurrent misses on one
+    key must share one build."""
+    import threading, time
+    from concurrent.futures import ThreadPoolExecutor
+    from scoring import board_cache
+    from scoring.board_cache import cached_build_board
+    conn = _seed(tmp_path)
+    board_cache.clear()
+    real = board_cache.build_board
+    calls = []
+    gate = threading.Barrier(6, timeout=10)
+    def slow_build(c, weights, settings):
+        calls.append(1)
+        time.sleep(0.3)
+        return real(c, weights, settings)
+    monkeypatch.setattr(board_cache, "build_board", slow_build)
+    def one():
+        gate.wait()
+        return cached_build_board(conn.cursor())
+    with ThreadPoolExecutor(6) as pool:
+        boards = list(pool.map(lambda _: one(), range(6)))
+    assert len(calls) == 1
+    assert all(b.equals(boards[0]) for b in boards)
+
+
+def test_cached_profile_frames_concurrent_misses_build_once(tmp_path, monkeypatch):
+    """Same failure, second cache: build_profile reads the profile frames
+    right after the board, and those cost the other half of the 1.67 GB."""
+    import threading, time
+    from concurrent.futures import ThreadPoolExecutor
+    from scoring import profile_cache
+    from scoring.profile_cache import cached_profile_frames
+    conn = _seed(tmp_path)
+    profile_cache.clear()
+    real = profile_cache._build
+    calls = []
+    gate = threading.Barrier(6, timeout=10)
+    def slow_build(c, rules):
+        calls.append(1)
+        time.sleep(0.3)
+        return real(c, rules)
+    monkeypatch.setattr(profile_cache, "_build", slow_build)
+    def one():
+        gate.wait()
+        return cached_profile_frames(conn.cursor())
+    with ThreadPoolExecutor(6) as pool:
+        frames = list(pool.map(lambda _: one(), range(6)))
+    assert len(calls) == 1
+    assert all(f.season_features.equals(frames[0].season_features) for f in frames)
+
+
+def test_get_or_build_failed_build_releases_waiters():
+    """A build that raises must not strand the callers waiting on it: they
+    wake, and the next one becomes the builder. Otherwise one transient DB
+    error during a draft would hang every later hover on that key forever."""
+    import threading
+    from collections import OrderedDict
+    from concurrent.futures import ThreadPoolExecutor
+    from scoring.board_cache import get_or_build
+    cache, inflight, lock = OrderedDict(), {}, threading.Lock()
+    calls = []
+    gate = threading.Barrier(4, timeout=10)
+    def build():
+        calls.append(1)
+        if len(calls) == 1:
+            time.sleep(0.2)
+            raise RuntimeError("first build fails")
+        return "built"
+    def one():
+        gate.wait()
+        try:
+            return get_or_build(cache, inflight, lock, "k", build, 4)
+        except RuntimeError:
+            return "raised"
+    with ThreadPoolExecutor(4) as pool:
+        results = list(pool.map(lambda _: one(), range(4)))
+    assert results.count("raised") == 1
+    assert results.count("built") == 3
+    assert len(calls) == 2
+    assert inflight == {}
 
 
 # -- profile frame cache + filtered reads (scoring/profile_cache.py) -------
