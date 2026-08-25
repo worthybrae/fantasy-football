@@ -16,6 +16,7 @@ import { seedFromBoardPlayer, seedFromCandidate, seedFromPlayer } from '../compo
 import DraftBoardGrid from '../components/DraftBoardGrid'
 import { nextPickFor } from '../components/draft/pickOrder'
 import { Logo } from '../components/Logo'
+import { useDocumentMeta } from '../lib/documentMeta'
 
 const POLL_MS = 2500
 // Only used while the event stream is up: it is a safety net for a
@@ -161,6 +162,7 @@ const SCORING_LABEL: Record<'ppr' | 'half' | 'std', string> = {
 }
 
 export default function DraftRoom() {
+  useDocumentMeta({ title: 'ESPN Draft Assist', noindex: true })
   const [state, setState] = useState<LiveState | null>(null)
   const [error, setError] = useState<string | null>(null)
   // The board grid's own poll and error slot, kept apart from `state`/`error`

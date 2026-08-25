@@ -7,6 +7,7 @@ import {
   type UpcomingDrafts,
 } from '../api'
 import { readAccount, rememberAccount } from '../lib/accountCache'
+import { useDocumentMeta } from '../lib/documentMeta'
 import { Logo } from '../components/Logo'
 import PickOption from '../components/PickOption'
 import type { ProfileSeed } from '../components/PlayerProfile'
@@ -155,6 +156,10 @@ function topPicks(turn: MarketTurn) {
  *  and this tells you whether he goes before YOU pick. */
 
 export default function Market() {
+  useDocumentMeta({
+    title: 'The draft archive – ESPN Draft Assist',
+    description: 'What hundreds of recorded ESPN mock drafts do from each seat: who is taken at your turn, and who is still there at the next one.',
+  })
   const navigate = useNavigate()
   const [seat, setSeat] = useState(readSeat)
   const [overview, setOverview] = useState<MarketOverview | null>(null)

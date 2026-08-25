@@ -4,6 +4,7 @@ import { ageLabel, fetchMockBoard, fetchMockDrafts,
          type LiveBoard, type MockDraft, type PickMaker } from '../api'
 import DraftBoardGrid, { MAKER_MARK } from '../components/DraftBoardGrid'
 import { Logo } from '../components/Logo'
+import { useDocumentMeta } from '../lib/documentMeta'
 
 // Slow on purpose. A mock room picks every few seconds at most, and the two
 // endpoints behind this page read recorded state rather than driving
@@ -206,6 +207,10 @@ function MakerTally({ tally }: { tally: Tally }) {
 // ESPN's own computer rather than a person, and a board that does not say
 // so is worth studying far less than it looks.
 export default function MockDrafts() {
+  useDocumentMeta({
+    title: 'Recorded ESPN mock drafts – ESPN Draft Assist',
+    description: 'Every recorded ESPN mock draft, pick by pick, with the board as it stood at each turn.',
+  })
   const [drafts, setDrafts] = useState<MockDraft[] | null>(null)
   const [listError, setListError] = useState<string | null>(null)
   // Seeded from `?draft=<id>` so another page (the archive's draft list) can

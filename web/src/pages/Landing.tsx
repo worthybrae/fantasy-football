@@ -7,6 +7,7 @@ import { connectEspnAccount, connectWithToken, fetchConnectProgress, fetchLiveSt
          type ConnectProgress, type LiveState, type TokenConnectParams,
          type UpcomingDrafts } from '../api'
 import { readAccount, rememberAccount } from '../lib/accountCache'
+import { useDocumentMeta } from '../lib/documentMeta'
 import SetupWizard, { ACCOUNT_CHANNEL, CHANNEL_ACK, CHANNEL_CONNECTED } from '../components/SetupWizard'
 import ConnectScreen from '../components/ConnectScreen'
 import Benefits from '../components/Benefits'
@@ -184,6 +185,11 @@ export default function Landing() {
   // retry starts from a blank screen rather than from the last one's rows.
   const [attempt, setAttempt] = useState(0)
   const navigate = useNavigate()
+  useDocumentMeta({
+    title: 'ESPN Draft Assist – a live draft assistant for ESPN fantasy football',
+    description: 'A live draft assistant for ESPN fantasy football. It sits beside your ESPN draft room and ranks the board from real recorded ESPN mock drafts.',
+    canonical: 'https://espnfantasydraft.com/',
+  })
 
   // The token the bookmarklet delivered, kept for the whole session. It has
   // to outlive the hash (which is wiped on arrival, see below) because Retry

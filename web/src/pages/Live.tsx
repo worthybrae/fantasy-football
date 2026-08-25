@@ -1,4 +1,5 @@
 import DemoRoom from '../components/DemoRoom'
+import { useDocumentMeta } from '../lib/documentMeta'
 
 // /live: watch a draft, any time.
 //
@@ -9,5 +10,6 @@ import DemoRoom from '../components/DemoRoom'
 // never saw it otherwise. Nothing here is the reader's own draft; that is
 // /draft, and the room's own bar says which it is watching.
 export default function Live() {
+  useDocumentMeta({ title: 'ESPN Draft Assist', noindex: true })
   return <DemoRoom site />
 }

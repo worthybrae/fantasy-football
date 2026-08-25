@@ -2,6 +2,7 @@ import { useCallback } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import type { TokenConnectParams } from '../api'
 import WaitingRoom from '../components/WaitingRoom'
+import { useDocumentMeta } from '../lib/documentMeta'
 
 // The waiting room as a ROUTE: /room/:leagueId(?season=YYYY).
 //
@@ -18,6 +19,7 @@ import WaitingRoom from '../components/WaitingRoom'
 //           more door into it. Landing wipes the hash on arrival, same as it
 //           does for the bookmarklet's.
 export default function WaitingRoomPage() {
+  useDocumentMeta({ title: 'ESPN Draft Assist', noindex: true })
   const navigate = useNavigate()
   const { leagueId } = useParams()
   const [search] = useSearchParams()
