@@ -2863,15 +2863,31 @@ button.wr-seat:focus-visible {
 
 /* -- the explainer: the page in words, and the FAQ ------------------------ */
 
+/* THE SAME GUTTER AS THE FOOTER. Everything else on this page runs the
+   full 1240px container inside clamp(20px, 6vw, 88px); this block used to
+   be a 720px centred column, which left it indented under the section
+   above it and short of the footer below. It now fills the page and splits
+   instead: the words on the left, the questions on the right, each column
+   landing near a 60-character measure. Under 900px the two stack and the
+   button falls to the bottom, which is the reading order it had before. */
 .xp {
-  max-width: 720px;
-  margin: 0 auto;
-  padding: 48px 24px 32px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-areas:
+    "say ask"
+    "cta ask";
+  column-gap: clamp(32px, 5vw, 72px);
+  row-gap: 28px;
+  align-items: start;
+  padding: clamp(48px, 6vw, 72px) clamp(20px, 6vw, 88px) clamp(32px, 4vw, 48px);
 }
+
+.xp-say { grid-area: say; }
+.xp-ask { grid-area: ask; }
 
 .xp-h1 {
   margin: 0 0 20px;
-  font-size: 26px;
+  font-size: clamp(26px, 2.4vw, 32px);
   line-height: 1.25;
   font-weight: 600;
   color: var(--text-1);
@@ -2883,6 +2899,13 @@ button.wr-seat:focus-visible {
   font-size: 15px;
   line-height: 1.55;
   color: var(--text-2);
+}
+
+/* The FAQ column starts on the headline's line, not 32px under it -- the
+   old margin was separating two stacked blocks that now sit side by side.
+   Under 900px the grid's own row-gap does that job instead. */
+.xp-ask > .xp-h2 {
+  margin-top: 0;
 }
 
 .xp-h2 {
@@ -2930,5 +2953,18 @@ button.wr-seat:focus-visible {
 }
 
 .xp-cta {
-  margin-top: 28px;
+  grid-area: cta;
+  justify-self: start;
+  align-self: start;
+  margin-top: 0;
+}
+
+@media (max-width: 900px) {
+  .xp {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "say"
+      "ask"
+      "cta";
+  }
 }

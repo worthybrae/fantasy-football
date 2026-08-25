@@ -55,36 +55,48 @@ export default function Explainer({ onStart }: { onStart: () => void }) {
 
   return (
     <section className="xp" aria-labelledby="xp-h1">
-      <h1 id="xp-h1" className="xp-h1">
-        A draft assistant for ESPN fantasy football, trained on real ESPN mock drafts.
-      </h1>
-      <div className="xp-body">
-        <p>
-          ESPN Draft Assist is a live board that sits beside your ESPN draft room.
-          Every pick in your room lands here as it happens, and the board re-ranks
-          around it: who is worth taking now, who will still be there at your next
-          turn, and who will not.
-        </p>
-        <p>
-          It is ranked from what ESPN rooms actually do. This site records hundreds
-          of real ESPN mock drafts every day, so when it says a player usually goes
-          at pick 41, that is where he has been going this week, in rooms like yours.
-        </p>
-        <p>
-          Setup is a bookmark. Drag it to your bar, click it once on ESPN, and your
-          leagues appear here with a button to open the board when your draft starts.
-          Mock drafts are free; a real draft is $9.99, once.
-        </p>
+      {/* TWO COLUMNS AT THE PAGE'S OWN WIDTH. The prose wants a readable
+          measure, which is why this block used to be a 720px column -- but a
+          720px column inside a 1240px page reads as a stray, indented under
+          everything above it. Splitting the words from the questions keeps
+          both columns near 60 characters and lets the section start and end
+          on the same gutter as the footer. One column again under 900px. */}
+      <div className="xp-say">
+        <h1 id="xp-h1" className="xp-h1">
+          A draft assistant for ESPN fantasy football, trained on real ESPN mock drafts.
+        </h1>
+        <div className="xp-body">
+          <p>
+            ESPN Draft Assist is a live board that sits beside your ESPN draft room.
+            Every pick in your room lands here as it happens, and the board re-ranks
+            around it: who is worth taking now, who will still be there at your next
+            turn, and who will not.
+          </p>
+          <p>
+            It is ranked from what ESPN rooms actually do. This site records hundreds
+            of real ESPN mock drafts every day, so when it says a player usually goes
+            at pick 41, that is where he has been going this week, in rooms like yours.
+          </p>
+          <p>
+            Setup is a bookmark. Drag it to your bar, click it once on ESPN, and your
+            leagues appear here with a button to open the board when your draft starts.
+            Mock drafts are free; a real draft is $9.99, once.
+          </p>
+        </div>
       </div>
-      <h2 className="xp-h2">Questions</h2>
-      <div className="xp-faq">
-        {FAQ.map(({ q, a }) => (
-          <details key={q} className="xp-q">
-            <summary>{q}</summary>
-            <p>{a}</p>
-          </details>
-        ))}
+
+      <div className="xp-ask">
+        <h2 className="xp-h2">Questions</h2>
+        <div className="xp-faq">
+          {FAQ.map(({ q, a }) => (
+            <details key={q} className="xp-q">
+              <summary>{q}</summary>
+              <p>{a}</p>
+            </details>
+          ))}
+        </div>
       </div>
+
       <button type="button" className="lp-cta xp-cta" onClick={onStart}>
         Try a mock draft
       </button>
