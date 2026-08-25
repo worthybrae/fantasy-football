@@ -33,3 +33,12 @@ stripe>=15.4,<16
 # without running the SPA. FastAPI's own templating extra; pinned to the
 # major so a template syntax change cannot arrive with a redeploy.
 jinja2>=3.1,<4
+
+# The Anthropic SDK, for scoring/blurbs.py -- the one call that writes a
+# league's draft report card. The request could be made with httpx, which is
+# already here; the SDK is what carries the retry policy for 429s and 5xxs,
+# the typed errors the writer branches on, and the structured-output
+# parameter that pins the response to a schema. Each of those is a thing this
+# code would otherwise re-implement and get subtly wrong. Capped at the major
+# version for the same reason stripe is.
+anthropic>=1.0,<2
