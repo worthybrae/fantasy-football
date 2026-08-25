@@ -23,6 +23,7 @@ would be served the index document instead.
 """
 from __future__ import annotations
 
+import os
 import re
 import threading
 import unicodedata
@@ -45,6 +46,14 @@ POSITIONS = ("QB", "RB", "WR", "TE", "K", "DST")
 MIN_SHARE = 0.02
 
 TEMPLATES = Path(__file__).resolve().parent / "templates"
+
+# Whether registering the routes also warms the ADP cache. On in a server,
+# and worth an off switch for the one caller that does not want a
+# background build the moment an app object exists: the test suite, which
+# calls `register_seo_routes` dozens of times a run and has no interest in
+# a daemon thread opening a corpus behind every one of them. See
+# `api/demo.py`'s `DEMO_WARM` for the same switch on the same principle.
+WARM_ON_REGISTER = os.environ.get("SEO_WARM", "1") != "0"
 
 
 def slug(name: str) -> str:
@@ -419,9 +428,26 @@ def register_seo_routes(app, conn=None):
     # burst happens to land first. Warm it once, off the request thread, at
     # registration time; `adp_data`'s own lock means a real request racing
     # this thread waits for the same answer rather than building its own.
+    #
+    # LAST, so a failure to warm can never cost the routes above it.
+    if not WARM_ON_REGISTER:
+        return
+
+    # A dedicated cursor, not the shared `conn`, for this background thread:
+    # `api/demo.py` registers its own warm thread against this same `conn`
+    # (see `api/main.py`), and the two can run at the same moment. A
+    # DuckDBPyConnection is not safe for concurrent queries from two threads
+    # -- see `adp_data`'s docstring for what that corrupts -- and `_adp_lock`
+    # only serializes callers that go through `adp_data`, not a different
+    # module reading `conn` directly. `conn.cursor()` shares the underlying
+    # database but gives this thread its own statement/result state, the
+    # same convention `api/main.py`'s ~20 handlers and its own sim worker
+    # already use for a background thread next to request handlers.
+    cur = conn.cursor() if conn is not None else None
+
     def _warm():
         try:
-            adp_data(conn)
+            adp_data(cur)
         except Exception:      # noqa: BLE001 -- a failed warm just means the
             # first request pays for `build_adp` itself, same as before.
             pass

@@ -12,6 +12,17 @@ from api import market, seo
 from pipeline import draft_log as dl
 
 
+@pytest.fixture(autouse=True)
+def _no_warm_thread(monkeypatch):
+    """Every `_client(board)` call below registers the routes fresh, and
+    with `WARM_ON_REGISTER` on that means a daemon thread opening the real
+    corpus (or racing `market._CACHE.clear()` in the next test's fixture
+    setup) once per test, for a whole suite that runs in a couple of
+    seconds. Off for the duration of this file; production keeps the
+    default."""
+    monkeypatch.setattr(seo, "WARM_ON_REGISTER", False)
+
+
 @pytest.fixture
 def corpus(tmp_path, monkeypatch):
     """Ten drafts, 4 teams x 2 rounds (8 picks each), so shares are round
@@ -313,7 +324,8 @@ def test_the_sitemap_lists_every_page_once(corpus, board):
     assert "https://espnfantasydraft.com/adp/round/2" in locs
     assert "https://espnfantasydraft.com/adp/round/3" not in locs   # two rounds
     assert "https://espnfantasydraft.com/adp/rb" in locs
-    assert "https://espnfantasydraft.com/adp/k" not in locs   # fixture drafts only RB and WR
+    assert "https://espnfantasydraft.com/adp/k" not in locs   # no K in the fixture at all
+    assert "https://espnfantasydraft.com/adp/te" not in locs  # `ghost` is TE, but never published
     mods = {u.find("s:lastmod", ns).text for u in root.findall("s:url", ns)}
     assert mods == {"2026-08-24"}
 
