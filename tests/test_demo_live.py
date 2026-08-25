@@ -24,10 +24,12 @@ def farm(tmp_path, monkeypatch):
     demo._CACHE.clear()
     demo._REPLAY.clear()
     demo._CLOCK.clear()
+    demo._SHOWING.clear()
     yield tmp_path / "live"
     demo._CACHE.clear()
     demo._REPLAY.clear()
     demo._CLOCK.clear()
+    demo._SHOWING.clear()
 
 
 def _room(league_id="777", picks=3, teams=8, rounds=16, clock=90.0,
@@ -72,6 +74,62 @@ def test_identity_ignores_a_room_the_page_is_not_showing(farm):
     other = "222" if shown[0] == "111" else "111"
     _write(farm, _room(league_id=other, picks=9))
     assert demo._identity(time.time()) == shown
+
+
+def test_the_shown_room_is_not_stolen_by_one_that_overtakes_it(farm):
+    """The farm sits in several rooms at once and they run neck and neck. The
+    page must not switch to whichever one happens to have made the latest
+    pick -- that is a slideshow of strangers, not a draft."""
+    _write(farm, _room(league_id="111", picks=20))
+    _write(farm, _room(league_id="222", picks=18))
+    assert demo._identity(time.time())[0] == "111"
+    _write(farm, _room(league_id="222", picks=21))
+    assert demo._identity(time.time())[0] == "111"
+    _write(farm, _room(league_id="222", picks=30))
+    assert demo._identity(time.time())[0] == "111"
+
+
+def test_the_shown_room_is_left_when_it_reaches_the_handoff_round(farm):
+    """Stay through round nine; the moment the room enters round ten, move
+    to the best of the others."""
+    teams = 8
+    _write(farm, _room(league_id="111", picks=teams * 9 - 1, teams=teams))
+    _write(farm, _room(league_id="222", picks=20, teams=teams))
+    assert demo._identity(time.time())[0] == "111"
+    # Last pick of round nine: still round nine, still ours.
+    _write(farm, _room(league_id="111", picks=teams * 9 - 1, teams=teams))
+    assert demo._identity(time.time())[0] == "111"
+    # Round ten begins.
+    _write(farm, _room(league_id="111", picks=teams * 9, teams=teams))
+    assert demo._identity(time.time())[0] == "222"
+    # And it does not come back, even though it has more picks than 222.
+    _write(farm, _room(league_id="111", picks=teams * 9 + 1, teams=teams))
+    assert demo._identity(time.time())[0] == "222"
+
+
+def test_the_shown_room_is_shown_live_past_the_interesting_rounds(farm):
+    """A room the page has stuck with is shown where it is, not rewound to
+    round three the moment it crosses into round nine."""
+    teams = 8
+    _write(farm, _room(league_id="111", picks=teams * 8 + 3, teams=teams))
+    demo._SHOWING["league_id"] = "111"
+    assert demo._identity(time.time()) == ("111", teams * 8 + 3)
+
+
+def test_a_room_that_finished_is_left(farm):
+    _write(farm, _room(league_id="111", picks=20, teams=8, rounds=3))
+    _write(farm, _room(league_id="222", picks=10))
+    demo._SHOWING["league_id"] = "111"
+    _write(farm, _room(league_id="111", picks=24, teams=8, rounds=3))
+    assert demo._identity(time.time())[0] == "222"
+
+
+def test_a_room_that_went_quiet_is_left(farm):
+    _write(farm, _room(league_id="111", picks=20))
+    _write(farm, _room(league_id="222", picks=10))
+    assert demo._identity(time.time())[0] == "111"
+    _write(farm, _room(league_id="222", picks=11))
+    assert demo._identity(time.time() + demo.STALE_SECONDS + 1)[0] == "222"
 
 
 def test_dir_revision_notices_any_write(farm):
@@ -286,6 +344,23 @@ def test_a_restart_starts_from_the_last_answer(tmp_path, monkeypatch):
     # Downgraded on the way in: that room was live when it was written and is
     # not live now, and the pill above it must not say it is.
     assert restored["mode"] == "replay"
+
+
+def test_a_restart_keeps_showing_the_room_it_was_showing(farm, tmp_path,
+                                                         monkeypatch):
+    """The last answer names its room, and a restarted server picks that room
+    back up rather than starting the choice over -- which, with two rooms
+    neck and neck, would be one more jump for whoever is watching."""
+    _write(farm, _room(league_id="111", picks=20))
+    _write(farm, _room(league_id="222", picks=19))
+    path = tmp_path / "demo-last.json"
+    path.write_text(json.dumps({"live": True, "mode": "live", "league_id": "222",
+                                "picks_made": 19, "server_now": time.time()}))
+    monkeypatch.setattr(demo, "DEMO_LAST", str(path))
+    monkeypatch.setattr(demo, "WARM_ON_REGISTER", True)
+    with mock.patch.object(demo.threading, "Thread"):
+        demo.register_demo_routes(FastAPI(), conn=mock.Mock())
+    assert demo._identity(time.time())[0] == "222"
 
 
 def test_last_night_s_answer_is_not_restored(tmp_path, monkeypatch):
