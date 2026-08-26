@@ -22,6 +22,12 @@ LEAGUE_TABLES = frozenset({
     # stored league reports built on it (api/reports.py). Both are one
     # league's business and nobody else's.
     "league_standings", "league_reports",
+    # A league's own history beyond the draft (pipeline/league_activity.py):
+    # who is in it, who played whom, every transaction, every week's
+    # lineup, the raw ESPN answers those were parsed from. One league's
+    # business and nobody else's.
+    "league_members", "league_matchups", "league_transactions",
+    "league_lineups", "league_draft_flags", "league_raw",
 })
 UNIVERSAL_TABLES = frozenset({
     "weekly", "snap_counts", "depth_charts", "players", "schedules",
