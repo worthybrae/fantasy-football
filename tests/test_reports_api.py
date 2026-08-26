@@ -88,6 +88,23 @@ def test_spawn_build_is_single_flight(league_root):
     assert not reports.building("424242", 2024)
 
 
+def test_a_build_that_cannot_start_leaves_no_flight_behind(league_root):
+    """`run`'s own finally clears the key, and it never runs if the thread
+    never starts -- so the key would sit in `_inflight` for the life of the
+    process and make every later build of this league-season a no-op."""
+    from api import reports
+
+    def boom(name, fn):
+        raise RuntimeError("can't start new thread")
+    with pytest.raises(RuntimeError):
+        reports.spawn_build("424242", 2024, spawn=boom, root=league_root)
+    assert not reports.building("424242", 2024)
+    held = []
+    assert reports.spawn_build("424242", 2024, spawn=lambda n, f: held.append(f),
+                               root=league_root)
+    held[0]()
+
+
 def test_get_reports_lists_and_serves(tmp_path, league_root):
     from api import reports
     reports.build_report("424242", 2024, root=league_root)

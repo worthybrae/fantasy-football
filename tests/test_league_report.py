@@ -269,7 +269,9 @@ def test_team_profiles_summarise_history(tmp_path):
     assert [s["season"] for s in m1["seasons"]] == [2024, 2025]
     assert m1["titles"] == [2024] and m1["playoffs"] == [2024]
     assert m1["completed"] == 1
-    assert m1["win_pct"] == pytest.approx(9 / 14)
+    # Stored rounded to 3 places (it goes to the model and is printed as a
+    # percent), so the tolerance has to allow half of the last place.
+    assert m1["win_pct"] == pytest.approx(9 / 14, abs=5e-4)
     assert m1["avg_finish"] == 1.0
     assert m1["drafts"] == 2
     # Both seasons repeat the same snake draft, so team 1's own first pick of

@@ -356,7 +356,10 @@ def team_profiles(conn) -> list:
             "titles": [s["season"] for s in done if s["final_rank"] == 1],
             "playoffs": [s["season"] for s in seasons if s["playoff_seed"] is not None],
             "completed": len(done),
-            "win_pct": (wins / games) if games else None,
+            # Rounded like every other figure here, because this one is sent
+            # to the model: 0.6428571428571429 spends tokens on twelve
+            # digits nobody reads, and the page prints it as a percent.
+            "win_pct": round(wins / games, 3) if games else None,
             "avg_finish": round(sum(s["final_rank"] for s in done) / len(done), 2) if done else None,
             "ppg": round(sum(p for p, _ in ppg_games) / ppg_total_games, 1) if ppg_total_games else None,
             "drafts": int(my_picks["season"].nunique()) if not my_picks.empty else 0,

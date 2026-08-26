@@ -34,7 +34,8 @@ from api import billing
 from pipeline import espn_drafts
 from pipeline.db import get_conn
 from pipeline.league_history import import_history, is_fresh
-from pipeline.leagues import LEAGUES_ROOT, league_db_path
+from pipeline import leagues
+from pipeline.leagues import league_db_path
 from scoring import blurbs, league_report
 from scoring.config import CURRENT_SEASON
 
@@ -150,7 +151,7 @@ def _season_on_file(conn, season: int) -> bool:
 
 def open_read(league_id: str, root: str | None = None):
     """A read-only connection to a league's file, or None when there is none."""
-    path = league_db_path(league_id, root=root or LEAGUES_ROOT)
+    path = league_db_path(league_id, root=root or leagues.LEAGUES_ROOT)
     if not Path(path).exists():
         return None
     return _open(path, read_only=True)
@@ -168,7 +169,7 @@ def build_report(league_id: str, season: int, picks=None, client=None,
     `drafted` to the same file is never blocked for the seconds the writer
     takes.
     """
-    path = league_db_path(league_id, root=root or LEAGUES_ROOT)
+    path = league_db_path(league_id, root=root or leagues.LEAGUES_ROOT)
     conn = _open(path, read_only=False)
     try:
         facts = league_report.build_facts(conn, league_id, int(season), picks=picks)
@@ -221,7 +222,17 @@ def spawn_build(league_id: str, season: int, picks=None, client=None, spawn=None
         finally:
             with _lock:
                 _inflight.discard(key)
-    (spawn or _spawn)(f"report-{league_id}-{season}", run)
+    try:
+        (spawn or _spawn)(f"report-{league_id}-{season}", run)
+    except Exception:      # noqa: BLE001
+        # `run`'s own finally is the only thing that clears the key, and it
+        # never runs if the thread never starts (RuntimeError: can't start
+        # new thread, or an injected spawn that raises). Left behind, that
+        # key makes `building()` true and every later build of this
+        # league-season a silent no-op, for the life of the process.
+        with _lock:
+            _inflight.discard(key)
+        raise
     return True
 
 
@@ -396,7 +407,7 @@ def register_report_routes(app, store=None, fetch=None, spawn=None, root: str | 
             FRESH_DAYS, while the caller was told 202 "building".
             """
             try:
-                path = league_db_path(league_id, root=root or LEAGUES_ROOT)
+                path = league_db_path(league_id, root=root or leagues.LEAGUES_ROOT)
                 if Path(path).exists():
                     existing = _open(path, read_only=True)
                     try:
@@ -405,7 +416,7 @@ def register_report_routes(app, store=None, fetch=None, spawn=None, root: str | 
                     finally:
                         existing.close()
                 import_history(league_id, cookies, current_season=CURRENT_SEASON,
-                               root=root or LEAGUES_ROOT)
+                               root=root or leagues.LEAGUES_ROOT)
             except Exception as exc:      # noqa: BLE001 -- the build runs on what is there
                 print(f"league {league_id}: history refresh failed: {exc}")
         spawn_build(league_id, season, spawn=spawn, before=refresh_history, root=root)

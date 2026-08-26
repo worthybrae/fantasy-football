@@ -25,8 +25,8 @@ import pandas as pd
 from pipeline.db import DEFAULT_PATH, get_conn, read_table, record_freshness, write_table
 from pipeline.espn_drafts import KONA, http_fetch
 from pipeline.espn_league import PLAYERS_FILTER, import_seasons
-from pipeline.import_league import historic_adp_frames
-from pipeline.leagues import LEAGUES_ROOT, league_db_path, provision_league
+from pipeline import leagues
+from pipeline.leagues import league_db_path, provision_league
 from scoring.config import CURRENT_SEASON
 
 FRESH_DAYS = 7
@@ -69,14 +69,26 @@ def is_fresh(conn, max_age_days: int = FRESH_DAYS) -> bool:
 
 def import_history(league_id: str, cookies: dict, fetch=None,
                    current_season: int = CURRENT_SEASON,
-                   universal_path: str = DEFAULT_PATH, root: str = LEAGUES_ROOT,
+                   universal_path: str = DEFAULT_PATH, root: str | None = None,
                    adp_fetch=None) -> dict:
     """Import drafted seasons, standings and historic ADP for one league.
 
     Returns `import_seasons`'s summary. Raises what `import_seasons` raises
     (no drafted seasons, an auction league, a dead session); the caller
     decides whether that is a log line or an error.
+
+    `root=None` reads `leagues.LEAGUES_ROOT` HERE rather than binding it as
+    a default argument, which would freeze it at import time -- the same
+    call-time read `api/live.py` makes, and the reason is the same: the test
+    suite's `_isolated_leagues_root` patches that module attribute, and a
+    frozen default would write a real file under the repo's data/leagues/.
     """
+    root = leagues.LEAGUES_ROOT if root is None else root
+    # Imported here, not at module scope: this module is reachable from
+    # `api/live.py`'s own imports, and `pipeline.import_league` pulls in
+    # `pipeline.sources` and with it `nfl_data_py` -- seconds of import cost
+    # on every API boot, for a function only the history import ever calls.
+    from pipeline.import_league import historic_adp_frames
     raw = fetch if fetch is not None else http_fetch()
     path = provision_league(league_id, universal_path, root=root)
     conn = get_conn(path)
@@ -106,7 +118,7 @@ def spawn_import_if_stale(league_id: str, cookies: dict, spawn=None, **kwargs) -
     Never raises: this is called from a request path that must not fail
     because a side job could not start. Returns whether a job started.
     """
-    root = kwargs.get("root", LEAGUES_ROOT)
+    root = kwargs.get("root") or leagues.LEAGUES_ROOT
     try:
         path = league_db_path(league_id, root=root)
         if Path(path).exists():
