@@ -168,7 +168,8 @@ def historical_picks(conn, season: int) -> pd.DataFrame:
 
 
 def live_picks(drafted: list, board_by_id: dict, settings, names: dict,
-               team_slots: dict, season: int) -> pd.DataFrame:
+               team_slots: dict, season: int,
+               trust_pick_order: bool = True) -> pd.DataFrame:
     """The season being drafted, from the room: `drafted` rows and the board.
 
     `drafted` is `[(player_id, pick_no), ...]`; `board_by_id` is the
@@ -176,15 +177,28 @@ def live_picks(drafted: list, board_by_id: dict, settings, names: dict,
     `team_slots` is the session's `slot -> ESPN team name`. The team behind
     a slot is `settings.pick_order[slot - 1]`; a manager the history does
     not know is named by the ESPN team name, then "Team N".
+
+    `trust_pick_order` IS THE PRECONDITION `api/live._slot_from_pick_order`
+    spells out, carried in by the caller because a bare LeagueSettings does
+    not know where it came from. `pick_order` names a team per slot only
+    when the settings are from THIS connect's live ESPN fetch; the
+    database's newest `league` row carries LAST season's order, and because
+    ESPN team ids are stable that lookup returns a confident, wrong manager
+    instead of nothing. False (or an empty order) means the slot is all we
+    know: name the team from `team_slots`, then "Team N", and leave
+    `team_id` null rather than looking a SLOT up in `names`, which is keyed
+    by team id. `api/reports.on_draft_complete` passes
+    `session.settings_from_espn` here, the same flag every other consumer
+    gates on.
     """
     teams, rounds = int(settings.teams), int(settings.rounds)
     slots = snake_slots(teams, rounds)
-    order = list(settings.pick_order or ())
+    order = list(settings.pick_order or ()) if trust_pick_order else []
     rows = []
     for player_id, pick_no in drafted:
         overall = int(pick_no)
         slot = slots[overall - 1] if 0 < overall <= len(slots) else None
-        team_id = order[slot - 1] if slot is not None and slot - 1 < len(order) else slot
+        team_id = order[slot - 1] if slot is not None and slot - 1 < len(order) else None
         espn_name = team_slots.get(slot) if slot is not None else None
         manager, team_name = names.get(int(team_id), (None, None)) if team_id is not None else (None, None)
         manager = manager or espn_name or f"Team {slot}"

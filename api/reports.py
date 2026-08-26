@@ -282,7 +282,13 @@ def on_draft_complete(league_id: str, season, swid: str | None, session, drafted
                 conn.close()
         picks = league_report.live_picks(
             drafted, getattr(session, "board_by_id", {}) or {}, session.settings, names,
-            getattr(session, "team_slots", {}) or {}, year)
+            getattr(session, "team_slots", {}) or {}, year,
+            # The session's own flag, never assumed. False means the ESPN
+            # settings fetch failed and build_session fell back to the
+            # database's `league` row, whose pick order is LAST season's --
+            # see live_picks, and `api/live._slot_from_pick_order`, which
+            # every other consumer of that order already gates on.
+            trust_pick_order=getattr(session, "settings_from_espn", False))
         return spawn_build(league_id, year, picks=picks, spawn=spawn, root=root)
     except Exception:      # noqa: BLE001
         traceback.print_exc()

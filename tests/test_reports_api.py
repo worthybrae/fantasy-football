@@ -305,6 +305,34 @@ def test_on_draft_complete_builds_while_this_process_holds_the_writer(
     assert reports.load_report(held_writer, 2026) is not None
 
 
+def test_on_draft_complete_does_not_trust_a_pick_order_espn_did_not_send(
+        league_root, monkeypatch):
+    """`session.settings_from_espn` is False whenever the connect's ESPN
+    settings fetch failed and build_session fell back to the database's own
+    `league` row -- whose pick order is last season's. Every other consumer
+    gates on that flag; this hook has to as well, or the report names the
+    wrong manager for every pick and sounds certain about it."""
+    import dataclasses
+    from api import billing, reports
+    from tests.test_league_report import _settings
+    monkeypatch.setattr(billing, "is_free_draft", lambda league_id: False)
+    captured = {}
+    monkeypatch.setattr(reports, "spawn_build",
+                        lambda lid, season, picks=None, **kw: captured.update(picks=picks) or True)
+
+    class Sess:
+        # Last season's order, reversed: slot 1 would resolve to team 8.
+        settings = dataclasses.replace(_settings(2026), pick_order=(8, 7, 6, 5, 4, 3, 2, 1))
+        settings_from_espn = False
+        board_by_id = {"x": {"player_id": "x", "name": "X", "position": "RB",
+                             "market_rank": 20.0}}
+        team_slots = {1: "Piss Floor"}
+    assert reports.on_draft_complete("424242", 2026, "{X}", Sess(), [("x", 1)],
+                                     root=league_root) is True
+    row = captured["picks"].iloc[0]
+    assert row["manager"] == "Piss Floor" and row["team_id"] is None
+
+
 def test_the_history_refresh_check_runs_while_this_process_holds_the_writer(
         tmp_path, league_root, held_writer, monkeypatch):
     """`refresh_history` opens the file to ask whether the import can be

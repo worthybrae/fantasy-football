@@ -185,6 +185,33 @@ def test_live_picks_falls_back_to_espn_team_name(tmp_path):
     assert picks.iloc[1]["manager"] == "Team 2"
 
 
+def test_live_picks_will_not_use_a_pick_order_it_cannot_trust():
+    """`pick_order` names a team per slot only when it came from THIS
+    connect's ESPN fetch. The database's newest `league` row carries LAST
+    season's order, and because ESPN team ids are stable that lookup returns
+    a confident, wrong manager rather than nothing -- the same precondition
+    `api/live._slot_from_pick_order` spells out, which every other consumer
+    gates on `session.settings_from_espn`."""
+    import dataclasses
+    from scoring.league_report import live_picks
+    stale = dataclasses.replace(_settings(2026, teams=2), pick_order=(2, 1))
+    names = {1: ("m1", "Alpha"), 2: ("m2", "Bravo")}
+    picks = live_picks([("a", 1)], {}, stale, names, {1: "Piss Floor"}, 2026,
+                       trust_pick_order=False)
+    row = picks.iloc[0]
+    assert row["manager"] == "Piss Floor" and row["team_name"] == "Piss Floor"
+    assert row["team_id"] is None
+    # No ESPN name either: the SLOT, never a `names` lookup keyed by one.
+    bare = live_picks([("a", 1)], {}, stale, names, {}, 2026, trust_pick_order=False)
+    assert bare.iloc[0]["manager"] == "Team 1" and bare.iloc[0]["team_id"] is None
+    # An empty pick_order is the same problem wearing a different hat: the
+    # old fallback used the slot AS a team id and looked it up in `names`,
+    # which is keyed by team id.
+    empty = dataclasses.replace(_settings(2026, teams=2), pick_order=())
+    none = live_picks([("a", 1)], {}, empty, names, {}, 2026)
+    assert none.iloc[0]["manager"] == "Team 1" and none.iloc[0]["team_id"] is None
+
+
 def test_draft_grades_rank_teams(tmp_path):
     from scoring.league_report import historical_picks, draft_grades
     conn = seed_league(str(tmp_path / "t.duckdb"))
