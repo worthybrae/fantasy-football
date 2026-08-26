@@ -333,6 +333,29 @@ def test_on_draft_complete_does_not_trust_a_pick_order_espn_did_not_send(
     assert row["manager"] == "Piss Floor" and row["team_id"] is None
 
 
+def test_spawn_draft_complete_runs_the_hook_off_the_callers_thread():
+    """The socket read thread calls this, not `on_draft_complete` -- so the
+    entitlement read, the DuckDB open and `is_free_draft`'s possible HTTP
+    call all happen somewhere else. Default `spawn` is a daemon thread."""
+    import threading
+    from api import reports
+    seen = []
+    monkey = lambda *a, **kw: seen.append((threading.current_thread().name, a))  # noqa: E731
+    real, reports.on_draft_complete = reports.on_draft_complete, monkey
+    try:
+        reports.spawn_draft_complete("424242", 2026, "{X}", object(), [("x", 1)])
+        for thread in threading.enumerate():
+            if thread.name.startswith("job-draft-complete-"):
+                thread.join(timeout=5)
+    finally:
+        reports.on_draft_complete = real
+    assert len(seen) == 1
+    name, args = seen[0]
+    assert name == "job-draft-complete-424242-2026"
+    assert name != threading.current_thread().name
+    assert args[:3] == ("424242", 2026, "{X}")
+
+
 def test_the_history_refresh_check_runs_while_this_process_holds_the_writer(
         tmp_path, league_root, held_writer, monkeypatch):
     """`refresh_history` opens the file to ask whether the import can be

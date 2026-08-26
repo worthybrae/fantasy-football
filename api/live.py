@@ -2493,8 +2493,14 @@ def register_live_routes(app, conn, db_path):
                     clear_session_record(db_path)
                     # The draft is over: hand the room to the report card.
                     # Read the picks here, where the connection is, and let
-                    # the job compute off this thread. The token record is
-                    # the connecting account (None on the browser path).
+                    # the job compute off this thread -- which is what
+                    # `spawn_draft_complete` is for, and why the hook is not
+                    # called directly: it does an entitlement read, a DuckDB
+                    # open, two table reads and a frame build, and
+                    # `billing.is_free_draft` can reach ESPN on a cold
+                    # cache. This callback must return fast (see the note
+                    # below the branch). The token record is the connecting
+                    # account (None on the browser path).
                     c3 = work_conn.cursor()
                     try:
                         drafted = c3.execute(
@@ -2504,7 +2510,7 @@ def register_live_routes(app, conn, db_path):
                         c3.close()
                     with lock:
                         token = state.get("token") or {}
-                    reports.on_draft_complete(
+                    reports.spawn_draft_complete(
                         league_id, token.get("season"), token.get("swid"),
                         current["session"], [(str(p), int(n)) for p, n in drafted])
                 # Hand off to the worker instead of searching here -- this

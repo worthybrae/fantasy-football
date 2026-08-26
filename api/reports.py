@@ -295,6 +295,29 @@ def on_draft_complete(league_id: str, season, swid: str | None, session, drafted
         return False
 
 
+def spawn_draft_complete(league_id: str, season, swid: str | None, session, drafted: list,
+                         store=None, spawn=None, root: str | None = None) -> None:
+    """`on_draft_complete`, off the caller's thread.
+
+    Its one call site is the socket read thread in `api/live.py`, which must
+    return fast -- the comment right below the call says so, and the next
+    frame ESPN sends is waiting behind it. `on_draft_complete` is not fast:
+    an entitlement read, a DuckDB open, two table reads and a frame build,
+    plus `billing.is_free_draft`'s cold-cache branch, which can make an
+    outbound HTTP call to ESPN's mock directory. The `drafted` read stays on
+    that thread, where the connection already is; everything from here runs
+    on a daemon thread of its own.
+
+    `spawn` is the same `(name, fn)` injection `spawn_build` takes, so a
+    test can run the job inline. Never raises -- `on_draft_complete` does
+    not, and a thread that could would have nowhere to raise to.
+    """
+    def run():
+        on_draft_complete(league_id, season, swid, session, drafted,
+                          store=store, root=root)
+    (spawn or _spawn)(f"draft-complete-{league_id}-{season}", run)
+
+
 # -- routes ------------------------------------------------------------------
 
 

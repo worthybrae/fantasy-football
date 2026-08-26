@@ -2375,10 +2375,16 @@ def test_connect_token_spawns_a_history_import(tmp_path, monkeypatch):
 def test_last_pick_calls_on_draft_complete(tmp_path, monkeypatch):
     """The `made >= total_picks` branch hands the room to the report job with
     what it needs: league, season, the connecting SWID, the session and the
-    drafted rows -- once."""
+    drafted rows -- once, and OFF this thread.
+
+    `spawn_draft_complete`, not `on_draft_complete`: this runs on the socket
+    read thread, whose own comment two lines below says it must return fast,
+    and the hook is not fast (an entitlement read, a DuckDB open, two table
+    reads, a frame build, and `billing.is_free_draft`'s cold-cache branch,
+    which can make an outbound HTTP call)."""
     from api import live, reports
     calls = []
-    monkeypatch.setattr(reports, "on_draft_complete",
+    monkeypatch.setattr(reports, "spawn_draft_complete",
                         lambda league_id, season, swid, session, drafted, **kw: calls.append(
                             (league_id, season, swid, len(drafted))) or True)
     # Drive a synthetic 2-team, 1-round session to its last pick (see
