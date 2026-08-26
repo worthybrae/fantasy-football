@@ -31,6 +31,9 @@ from pipeline.leagues import league_db_path, provision_league
 from scoring.config import CURRENT_SEASON
 
 FRESH_DAYS = 7
+# Seconds between ESPN requests in the walk. Enough to be a polite reader,
+# short enough that six seasons still take a couple of minutes.
+PAUSE_SECONDS = 0.15
 
 
 def json_fetch(fetch, cookies: dict):
@@ -71,7 +74,7 @@ def is_fresh(conn, max_age_days: int = FRESH_DAYS) -> bool:
 def import_history(league_id: str, cookies: dict, fetch=None,
                    current_season: int = CURRENT_SEASON,
                    universal_path: str = DEFAULT_PATH, root: str | None = None,
-                   adp_fetch=None, progress=None, pause: float = 0.0) -> dict:
+                   adp_fetch=None, progress=None, pause: float = PAUSE_SECONDS) -> dict:
     """Import drafted seasons, standings, historic ADP and every season's
     activity for one league.
 

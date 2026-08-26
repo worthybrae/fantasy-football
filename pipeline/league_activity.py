@@ -285,6 +285,17 @@ class Progress:
                 stage.update(done=True, label=f"{season} · done")
             self._done.append(season)
 
+    def absent(self, season: int) -> None:
+        """A season ESPN 404s outright, most often the current season
+        unioned in by `import_history` before its league has rolled over to
+        it. Marks the stage done with its own label rather than raising --
+        there is nothing this season to read, not a failure of the walk."""
+        with self._lock:
+            stage = self._stage(season)
+            if stage is not None:
+                stage.update(done=True, label=f"{season} · not on ESPN")
+            self._done.append(season)
+
     def fail(self, error: str) -> None:
         with self._lock:
             self._phase = "failed"
@@ -365,7 +376,11 @@ def import_activity(conn, league_id: str, fetch_json, seasons: list, current_sea
 
     Raises whatever `fetch_json` raises other than FileNotFoundError, after
     recording the failure on `progress`. A 404 on a week is treated as an
-    empty week.
+    empty week; a 404 on a season's own views (a league ESPN has not
+    rolled over to that season yet -- the current season, most often, when
+    `import_history` unions it in whether or not it has been drafted) skips
+    that season outright rather than failing the whole walk, and is
+    recorded on `progress` via `Progress.absent`.
     """
     progress = progress or Progress(league_id)
     progress.start(list(seasons))
@@ -383,12 +398,20 @@ def import_activity(conn, league_id: str, fetch_json, seasons: list, current_sea
                 progress.finish(season)
                 continue
             payloads = {}
-            for view in SEASON_VIEWS:
-                payloads[view] = fetch_json(season_url(league_id, season, view))
-                requests += 1
-                _store_raw(conn, season, view, 0, payloads[view])
-                if pause:
-                    time.sleep(pause)
+            try:
+                for view in SEASON_VIEWS:
+                    payloads[view] = fetch_json(season_url(league_id, season, view))
+                    requests += 1
+                    _store_raw(conn, season, view, 0, payloads[view])
+                    if pause:
+                        time.sleep(pause)
+            except FileNotFoundError:
+                # The season itself does not exist on ESPN yet (or ever
+                # will) -- nothing to store, and not a reason to fail the
+                # rest of the walk. Whatever raw rows an earlier walk left
+                # for this season, if any, are untouched.
+                progress.absent(season)
+                continue
             status = payloads["mTeam"].get("status") or {}
             final = int(status.get("finalScoringPeriod") or 17)
             latest = int(status.get("latestScoringPeriod") or final)

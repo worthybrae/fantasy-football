@@ -25,6 +25,7 @@ from pipeline import espn_drafts as drafts
 from pipeline import leagues
 from pipeline.db import DEFAULT_PATH, get_conn, read_table
 from pipeline.league_activity import CURRENT_MAX_AGE_HOURS, Progress, _raw, _stale
+from pipeline.league_history import PAUSE_SECONDS
 from pipeline.leagues import league_db_path
 from scoring import manager_profile
 from scoring.config import CURRENT_SEASON
@@ -36,9 +37,6 @@ _LOCK = threading.Lock()
 # five minutes per league, dropped when an import finishes.
 CACHE_SECONDS = 300.0
 _ANSWERS: dict = {}
-# Seconds between ESPN requests in the walk. Enough to be a polite reader,
-# short enough that six seasons take a couple of minutes.
-PAUSE_SECONDS = 0.15
 
 
 def _leagues_root():

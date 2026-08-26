@@ -317,3 +317,26 @@ def test_progress_records_a_failure_and_the_walk_raises(tmp_path):
                             progress=progress)
     snap = progress.snapshot()
     assert snap["phase"] == "failed" and "500" in snap["error"]
+
+
+def test_a_season_espn_has_not_rolled_over_to_yet_is_skipped_not_fatal(tmp_path):
+    """`import_history` unions the current season into the walk whether or
+    not it has been drafted (see pipeline/league_history.py) -- a league
+    ESPN has not created that season's data for yet 404s on every one of
+    its views. That must not fail the whole walk: the season is skipped,
+    its stage reads "not on ESPN", and every OTHER season still imports."""
+    conn = duckdb.connect(str(tmp_path / "league.duckdb"))
+    served = _served(2024)      # 2025 is not in here at all -- every 2025 URL 404s
+    progress = act.Progress("53929318")
+    summary = act.import_activity(conn, "53929318", _fetch_json(served, []),
+                                  seasons=[2025, 2024], current_season=2025,
+                                  progress=progress)
+    assert summary["seasons"] == [2025, 2024]      # echoed back, not filtered
+    snap = progress.snapshot()
+    assert snap["phase"] == "done"
+    stage_2025 = next(s for s in snap["stages"] if s["season"] == 2025)
+    assert stage_2025 == {"season": 2025, "label": "2025 · not on ESPN", "done": True,
+                          "week": 0, "weeks": None}
+    # 2024 still imported in full.
+    assert len(read_table(conn, "league_members")) == 3
+    assert len(read_table(conn, "league_lineups")) == 6

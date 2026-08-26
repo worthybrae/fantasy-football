@@ -63,7 +63,7 @@ def test_import_history_writes_into_the_leagues_own_file(tmp_path):
     # that walk rather than the historical one this test means to exercise.
     summary = import_history(
         "424242", {"SWID": "{X}", "espn_s2": "s"}, fetch=_raw_fetch([2025, 2024]),
-        current_season=2025, universal_path=universal, root=root,
+        current_season=2025, universal_path=universal, root=root, pause=0.0,
         adp_fetch=lambda season: pd.DataFrame([
             {"adp_name": "Justin Jefferson", "position": "WR", "team": "MIN", "adp": 1.5}]))
     assert summary["seasons"] == [2025, 2024]
@@ -90,7 +90,7 @@ def test_import_history_only_fetches_adp_for_missing_seasons(tmp_path):
 
     import_history(
         league_id, {}, fetch=_raw_fetch([2025]), current_season=2025,
-        universal_path=universal, root=root,
+        universal_path=universal, root=root, pause=0.0,
         adp_fetch=lambda season: adp_row("Justin Jefferson", "MIN", 1.5))
 
     calls = []
@@ -101,7 +101,7 @@ def test_import_history_only_fetches_adp_for_missing_seasons(tmp_path):
 
     summary = import_history(
         league_id, {}, fetch=_raw_fetch([2025, 2024]), current_season=2025,
-        universal_path=universal, root=root, adp_fetch=recording_adp_fetch)
+        universal_path=universal, root=root, pause=0.0, adp_fetch=recording_adp_fetch)
     assert summary["seasons"] == [2025, 2024]
     # 2025 was already on disk from the first import; only 2024 is new.
     assert calls == [2024]
@@ -115,7 +115,7 @@ def test_import_history_survives_a_missing_adp_year(tmp_path):
     def adp_fetch(season):
         raise RuntimeError("feed down")
     summary = import_history(
-        "1", {}, fetch=_raw_fetch([2025]), current_season=2025,
+        "1", {}, fetch=_raw_fetch([2025]), current_season=2025, pause=0.0,
         universal_path=universal, root=str(tmp_path / "lg"), adp_fetch=adp_fetch)
     assert summary["seasons"] == [2025]
 
@@ -136,7 +136,7 @@ def test_spawn_import_if_stale_skips_fresh_and_never_raises(tmp_path, monkeypatc
         started.append(name)
         fn()
     ok = league_history.spawn_import_if_stale(
-        "5", {}, spawn=spawn, fetch=_raw_fetch([2025]), current_season=2025,
+        "5", {}, spawn=spawn, fetch=_raw_fetch([2025]), current_season=2025, pause=0.0,
         universal_path=universal, root=root, adp_fetch=lambda s: pd.DataFrame(
             columns=["adp_name", "position", "team", "adp"]))
     assert ok and started == ["history-5"]
@@ -172,3 +172,29 @@ def test_import_history_also_walks_the_seasons_activity(tmp_path, monkeypatch):
                                     columns=["adp_name", "position", "team", "adp"]))
     assert seen == [summary["seasons"]]
     assert summary["activity"]["seasons"] == summary["seasons"]
+
+
+def test_import_history_records_freshness_when_the_current_season_is_not_on_espn_yet(tmp_path):
+    """current_season is unioned into the activity walk unconditionally
+    (see the comment in import_history) -- a league ESPN has not rolled
+    over to that season yet must not stop the import short of
+    record_freshness, or is_fresh() would read False forever and every
+    later visit would retry and fail the same way."""
+    from pipeline.league_history import import_history
+    from pipeline import leagues
+    universal = str(tmp_path / "nfl.duckdb")
+    get_conn(universal).close()
+    root = str(tmp_path / "leagues")
+    # 2025 (current_season) is not in this fake's seasons at all -- every
+    # 2025 URL, including the combined-view one import_seasons asks for,
+    # 404s. 2024 is the only season this league actually has.
+    summary = import_history(
+        "99", {"SWID": "{X}", "espn_s2": "s"}, fetch=_raw_fetch([2024]),
+        current_season=2025, universal_path=universal, root=root, pause=0.0,
+        adp_fetch=lambda s: pd.DataFrame(columns=["adp_name", "position", "team", "adp"]))
+    assert summary["seasons"] == [2024]
+    assert summary["activity"]["seasons"] == [2025, 2024]
+    conn = get_conn(leagues.league_db_path("99", root=root))
+    meta = read_table(conn, "meta")
+    row = meta[meta.source == "league"]
+    assert not row.empty and bool(row.iloc[0].ok)
