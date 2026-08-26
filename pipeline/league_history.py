@@ -25,11 +25,15 @@ import pandas as pd
 from pipeline.db import DEFAULT_PATH, get_conn, read_table, record_freshness, write_table
 from pipeline.espn_drafts import KONA, http_fetch
 from pipeline.espn_league import PLAYERS_FILTER, import_seasons
+from pipeline.league_activity import import_activity
 from pipeline import leagues
 from pipeline.leagues import league_db_path, provision_league
 from scoring.config import CURRENT_SEASON
 
 FRESH_DAYS = 7
+# Seconds between ESPN requests in the walk. Enough to be a polite reader,
+# short enough that six seasons still take a couple of minutes.
+PAUSE_SECONDS = 0.15
 
 
 def json_fetch(fetch, cookies: dict):
@@ -70,10 +74,12 @@ def is_fresh(conn, max_age_days: int = FRESH_DAYS) -> bool:
 def import_history(league_id: str, cookies: dict, fetch=None,
                    current_season: int = CURRENT_SEASON,
                    universal_path: str = DEFAULT_PATH, root: str | None = None,
-                   adp_fetch=None) -> dict:
-    """Import drafted seasons, standings and historic ADP for one league.
+                   adp_fetch=None, progress=None, pause: float = PAUSE_SECONDS) -> dict:
+    """Import drafted seasons, standings, historic ADP and every season's
+    activity for one league.
 
-    Returns `import_seasons`'s summary. Raises what `import_seasons` raises
+    Returns `import_seasons`'s summary, with an `activity` key added
+    (`import_activity`'s own summary). Raises what `import_seasons` raises
     (no drafted seasons, an auction league, a dead session); the caller
     decides whether that is a log line or an error.
 
@@ -102,6 +108,20 @@ def import_history(league_id: str, cookies: dict, fetch=None,
             rows = pd.concat(frames, ignore_index=True)
             write_table(conn, "historic_adp", rows)
             record_freshness(conn, "historic_adp", True, len(rows))
+        # import_seasons walks only DRAFTED seasons; ESPN's own
+        # status.previousSeasons can list more than that. The spec wants
+        # every season the league has, so the activity walk below also
+        # covers the current season even when import_seasons did not find
+        # it drafted yet -- a season whose draft has not happened still has
+        # members, standings-in-progress and settings worth reading.
+        seasons = sorted(set(summary["seasons"]) | {current_season}, reverse=True)
+        # Everything a season does after the draft -- see league_activity.
+        # Same connection, same fetch, same walk from the caller's point of
+        # view. `progress` is the page's stage list when a visit started
+        # this; None from the connect path, which nobody is watching.
+        summary["activity"] = import_activity(
+            conn, league_id, json_fetch(raw, cookies), seasons,
+            current_season, progress=progress, pause=pause)
         record_freshness(conn, "league", True, len(summary["seasons"]))
         return summary
     finally:

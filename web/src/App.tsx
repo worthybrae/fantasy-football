@@ -5,6 +5,7 @@ import MockDrafts from './pages/MockDrafts'
 import Market from './pages/Market'
 import ArchiveData from './pages/ArchiveData'
 import LeaguePage from './pages/LeaguePage'
+import ManagerPage from './pages/ManagerPage'
 import Live from './pages/Live'
 import WaitingRoomPage from './pages/WaitingRoomPage'
 import LeagueReport from './pages/LeagueReport'
@@ -58,6 +59,8 @@ export default function App() {
               {/* One of your leagues, as a place: what it is, when it drafts, the
                   way in -- and where its report cards and profiles will live. */}
               <Route path="/league/:leagueId" element={<LeaguePage />} />
+              {/* One manager in that league, over every season. */}
+              <Route path="/league/:leagueId/manager/:memberId" element={<ManagerPage />} />
             </Routes>
           </MobileGate>
         }

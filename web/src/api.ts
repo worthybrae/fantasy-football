@@ -1606,3 +1606,129 @@ export async function buildLeagueReport(leagueId: string, season: number | strin
   if (!res.ok) throw new Error(await detailText(res))
   return res.json()
 }
+
+/** -- league history (api/league_history.py) ------------------------------ */
+
+export interface HistoryStage {
+  season: number
+  label: string
+  done: boolean
+  week: number
+  weeks: number | null
+}
+
+export interface HistoryProgress {
+  phase: 'idle' | 'running' | 'done' | 'failed'
+  league_id?: string
+  started_at?: number | null
+  error?: string | null
+  seasons_done?: number[]
+  stages?: HistoryStage[]
+}
+
+export interface Named {
+  member_id: string | null
+  display_name: string | null
+}
+
+// One season's headline results, for the seasons strip. Named
+// `HistorySeasonSummary` rather than the bare `SeasonSummary` the plan text
+// uses -- that name is already taken above, by a played SEASON on one
+// player's career (games, ppg, pos_finish, ...), and TypeScript would not
+// have rejected a second `export interface SeasonSummary` here: with no
+// directly conflicting member types it merges the two declarations into one
+// interface that demands every field of both. `LeagueHistory.seasons` would
+// then typecheck against a shape no season summary ESPN ever sends, and
+// nothing here would fail loudly enough to catch it.
+export interface HistorySeasonSummary {
+  season: number
+  teams: number
+  complete: boolean
+  champion: Named | null
+  runner_up: Named | null
+  last: Named | null
+  top_scorer: Named | null
+}
+
+export interface MemberCard {
+  member_id: string
+  display_name: string
+  seasons: number
+  titles: number
+  avg_finish: number | null
+  win_pct: number | null
+  defining_line: string
+}
+
+export interface LeagueHistory {
+  league_id: string
+  imported_at: string | null
+  seasons: HistorySeasonSummary[]
+  members: MemberCard[]
+}
+
+export interface ManagerProfile {
+  member_id: string
+  display_name: string
+  first_name: string | null
+  seasons: number[]
+  finishes: {
+    n: number
+    seasons: { season: number; team_name: string | null; wins: number | null; losses: number | null;
+               ties: number | null; points_for: number | null; points_against: number | null;
+               playoff_seed: number | null; final_rank: number | null; draft_day_rank: number | null;
+               outperformance: number | null }[]
+    titles: number[]; avg_finish: number | null; win_pct: number | null
+    points_per_season: number | null; outperformance: number | null
+  }
+  playoffs: { n: number; appearances: number[]; bracket_wins: number; bracket_losses: number;
+              consolation: { wins: number; losses: number }; titles: number[]; last_place: number[] }
+  head_to_head: { opponent: Named; games: number; wins: number; losses: number; ties: number;
+                  margin: number; playoff_games: number; n: number }[]
+  luck: { n: number; luck: number | null;
+          seasons: { season: number; games: number; actual_wins: number; expected_wins: number; luck: number }[] }
+  waivers: { n: number; claims: number; won: number; lost: number; failed: number;
+             canceled: number; win_rate: number | null;
+             free_agent_adds: number; drops: number; adds_by_weekday: Record<string, number>;
+             busiest_week: { season: number; week: number; moves: number } | null; seasons: number[];
+             bids?: { n: number; mean: number; max: number; spent: number } }
+  trades: { n: number; proposed: number; received: number; accepted: number; declined_by_me: number;
+            declined_by_them: number; vetoed: number; partners: { member_id: string; display_name: string; trades: number }[];
+            balance: number | null;
+            ledger: { season: number; week: number; with: string | null; with_name: string | null;
+                      sent: { player_id: number; name: string }[]; received: { player_id: number; name: string }[];
+                      balance: number }[] }
+  lineups: { n: number; weeks: { season: number; week: number; started: number; optimal: number; left: number }[];
+             bench_points_left: number | null; hit_rate: number | null; started_out: number;
+             worst_week: { season: number; week: number; left: number } | null; moves_per_week: number | null }
+  draft_flags: { n: number; autodrafts: number; autodraft_rate: number | null; keepers: number; seasons: number[] }
+  /** The league-report branch's draft habits, when its tables exist. */
+  draft: Record<string, unknown> | null
+}
+
+export async function startLeagueHistory(leagueId: string): Promise<'running' | 'fresh'> {
+  const res = await fetch(`/api/leagues/${encodeURIComponent(leagueId)}/history`, { method: 'POST' })
+  if (!res.ok) throw new Error(await detailText(res))
+  return (await res.json()).status
+}
+
+export async function fetchLeagueHistoryProgress(leagueId: string): Promise<HistoryProgress> {
+  const res = await fetch(`/api/leagues/${encodeURIComponent(leagueId)}/history/progress`)
+  if (!res.ok) throw new Error(await detailText(res))
+  return res.json()
+}
+
+/** Null on 404: nothing imported yet, which is a state, not an error. */
+export async function fetchLeagueHistory(leagueId: string): Promise<LeagueHistory | null> {
+  const res = await fetch(`/api/leagues/${encodeURIComponent(leagueId)}/history`)
+  if (res.status === 404) return null
+  if (!res.ok) throw new Error(await detailText(res))
+  return res.json()
+}
+
+export async function fetchManagerProfile(leagueId: string, memberId: string): Promise<ManagerProfile> {
+  const res = await fetch(
+    `/api/leagues/${encodeURIComponent(leagueId)}/managers/${encodeURIComponent(memberId)}`)
+  if (!res.ok) throw new Error(await detailText(res))
+  return res.json()
+}

@@ -34,12 +34,63 @@
   background: var(--accent);
 }
 
-.lg-soon {
-  margin-top: 28px;
-}
-
 .lg-back {
   display: inline-block;
   margin-top: 14px;
   color: var(--accent);
 }
+
+/* -- history: importing ------------------------------------------------ */
+.lg-import { margin-top: 28px; }
+.lg-stages { list-style: none; margin: 14px 0 0; padding: 0; display: grid; gap: 6px; font-size: var(--text-sm); color: var(--text-3); }
+.lg-stage { display: flex; align-items: center; gap: 10px; }
+.lg-stage-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--border); }
+.lg-stage.is-live { color: var(--text-1); }
+.lg-stage.is-live .lg-stage-dot { background: var(--accent); animation: db-dot 1.8s ease-in-out infinite; }
+.lg-stage.is-done { color: var(--text-2); }
+.lg-stage.is-done .lg-stage-dot { background: var(--ok); }
+
+/* -- history: seasons strip -------------------------------------------- */
+.lg-seasons { margin-top: 28px; }
+.lg-strip { list-style: none; margin: 14px 0 0; padding: 0; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(180px, 1fr); gap: 12px; overflow-x: auto; }
+.lg-season { padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-1); display: grid; gap: 6px; }
+.lg-season.is-open { border-style: dashed; }
+.lg-season-year { font-size: var(--text-md); font-weight: 700; color: var(--text-1); }
+.lg-season-row { display: flex; justify-content: space-between; gap: 8px; font-size: var(--text-sm); }
+.lg-season-row.is-empty { color: var(--text-3); }
+.lg-season-label { color: var(--text-3); }
+.lg-season-row a { color: var(--text-1); text-decoration: none; }
+.lg-season-row a:hover { color: var(--accent); }
+
+/* -- history: manager grid --------------------------------------------- */
+.lg-managers { margin-top: 28px; }
+.lg-grid { list-style: none; margin: 14px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.lg-manager { padding: 16px 18px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-1); display: grid; gap: 6px; }
+.lg-manager.is-me { border-color: var(--accent-border); }
+.lg-manager-name { font-size: var(--text-md); font-weight: 700; color: var(--text-1); text-decoration: none; }
+.lg-manager-name:hover { color: var(--accent); }
+.lg-manager-line { margin: 0; color: var(--text-2); font-size: var(--text-sm); }
+.lg-manager-figs { margin: 0; color: var(--text-3); font-size: var(--text-xs); }
+
+/* -- manager page -------------------------------------------------------- */
+.lg-sec { margin-top: 28px; }
+.lg-figs { display: flex; flex-wrap: wrap; gap: 18px 28px; margin-top: 12px; }
+.lg-fig { display: grid; gap: 2px; }
+.lg-fig-value { font-size: 22px; font-weight: 700; color: var(--text-1); }
+.lg-fig-label { font-size: var(--text-xs); color: var(--text-3); text-transform: uppercase; letter-spacing: 0.06em; }
+.lg-n { color: var(--text-3); text-transform: none; letter-spacing: 0; }
+.lg-table { margin-top: 12px; border-collapse: collapse; font-size: var(--text-sm); }
+.lg-table th, .lg-table td { padding: 6px 12px 6px 0; text-align: right; border-bottom: 1px solid var(--border); }
+.lg-table th { color: var(--text-3); font-weight: 600; font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.06em; }
+.lg-table .lg-td-text { text-align: left; padding-left: 12px; font-family: var(--font-sans); }
+.lg-table .lg-td-text a { color: var(--text-1); text-decoration: none; }
+.lg-table .lg-td-text a:hover { color: var(--accent); }
+.lg-table tr.is-title td:first-child::after { content: ' ♛'; color: var(--accent); }
+.is-up { color: var(--ok); }
+.is-down { color: var(--danger, #e5484d); }
+.lg-ledger { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 8px; }
+.lg-trade { display: grid; grid-template-columns: 110px 1fr 70px; gap: 12px; align-items: baseline; font-size: var(--text-sm); }
+.lg-trade-when { color: var(--text-3); }
+.lg-trade-balance { text-align: right; }
+.lg-player { border: 0; padding: 0; margin: 0 2px; background: none; font: inherit; color: var(--text-1); text-decoration: underline dotted; cursor: pointer; }
+.lg-player:hover { color: var(--accent); }
