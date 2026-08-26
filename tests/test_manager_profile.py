@@ -247,3 +247,36 @@ def test_trades_count_proposals_outcomes_partners_and_balance(activity):
 def test_player_names_come_from_any_week_a_player_was_rostered(activity):
     names = mp.player_names(activity)
     assert names[300] == "Got Back" and 999 not in names
+
+
+def test_trades_balance_and_partners_span_every_team_in_a_multi_team_trade(league):
+    """A sends 200 to B and 201 to C, and receives 300 from B. The balance
+    must subtract each sent player's rest-of-season points from the team
+    that actually received them, not just the first sent item's team, and
+    `partners` must list both B and C, not just the first counterpart
+    `counterpart()` happens to find."""
+    conn = league
+    t = [
+        _txn(2025, 3, "tp1", 1, A, "TRADE_PROPOSAL", "PENDING", "EXECUTE",
+             [_trade_item(200, 1, 2), _trade_item(201, 1, 3), _trade_item(300, 2, 1)]),
+        _txn(2025, 3, "ta1", 2, B, "TRADE_ACCEPT", "EXECUTED", "PROCESS",
+             [_trade_item(200, 1, 2), _trade_item(201, 1, 3), _trade_item(300, 2, 1)],
+             related="tp1", when="2025-09-25T10:00:00Z"),
+    ]
+    write_table(conn, "league_transactions", pd.DataFrame(t))
+    lu = [
+        _lineup(2025, 4, 1, 300, "Got Back", "RB", 2, 20.0),
+        _lineup(2025, 5, 1, 300, "Got Back", "RB", 2, 25.0),
+        _lineup(2025, 4, 2, 200, "Sent To B", "RB", 2, 10.0),
+        _lineup(2025, 5, 2, 200, "Sent To B", "RB", 2, 10.0),
+        _lineup(2025, 4, 3, 201, "Sent To C", "RB", 2, 5.0),
+        _lineup(2025, 5, 3, 201, "Sent To C", "RB", 2, 5.0),
+    ]
+    write_table(conn, "league_lineups", pd.DataFrame(lu))
+    t_a = mp.trades(conn, A)
+    assert t_a["n"] == 1
+    # +45 (300, rest of season for A) - 20 (200, rest of season for B)
+    # - 10 (201, rest of season for C)
+    assert t_a["balance"] == pytest.approx(15.0)
+    assert {p["member_id"] for p in t_a["partners"]} == {B, C}
+    assert sum(p["trades"] for p in t_a["partners"]) == 2

@@ -376,14 +376,22 @@ def trades(conn, member_id: str) -> dict:
         season = int(r.season)
         my_team = teams.get(season)
         items = r.items
+        # `with`/`with_name` below keep only the first counterpart -- ESPN
+        # trades are two-team in practice -- but `partners` must count every
+        # distinct counterpart team the items actually touch, once per trade.
         other = counterpart(items, season)
-        partners[other] += 1
+        other_teams = {int(tid) for i in items for tid in (i.get("fromTeamId"), i.get("toTeamId"))
+                       if tid and tid != my_team}
+        for tid in other_teams:
+            partners[owner.get((season, tid))] += 1
         sent = [i for i in items if i.get("fromTeamId") == my_team]
         got = [i for i in items if i.get("toTeamId") == my_team]
-        other_team = next((i.get("toTeamId") for i in sent), None)
         week = int(r.week)
+        # Each sent item's own toTeamId is the team that player now scores
+        # for -- not just the first sent item's, in case a trade sends
+        # players to more than one team.
         balance = (sum(_rest_of_season_points(lu, season, week, int(i["playerId"]), my_team) for i in got)
-                   - sum(_rest_of_season_points(lu, season, week, int(i["playerId"]), other_team) for i in sent))
+                   - sum(_rest_of_season_points(lu, season, week, int(i["playerId"]), int(i["toTeamId"])) for i in sent))
         ledger.append({
             "season": season, "week": week, "with": other,
             "with_name": display.get(other, other),
