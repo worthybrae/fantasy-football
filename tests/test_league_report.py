@@ -124,6 +124,28 @@ def test_names_for_prefers_the_newest_season(tmp_path):
     assert names[2] == ("s-new", "New Team 2")
 
 
+def test_names_for_never_yields_a_stringified_null(tmp_path):
+    """`str(row["manager"])` on a null turns into the literal "None" or
+    "nan", which then goes on a public page and into the model's prompt as
+    if it were somebody's name. A row with no manager has nothing to say;
+    the pick keeps its ESPN team name or its "Team N"."""
+    from scoring.league_report import names_for
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    write_table(conn, "league_standings", pd.DataFrame([
+        {"season": 2025, "team_id": 1, "manager": None, "team_name": "Ghost Town",
+         "wins": 0, "losses": 0, "ties": 0, "points_for": 0.0, "points_against": 0.0,
+         "playoff_seed": None, "final_rank": None},
+    ]))
+    write_table(conn, "draft_teams", pd.DataFrame([
+        {"season": 2025, "team_id": 2, "manager": None, "slot": 2},
+        {"season": 2025, "team_id": 3, "manager": "real", "slot": 3},
+    ]))
+    names = names_for(conn)
+    assert 1 not in names and 2 not in names
+    assert names[3] == ("real", None)
+    assert not [n for n, _ in names.values() if n in ("None", "nan", "NaN", "<NA>")]
+
+
 def test_historical_picks_join_adp_and_names(tmp_path):
     from scoring.league_report import historical_picks, PICK_COLUMNS
     conn = seed_league(str(tmp_path / "t.duckdb"))

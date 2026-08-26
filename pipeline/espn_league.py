@@ -106,10 +106,25 @@ def parse_draft_picks(payload: dict, season: int) -> pd.DataFrame:
     return df.sort_values("overall_pick").reset_index(drop=True)
 
 
+def _display_name(team: dict) -> str:
+    """ESPN's own label for a team, however it stored it.
+
+    `pipeline.espn_teams._team_name`, imported inside the function on
+    purpose: `espn_teams` reads `BASE` out of this module at import time, so
+    a module-scope import here would close the cycle. One helper rather than
+    the same deferred import twice below.
+    """
+    from pipeline.espn_teams import _team_name
+    return _team_name(team)
+
+
 def parse_draft_teams(payload: dict, season: int) -> pd.DataFrame:
     # `owners` holds member GUIDs; the human-readable name lives in `members`.
     # A team with no owner (orphan/abandoned) falls back to its team name so
-    # the manager column is never null -- the model keys on it.
+    # the manager column is never null -- the model keys on it. Via
+    # `_display_name`, because `t["name"]` is empty for the teams that carry
+    # a location+nickname pair instead, and a null manager reaches a public
+    # page as the literal string "None".
     members = {m.get("id"): m.get("displayName")
                for m in (payload.get("members") or [])}
     rows = []
@@ -117,7 +132,7 @@ def parse_draft_teams(payload: dict, season: int) -> pd.DataFrame:
         owners = t.get("owners") or []
         manager = next((members[o] for o in owners if members.get(o)), None)
         rows.append({"season": season, "team_id": t.get("id"),
-                     "manager": manager or t.get("name"),
+                     "manager": manager or _display_name(t),
                      "slot": t.get("draftDayPickOrder")})
     return pd.DataFrame(rows, columns=["season", "team_id", "manager", "slot"])
 
@@ -144,6 +159,13 @@ def parse_standings(payload: dict, season: int) -> pd.DataFrame:
     playoff-resolved finish (1 is the champion). The manager resolves the
     same way `parse_draft_teams` resolves it so the two tables agree on the
     name a person is known by across seasons.
+
+    Both names come through `_display_name`, never `t["name"]` alone: some
+    teams leave `name` empty and carry a `location` + `nickname` pair
+    instead (which is the whole reason `espn_teams._team_name` exists), and
+    reading only `name` stored a NULL team_name for them -- plus, for one
+    with no owner, a NULL manager, which `scoring.league_report.names_for`
+    used to stringify into "None" on a public page and in the model prompt.
     """
     members = {m.get("id"): m.get("displayName")
                for m in (payload.get("members") or [])}
@@ -154,8 +176,8 @@ def parse_standings(payload: dict, season: int) -> pd.DataFrame:
         overall = ((t.get("record") or {}).get("overall")) or {}
         rows.append({
             "season": season, "team_id": t.get("id"),
-            "manager": manager or t.get("name"),
-            "team_name": t.get("name"),
+            "manager": manager or _display_name(t),
+            "team_name": _display_name(t),
             "wins": overall.get("wins"), "losses": overall.get("losses"),
             "ties": overall.get("ties"),
             "points_for": overall.get("pointsFor"),

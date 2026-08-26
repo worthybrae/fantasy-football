@@ -402,6 +402,34 @@ def test_parse_standings_reads_record_seed_and_final_rank():
     assert pd.isna(charlie["wins"]) and pd.isna(charlie["points_for"])
 
 
+def test_parse_standings_reads_espns_other_team_name_shape():
+    """Some teams carry `location` + `nickname` and no `name` at all --
+    which is why `espn_teams._team_name` exists. Read through `t["name"]`
+    alone, such a team stored a NULL team_name and, with no owner, a NULL
+    manager too, and `names_for` stringified that into "None"/"nan" on a
+    public page and in the model's prompt."""
+    from pipeline.espn_league import parse_draft_teams, parse_standings
+    payload = {
+        "teams": [
+            {"id": 4, "location": "Piss", "nickname": "Floor", "owners": ["{AAA}"],
+             "draftDayPickOrder": 1,
+             "record": {"overall": {"wins": 8, "losses": 6, "ties": 0,
+                                    "pointsFor": 1500.0, "pointsAgainst": 1400.0}}},
+            # Ownerless AND unnamed: the manager falls back to the same
+            # label rather than to None.
+            {"id": 5, "location": "Ghost", "nickname": "Town", "owners": [],
+             "draftDayPickOrder": 2},
+        ],
+        "members": [{"id": "{AAA}", "displayName": "worthy"}],
+    }
+    df = parse_standings(payload, 2024).set_index("team_id")
+    assert df.loc[4, "team_name"] == "Piss Floor" and df.loc[4, "manager"] == "worthy"
+    assert df.loc[5, "team_name"] == "Ghost Town" and df.loc[5, "manager"] == "Ghost Town"
+    teams = parse_draft_teams(payload, 2024).set_index("team_id")
+    assert teams.loc[5, "manager"] == "Ghost Town"
+    assert teams.loc[4, "manager"] == "worthy"
+
+
 def test_import_seasons_writes_standings_and_league_name(tmp_path):
     def fetch(url):
         if "2025" not in url:

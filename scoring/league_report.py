@@ -101,11 +101,23 @@ def league_name(conn, league_id: str) -> str:
 
 
 def names_for(conn) -> dict:
-    """team_id -> (manager, team_name) from the newest season each appears in."""
+    """team_id -> (manager, team_name) from the newest season each appears in.
+
+    A row with no manager is SKIPPED, not stringified. `str(None)` is
+    "None" and `str(float('nan'))` is "nan", and either one goes straight
+    onto a public report page and into the model's prompt as if it were
+    somebody's name. Absent here, the caller falls back to the ESPN team
+    name or "Team N", which is what a nameless team is actually called.
+    (The import should no longer produce one -- `parse_standings` and
+    `parse_draft_teams` both fall back to ESPN's own team label now -- but
+    every league file imported before that keeps its nulls.)
+    """
     out = {}
     standings = read_table(conn, "league_standings")
     if not standings.empty:
         for _, row in standings.sort_values("season").iterrows():
+            if pd.isna(row["manager"]):
+                continue
             out[int(row["team_id"])] = (str(row["manager"]), row.get("team_name"))
     teams = read_table(conn, "draft_teams")
     if not teams.empty:
@@ -115,7 +127,7 @@ def names_for(conn) -> dict:
         # of this function's contract.
         for _, row in teams.sort_values("season", ascending=False).iterrows():
             tid = int(row["team_id"])
-            if tid not in out:
+            if tid not in out and not pd.isna(row["manager"]):
                 out[tid] = (str(row["manager"]), None)
     return out
 
