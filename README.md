@@ -103,18 +103,35 @@ relevant. A guess and a fact are not the same claim. A player nobody wrote
 about gets an empty list; so does every defense, because a search for
 "Denver Defense" returns whatever the newspaper wrote about the Broncos.
 
+## The league report card
+
+`/leagues/<league id>/report/<season>` is the morning-after page: power
+rankings, a graded report card per team, and a profile per manager, written
+up in one Haiku call over numbers computed in Python. It is built once and
+stored in that league's own database (one row per season, in
+`league_reports`), so a link shared with the league costs nothing after the
+first build and everybody reads the same words. The room orders it itself
+when the last pick of a real draft lands; the league's owner can also build
+a past season, or rebuild this one, with `POST
+/api/leagues/<id>/report/<season>` — the button on the dashboard card.
+Reading is public, building is the owner's. With no `ANTHROPIC_API_KEY` the
+page is complete and quiet: every number, no prose (`status:
+"numbers_only"`).
+
 ## Project structure
 
 - `pipeline/` — data ingestion and refresh workflow (`sources.py`, `db.py`,
   `refresh.py`), plus ESPN draft history import (`espn_league.py`,
-  `import_league.py`), manager fitting (`fit_managers.py`), and the
+  `import_league.py`), the same import for any connected account's league
+  (`league_history.py`), manager fitting (`fit_managers.py`), and the
   simulator CLI (`run_sim.py`)
 - `scoring/` — PPR calculations, per-factor scoring, composite/VOR/tiers,
   league config (`scoring/config.py`), ESPN-derived league structure
-  (`league.py`), the per-manager pick model (`draft_model.py`), and the
-  draft simulator (`draft_sim.py`)
+  (`league.py`), the per-manager pick model (`draft_model.py`), the draft
+  simulator (`draft_sim.py`), and the report card's numbers
+  (`league_report.py`) and prose (`blurbs.py`)
 - `api/` — FastAPI backend serving the draft board, drafted-player state,
-  and draft simulation endpoints
+  draft simulation endpoints, and the league report card (`reports.py`)
 - `web/` — Vite + React + TypeScript frontend
 - `tests/` — pytest suite for the Python side
 
@@ -262,6 +279,7 @@ means moving the mutable tables to Postgres first.
 | `RUN_FARM` | `1` | **Off by default.** Needs the login variable below |
 | `FARM_CONCURRENCY` | `1` | How many drafts at once. Six matches a full local setup; capped at 8 |
 | `FARM_ESPN_STATE_B64` | `make farm-secret` | The farm's ESPN login. A live session — host's variable store only |
+| `ANTHROPIC_API_KEY` | `sk-ant-…` | **Off by default.** Absent, every report card is `numbers_only` — see The league report card |
 | `STRIPE_SECRET_KEY` | `rk_live_…` | **Off by default.** Absent, every draft is free — see Charging for it |
 | `STRIPE_PRICE_ID` | `price_…` | The $9.99 price, made in the Stripe Dashboard |
 | `STRIPE_WEBHOOK_SECRET` | `whsec_…` | Required with the key. Without it the webhook refuses everything |
