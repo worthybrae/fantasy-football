@@ -142,6 +142,17 @@ def _answer(league_id: str, key: str, build):
     return value
 
 
+def _release_reservation(league_id: str, progress: Progress) -> None:
+    """Undo start_history's reservation of `_JOBS[league_id]`, but only if
+    it is still ours. Used on the "fresh, no job needed" path and on any
+    failure between reserving the slot and the job actually starting --
+    both cases need the same identity-guarded release, so it lives once
+    here rather than twice inline."""
+    with _LOCK:
+        if _JOBS.get(league_id) is progress:
+            del _JOBS[league_id]
+
+
 def register_league_history_routes(app, store=None, fetch=None, runner=None,
                                    universal_path: str = DEFAULT_PATH) -> None:
     """`fetch` and `runner` are seams for tests: the ESPN fetch, and how the
@@ -183,21 +194,30 @@ def register_league_history_routes(app, store=None, fetch=None, runner=None,
             progress = Progress(league_id)
             progress.start([])
             _JOBS[league_id] = progress
-        if not retryable and _imported(league_id) and _fresh(league_id):
-            with _LOCK:
-                if _JOBS.get(league_id) is progress:
-                    del _JOBS[league_id]
-            return {"status": "fresh"}
-        cookies = drafts.cookies_for(session.swid, session.espn_s2)
+        # Everything from here down can still raise before the job is
+        # genuinely under way -- a DB read inside _imported/_fresh, cookie
+        # construction, the thread itself failing to start -- and none of
+        # that may leave the reservation above behind: an orphaned
+        # "running" placeholder is a job nothing will ever advance, and
+        # every later POST would answer 202 running forever.
+        try:
+            if not retryable and _imported(league_id) and _fresh(league_id):
+                _release_reservation(league_id, progress)
+                return {"status": "fresh"}
+            cookies = drafts.cookies_for(session.swid, session.espn_s2)
 
-        def job():
-            try:
-                run_import(league_id, cookies, progress, fetch=fetch,
-                          universal_path=universal_path)
-            except Exception:      # noqa: BLE001 -- run_import has already
-                traceback.print_exc()  # recorded the failure on `progress`;
-                # this only puts a trace in the server's own log.
-        start(job)
+            def job():
+                try:
+                    run_import(league_id, cookies, progress, fetch=fetch,
+                              universal_path=universal_path)
+                except Exception:      # noqa: BLE001 -- run_import has
+                    traceback.print_exc()  # already recorded the failure
+                    # on `progress`; this only puts a trace in the server's
+                    # own log.
+            start(job)
+        except BaseException:
+            _release_reservation(league_id, progress)
+            raise
         return _status(202, {"status": "running"})
 
     @app.get("/api/leagues/{league_id}/history/progress")

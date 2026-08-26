@@ -217,3 +217,30 @@ def test_a_failure_after_the_walk_is_recorded_and_the_next_post_retries(owner, m
     # never finished cleanly, whatever import_activity itself stored.
     retry = client.post(f"/api/leagues/{LEAGUE}/history")
     assert retry.status_code == 202 and retry.json()["status"] == "running"
+
+
+def test_a_failure_before_the_job_starts_releases_the_reservation(owner, monkeypatch):
+    """_imported (or _fresh) raising after the slot is reserved -- a DB read
+    error, say -- must not leave the placeholder "running" Progress behind:
+    nothing would ever advance it, and every later POST would answer 202
+    running forever against a job that never actually started."""
+    real_imported = lh._imported
+    should_boom = {"on": True}
+
+    def maybe_boom(league_id):
+        if should_boom["on"]:
+            raise RuntimeError("disk on fire")
+        return real_imported(league_id)
+    monkeypatch.setattr(lh, "_imported", maybe_boom)
+    client = _client(_fetch(_entries_payload((LEAGUE, "Mine"))), runner=_sync)
+
+    with pytest.raises(RuntimeError):
+        client.post(f"/api/leagues/{LEAGUE}/history")
+
+    # The reservation must not have leaked: progress reads idle, not a
+    # "running" placeholder nothing will ever advance.
+    assert client.get(f"/api/leagues/{LEAGUE}/history/progress").json()["phase"] == "idle"
+
+    should_boom["on"] = False
+    retry = client.post(f"/api/leagues/{LEAGUE}/history")
+    assert retry.status_code == 202 and retry.json()["status"] == "running"
