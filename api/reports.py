@@ -307,8 +307,8 @@ def on_draft_complete(league_id: str, season, swid: str | None, session, drafted
 
 
 def spawn_draft_complete(league_id: str, season, swid: str | None, session, drafted: list,
-                         store=None, spawn=None, root: str | None = None) -> None:
-    """`on_draft_complete`, off the caller's thread.
+                         store=None, spawn=None, root: str | None = None) -> bool:
+    """`on_draft_complete`, off the caller's thread. Whether it started.
 
     Its one call site is the socket read thread in `api/live.py`, which must
     return fast -- the comment right below the call says so, and the next
@@ -320,13 +320,26 @@ def spawn_draft_complete(league_id: str, season, swid: str | None, session, draf
     on a daemon thread of its own.
 
     `spawn` is the same `(name, fn)` injection `spawn_build` takes, so a
-    test can run the job inline. Never raises -- `on_draft_complete` does
-    not, and a thread that could would have nowhere to raise to.
+    test can run the job inline.
+
+    NEVER RAISES, and the start itself is the part that has to be guarded.
+    `on_draft_complete` swallows its own failures, but the thread start does
+    not: `RuntimeError: can't start new thread` from here would come up on
+    the socket read thread and kill the listener at the last pick of a real
+    draft -- losing the room, to save a report card nobody has asked for
+    yet. A report that never starts is a missing page; a dead listener is a
+    dead draft.
     """
     def run():
         on_draft_complete(league_id, season, swid, session, drafted,
                           store=store, root=root)
-    (spawn or _spawn)(f"draft-complete-{league_id}-{season}", run)
+    try:
+        (spawn or _spawn)(f"draft-complete-{league_id}-{season}", run)
+    except Exception as exc:      # noqa: BLE001 -- see the docstring
+        print(f"league {league_id}: could not start the draft-end report job: {exc}",
+              flush=True)
+        return False
+    return True
 
 
 # -- routes ------------------------------------------------------------------

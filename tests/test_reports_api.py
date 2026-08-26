@@ -105,6 +105,19 @@ def test_a_build_that_cannot_start_leaves_no_flight_behind(league_root):
     held[0]()
 
 
+def test_a_draft_end_job_that_cannot_start_never_reaches_the_listener():
+    """Same guard, the other job. This one is started FROM THE SOCKET READ
+    THREAD at the last pick of a real draft: a `RuntimeError: can't start
+    new thread` coming up out of here would kill the listener to save a
+    report card nobody has asked for yet."""
+    from api import reports
+
+    def boom(name, fn):
+        raise RuntimeError("can't start new thread")
+    assert reports.spawn_draft_complete("424242", 2026, "{X}", object(), [("x", 1)],
+                                        spawn=boom) is False
+
+
 def test_get_reports_lists_and_serves(tmp_path, league_root):
     from api import reports
     reports.build_report("424242", 2024, root=league_root)
@@ -360,7 +373,7 @@ def test_spawn_draft_complete_runs_the_hook_off_the_callers_thread():
     monkey = lambda *a, **kw: seen.append((threading.current_thread().name, a))  # noqa: E731
     real, reports.on_draft_complete = reports.on_draft_complete, monkey
     try:
-        reports.spawn_draft_complete("424242", 2026, "{X}", object(), [("x", 1)])
+        assert reports.spawn_draft_complete("424242", 2026, "{X}", object(), [("x", 1)]) is True
         for thread in threading.enumerate():
             if thread.name.startswith("job-draft-complete-"):
                 thread.join(timeout=5)

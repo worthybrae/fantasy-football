@@ -3774,6 +3774,15 @@ def register_live_routes(app, conn, db_path):
             session = dataclasses.replace(session,
                                           my_slot=int(record["my_slot"]))
             progress.fact(my_slot=int(session.my_slot))
+        # OUTSIDE `lock`, and it matters. On a cold lobby cache
+        # `is_free_draft` reaches ESPN's mock directory -- an outbound fetch
+        # with a 10s timeout -- and `lock` is taken by /api/live/state,
+        # /api/live/connect-token and every socket callback. Asked inside
+        # the block below, one restart with a saved real-league session
+        # could stall every poll in the process for ten seconds. Same shape
+        # as the live connect path, which computes `real_league` before it
+        # touches the lock.
+        real_league = not billing.is_free_draft(league_id)
         with lock:
             # Same in-memory token record a live connect keeps, so
             # /api/live/state's token_received is true for a restored
@@ -3785,10 +3794,10 @@ def register_live_routes(app, conn, db_path):
                 "season": record["season"],
                 "received_at": record.get("saved_at"),
                 # Same as the live connect's own record: the rail's link to
-                # this room's report card, worked out once here on the
-                # restore thread rather than on every poll.
-                "report_url": (None if billing.is_free_draft(league_id)
-                               else _report_url(league_id, record["season"])),
+                # this room's report card, worked out once on the restore
+                # thread rather than on every poll.
+                "report_url": (_report_url(league_id, record["season"])
+                               if real_league else None),
             }
         _launch_listener(work_conn, league_conn, league_id, session,
                          _socket_run_fn(league_id, record["team_id"],
