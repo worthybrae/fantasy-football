@@ -280,3 +280,101 @@ def test_trades_balance_and_partners_span_every_team_in_a_multi_team_trade(leagu
     assert t_a["balance"] == pytest.approx(15.0)
     assert {p["member_id"] for p in t_a["partners"]} == {B, C}
     assert sum(p["trades"] for p in t_a["partners"]) == 2
+
+
+SLOTS = {"0": 1, "2": 1, "4": 1, "23": 1, "20": 3}     # QB, RB, WR, FLEX, 3 bench
+
+
+def test_optimal_points_fills_flex_with_the_best_leftover():
+    entries = [("QB", 20.0), ("RB", 15.0), ("RB", 12.0), ("WR", 10.0), ("WR", 18.0), ("TE", 9.0)]
+    # QB 20 + RB 15 + WR 18 + FLEX best of {RB 12, WR 10, TE 9} = 12 -> 65
+    assert mp.optimal_points(entries, SLOTS) == pytest.approx(65.0)
+
+
+@pytest.fixture
+def lineups_league(league):
+    conn = league
+    raw = pd.DataFrame([{"season": 2025, "view": "mSettings", "week": 0,
+                         "fetched_at": pd.Timestamp.now(tz="UTC"),
+                         "payload_json": json.dumps({"settings": {
+                             "rosterSettings": {"lineupSlotCounts": SLOTS},
+                             "acquisitionSettings": {"isUsingAcquisitionBudget": False}}})}])
+    write_table(conn, "league_raw", raw)
+    # A, 2025 week 1: started QB 20, RB 8, WR 18, FLEX RB 5; benched RB 15 (OUT starter RB 8).
+    # Optimal: 20 + 15 + 18 + 8 = 61; started 51; left 10.
+    rows = [
+        _lineup(2025, 1, 1, 1, "Q", "QB", 0, 20.0), _lineup(2025, 1, 1, 2, "R1", "RB", 2, 8.0),
+        _lineup(2025, 1, 1, 3, "W", "WR", 4, 18.0), _lineup(2025, 1, 1, 4, "R2", "RB", 23, 5.0),
+        _lineup(2025, 1, 1, 5, "R3", "RB", 20, 15.0),
+        # week 2: optimal lineup started (hit). QB 10, RB 10, WR 10, FLEX 10, bench 1.
+        _lineup(2025, 2, 1, 1, "Q", "QB", 0, 10.0), _lineup(2025, 2, 1, 2, "R1", "RB", 2, 10.0),
+        _lineup(2025, 2, 1, 3, "W", "WR", 4, 10.0), _lineup(2025, 2, 1, 4, "R2", "RB", 23, 10.0),
+        _lineup(2025, 2, 1, 5, "R3", "RB", 20, 1.0),
+    ]
+    df = pd.DataFrame(rows)
+    df.loc[(df.week == 1) & (df.player_id == 2), "injury_status"] = "OUT"
+    write_table(conn, "league_lineups", df)
+    flags = pd.DataFrame([
+        {"season": 2025, "overall_pick": 1, "round": 1, "team_id": 1, "member_id": A,
+         "player_id": 1, "autodraft": False, "keeper": False},
+        {"season": 2025, "overall_pick": 5, "round": 2, "team_id": 1, "member_id": A,
+         "player_id": 2, "autodraft": True, "keeper": False},
+    ])
+    write_table(conn, "league_draft_flags", flags)
+    return conn
+
+
+def test_lineups_measure_points_left_hit_rate_and_bad_starts(lineups_league):
+    l = mp.lineups(lineups_league, A)
+    assert l["n"] == 2
+    weeks = {w["week"]: w for w in l["weeks"]}
+    assert weeks[1]["started"] == 51.0 and weeks[1]["optimal"] == 61.0 and weeks[1]["left"] == 10.0
+    assert weeks[2]["left"] == 0.0
+    assert l["bench_points_left"] == 5.0 and l["hit_rate"] == 0.5
+    assert l["started_out"] == 1
+    assert l["worst_week"] == {"season": 2025, "week": 1, "left": 10.0}
+    assert l["moves_per_week"] is None or l["moves_per_week"] > 0
+
+
+def test_draft_flags_give_an_autodraft_rate(lineups_league):
+    d = mp.draft_flags(lineups_league, A)
+    assert d["n"] == 2 and d["autodraft_rate"] == 0.5 and d["autodrafts"] == 1
+
+
+def test_profile_assembles_every_section_with_names(lineups_league):
+    p = mp.profile(lineups_league, A)
+    assert p["member_id"] == A and p["display_name"] == "a"
+    for key in ("finishes", "playoffs", "head_to_head", "luck", "waivers", "trades",
+                "lineups", "draft_flags"):
+        assert key in p
+    assert p["head_to_head"][0]["opponent"]["display_name"] in {"b", "c", "d"}
+    assert mp.profile(lineups_league, "{NOBODY}") is None
+
+
+def test_overview_has_the_strip_and_a_grid_with_a_defining_line(lineups_league):
+    o = mp.league_overview(lineups_league)
+    assert [s["season"] for s in o["seasons"]] == [2024, 2025]
+    grid = {m["member_id"]: m for m in o["members"]}
+    assert grid[A]["titles"] == 1 and grid[A]["seasons"] == 2
+    assert isinstance(grid[A]["defining_line"], str) and grid[A]["defining_line"]
+    # D holds the league's extreme on luck (-0.33 over two seasons, n=6 >= 5):
+    # rule 8 fires and D gets that line, not the fallback.
+    assert grid[D]["defining_line"] == "the unluckiest record in the league"
+
+
+def test_defining_line_falls_back_to_the_record_with_no_extreme():
+    no_extreme = {"n": 0}
+    rookie = {
+        "finishes": {"n": 0, "seasons": []}, "playoffs": no_extreme, "luck": no_extreme,
+        "waivers": no_extreme, "trades": no_extreme, "lineups": no_extreme,
+        "draft_flags": no_extreme,
+    }
+    veteran = {
+        "finishes": {"n": 1, "avg_finish": 3.0,
+                     "seasons": [{"wins": 7, "losses": 6}]},
+        "playoffs": no_extreme, "luck": no_extreme, "waivers": no_extreme,
+        "trades": no_extreme, "lineups": no_extreme, "draft_flags": no_extreme,
+    }
+    facts_by_member = {"rookie": rookie, "veteran": veteran}
+    assert mp.defining_line("rookie", facts_by_member) == "first season in the league"
+    assert mp.defining_line("veteran", facts_by_member) == "7-6 last season, avg finish 3.0"

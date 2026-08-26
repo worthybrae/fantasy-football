@@ -18,9 +18,12 @@ from collections import defaultdict
 import pandas as pd
 
 from pipeline.db import read_table
+from pipeline.espn_league import (ESPN_BENCH_SLOT, ESPN_FLEX_SLOT, ESPN_IR_SLOT,
+                                  ESPN_SLOT_POSITIONS)
 
 PLAYOFF_TIERS = {"WINNERS_BRACKET"}
 CONSOLATION_TIERS = {"WINNERS_CONSOLATION_LADDER", "LOSERS_CONSOLATION_LADDER"}
+FLEX_POSITIONS = {"RB", "WR", "TE"}
 
 
 def _num(value):
@@ -33,6 +36,12 @@ def _int(value):
     if value is None or pd.isna(value):
         return None
     return int(value)
+
+
+def _str(value):
+    if value is None or pd.isna(value):
+        return None
+    return str(value)
 
 
 def members(conn) -> pd.DataFrame:
@@ -257,7 +266,7 @@ def _txns(conn) -> pd.DataFrame:
     if t.empty:
         return pd.DataFrame(columns=["season", "week", "txn_id", "related_txn_id", "team_id",
                                      "member_id", "type", "status", "execution_type",
-                                     "bid_amount", "proposed_at", "items_json"])
+                                     "bid_amount", "proposed_at", "items_json", "items"])
     t = t.copy()
     t["items"] = t.items_json.map(lambda s: json.loads(s) if isinstance(s, str) else [])
     return t
@@ -411,4 +420,173 @@ def trades(conn, member_id: str) -> dict:
                      for m, c in sorted(partners.items(), key=lambda kv: -kv[1])],
         "balance": round(sum(l["balance"] for l in ledger), 1) if ledger else None,
         "ledger": ledger,
+    }
+
+
+def _slot_counts(conn, season: int) -> dict:
+    raw = read_table(conn, "league_raw")
+    if raw.empty:
+        return {}
+    hit = raw[(raw.view == "mSettings") & (raw.season == season)]
+    if hit.empty:
+        return {}
+    settings = json.loads(hit.iloc[0].payload_json).get("settings") or {}
+    return (settings.get("rosterSettings") or {}).get("lineupSlotCounts") or {}
+
+
+def optimal_points(entries: list, slot_counts: dict) -> float:
+    """The most a roster could have scored that week under the league's
+    starting slots. `entries` is [(position, points)]. Fixed slots take
+    their position's best scorers first; FLEX takes the best of what is
+    left among RB/WR/TE. Greedy is exact here because every fixed slot
+    admits one position and FLEX is filled last from the remainder."""
+    pool = sorted(((pts, pos) for pos, pts in entries if pts is not None), reverse=True)
+    total = 0.0
+    for slot_id, count in slot_counts.items():
+        pos = ESPN_SLOT_POSITIONS.get(int(slot_id))
+        if pos is None:
+            continue
+        for _ in range(int(count)):
+            pick = next((e for e in pool if e[1] == pos), None)
+            if pick is None:
+                break
+            pool.remove(pick)
+            total += pick[0]
+    for _ in range(int(slot_counts.get(str(ESPN_FLEX_SLOT), 0))):
+        pick = next((e for e in pool if e[1] in FLEX_POSITIONS), None)
+        if pick is None:
+            break
+        pool.remove(pick)
+        total += pick[0]
+    return round(total, 2)
+
+
+def lineups(conn, member_id: str) -> dict:
+    lu = read_table(conn, "league_lineups")
+    teams = _teams_for(conn, member_id)
+    mem = read_table(conn, "league_members")
+    weeks = []
+    started_out = 0
+    for season, team in teams.items():
+        slots = _slot_counts(conn, season)
+        rows = lu[(lu.season == season) & (lu.team_id == team)] if not lu.empty else lu
+        if rows.empty or not slots:
+            continue
+        for week, g in rows.groupby("week"):
+            scored = g[g.actual_points.notna()]
+            if scored.empty:
+                continue
+            starters = scored[~scored.lineup_slot.isin([ESPN_BENCH_SLOT, ESPN_IR_SLOT])]
+            started = float(starters.actual_points.sum())
+            optimal = optimal_points([(r.position, float(r.actual_points))
+                                      for r in scored.itertuples()], slots)
+            started_out += int(starters.injury_status.isin(["OUT", "IR", "SUSPENSION"]).sum())
+            weeks.append({"season": int(season), "week": int(week), "started": round(started, 2),
+                          "optimal": optimal, "left": round(max(0.0, optimal - started), 2)})
+    n = len(weeks)
+    moves = mem[(mem.member_id == member_id) & mem.lineup_moves.notna()]
+    moves_per_week = None
+    if not moves.empty and n:
+        seasons = {w["season"] for w in weeks}
+        per_season = {int(r.season): int(r.lineup_moves) for r in moves.itertuples()}
+        counted = [per_season[s] for s in seasons if s in per_season]
+        weeks_in = sum(1 for w in weeks if w["season"] in per_season)
+        moves_per_week = round(sum(counted) / weeks_in, 1) if weeks_in else None
+    worst = max(weeks, key=lambda w: w["left"]) if weeks else None
+    return {
+        "n": n,
+        "weeks": weeks,
+        "bench_points_left": round(sum(w["left"] for w in weeks) / n, 1) if n else None,
+        "hit_rate": round(sum(1 for w in weeks if w["left"] <= 0.5) / n, 3) if n else None,
+        "started_out": started_out,
+        "worst_week": {"season": worst["season"], "week": worst["week"], "left": worst["left"]} if worst else None,
+        "moves_per_week": moves_per_week,
+    }
+
+
+def draft_flags(conn, member_id: str) -> dict:
+    f = read_table(conn, "league_draft_flags")
+    mine = f[f.member_id == member_id] if not f.empty else f
+    n = int(len(mine))
+    auto = int(mine.autodraft.sum()) if n else 0
+    return {"n": n, "autodrafts": auto, "autodraft_rate": round(auto / n, 3) if n else None,
+            "keepers": int(mine.keeper.sum()) if n else 0,
+            "seasons": sorted(int(s) for s in mine.season.unique()) if n else []}
+
+
+# The rules a defining line is chosen by, most extreme rank first. Each is
+# (label, section, key, higher_is_it, minimum n). The member holding the
+# league's top (or bottom) value on a fact with enough behind it gets that
+# line; a member with no extreme gets their record.
+DEFINING_RULES = [
+    ("wins more than anyone", "finishes", "win_pct", True, 2),
+    ("outperforms the draft board", "finishes", "outperformance", True, 2),
+    ("trades more than anyone", "trades", "accepted", True, 2),
+    ("works the wire harder than anyone", "waivers", "claims", True, 5),
+    ("leaves the most points on the bench", "lineups", "bench_points_left", True, 5),
+    ("sets the best lineups", "lineups", "hit_rate", True, 5),
+    ("the luckiest record in the league", "luck", "luck", True, 5),
+    ("the unluckiest record in the league", "luck", "luck", False, 5),
+    ("lets the computer draft", "draft_flags", "autodraft_rate", True, 5),
+]
+
+
+def defining_line(member_id: str, facts_by_member: dict) -> str:
+    mine = facts_by_member[member_id]
+    for label, section, key, higher, minimum in DEFINING_RULES:
+        values = {m: f[section].get(key) for m, f in facts_by_member.items()
+                  if f[section].get("n", 0) >= minimum and f[section].get(key) is not None}
+        if len(values) < 2 or member_id not in values:
+            continue
+        best = max(values, key=values.get) if higher else min(values, key=values.get)
+        if best != member_id:
+            continue
+        if len(set(values.values())) < 2:
+            continue
+        return label
+    fin = mine["finishes"]
+    if fin["n"]:
+        last = fin["seasons"][-1]
+        return f"{last['wins']}-{last['losses']} last season, avg finish {fin['avg_finish']}"
+    return "first season in the league"
+
+
+def _facts(conn, member_id: str) -> dict:
+    return {"finishes": finishes(conn, member_id), "playoffs": playoffs(conn, member_id),
+            "luck": luck(conn, member_id), "waivers": waivers(conn, member_id),
+            "trades": trades(conn, member_id), "lineups": lineups(conn, member_id),
+            "draft_flags": draft_flags(conn, member_id)}
+
+
+def league_overview(conn) -> dict:
+    m = members(conn)
+    facts = {r.member_id: _facts(conn, r.member_id) for r in m.itertuples()}
+    grid = []
+    for r in m.itertuples():
+        f = facts[r.member_id]["finishes"]
+        grid.append({
+            "member_id": r.member_id, "display_name": r.display_name,
+            "seasons": len(r.seasons), "titles": len(f["titles"]),
+            "avg_finish": f["avg_finish"], "win_pct": f["win_pct"],
+            "defining_line": defining_line(r.member_id, facts),
+        })
+    grid.sort(key=lambda g: (g["avg_finish"] is None, g["avg_finish"] or 0))
+    return {"seasons": seasons_strip(conn), "members": grid}
+
+
+def profile(conn, member_id: str) -> dict | None:
+    m = members(conn)
+    hit = m[m.member_id == member_id]
+    if hit.empty:
+        return None
+    me = hit.iloc[0]
+    display = {r.member_id: r.display_name for r in m.itertuples()}
+    h2h = [{"opponent": {"member_id": b, "display_name": display.get(b, b)}, **rec}
+           for (a, b), rec in head_to_head(conn).items() if a == member_id]
+    h2h.sort(key=lambda x: -x["games"])
+    return {
+        "member_id": member_id, "display_name": _str(me.display_name),
+        "first_name": _str(me.first_name), "seasons": me.seasons,
+        "head_to_head": h2h,
+        **_facts(conn, member_id),
     }
