@@ -431,3 +431,32 @@ def test_members_normalises_display_name_even_when_the_whole_column_is_null(tmp_
     p = mp.profile(conn, "{Z}")
     json.dumps(p)
     assert p["display_name"] is None
+
+
+def test_profile_survives_a_league_with_no_standings_table_yet(tmp_path):
+    """A freshly connected league whose activity walk has run but whose
+    draft (and so `league_standings`, written by `import_seasons`) has not
+    -- `read_table` returns an empty, columnless frame for a table that
+    does not exist at all, and `.final_rank` etc on that frame raises
+    AttributeError rather than reading as "no data". `finishes`, `playoffs`
+    and `seasons_strip` must all read that as zero observations instead."""
+    conn = duckdb.connect(str(tmp_path / "no_standings.duckdb"))
+    write_table(conn, "league_members", pd.DataFrame(_members(2025)))
+
+    p = mp.profile(conn, A)
+    assert p["finishes"]["n"] == 0
+    assert p["finishes"]["seasons"] == []
+    assert p["playoffs"]["titles"] == []
+    assert p["playoffs"]["last_place"] == []
+    o = mp.league_overview(conn)
+    assert o["seasons"] == []
+    json.dumps(p)
+    json.dumps(o)
+
+
+def test_the_draft_chapter_is_the_report_branch_s_record_or_none(lineups_league, monkeypatch):
+    import scoring.league_report as lr
+    monkeypatch.setattr(lr, "team_profiles", lambda conn: [{"manager": "a", "mean_value": 2.5}])
+    assert mp.profile(lineups_league, A)["draft"] == {"manager": "a", "mean_value": 2.5}
+    monkeypatch.setattr(lr, "team_profiles", lambda conn: [])
+    assert mp.profile(lineups_league, A)["draft"] is None

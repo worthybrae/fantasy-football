@@ -12,25 +12,20 @@ state every few seconds is the whole of what a stream would buy.
 """
 from __future__ import annotations
 
-import json
 import threading
 import time
 import traceback
 from pathlib import Path
 
-import pandas as pd
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from api.league_access import owned_league
 from pipeline import espn_drafts as drafts
 from pipeline import leagues
-from pipeline.db import DEFAULT_PATH, get_conn, read_table, write_table
-from pipeline.espn_league import STANDINGS_COLUMNS, parse_standings
-from pipeline.league_activity import (CURRENT_MAX_AGE_HOURS, Progress, _raw, _stale,
-                                      import_activity, season_url)
-from pipeline.league_history import json_fetch
-from pipeline.leagues import league_db_path, provision_league
+from pipeline.db import DEFAULT_PATH, get_conn, read_table
+from pipeline.league_activity import CURRENT_MAX_AGE_HOURS, Progress, _raw, _stale
+from pipeline.leagues import league_db_path
 from scoring import manager_profile
 from scoring.config import CURRENT_SEASON
 
@@ -68,64 +63,23 @@ def _imported(league_id: str) -> bool:
         conn.close()
 
 
-def seasons_from_status(fetch_json, league_id: str, current_season: int) -> list:
-    """The seasons to walk, newest first: the current one and everything
-    ESPN lists in `status.previousSeasons`."""
-    team = fetch_json(season_url(league_id, current_season, "mTeam"))
-    previous = [int(s) for s in ((team.get("status") or {}).get("previousSeasons") or [])]
-    return [current_season] + sorted(previous, reverse=True)
-
-
-def _rebuild_standings(conn) -> None:
-    """`league_standings`, from the `mTeam` answers `import_activity` just
-    stored in `league_raw`. No new fetch: the season view already carries
-    each team's record, points and final rank.
-
-    `import_activity` alone never writes this table -- it is Task 7's
-    `import_history` (via `pipeline.espn_league.import_seasons`) that
-    builds it properly, alongside draft validation this walk does not do.
-    Until that lands, `scoring/manager_profile.py` reads `league_standings`
-    directly with no guard for the table being altogether absent, so a
-    freshly imported league would 500 every read rather than show a page
-    with no titles or finishes yet. This keeps the table present -- one row
-    per team ESPN has answered for -- without duplicating the draft walk.
-    """
-    raw = read_table(conn, "league_raw")
-    frames = []
-    if not raw.empty:
-        season_views = raw[(raw.view == "mTeam") & (raw.week == 0)]
-        for row in season_views.itertuples():
-            frames.append(parse_standings(json.loads(row.payload_json), int(row.season)))
-    standings = (pd.concat(frames, ignore_index=True) if frames
-                else pd.DataFrame(columns=STANDINGS_COLUMNS))
-    write_table(conn, "league_standings", standings)
-
-
 def run_import(league_id: str, cookies: dict, progress: Progress, fetch=None,
-               universal_path: str = DEFAULT_PATH) -> None:
-    """The job. Until `import_history` carries the week walk (see the
-    league-report branch), this walks activity on its own."""
-    raw = fetch if fetch is not None else drafts.http_fetch()
-    fetch_json = json_fetch(raw, cookies)
-    path = provision_league(league_id, universal_path, root=_leagues_root())
-    conn = get_conn(path)
+               universal_path: str = DEFAULT_PATH, adp_fetch=None) -> None:
+    """The job. `import_history` (see the league-report branch) carries the
+    draft walk, the season's own activity and historic ADP end to end, all
+    against this league's own file; this just supplies its Progress and
+    cleans up the in-flight answer cache when the job ends, however it
+    ends."""
+    from pipeline.league_history import import_history
     try:
-        seasons = seasons_from_status(fetch_json, league_id, CURRENT_SEASON)
-        import_activity(conn, league_id, fetch_json, seasons, CURRENT_SEASON,
-                        progress=progress, pause=PAUSE_SECONDS)
-        _rebuild_standings(conn)
-    except Exception as exc:      # noqa: BLE001 -- import_activity already
-        # records its own failures on `progress` before re-raising; this
-        # also catches anything AFTER it (right now, only
-        # _rebuild_standings), so a failure there cannot leave `progress`
-        # reading "done" for a league whose file never got a usable
-        # league_standings table -- the same pattern import_activity uses,
-        # not doubled up if it already recorded one.
+        import_history(league_id, cookies, fetch=fetch, universal_path=universal_path,
+                       root=_leagues_root(), progress=progress, pause=PAUSE_SECONDS,
+                       adp_fetch=adp_fetch)
+    except Exception as exc:      # noqa: BLE001
         if progress.snapshot()["phase"] != "failed":
             progress.fail(f"{type(exc).__name__}: {exc}")
         raise
     finally:
-        conn.close()
         with _LOCK:
             _ANSWERS.pop(league_id, None)
 
@@ -154,11 +108,14 @@ def _release_reservation(league_id: str, progress: Progress) -> None:
 
 
 def register_league_history_routes(app, store=None, fetch=None, runner=None,
-                                   universal_path: str = DEFAULT_PATH) -> None:
+                                   universal_path: str = DEFAULT_PATH,
+                                   adp_fetch=None) -> None:
     """`fetch` and `runner` are seams for tests: the ESPN fetch, and how the
     job is started (default: a daemon thread). `universal_path` is where a
     newly provisioned league copies its universal tables from -- a seam so
-    tests never provision against the real data/nfl.duckdb."""
+    tests never provision against the real data/nfl.duckdb. `adp_fetch` is
+    the same seam for `import_history`'s historic ADP read -- tests pass one
+    so an import never reaches the real ADP feed."""
 
     def start(fn):
         if runner is not None:
@@ -209,7 +166,7 @@ def register_league_history_routes(app, store=None, fetch=None, runner=None,
             def job():
                 try:
                     run_import(league_id, cookies, progress, fetch=fetch,
-                              universal_path=universal_path)
+                              universal_path=universal_path, adp_fetch=adp_fetch)
                 except Exception:      # noqa: BLE001 -- run_import has
                     traceback.print_exc()  # already recorded the failure
                     # on `progress`; this only puts a trace in the server's

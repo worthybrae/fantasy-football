@@ -6,6 +6,7 @@ import threading
 import time
 from pathlib import Path
 
+import pandas as pd
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -13,11 +14,19 @@ from fastapi.testclient import TestClient
 from api import drafts as drafts_api
 from api import league_history as lh
 from pipeline import espn_drafts as drafts
+from pipeline import league_history as plh
 from scoring.config import CURRENT_SEASON
 from tests.test_league_activity import (DRAFT_PAYLOAD, MATCHUP_PAYLOAD, ROSTER_PAYLOAD,
                                         TEAM_PAYLOAD, TXN_PAYLOAD, SWID_A)
 
 LEAGUE = "53929318"
+
+
+def _no_adp(season):
+    """No test here should ever reach the real historic-ADP feed: an empty
+    frame is "nothing to add", read the same way a genuinely ADP-less
+    season is (see `pipeline.import_league.historic_adp_frames`)."""
+    return pd.DataFrame(columns=["adp_name", "position", "team", "adp"])
 
 
 def _entries_payload(*leagues):
@@ -36,8 +45,34 @@ def _entries_payload(*leagues):
         for lid, name in leagues]})
 
 
+# The combined view import_seasons asks for in one query -- draft detail,
+# team and settings together (pipeline.espn_league.VIEWS/season_url) --
+# distinct from the walk's own single-view URLs below, which keep serving
+# what they always served.
+_COMBINED_VIEWS = "view=mDraftDetail&view=mTeam&view=mSettings"
+
+
 def _fetch(entries, calls=None):
-    """One fake for both the account list and the season/week reads."""
+    """One fake for both the account list and the season/week reads.
+
+    `import_history` now runs `import_seasons` first, which walks seasons
+    backward asking for the combined view above. Answered only for
+    CURRENT_SEASON (as a real league's own current season would be) --
+    every other season 404s on both the dated and the `leagueHistory` form
+    (both carry the same combined-view marker), which is what stops the
+    backward walk after two misses instead of importing years this fixture
+    was never built to describe. `import_seasons` also requires a real,
+    already-drafted season with real picks (`_is_real_pick`) and a SNAKE
+    draft, which is why the merged body below adds `settings` on top of
+    the plain team/draft fixtures the activity walk already uses.
+    """
+    combined = TEAM_PAYLOAD | DRAFT_PAYLOAD | {"settings": {
+        "size": 2,
+        "rosterSettings": {"lineupSlotCounts": {"0": 1, "20": 5}},
+        "scoringSettings": {"scoringItems": []},
+        "draftSettings": {"type": "SNAKE"},
+        "acquisitionSettings": {},
+    }}
     served = {
         "view=mTeam": dict(TEAM_PAYLOAD, status=dict(TEAM_PAYLOAD["status"], finalScoringPeriod=1,
                                                      latestScoringPeriod=1, previousSeasons=[])),
@@ -54,6 +89,13 @@ def _fetch(entries, calls=None):
         # marker of an account-list read, unlike a guess at the host name.
         if "showFantasyEntries" in url:
             return 200, entries
+        # The player directory import_seasons reads once per drafted season.
+        if "/players?" in url:
+            return 200, json.dumps([])
+        if _COMBINED_VIEWS in url:
+            if str(CURRENT_SEASON) not in url:
+                return 404, "not found"
+            return 200, json.dumps(combined)
         for key, payload in served.items():
             if key in url:
                 return 200, json.dumps(payload)
@@ -86,7 +128,7 @@ def _client(fetch, runner=None):
     # never data/nfl.duckdb, which another session may hold the lock on.
     universal_path = str(Path(tempfile.mkdtemp()) / "universal.duckdb")
     lh.register_league_history_routes(app, fetch=fetch, runner=runner,
-                                      universal_path=universal_path)
+                                      universal_path=universal_path, adp_fetch=_no_adp)
     return TestClient(app, client=("127.0.0.1", 50000))
 
 
@@ -197,13 +239,15 @@ def test_two_concurrent_first_time_posts_start_only_one_job(owner):
 
 
 def test_a_failure_after_the_walk_is_recorded_and_the_next_post_retries(owner, monkeypatch):
-    """_rebuild_standings raising after import_activity already succeeded
-    must not leave progress reading "done" -- otherwise every later POST
-    would answer "fresh" while the GET routes 500 against a league whose
-    league_standings table was never written."""
-    def boom(conn):
+    """Any failure inside `import_history` -- the draft walk, the activity
+    walk, historic ADP -- must not leave progress reading "done", or every
+    later POST would answer "fresh" while the GET routes 404/500 against a
+    league whose tables were never fully written. `run_import` imports
+    `import_history` from `pipeline.league_history` fresh on every call, so
+    it is that module's attribute that has to be patched, not `lh`'s own."""
+    def boom(*args, **kwargs):
         raise RuntimeError("standings blew up")
-    monkeypatch.setattr(lh, "_rebuild_standings", boom)
+    monkeypatch.setattr(plh, "import_history", boom)
     client = _client(_fetch(_entries_payload((LEAGUE, "Mine"))), runner=_sync)
 
     started = client.post(f"/api/leagues/{LEAGUE}/history")

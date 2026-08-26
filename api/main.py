@@ -848,6 +848,12 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
     from api.reports import register_report_routes
     register_report_routes(app)
 
+    # A league's history and manager profiles, imported on first visit
+    # with the visitor's own ESPN session (api/league_history.py). Before
+    # the SPA catch-all, like everything under /api.
+    from api.league_history import register_league_history_routes
+    register_league_history_routes(app)
+
     # THE BUILT FRONTEND, LAST. Its fallback route matches every path there
     # is, so anything registered after it would be unreachable -- see
     # api/static.py, which also explains why the SPA is served from this

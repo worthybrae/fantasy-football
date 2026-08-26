@@ -83,7 +83,11 @@ def finishes(conn, member_id: str) -> dict:
     st = read_table(conn, "league_standings")
     mem = read_table(conn, "league_members")
     seasons = []
-    for season in sorted(mine):
+    # `st` is a columnless frame when `league_standings` does not exist yet
+    # (a league whose activity has been walked but never drafted) --
+    # `st.season` below would raise AttributeError on that shape, so there
+    # is nothing to loop over rather than nothing found per season.
+    for season in sorted(mine) if not st.empty else []:
         row = st[(st.season == season) & (st.team_id == mine[season])]
         me = mem[(mem.season == season) & (mem.member_id == member_id)]
         if row.empty:
@@ -155,7 +159,9 @@ def playoffs(conn, member_id: str) -> dict:
     st = read_table(conn, "league_standings")
     teams = _teams_for(conn, member_id)
     last, titles = [], []
-    for season, team in teams.items():
+    # Same guard as `finishes`: a columnless `st` (no `league_standings`
+    # table yet) has no `.season`/`.team_id` to filter on.
+    for season, team in (teams.items() if not st.empty else []):
         row = st[(st.season == season) & (st.team_id == team)]
         if row.empty or pd.isna(row.iloc[0].final_rank):
             continue
@@ -574,6 +580,20 @@ def league_overview(conn) -> dict:
     return {"seasons": seasons_strip(conn), "members": grid}
 
 
+def _draft_chapter(conn, display_name: str):
+    """The league-report branch's draft habits for this manager, matched
+    on the display name both tables carry. None when the branch's tables
+    are not there yet or the manager has no graded picks."""
+    try:
+        from scoring.league_report import team_profiles
+    except ImportError:
+        return None
+    try:
+        return next((p for p in team_profiles(conn) if p.get("manager") == display_name), None)
+    except Exception:      # noqa: BLE001 -- no picks, no ADP: no chapter
+        return None
+
+
 def profile(conn, member_id: str) -> dict | None:
     m = members(conn)
     hit = m[m.member_id == member_id]
@@ -588,5 +608,6 @@ def profile(conn, member_id: str) -> dict | None:
         "member_id": member_id, "display_name": me.display_name,
         "first_name": me.first_name, "seasons": me.seasons,
         "head_to_head": h2h,
+        "draft": _draft_chapter(conn, me.display_name),
         **_facts(conn, member_id),
     }
