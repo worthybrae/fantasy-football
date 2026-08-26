@@ -278,9 +278,12 @@ from pydantic import BaseModel
 from websockets.exceptions import ConnectionClosed
 
 from api import billing
+from api import reports
 from api.custody import (abandon_custody, establish_custody,
                          require_secure, set_session_cookie)
 from pipeline import credentials as custody
+from pipeline import espn_drafts
+from pipeline import league_history
 from pipeline.draft_listener import DraftListener, run_listener
 from pipeline.draft_socket import run_socket_listener
 from pipeline.espn_league import STATE_PATH, parse_league_id
@@ -2488,6 +2491,22 @@ def register_live_routes(app, conn, db_path):
                 # the record under `lock`.
                 if mine and total_picks and made >= total_picks:
                     clear_session_record(db_path)
+                    # The draft is over: hand the room to the report card.
+                    # Read the picks here, where the connection is, and let
+                    # the job compute off this thread. The token record is
+                    # the connecting account (None on the browser path).
+                    c3 = work_conn.cursor()
+                    try:
+                        drafted = c3.execute(
+                            "SELECT player_id, pick_no FROM drafted "
+                            "WHERE pick_no IS NOT NULL ORDER BY pick_no").fetchall()
+                    finally:
+                        c3.close()
+                    with lock:
+                        token = state.get("token") or {}
+                    reports.on_draft_complete(
+                        league_id, token.get("season"), token.get("swid"),
+                        current["session"], [(str(p), int(n)) for p, n in drafted])
                 # Hand off to the worker instead of searching here -- this
                 # callback runs on the socket read thread and must return fast.
                 with lock:
@@ -3430,6 +3449,13 @@ def register_live_routes(app, conn, db_path):
         work_conn, league_conn, session = _connect_work(
             progress, league_id, team_id, season)
 
+        # The browser-observer path is the machine owner's: the saved login
+        # is the credential, when there is one.
+        local = espn_drafts.saved_session()
+        if local is not None and not billing.is_free_draft(league_id):
+            league_history.spawn_import_if_stale(
+                league_id, espn_drafts.cookies_for(local[0], local[1]))
+
         def run_fn(listener, on_change, on_activity, stop_event):
             # The browser observer: watches the socket a real ESPN tab holds.
             # Still the fallback for the waiting-room URL that carries no
@@ -3526,6 +3552,14 @@ def register_live_routes(app, conn, db_path):
 
         work_conn, league_conn, session = _connect_work(
             progress, body.leagueId, team_id, body.season)
+
+        # The account's cookies are in hand right now and at no later point
+        # in this draft, so this is when the league's history is fetched for
+        # the report card. Background, idempotent, never blocks the connect.
+        if not billing.is_free_draft(body.leagueId):
+            cookies = reports.cookies_for_connect(request, body.swid, body.espn_s2)
+            if cookies:
+                league_history.spawn_import_if_stale(body.leagueId, cookies)
 
         run_fn = _socket_run_fn(body.leagueId, body.teamId, body.swid,
                                 body.token, progress)

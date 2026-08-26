@@ -2209,6 +2209,187 @@ def test_state_query_and_stop_close_are_serialized_by_the_lock(
 # everything downstream (build_session, apply_picks, _recompute) is real code,
 # the same discipline the browser-path wiring test above holds.
 
+def _connect_token_setup(tmp_path, monkeypatch, *, league_id="1", team_id="2",
+                         slot=7, extra_players=None):
+    """Shared setup for a bare /api/live/connect-token POST: a minimal live
+    database, the named league provisioned with `team_id` resolving to `slot`
+    up front (same two-hop draft_teams -> draft_order translation
+    test_connect_token_resolves_slot_and_wires_socket_picks below exercises),
+    and run_socket_listener faked so no real ESPN socket ever opens.
+
+    `is_free_draft` is forced False: these two tests are about the
+    history-import and report-card hooks, both gated on a real (non-mock)
+    league id, and the real check can make a network call this suite must
+    never depend on.
+
+    Returns (client, body) -- the caller POSTs `body` itself so it can assert
+    on the response.
+    """
+    from pipeline.leagues import provision_league, LEAGUES_ROOT
+
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path, extra_players=extra_players)
+
+    lg_path = provision_league(league_id, universal_path=path, root=LEAGUES_ROOT)
+    lg_conn = get_conn(lg_path)
+    write_table(lg_conn, "draft_teams", pd.DataFrame([
+        {"season": 2025, "team_id": 1, "manager": "m1", "slot": None},
+        {"season": 2025, "team_id": int(team_id), "manager": "m2", "slot": None}]))
+    write_table(lg_conn, "draft_order", pd.DataFrame([
+        {"slot": 1, "manager": "m1", "is_me": False},
+        {"slot": slot, "manager": "m2", "is_me": True}]))
+    lg_conn.close()
+
+    monkeypatch.setattr("api.live.billing.is_free_draft", lambda lid: False)
+    monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
+    monkeypatch.setattr("api.live.survival", _fake_survival_frame)
+    monkeypatch.setattr("api.live.rank_available",
+                        lambda *a, **k: _fake_candidates_frame("winner"))
+
+    def fake_run_socket_listener(listener, league_id, team_id, swid, token,
+                                 on_change=None, stop_event=None,
+                                 on_activity=None, on_socket=None):
+        # No real socket: the listener thread just parks until stopped. The
+        # connect-token hooks under test run on the request thread, before
+        # this background thread is even started.
+        if stop_event is not None:
+            stop_event.wait(timeout=5)
+
+    monkeypatch.setattr("api.live.run_socket_listener", fake_run_socket_listener)
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    client = TestClient(create_app(path))
+    body = {"leagueId": league_id, "teamId": team_id, "swid": "{X}",
+           "token": "1953383334", "season": "2026"}
+    return client, body
+
+
+def _connect_token_with_picks(tmp_path, monkeypatch, *, teams=2, rounds=1,
+                              league_id="1", team_id="2", slot=2):
+    """Connects a `teams`-team, `rounds`-round league over connect-token, and
+    hands back a `feed` the caller drives by hand: one (player_id, pick_no)
+    pair per pick, in order. `pick_no` is documentary only -- the real
+    pick number a SELECTED frame earns is its 1-based position in the
+    stream (see picks_from_events) -- so the pairs must already be in play
+    order.
+
+    `rounds` is a computed property (starters + flex_slots + bench: see
+    scoring/league.py), so a small league is built by giving it one shallow
+    starters entry rather than by setting `rounds` directly. The league
+    settings live on the PROVISIONED league file, not the universal one --
+    `league` is a LEAGUE_TABLE, so provision_league never copies it, and
+    build_session falls back to it via league_mod.load reading that file's
+    own (here: freshly written) `league` table.
+
+    `feed` builds a real "SELECTED <team> <espn_id> <slot>" frame per pick,
+    the espn id coming from the reverse of the session's own crosswalk, and
+    folds each one through the real DraftListener.on_frame + on_change --
+    the same path production runs, with only the socket itself faked.
+    """
+    from pipeline.leagues import provision_league, LEAGUES_ROOT
+
+    path = str(tmp_path / "live.duckdb")
+    extra_players = [{"player_id": "p2", "name": "B Runner", "position": "WR",
+                      "team": "GB", "espn_id": 4430807}]
+    _seed_minimal_live_db(path, extra_players=extra_players)
+
+    setup_conn = get_conn(path)
+    crosswalk = build_session(setup_conn, my_slot=1).crosswalk
+    setup_conn.close()
+    reverse_crosswalk = {pid: espn_id for espn_id, pid in crosswalk.items()}
+
+    lg_path = provision_league(league_id, universal_path=path, root=LEAGUES_ROOT)
+    lg_conn = get_conn(lg_path)
+    settings = league_mod.LeagueSettings(
+        season=2026, teams=teams, starters={"WR": rounds}, flex_slots=0,
+        bench=0, scoring={"receptions": 0.5}, draft_type="SNAKE")
+    write_table(lg_conn, "league", pd.DataFrame([
+        {"season": 2026, "league_id": league_id,
+         "settings_json": league_mod.to_json(settings)}]))
+    write_table(lg_conn, "draft_teams", pd.DataFrame([
+        {"season": 2025, "team_id": i, "manager": f"m{i}", "slot": None}
+        for i in range(1, teams + 1)]))
+    write_table(lg_conn, "draft_order", pd.DataFrame([
+        {"slot": i, "manager": f"m{i}", "is_me": i == slot}
+        for i in range(1, teams + 1)]))
+    lg_conn.close()
+
+    monkeypatch.setattr("api.live.billing.is_free_draft", lambda lid: False)
+    monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
+    monkeypatch.setattr("api.live.survival", _fake_survival_frame)
+    monkeypatch.setattr("api.live.rank_available",
+                        lambda *a, **k: _fake_candidates_frame("winner"))
+
+    holder = {}
+    ready = threading.Event()
+
+    def fake_run_socket_listener(listener, league_id, team_id, swid, token,
+                                 on_change=None, stop_event=None,
+                                 on_activity=None, on_socket=None):
+        holder["listener"] = listener
+        holder["on_change"] = on_change
+        ready.set()
+        if stop_event is not None:
+            stop_event.wait(timeout=5)
+
+    monkeypatch.setattr("api.live.run_socket_listener", fake_run_socket_listener)
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    client = TestClient(create_app(path))
+    body = {"leagueId": league_id, "teamId": team_id, "swid": "{X}",
+           "token": "1953383334", "season": "2026"}
+    resp = client.post("/api/live/connect-token", json=body)
+    assert resp.status_code == 200
+    assert ready.wait(timeout=5), "fake socket listener never started"
+
+    def feed(picks):
+        listener = holder["listener"]
+        on_change = holder["on_change"]
+        for player_id, _pick_no in picks:
+            espn_id = reverse_crosswalk[player_id]
+            listener.on_frame(f"SELECTED 1 {espn_id} 4")
+            on_change()
+
+    return client, body, feed
+
+
+def test_connect_token_spawns_a_history_import(tmp_path, monkeypatch):
+    """The connect request is the one moment the account's cookies are in
+    hand, so that is when the league's history is fetched -- not at the end
+    of the draft, which has no request and no credential."""
+    from api import live, reports
+    from pipeline import league_history
+    spawned = []
+    monkeypatch.setattr(league_history, "spawn_import_if_stale",
+                        lambda league_id, cookies, **kw: spawned.append((league_id, cookies)) or True)
+    monkeypatch.setattr(reports, "cookies_for_connect",
+                        lambda request, swid, espn_s2, store=None: {"SWID": swid, "espn_s2": "s2"})
+    client, body = _connect_token_setup(tmp_path, monkeypatch)   # the existing test's setup
+    resp = client.post("/api/live/connect-token", json=body)
+    assert resp.status_code == 200
+    assert spawned == [(body["leagueId"], {"SWID": body["swid"], "espn_s2": "s2"})]
+
+
+def test_last_pick_calls_on_draft_complete(tmp_path, monkeypatch):
+    """The `made >= total_picks` branch hands the room to the report job with
+    what it needs: league, season, the connecting SWID, the session and the
+    drafted rows -- once."""
+    from api import live, reports
+    calls = []
+    monkeypatch.setattr(reports, "on_draft_complete",
+                        lambda league_id, season, swid, session, drafted, **kw: calls.append(
+                            (league_id, season, swid, len(drafted))) or True)
+    # Drive a synthetic 2-team, 1-round session to its last pick (see
+    # _connect_token_with_picks: two real SELECTED frames through the real
+    # DraftListener/on_change/apply_picks path, no captured fixture needed
+    # for a draft this small), then assert.
+    client, body, feed = _connect_token_with_picks(tmp_path, monkeypatch, teams=2, rounds=1)
+    feed([("p1", 1), ("p2", 2)])
+    assert calls == [(body["leagueId"], body["season"], body["swid"], 2)]
+
+
 @pytest.mark.skipif(not _SOCKET_FIXTURE.exists(), reason="no draft capture")
 def test_connect_token_resolves_slot_and_wires_socket_picks(
         tmp_path, monkeypatch, _isolated_leagues_root):

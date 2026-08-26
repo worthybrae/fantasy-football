@@ -22,3 +22,32 @@ def _seo_warm_off():
     seo.WARM_ON_REGISTER = False
     yield
     seo.WARM_ON_REGISTER = before
+
+
+@pytest.fixture(autouse=True)
+def _no_history_import(request):
+    """History import stays off under pytest, except where a test wants to
+    watch it. `api/live.py` now calls `league_history.spawn_import_if_stale`
+    on real (non-mock) connects, so every connect `tests/test_live_api.py`
+    drives does too -- most against a provisioned-but-empty per-league file,
+    which is exactly the "stale" case that spawns a background thread. That
+    thread's `import_history` then makes a real ESPN call with no real
+    cookies and fails, printing a traceback that has nothing to do with
+    whatever the test itself is checking. Harmless, but noisy across a full
+    run; `tests/test_live_api.py`'s two connect-token history tests override
+    this via monkeypatch to watch the call instead of skip it.
+
+    Function-scoped, not session-scoped like `_seo_warm_off` above, and
+    excluding `tests/test_league_history.py` by name: that file calls
+    `spawn_import_if_stale` directly to test ITS OWN real behaviour, and a
+    session-wide no-op would silently break every assertion there instead of
+    protecting it from anything.
+    """
+    if "test_league_history" in request.module.__name__:
+        yield
+        return
+    from pipeline import league_history
+    before = league_history.spawn_import_if_stale
+    league_history.spawn_import_if_stale = lambda *a, **k: False
+    yield
+    league_history.spawn_import_if_stale = before
