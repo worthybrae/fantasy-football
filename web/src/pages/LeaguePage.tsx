@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { fetchUpcomingDrafts, mintDraftToken, type UpcomingDraft } from '../api'
+import {
+  fetchLeagueHistory, fetchLeagueHistoryProgress, fetchUpcomingDrafts, mintDraftToken, startLeagueHistory,
+  type HistoryProgress, type LeagueHistory, type UpcomingDraft,
+} from '../api'
 import { Logo } from '../components/Logo'
 import { calendarLabel, countdownTo, secondsUntil } from '../lib/countdown'
 import { useDocumentMeta } from '../lib/documentMeta'
@@ -164,21 +167,153 @@ export default function LeaguePage() {
 
             {error !== null && <p className="db-error">{error}</p>}
 
-            {/* WHAT IS COMING HERE, said plainly rather than left as an empty
-                page. Each of these is a real piece of work with a place
-                reserved for it; the list is the page's own roadmap and it
-                shrinks as they land. */}
-            <section className="lg-soon">
-              <h2 className="mk-h2">This league, over time</h2>
-              <p className="mk-sub">
-                Past seasons, draft report cards and player profiles for this
-                league live here as they are built -- with waiver-wire help and
-                trade suggestions to follow.
-              </p>
-            </section>
+            {/* `me` is the visiting member's SWID; the league list this page
+                is built from does not carry it yet, so nobody is marked as
+                "you" among the managers below until /api/espn/drafts grows a
+                member_id -- a follow-up, not a gap in this section. */}
+            <LeagueHistorySection leagueId={league.league_id} me={null} />
           </>
         )}
       </main>
     </div>
+  )
+}
+
+// THE LEAGUE'S HISTORY, IMPORTED ON THE FIRST VISIT. The page asks for the
+// overview; a 404 means nobody has read this league yet, so it starts the
+// import with the visitor's own session and draws the stage list while
+// ESPN is read -- one row per season, the current one ticking week by
+// week -- then the overview the moment the job says done.
+const POLL_MS = 2000
+
+function LeagueHistorySection({ leagueId, me }: { leagueId: string; me: string | null }) {
+  const [history, setHistory] = useState<LeagueHistory | null | undefined>(undefined)
+  const [progress, setProgress] = useState<HistoryProgress | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    try {
+      const body = await fetchLeagueHistory(leagueId)
+      setHistory(body)
+      return body
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+      setHistory(null)
+      return null
+    }
+  }, [leagueId])
+
+  const start = useCallback(async () => {
+    setError(null)
+    try {
+      const status = await startLeagueHistory(leagueId)
+      if (status === 'fresh') { await load(); return }
+      setProgress({ phase: 'running', stages: [] })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }, [leagueId, load])
+
+  useEffect(() => {
+    let cancelled = false
+    load().then((body) => { if (!cancelled && body === null) start() })
+    return () => { cancelled = true }
+  }, [load, start])
+
+  // Poll while running; on done, fetch the overview and stop.
+  useEffect(() => {
+    if (progress?.phase !== 'running') return
+    let cancelled = false
+    const id = setInterval(async () => {
+      try {
+        const next = await fetchLeagueHistoryProgress(leagueId)
+        if (cancelled) return
+        setProgress(next)
+        if (next.phase === 'done') { clearInterval(id); await load() }
+        if (next.phase === 'failed') clearInterval(id)
+      } catch { /* the next tick asks again */ }
+    }, POLL_MS)
+    return () => { cancelled = true; clearInterval(id) }
+  }, [progress?.phase, leagueId, load])
+
+  if (history === undefined && progress === null && error === null) {
+    return <p className="mk-loading">Reading the league…</p>
+  }
+  if (history) return <History history={history} leagueId={leagueId} me={me} />
+  if (progress?.phase === 'failed' || error) {
+    return (
+      <section className="lg-import">
+        <h2 className="mk-h2">The history could not be read.</h2>
+        <p className="mk-sub">{progress?.error ?? error}</p>
+        <button type="button" className="db-join" onClick={start}>Try again</button>
+      </section>
+    )
+  }
+  return (
+    <section className="lg-import" aria-live="polite">
+      <h2 className="mk-h2">Reading this league's history from ESPN…</h2>
+      <p className="mk-sub">Every season, every week: standings, matchups, waivers, trades, lineups. A minute or two.</p>
+      <ul className="lg-stages mono">
+        {(progress?.stages ?? []).map((s) => (
+          <li key={s.season} className={`lg-stage${s.done ? ' is-done' : s.week > 0 ? ' is-live' : ''}`}>
+            <span className="lg-stage-dot" aria-hidden="true" />{s.label}
+          </li>
+        ))}
+      </ul>
+    </section>
+  )
+}
+
+function History({ history, leagueId, me }: { history: LeagueHistory; leagueId: string; me: string | null }) {
+  return (
+    <>
+      <section className="lg-seasons">
+        <h2 className="mk-h2">Seasons</h2>
+        <ol className="lg-strip">
+          {history.seasons.map((s) => (
+            <li className={`lg-season${s.complete ? '' : ' is-open'}`} key={s.season}>
+              <span className="mono lg-season-year">{s.season}</span>
+              <Row label="Champion" who={s.champion} leagueId={leagueId} crown />
+              <Row label="Last" who={s.last} leagueId={leagueId} />
+              <Row label="Top scorer" who={s.top_scorer} leagueId={leagueId} />
+            </li>
+          ))}
+        </ol>
+      </section>
+      <section className="lg-managers">
+        <h2 className="mk-h2">Managers</h2>
+        <ul className="lg-grid">
+          {history.members.map((m) => (
+            <li className={`lg-manager${m.member_id === me ? ' is-me' : ''}`} key={m.member_id}>
+              <Link to={`/league/${encodeURIComponent(leagueId)}/manager/${encodeURIComponent(m.member_id)}`} className="lg-manager-name">
+                {m.display_name}
+              </Link>
+              <p className="lg-manager-line">{m.defining_line}</p>
+              <p className="mono lg-manager-figs">
+                {m.seasons} {m.seasons === 1 ? 'season' : 'seasons'}
+                {m.titles > 0 && ` · ${m.titles} ${m.titles === 1 ? 'title' : 'titles'}`}
+                {m.avg_finish !== null && ` · avg finish ${m.avg_finish}`}
+                {m.win_pct !== null && ` · ${Math.round(m.win_pct * 100)}% wins`}
+              </p>
+            </li>
+          ))}
+        </ul>
+      </section>
+    </>
+  )
+}
+
+function Row({ label, who, leagueId, crown = false }: {
+  label: string; who: { member_id: string | null; display_name: string | null } | null
+  leagueId: string; crown?: boolean
+}) {
+  if (!who || !who.member_id) return <span className="lg-season-row is-empty">{label}: —</span>
+  return (
+    <span className="lg-season-row">
+      <span className="lg-season-label">{crown ? '♛ ' : ''}{label}</span>
+      <Link to={`/league/${encodeURIComponent(leagueId)}/manager/${encodeURIComponent(who.member_id)}`}>
+        {who.display_name}
+      </Link>
+    </span>
   )
 }

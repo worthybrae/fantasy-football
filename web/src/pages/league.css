@@ -34,12 +34,40 @@
   background: var(--accent);
 }
 
-.lg-soon {
-  margin-top: 28px;
-}
-
 .lg-back {
   display: inline-block;
   margin-top: 14px;
   color: var(--accent);
 }
+
+/* -- history: importing ------------------------------------------------ */
+.lg-import { margin-top: 28px; }
+.lg-stages { list-style: none; margin: 14px 0 0; padding: 0; display: grid; gap: 6px; font-size: var(--text-sm); color: var(--text-3); }
+.lg-stage { display: flex; align-items: center; gap: 10px; }
+.lg-stage-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--border); }
+.lg-stage.is-live { color: var(--text-1); }
+.lg-stage.is-live .lg-stage-dot { background: var(--accent); animation: db-dot 1.8s ease-in-out infinite; }
+.lg-stage.is-done { color: var(--text-2); }
+.lg-stage.is-done .lg-stage-dot { background: var(--ok); }
+
+/* -- history: seasons strip -------------------------------------------- */
+.lg-seasons { margin-top: 28px; }
+.lg-strip { list-style: none; margin: 14px 0 0; padding: 0; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(180px, 1fr); gap: 12px; overflow-x: auto; }
+.lg-season { padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-1); display: grid; gap: 6px; }
+.lg-season.is-open { border-style: dashed; }
+.lg-season-year { font-size: var(--text-md); font-weight: 700; color: var(--text-1); }
+.lg-season-row { display: flex; justify-content: space-between; gap: 8px; font-size: var(--text-sm); }
+.lg-season-row.is-empty { color: var(--text-3); }
+.lg-season-label { color: var(--text-3); }
+.lg-season-row a { color: var(--text-1); text-decoration: none; }
+.lg-season-row a:hover { color: var(--accent); }
+
+/* -- history: manager grid --------------------------------------------- */
+.lg-managers { margin-top: 28px; }
+.lg-grid { list-style: none; margin: 14px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.lg-manager { padding: 16px 18px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-1); display: grid; gap: 6px; }
+.lg-manager.is-me { border-color: var(--accent-border); }
+.lg-manager-name { font-size: var(--text-md); font-weight: 700; color: var(--text-1); text-decoration: none; }
+.lg-manager-name:hover { color: var(--accent); }
+.lg-manager-line { margin: 0; color: var(--text-2); font-size: var(--text-sm); }
+.lg-manager-figs { margin: 0; color: var(--text-3); font-size: var(--text-xs); }
