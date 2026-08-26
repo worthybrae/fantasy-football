@@ -136,37 +136,56 @@ def _text_of(response) -> str:
 
 
 def write_blurbs(client, facts: dict) -> dict | None:
+    """Write the league's report card prose in one structured Haiku call.
+
+    Returns `{"intro": str, "cards": [{manager, nickname, blurb}],
+    "rankings": [{manager, line}]}` once an answer validates within two
+    attempts. Returns `None` on any failure -- no client, a `facts` this
+    module cannot even build a request from, a request that raises, a
+    refusal, or two answers that fail validation -- so the caller always
+    has a fallback: the report stored as numbers only. Never raises.
+    """
     if client is None:
         return None
     import anthropic
 
-    managers = {c["manager"] for c in facts.get("report_cards", [])}
-    if not managers:
+    try:
+        managers = set()
+        for card in facts.get("report_cards", []):
+            manager = card.get("manager")
+            if not manager:
+                print("blurbs: a report card is missing its manager", flush=True)
+                return None
+            managers.add(manager)
+        if not managers:
+            return None
+        messages = [{"role": "user",
+                     "content": "Here is the league:\n" + json.dumps(compact_facts(facts), sort_keys=True)}]
+    except Exception as exc:      # noqa: BLE001 -- the job never raises out of here
+        print(f"blurbs: {type(exc).__name__}: {exc}", flush=True)
         return None
-    messages = [{"role": "user",
-                 "content": "Here is the league:\n" + json.dumps(compact_facts(facts), sort_keys=True)}]
+
     for attempt in range(2):
         try:
             response = client.messages.create(
                 model=MODEL, max_tokens=MAX_TOKENS, system=SYSTEM, messages=messages,
                 output_config={"format": {"type": "json_schema", "schema": SCHEMA}})
         except (anthropic.APIConnectionError, anthropic.APIStatusError) as exc:
-            request_id = getattr(getattr(exc, "response", None), "headers", {}).get("request-id") \
-                if getattr(exc, "response", None) is not None else None
-            print(f"blurbs: {type(exc).__name__}: {exc} (request {request_id})")
+            print(f"blurbs: {type(exc).__name__}: {exc} "
+                  f"(request {getattr(exc, 'request_id', None)})", flush=True)
             return None
         except Exception as exc:      # noqa: BLE001 -- the job never raises out of here
-            print(f"blurbs: {type(exc).__name__}: {exc}")
+            print(f"blurbs: {type(exc).__name__}: {exc}", flush=True)
             return None
         if getattr(response, "stop_reason", None) == "refusal":
-            print(f"blurbs: refused (request {getattr(response, '_request_id', None)})")
+            print(f"blurbs: refused (request {getattr(response, '_request_id', None)})", flush=True)
             return None
         text = _text_of(response)
         data, problem = _validate(text, managers)
         if data is not None:
             return data
         print(f"blurbs: attempt {attempt + 1} rejected: {problem} "
-              f"(request {getattr(response, '_request_id', None)})")
+              f"(request {getattr(response, '_request_id', None)})", flush=True)
         messages = messages + [
             {"role": "assistant", "content": text or "{}"},
             {"role": "user", "content": f"That answer was rejected: {problem}. "

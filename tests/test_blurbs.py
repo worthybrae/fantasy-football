@@ -1,6 +1,5 @@
+import datetime
 import json
-
-import pytest
 
 
 class _Block:
@@ -131,6 +130,21 @@ def test_unknown_manager_fails_validation():
     assert blurbs.write_blurbs(client, _facts()) is None
 
 
+def test_duplicate_manager_is_retried_once_with_the_failure_named():
+    from scoring import blurbs
+    dupe = json.dumps({"intro": "x",
+                       "cards": [{"manager": "ann", "nickname": "n1", "blurb": "b1"},
+                                 {"manager": "ann", "nickname": "n2", "blurb": "b2"},
+                                 {"manager": "bob", "nickname": "n3", "blurb": "b3"}],
+                       "rankings": [{"manager": "ann", "line": "l1"}, {"manager": "bob", "line": "l2"}]})
+    client = FakeClient([_Response(dupe), _Response(_good())])
+    out = blurbs.write_blurbs(client, _facts())
+    assert out is not None and len(out["cards"]) == 2
+    assert len(client.calls) == 2
+    retry = client.calls[1]["messages"]
+    assert "repeats managers: ann" in retry[2]["content"]
+
+
 def test_api_errors_yield_none_and_do_not_raise():
     import anthropic
     from scoring import blurbs
@@ -143,6 +157,24 @@ def test_refusal_yields_none():
     from scoring import blurbs
     client = FakeClient([_Response("", stop_reason="refusal")])
     assert blurbs.write_blurbs(client, _facts()) is None
+
+
+def test_unserialisable_facts_yield_none():
+    from scoring import blurbs
+    facts = _facts()
+    facts["profiles"][0]["career_best"] = datetime.date(2024, 1, 1)
+    client = FakeClient([_Response(_good())])
+    assert blurbs.write_blurbs(client, facts) is None
+    assert client.calls == []
+
+
+def test_card_without_manager_yields_none():
+    from scoring import blurbs
+    facts = _facts()
+    del facts["report_cards"][0]["manager"]
+    client = FakeClient([_Response(_good())])
+    assert blurbs.write_blurbs(client, facts) is None
+    assert client.calls == []
 
 
 def test_none_client_is_skipped():
