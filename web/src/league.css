@@ -29,8 +29,12 @@
 .lr-ranks { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
 .lr-rank { display: grid; grid-template-columns: 36px 1fr; gap: 10px; align-items: start; }
 .lr-rank-n { font-size: 22px; color: var(--accent); line-height: 1.1; }
-.lr-rank-team { margin: 0; font-weight: 600; }
-.lr-rank-manager { margin: 0; color: var(--text-3); font-size: var(--text-sm); }
+/* min-width: 0 is the grid-item counterpart of the flex one in App.css
+   (.draft-main, .top3-recompute): without it a long team or manager name
+   refuses to shrink below its content and pushes the card past 100vw. */
+.lr-rank-who { min-width: 0; }
+.lr-rank-team { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+.lr-rank-manager { margin: 0; color: var(--text-2); font-size: var(--text-sm); }
 .lr-rank-line { margin: 2px 0 0; color: var(--text-2); }
 .lr-first { color: var(--accent); }
 
@@ -45,8 +49,9 @@
 .lr-grade-c .lr-grade { color: var(--ramp-mid); }
 .lr-grade-d .lr-grade { color: var(--accent); }
 .lr-grade-f .lr-grade { color: var(--fail); }
-.lr-card-team { margin: 0; font-weight: 600; }
-.lr-card-manager { margin: 0; color: var(--text-3); font-size: var(--text-sm); }
+.lr-card-who { min-width: 0; }
+.lr-card-team { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+.lr-card-manager { margin: 0; color: var(--text-2); font-size: var(--text-sm); }
 .lr-nickname { color: var(--text-2); font-style: italic; }
 .lr-card-stat { margin: 0; font-size: var(--text-sm); text-align: right; }
 .lr-sep { margin: 0 6px; color: var(--text-3); }
@@ -56,9 +61,9 @@
 
 .lr-blurb { margin: 10px 0 8px; }
 .lr-pick { margin: 4px 0; display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; font-size: var(--text-sm); }
-.lr-pick-label { color: var(--text-3); width: 40px; }
+.lr-pick-label { color: var(--text-2); width: 40px; }
 .lr-pick-name { font-weight: 600; }
-.lr-pick-where { color: var(--text-3); }
+.lr-pick-where { color: var(--text-2); }
 .lr-pos { font-family: var(--font-mono); font-size: var(--text-xs); padding: 0 4px; border-radius: var(--radius); color: #fff; }
 .lr-pos-qb { background: var(--pos-qb); }
 .lr-pos-rb { background: var(--pos-rb); }
@@ -71,8 +76,8 @@
 
 .lr-history { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; }
 .lr-history-head { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; }
-.lr-history-team { margin: 0; font-weight: 600; }
-.lr-history-manager { margin: 0; color: var(--text-3); font-size: var(--text-sm); grid-column: 1; }
+.lr-history-team { margin: 0; font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.lr-history-manager { margin: 0; color: var(--text-2); font-size: var(--text-sm); grid-column: 1; min-width: 0; }
 .lr-history-pct { grid-column: 2; grid-row: 1 / span 2; color: var(--text-2); font-size: var(--text-sm); align-self: center; }
 .lr-seasons { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 14px; }
 .lr-season { display: inline-flex; gap: 6px; align-items: baseline; font-size: var(--text-sm); }

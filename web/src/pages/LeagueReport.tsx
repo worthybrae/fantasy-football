@@ -5,6 +5,7 @@ import {
 } from '../api'
 import { useDocumentMeta } from '../lib/documentMeta'
 import { Logo } from '../components/Logo'
+import { ordinal } from '../components/profile/payload'
 import '../league.css'
 
 // A report is built once and stored; this page only reads it. While the
@@ -39,7 +40,7 @@ function PickLine({ label, pick }: { label: string; pick: ReportPick | null }) {
       {pick.position && <span className={`lr-pos lr-pos-${pick.position.toLowerCase()}`}>{pick.position}</span>}
       <span className="mono lr-pick-where">R{pick.round ?? '?'} · #{pick.overall_pick}</span>
       <span className={`lr-pick-verdict ${tone(pick.verdict)}`}>
-        {pick.verdict ? VERDICT_WORD[pick.verdict] : 'No ADP'} · {gap(pick)}
+        {pick.verdict ? `${VERDICT_WORD[pick.verdict]} · ${gap(pick)}` : 'No ADP'}
       </span>
     </p>
   )
@@ -88,12 +89,6 @@ function record(p: TeamProfile['seasons'][number]): string {
   if (p.wins === null || p.losses === null) return '—'
   const base = `${p.wins}-${p.losses}${p.ties ? `-${p.ties}` : ''}`
   return p.final_rank ? `${base} · ${ordinal(p.final_rank)}` : base
-}
-
-function ordinal(n: number): string {
-  const s = ['th', 'st', 'nd', 'rd']
-  const v = n % 100
-  return `${n}${s[(v - 20) % 10] || s[v] || s[0]}`
 }
 
 function habits(p: TeamProfile): string {
@@ -148,7 +143,7 @@ export default function LeagueReport() {
   useEffect(() => {
     let cancelled = false
     fetchLeagueReport(leagueId, season)
-      .then((body) => { if (!cancelled) setReport(body) })
+      .then((body) => { if (!cancelled) { setReport(body); setError(null) } })
       .catch((err) => { if (!cancelled) setError(String(err.message || err)) })
     return () => { cancelled = true }
   }, [leagueId, season, polls])
