@@ -4,10 +4,12 @@ copies of real answers (league 53929318, 2025), two teams each, so a
 parser is tested against the shape ESPN actually sends."""
 import json
 
+import duckdb
 import pandas as pd
 import pytest
 
 from pipeline import league_activity as act
+from pipeline.db import read_table, write_table
 
 SWID_A = "{AAAAAAAA-0000-0000-0000-000000000001}"
 SWID_B = "{BBBBBBBB-0000-0000-0000-000000000002}"
@@ -204,3 +206,114 @@ def test_the_new_tables_are_registered_as_league_tables():
     for name in ("league_members", "league_matchups", "league_transactions",
                  "league_lineups", "league_draft_flags", "league_raw"):
         assert name in LEAGUE_TABLES
+
+
+def _fetch_json(served, calls):
+    """`fetch_json(url) -> dict`, the shape league_history.json_fetch makes.
+    `served` maps a (season, view, week) key to a payload; anything else 404s."""
+    def fetch(url):
+        calls.append(url)
+        for (season, view, week), payload in served.items():
+            if (f"/seasons/{season}/" in url and f"view={view}" in url
+                    and ((week is None and "scoringPeriodId" not in url)
+                         or (week is not None and f"scoringPeriodId={week}" in url))):
+                return payload
+        raise FileNotFoundError(url)
+    return fetch
+
+
+def _served(season, weeks=(1, 2), final=2):
+    status = dict(TEAM_PAYLOAD["status"], finalScoringPeriod=final,
+                  latestScoringPeriod=final, currentMatchupPeriod=final + 1)
+    served = {
+        (season, "mTeam", None): dict(TEAM_PAYLOAD, seasonId=season, status=status),
+        (season, "mMatchupScore", None): dict(MATCHUP_PAYLOAD, seasonId=season),
+        (season, "mDraftDetail", None): dict(DRAFT_PAYLOAD, seasonId=season),
+    }
+    for w in weeks:
+        served[(season, "mTransactions2", w)] = dict(TXN_PAYLOAD, seasonId=season)
+        served[(season, "mRoster", w)] = dict(ROSTER_PAYLOAD, seasonId=season, scoringPeriodId=w)
+    return served
+
+
+def test_season_url_names_the_view_and_the_week():
+    assert act.season_url("53929318", 2025, "mTeam").endswith(
+        "/seasons/2025/segments/0/leagues/53929318?view=mTeam")
+    assert act.season_url("53929318", 2025, "mRoster", week=3).endswith(
+        "?view=mRoster&scoringPeriodId=3")
+
+
+def test_the_walk_stores_raw_answers_and_builds_every_table(tmp_path):
+    conn = duckdb.connect(str(tmp_path / "league.duckdb"))
+    calls = []
+    summary = act.import_activity(conn, "53929318", _fetch_json(_served(2024), calls),
+                                  seasons=[2024], current_season=2025)
+    raw = read_table(conn, "league_raw")
+    assert set(zip(raw.season, raw.view, raw.week)) == {
+        (2024, "mTeam", 0), (2024, "mMatchupScore", 0), (2024, "mDraftDetail", 0),
+        (2024, "mTransactions2", 1), (2024, "mTransactions2", 2),
+        (2024, "mRoster", 1), (2024, "mRoster", 2)}
+    assert len(read_table(conn, "league_members")) == 3
+    assert len(read_table(conn, "league_matchups")) == 3
+    # Two weeks of the same three transactions: de-duplicated on the id.
+    assert len(read_table(conn, "league_transactions")) == 3
+    assert len(read_table(conn, "league_lineups")) == 6
+    assert len(read_table(conn, "league_draft_flags")) == 2
+    assert summary == {"seasons": [2024], "requests": 7, "weeks": {2024: 2}}
+
+
+def test_a_finished_season_is_never_fetched_twice(tmp_path):
+    conn = duckdb.connect(str(tmp_path / "league.duckdb"))
+    served = _served(2024)
+    act.import_activity(conn, "53929318", _fetch_json(served, []), seasons=[2024],
+                        current_season=2025)
+    calls = []
+    summary = act.import_activity(conn, "53929318", _fetch_json(served, calls), seasons=[2024],
+                                  current_season=2025)
+    assert calls == [] and summary["requests"] == 0
+
+
+def test_the_current_season_refetches_only_what_moved(tmp_path):
+    conn = duckdb.connect(str(tmp_path / "league.duckdb"))
+    # First pass: the season is two weeks in.
+    served = _served(2025, weeks=(1, 2), final=17)
+    served[(2025, "mTeam", None)]["status"].update(latestScoringPeriod=2, currentMatchupPeriod=2)
+    act.import_activity(conn, "53929318", _fetch_json(served, []), seasons=[2025],
+                        current_season=2025)
+    # Second pass a day later: week 3 exists now. Week 1 is over and stays;
+    # week 2 (the latest last time) and week 3 are read; the season views
+    # are read again because the standings moved.
+    served = _served(2025, weeks=(1, 2, 3), final=17)
+    served[(2025, "mTeam", None)]["status"].update(latestScoringPeriod=3, currentMatchupPeriod=3)
+    calls = []
+    act.import_activity(conn, "53929318", _fetch_json(served, calls), seasons=[2025],
+                        current_season=2025, max_age_hours=0)
+    weeks = sorted(int(u.split("scoringPeriodId=")[1]) for u in calls if "scoringPeriodId=" in u)
+    assert weeks == [2, 2, 3, 3]
+    assert len(read_table(conn, "league_lineups")) == 9      # three weeks, three rows each
+
+
+def test_progress_publishes_the_shape_up_front_and_ticks(tmp_path):
+    conn = duckdb.connect(str(tmp_path / "league.duckdb"))
+    progress = act.Progress("53929318")
+    snap = progress.snapshot()
+    assert snap["phase"] == "idle"
+    act.import_activity(conn, "53929318", _fetch_json(_served(2024), []), seasons=[2024],
+                        current_season=2025, progress=progress)
+    snap = progress.snapshot()
+    assert snap["phase"] == "done" and snap["seasons_done"] == [2024]
+    assert snap["stages"] == [{"season": 2024, "label": "2024 · done", "done": True,
+                               "week": 2, "weeks": 2}]
+
+
+def test_progress_records_a_failure_and_the_walk_raises(tmp_path):
+    conn = duckdb.connect(str(tmp_path / "league.duckdb"))
+    progress = act.Progress("53929318")
+
+    def boom(url):
+        raise RuntimeError("ESPN answered 500")
+    with pytest.raises(RuntimeError):
+        act.import_activity(conn, "53929318", boom, seasons=[2024], current_season=2025,
+                            progress=progress)
+    snap = progress.snapshot()
+    assert snap["phase"] == "failed" and "500" in snap["error"]
