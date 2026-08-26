@@ -144,6 +144,50 @@ def test_post_builds_and_answers_202(tmp_path, league_root, monkeypatch):
     assert client.get("/api/leagues/424242/report/2024").status_code == 200
 
 
+def test_post_refreshes_history_when_the_season_is_missing_even_if_fresh(
+        tmp_path, league_root, monkeypatch):
+    from api import billing, reports
+    from pipeline.db import record_freshness
+    monkeypatch.setattr(billing, "is_free_draft", lambda league_id: False)
+    # The whole-league freshness stamp a PRE-draft import leaves: fresh, but
+    # with no picks at all for the season that just finished drafting.
+    conn = get_conn(f"{league_root}/424242.duckdb")
+    record_freshness(conn, "league", True, 1)
+    conn.close()
+    imported = []
+    monkeypatch.setattr(reports, "import_history",
+                        lambda league_id, cookies, **kw: imported.append(league_id))
+
+    class Sess:
+        swid = "{X}"
+        cookies = {"SWID": "{X}", "espn_s2": "s"}
+    client = _app(tmp_path, league_root, session=Sess(), entries=[{"league_id": "424242"}])
+    resp = client.post("/api/leagues/424242/report/2026")
+    assert resp.status_code == 202
+    assert imported == ["424242"]
+
+
+def test_post_skips_the_refresh_when_fresh_and_the_season_is_on_file(
+        tmp_path, league_root, monkeypatch):
+    from api import billing, reports
+    from pipeline.db import record_freshness
+    monkeypatch.setattr(billing, "is_free_draft", lambda league_id: False)
+    conn = get_conn(f"{league_root}/424242.duckdb")
+    record_freshness(conn, "league", True, 1)
+    conn.close()
+    imported = []
+    monkeypatch.setattr(reports, "import_history",
+                        lambda league_id, cookies, **kw: imported.append(league_id))
+
+    class Sess:
+        swid = "{X}"
+        cookies = {"SWID": "{X}", "espn_s2": "s"}
+    client = _app(tmp_path, league_root, session=Sess(), entries=[{"league_id": "424242"}])
+    resp = client.post("/api/leagues/424242/report/2024")
+    assert resp.status_code == 202
+    assert imported == []
+
+
 def test_post_while_building_does_not_start_another(tmp_path, league_root, monkeypatch):
     from api import billing, reports
     monkeypatch.setattr(billing, "is_free_draft", lambda league_id: False)

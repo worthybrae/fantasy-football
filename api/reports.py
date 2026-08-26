@@ -64,15 +64,15 @@ def store_report(conn, payload: dict) -> None:
                   payload.get("status"), json.dumps(payload)])
 
 
-def _has_table(conn) -> bool:
+def _has_table(conn, table: str) -> bool:
     return bool(conn.execute(
-        "SELECT count(*) FROM information_schema.tables WHERE table_name = 'league_reports'"
+        "SELECT count(*) FROM information_schema.tables WHERE table_name = ?", [table]
     ).fetchone()[0])
 
 
 def load_report(conn, season: int) -> dict | None:
     """The full stored document for one season, or None."""
-    if not _has_table(conn):
+    if not _has_table(conn, "league_reports"):
         return None
     row = conn.execute("SELECT payload_json FROM league_reports WHERE season = ?",
                        [int(season)]).fetchone()
@@ -81,7 +81,7 @@ def load_report(conn, season: int) -> dict | None:
 
 def list_reports(conn) -> list:
     """Every stored season, newest first, without the heavy payload."""
-    if not _has_table(conn):
+    if not _has_table(conn, "league_reports"):
         return []
     rows = conn.execute(
         "SELECT season, generated_at, status FROM league_reports ORDER BY season DESC"
@@ -109,6 +109,21 @@ def _open(path: str, read_only: bool):
                 time.sleep(LOCK_RETRY_SECONDS)
     raise HTTPException(status_code=503,
                         detail=f"this league's database is busy -- try again in a moment ({last})")
+
+
+def _season_on_file(conn, season: int) -> bool:
+    """Whether `draft_picks` already has a row for this season.
+
+    `is_fresh` is a WHOLE-LEAGUE stamp: the import that sets it runs at room
+    connect, before a single pick lands, so a fresh league can still have
+    zero rows for the season a draft just finished. Checked alongside
+    `is_fresh` rather than instead of it -- see `refresh_history` below.
+    """
+    if not _has_table(conn, "draft_picks"):
+        return False
+    row = conn.execute("SELECT count(*) FROM draft_picks WHERE season = ?",
+                       [int(season)]).fetchone()
+    return bool(row and row[0])
 
 
 def open_read(league_id: str, root: str | None = None):
@@ -297,14 +312,22 @@ def register_report_routes(app, store=None, fetch=None, spawn=None, root: str | 
 
         def refresh_history():
             """Refresh this league's history before building -- unless it is
-            already fresh, so clicking "rebuild" on a report just built does
-            not refetch a whole league's ESPN history for nothing."""
+            already fresh AND this season's picks are already on file.
+
+            BOTH, not `is_fresh` alone. `is_fresh` is a whole-league stamp
+            set by the import that runs at room connect, before a single
+            pick lands -- so a league can be "fresh" while the season that
+            just finished drafting has zero rows in `draft_picks`. Skipping
+            on the stamp alone would leave that build running against an
+            empty season and stored as `status: "failed"` for up to
+            FRESH_DAYS, while the caller was told 202 "building".
+            """
             try:
                 path = league_db_path(league_id, root=root or LEAGUES_ROOT)
                 if Path(path).exists():
-                    existing = get_conn(path)
+                    existing = _open(path, read_only=True)
                     try:
-                        if is_fresh(existing):
+                        if is_fresh(existing) and _season_on_file(existing, season):
                             return
                     finally:
                         existing.close()
