@@ -316,6 +316,9 @@ def test_state_is_inactive_before_start(tmp_path):
     # No bookmarklet click yet, so the connect screen keeps showing the
     # install guide rather than following a board that does not exist.
     assert body["token_received"] is False
+    # Present with a null value, not omitted -- same convention as every
+    # other key on this branch. No room, no report card to link to.
+    assert body["report_url"] is None
 
 
 import dataclasses
@@ -2370,6 +2373,42 @@ def test_connect_token_spawns_a_history_import(tmp_path, monkeypatch):
     resp = client.post("/api/live/connect-token", json=body)
     assert resp.status_code == 200
     assert spawned == [(body["leagueId"], {"SWID": body["swid"], "espn_s2": "s2"})]
+
+
+def test_state_carries_the_rooms_report_url(tmp_path, monkeypatch):
+    """The room is the only way into an auto-built report: by the time it
+    exists, `GET /api/espn/drafts` has dropped the finished draft and the
+    dashboard card with the other link is gone. The URL comes off the
+    connect token, which is the only thing that knows both the league and
+    the season."""
+    from api import reports
+    monkeypatch.setattr(reports, "spawn_draft_complete", lambda *a, **kw: True)
+    client, body, feed = _connect_token_with_picks(tmp_path, monkeypatch, teams=2, rounds=1)
+    # These fixtures stub `_drafted_state` with a shape the state endpoint's
+    # empty-list fallback cannot mask off; stub the fallback itself, which
+    # this test says nothing about either way.
+    monkeypatch.setattr("api.live.available_by_vor",
+                        lambda *a, **k: _fake_candidates_frame("winner"))
+    mid = client.get("/api/live/state").json()
+    assert mid["report_url"] == "/leagues/1/report/2026"
+    assert mid["on_the_clock"] is not None
+    feed([("p1", 1), ("p2", 2)])
+    # Draft over: `on_the_clock` is null, which is what the rail renders
+    # "Draft complete" (and now the link) on.
+    done = client.get("/api/live/state").json()
+    assert done["on_the_clock"] is None
+    assert done["report_url"] == "/leagues/1/report/2026"
+
+
+def test_a_mock_rooms_state_carries_no_report_url(tmp_path, monkeypatch):
+    """A mock draft never builds a report card (`on_draft_complete` refuses
+    one), so its room offers no link to a page that would only say so."""
+    client, body = _connect_token_setup(tmp_path, monkeypatch)
+    monkeypatch.setattr("api.live.billing.is_free_draft", lambda lid: True)
+    monkeypatch.setattr("api.live.available_by_vor",
+                        lambda *a, **k: _fake_candidates_frame("winner"))
+    assert client.post("/api/live/connect-token", json=body).status_code == 200
+    assert client.get("/api/live/state").json()["report_url"] is None
 
 
 def test_last_pick_calls_on_draft_complete(tmp_path, monkeypatch):

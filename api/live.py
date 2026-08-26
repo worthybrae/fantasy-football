@@ -1219,6 +1219,26 @@ def _billing_state(request, session) -> dict:
         return {"enabled": False, "required": False, "entitled": True}
 
 
+def _report_url(league_id, season) -> str | None:
+    """This room's report card page, or None when there will not be one.
+
+    The one way a reader reaches an auto-built report from inside the room:
+    `GET /api/espn/drafts` drops a league whose draft has finished, so the
+    dashboard card that carries the other link is gone by the time the
+    report exists. Served on /api/live/state and rendered by ClockPanel once
+    the draft is complete.
+
+    Both halves come from the connect token, which is the only thing that
+    knows them: a session started any other way (the browser observer,
+    /api/live/start) has no season and so no honest URL. Callers pass None
+    for a mock room -- `api/reports.on_draft_complete` refuses to build one,
+    so a link would lead to a page that only says so.
+    """
+    if not league_id or not season:
+        return None
+    return f"/leagues/{league_id}/report/{season}"
+
+
 def _league_settings_payload(settings) -> dict:
     """The session's real league shape, as /api/live/state's `settings` key
     serves it -- the rail's RosterPanel/ClockPanel read teams/rounds/starter
@@ -2702,6 +2722,10 @@ def register_live_routes(app, conn, db_path):
                         # omitted, same convention as every other key here.
                         "autodraft": None,
                         "token_received": state.get("token") is not None,
+                        # Present with a null value, same convention as
+                        # every other key on this branch: no session means
+                        # no room and so no report card to link to.
+                        "report_url": None,
                         "ms_remaining": None,
                         # No listener at all on this branch, so genuinely
                         # unstarted rather than unknown -- same reasoning as
@@ -2945,6 +2969,11 @@ def register_live_routes(app, conn, db_path):
             "socket_alive": socket_alive,
             "autodraft": autodraft,
             "token_received": snapshot.get("token") is not None,
+            # Where this room's report card lives, worked out once at
+            # connect (see the token record) and carried here so the rail
+            # can offer it the moment the draft is over. Null for a mock, a
+            # token with no season, and every session with no token at all.
+            "report_url": (snapshot.get("token") or {}).get("report_url"),
             "ms_remaining": ms_remaining,
             # Present on both branches with the same meaning, same
             # convention as listener_alive and autodraft: a session exists,
@@ -3562,7 +3591,8 @@ def register_live_routes(app, conn, db_path):
         # The account's cookies are in hand right now and at no later point
         # in this draft, so this is when the league's history is fetched for
         # the report card. Background, idempotent, never blocks the connect.
-        if not billing.is_free_draft(body.leagueId):
+        real_league = not billing.is_free_draft(body.leagueId)
+        if real_league:
             cookies = reports.cookies_for_connect(request, body.swid, body.espn_s2)
             if cookies:
                 league_history.spawn_import_if_stale(body.leagueId, cookies)
@@ -3578,6 +3608,12 @@ def register_live_routes(app, conn, db_path):
                 "league_id": body.leagueId, "team_id": body.teamId,
                 "swid": body.swid, "token": body.token, "season": body.season,
                 "received_at": datetime.now(timezone.utc).isoformat(),
+                # Where this room's report card will be, for the link the
+                # rail shows once the draft is over. Worked out HERE, not on
+                # every /api/live/state poll: `is_free_draft` has already
+                # been asked, one connect, and the answer cannot change for
+                # the life of this session.
+                "report_url": _report_url(body.leagueId, body.season) if real_league else None,
             }
         # And to disk, which is the whole of this session that a restart
         # cannot rebuild for itself (see save_session_record, and the long
@@ -3748,6 +3784,11 @@ def register_live_routes(app, conn, db_path):
                 "swid": record["swid"], "token": record["token"],
                 "season": record["season"],
                 "received_at": record.get("saved_at"),
+                # Same as the live connect's own record: the rail's link to
+                # this room's report card, worked out once here on the
+                # restore thread rather than on every poll.
+                "report_url": (None if billing.is_free_draft(league_id)
+                               else _report_url(league_id, record["season"])),
             }
         _launch_listener(work_conn, league_conn, league_id, session,
                          _socket_run_fn(league_id, record["team_id"],

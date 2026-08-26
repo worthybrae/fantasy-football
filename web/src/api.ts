@@ -421,6 +421,16 @@ export interface LiveState {
   // The bookmarklet has delivered a draft token. The onboarding gate flips
   // from "open your draft and click Draft Assistant" to the live board on this.
   token_received?: boolean
+  /** This room's report card page, e.g. `/leagues/123/report/2026` -- the
+   *  only way in from the room, and by the end of a draft the only way in
+   *  at all: `GET /api/espn/drafts` drops a league whose draft has
+   *  finished, so the dashboard card carrying the other link is gone.
+   *  Worked out once at connect from the token (api/live.py's
+   *  `_report_url`). Null for a mock room, which never builds one, for a
+   *  session with no token or no season, and on the inactive response --
+   *  present with a null value there rather than omitted, same convention
+   *  as `listener_alive`. ClockPanel renders it once the draft is over. */
+  report_url: string | null
   // The live pick clock, straight off DraftListener.ms_remaining
   // (pipeline/draft_listener.py) -- null until the first CLOCK or SELECTING
   // frame has been seen. Never decayed or interpolated client-side between

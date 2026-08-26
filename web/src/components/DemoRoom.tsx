@@ -241,6 +241,10 @@ export default function DemoRoom({ onMode, live = false, site = false }: {
       recompute_error: null,
       socket_alive: true,
       autodraft: null,
+      // Null, and permanently: this rail is drawn over the farm's mock
+      // rooms, and a mock draft never builds a report card. ClockPanel's
+      // "Report card" link is absent here for exactly that reason.
+      report_url: null,
       ms_remaining: null,
       settings: room.settings,
       my_roster: [],

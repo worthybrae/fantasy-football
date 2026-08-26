@@ -265,6 +265,20 @@ export default function ClockPanel({
   return (
     <div className={`clock-panel${youAreUp ? ' clock-panel-up' : ''}${autodraftOn ? ' clock-panel-auto' : ''}`}>
       <div className="draft-cap">{heading}</div>
+      {/* THE ONLY WAY INTO THE REPORT CARD FROM HERE, and by now the only
+          way in at all: the room orders the report on the last pick, and
+          `GET /api/espn/drafts` drops a league whose draft has finished --
+          so the dashboard card that carries the other link is already gone.
+          `#building` is the same anchor the dashboard's own build sends
+          people to, which makes the page poll for a few seconds rather than
+          say "no report" at the one moment there genuinely isn't one yet.
+          Null `report_url` (a mock room, a session with no token) shows
+          nothing: a mock never builds a report card. */}
+      {draftDone && state.report_url !== null && (
+        <Link className="clock-report" to={`${state.report_url}#building`}>
+          Report card →
+        </Link>
+      )}
       {/* The countdown keeps the whole left side; the autodraft control sits
           beside it, top right, where the owner asked for it. It is state
           first and control second: when autodraft is off this is a quiet

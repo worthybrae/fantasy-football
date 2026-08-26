@@ -1138,6 +1138,23 @@ button.pick-ticker-pick:hover {
   text-decoration: underline;
 }
 
+/* The way out of a finished room, under the "Draft complete" heading. Sized
+   and coloured like the recovery link above rather than like a button: the
+   draft is over, nothing here is urgent, and the rail's own furniture stays
+   the furniture. */
+.clock-report {
+  display: inline-block;
+  margin-top: var(--space-2);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.clock-report:hover {
+  text-decoration: underline;
+}
+
 .clock-countdown {
   font-size: 48px;
   font-weight: 700;
