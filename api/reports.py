@@ -212,11 +212,24 @@ def cookies_for_connect(request: Request, swid: str, espn_s2: str | None, store=
     The bookmarklet may send `espn_s2` in the body; a returning browser
     carries the custody cookie instead; the machine owner has a saved
     login. Same order `api/drafts.session_for` uses.
+
+    Never raises: this runs on the connect path, which must never block on
+    a history import it merely triggers. `session_for` -> `custody_for` can
+    raise HTTPException(503) when the custody cookie is present but the
+    credential store itself is down (CustodyUnavailable / duckdb.Error) --
+    that is the right answer for a request ASKING for the stored session,
+    but wrong here, where the caller only wants to know whether cookies are
+    available at all.
     """
     if espn_s2:
         return espn_drafts.cookies_for(swid, espn_s2)
-    from api.drafts import session_for
-    session = session_for(request, store)
+    try:
+        from api.drafts import session_for
+        session = session_for(request, store)
+    except Exception as exc:      # noqa: BLE001 -- see docstring
+        print(f"reports: could not resolve cookies for the history import: {exc}",
+              flush=True)
+        return None
     return session.cookies if session is not None else None
 
 

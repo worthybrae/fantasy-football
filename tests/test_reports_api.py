@@ -202,3 +202,23 @@ def test_post_while_building_does_not_start_another(tmp_path, league_root, monke
     assert client.post("/api/leagues/424242/report/2024").status_code == 202
     assert len(held) == 1
     held[0]()
+
+
+def test_cookies_for_connect_never_raises(monkeypatch):
+    """This runs on the connect path -- see `cookies_for_connect`'s own
+    docstring -- so a down credential store must come back as "no cookies",
+    never as the 503 `custody_for` raises for every other caller."""
+    from fastapi import HTTPException
+    from starlette.requests import Request
+    from api import reports
+
+    def _down(request, store=None):
+        raise HTTPException(status_code=503, detail="the credential store is down")
+
+    monkeypatch.setattr("api.drafts.session_for", _down)
+    request = Request({"type": "http", "headers": []})
+    assert reports.cookies_for_connect(request, "{X}", None) is None
+    # The body carried its own credential, so the (raising) session lookup
+    # is never even reached.
+    assert reports.cookies_for_connect(request, "{X}", "s2") == {
+        "SWID": "{X}", "espn_s2": "s2"}
