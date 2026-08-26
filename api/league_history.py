@@ -114,6 +114,16 @@ def run_import(league_id: str, cookies: dict, progress: Progress, fetch=None,
         import_activity(conn, league_id, fetch_json, seasons, CURRENT_SEASON,
                         progress=progress, pause=PAUSE_SECONDS)
         _rebuild_standings(conn)
+    except Exception as exc:      # noqa: BLE001 -- import_activity already
+        # records its own failures on `progress` before re-raising; this
+        # also catches anything AFTER it (right now, only
+        # _rebuild_standings), so a failure there cannot leave `progress`
+        # reading "done" for a league whose file never got a usable
+        # league_standings table -- the same pattern import_activity uses,
+        # not doubled up if it already recorded one.
+        if progress.snapshot()["phase"] != "failed":
+            progress.fail(f"{type(exc).__name__}: {exc}")
+        raise
     finally:
         conn.close()
         with _LOCK:
@@ -148,24 +158,45 @@ def register_league_history_routes(app, store=None, fetch=None, runner=None,
     @app.post("/api/leagues/{league_id}/history")
     def start_history(league_id: str, request: Request):
         session = owned_league(request, store, league_id, fetch=fetch)
+        # Check-and-reserve is one atomic step under _LOCK: a job is only
+        # ever recorded in _JOBS while the lock is held, so two requests
+        # that both arrive before anything is registered cannot each see
+        # "nothing running yet" and both start their own import against the
+        # same league file. _imported/_fresh (file reads) run AFTER the
+        # reservation, deliberately outside the lock -- they no longer need
+        # it, since the reservation already claims the slot.
+        #
+        # Lock order: _LOCK, then (inside snapshot()/start() below) a
+        # Progress's own internal lock -- never the reverse, so this can
+        # never deadlock against anything that reads a Progress under its
+        # own lock first.
         with _LOCK:
             running = _JOBS.get(league_id)
-            if running is not None and running.snapshot()["phase"] == "running":
+            status = running.snapshot()["phase"] if running is not None else None
+            if status == "running":
                 return _status(202, {"status": "running"})
-        if _imported(league_id) and _fresh(league_id):
-            return {"status": "fresh"}
-        progress = Progress(league_id)
-        progress.start([])
-        with _LOCK:
+            # A job that failed does not block a retry -- and the fresh
+            # check just below must not fire for it either: the walk never
+            # finished cleanly, whatever import_activity itself managed to
+            # store before that.
+            retryable = status == "failed"
+            progress = Progress(league_id)
+            progress.start([])
             _JOBS[league_id] = progress
+        if not retryable and _imported(league_id) and _fresh(league_id):
+            with _LOCK:
+                if _JOBS.get(league_id) is progress:
+                    del _JOBS[league_id]
+            return {"status": "fresh"}
         cookies = drafts.cookies_for(session.swid, session.espn_s2)
 
         def job():
             try:
                 run_import(league_id, cookies, progress, fetch=fetch,
                           universal_path=universal_path)
-            except Exception:      # noqa: BLE001 -- recorded on progress
-                traceback.print_exc()
+            except Exception:      # noqa: BLE001 -- run_import has already
+                traceback.print_exc()  # recorded the failure on `progress`;
+                # this only puts a trace in the server's own log.
         start(job)
         return _status(202, {"status": "running"})
 

@@ -2,6 +2,8 @@
 page reads while it runs and after."""
 import json
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -149,3 +151,69 @@ def test_a_fresh_league_answers_200_without_fetching(owner):
     # call /api/espn/drafts uses, so the account list from the first POST
     # is still good, and "fresh" itself costs no ESPN round trip either.
     assert len(calls) == before
+
+
+def test_two_concurrent_first_time_posts_start_only_one_job(owner):
+    """Real threads, both racing to start the SAME never-imported league's
+    first import -- not the sequential double-call above, which never
+    exercises two requests actually overlapping. start_history's running
+    check and its registration in _JOBS must be one atomic step under
+    _LOCK, or two requests that both land before either has registered can
+    each decide "nothing running yet" and each start their own job against
+    the same league file.
+    """
+    started = []
+    entered = threading.Event()
+    release = threading.Event()
+
+    def runner(fn):
+        # Whichever request wins the race reaches here and parks, so the
+        # test can look for a second job trying to reach it too before
+        # letting the winner's request finish.
+        started.append(fn)
+        entered.set()
+        release.wait(timeout=5)
+
+    client = _client(_fetch(_entries_payload((LEAGUE, "Mine"))), runner=runner)
+    results = []
+
+    def post():
+        results.append(client.post(f"/api/leagues/{LEAGUE}/history").status_code)
+
+    t1 = threading.Thread(target=post)
+    t2 = threading.Thread(target=post)
+    t1.start()
+    t2.start()
+    assert entered.wait(timeout=5), "neither POST ever reached a job"
+    # A real window for a second, wrongly-started job to also reach the
+    # runner, before letting the one that did proceed.
+    time.sleep(0.2)
+    release.set()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+
+    assert sorted(results) == [202, 202]
+    assert len(started) == 1
+
+
+def test_a_failure_after_the_walk_is_recorded_and_the_next_post_retries(owner, monkeypatch):
+    """_rebuild_standings raising after import_activity already succeeded
+    must not leave progress reading "done" -- otherwise every later POST
+    would answer "fresh" while the GET routes 500 against a league whose
+    league_standings table was never written."""
+    def boom(conn):
+        raise RuntimeError("standings blew up")
+    monkeypatch.setattr(lh, "_rebuild_standings", boom)
+    client = _client(_fetch(_entries_payload((LEAGUE, "Mine"))), runner=_sync)
+
+    started = client.post(f"/api/leagues/{LEAGUE}/history")
+    assert started.status_code == 202
+    progress = client.get(f"/api/leagues/{LEAGUE}/history/progress").json()
+    assert progress["phase"] == "failed"
+    assert "standings blew up" in progress["error"]
+
+    # A failed job is not "running" (the retry below must be allowed to
+    # start) and its league must not be read as "fresh" either -- the walk
+    # never finished cleanly, whatever import_activity itself stored.
+    retry = client.post(f"/api/leagues/{LEAGUE}/history")
+    assert retry.status_code == 202 and retry.json()["status"] == "running"
