@@ -100,9 +100,15 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
   const [roomCount, setRoomCount] = useState<number | null>(null)
 
   const navigate = useNavigate()
-  // league_id -> its stored reports, newest first. One read per card when
-  // the dashboard mounts; undefined until it lands, so the card shows no
-  // report link rather than a wrong one.
+  // league_id -> its stored reports, newest first. One read per non-mock
+  // league, repeated whenever the league list is re-read -- about once a
+  // minute, alongside Landing's own account poll -- rather than once at
+  // mount: a report the room finishes building at the end of a draft, or
+  // one started from another tab, should get its "Report card" link here
+  // without a reload. The GET is a cheap read of one stored table, so
+  // paying it once a minute per league costs nothing worth guarding.
+  // Undefined until the first read lands, so the card shows no report link
+  // rather than a wrong one.
   const [reports, setReports] = useState<Record<string, ReportSummary[]>>({})
   const [buildingFor, setBuildingFor] = useState<string | null>(null)
   useEffect(() => {
