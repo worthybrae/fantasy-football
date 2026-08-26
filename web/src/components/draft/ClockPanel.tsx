@@ -138,12 +138,21 @@ export default function ClockPanel({
     )
   }
 
+  // Read up here, above the listener branch, because it OUTRANKS it. ESPN
+  // closes the draft socket the moment the last pick lands, so a finished
+  // draft always ends up with a dead listener a second or two later -- and
+  // letting "Listener down" win would hide the "Draft complete" heading,
+  // and with it the only way into the report card, in the ordinary case
+  // rather than the exotic one. A done draft is done: nothing is left for a
+  // listener to be late for, and there is no reconnect worth offering.
+  const draftDone = state.on_the_clock === null
+
   // Draft night's worst failure: a board that looks current and has simply
   // stopped updating. This replaces the countdown outright rather than
   // sharing space with it -- a stopped listener means everything below is
   // suspect, not just late.
   const listenerDown = state.listener_error !== null || !state.listener_alive
-  if (listenerDown) {
+  if (listenerDown && !draftDone) {
     return (
       <div className="clock-panel clock-panel-down" role="alert">
         <div className="draft-cap">Listener down</div>
@@ -179,7 +188,6 @@ export default function ClockPanel({
   const teams = state.settings.teams as number
 
   const youAreUp = state.on_the_clock !== null && state.on_the_clock === state.my_slot
-  const draftDone = state.on_the_clock === null
   // null, not picks_made + 1, once the draft is over -- a 120-pick, 15-round
   // league otherwise reads "121 · RD 16," naming a round that does not
   // exist (Task 6+7 review finding #4). Renders as the same em dash '—'
