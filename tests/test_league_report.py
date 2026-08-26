@@ -282,6 +282,10 @@ def test_team_profiles_summarise_history(tmp_path):
     # first" as true career-wide rather than per-season.
     assert m1["mean_value"] > 8        # every pick but the first is +10
     assert m1["steal_rate"] > 0.8 and m1["reach_rate"] == 0.0
+    # The count the three rates above rest on: both seasons' worth of
+    # picks (7 rounds x 2 seasons), every one graded -- this fixture's ADP
+    # covers every player.
+    assert m1["graded_picks"] == 14
     assert m1["first_pick_positions"] == {"WR": 2}
     assert m1["career_best"]["value"] == 10.0
     m5 = profiles["m5"]

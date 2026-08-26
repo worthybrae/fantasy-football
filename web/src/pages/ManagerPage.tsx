@@ -62,6 +62,12 @@ export default function ManagerPage() {
   }, [leagueId, memberId])
 
   const openPlayer = (id: number) => setTarget({ playerId: String(id), seed: null })
+  // `p.draft` is a loose bag (the league-report branch's tables, or absent
+  // entirely) rather than a typed shape, so the count backing its three
+  // rates -- mean value, steal rate, reach rate -- is read out once here,
+  // the same defensive way each rate itself is, rather than three times
+  // inline below.
+  const gradedPicks = p?.draft && typeof p.draft.graded_picks === 'number' ? p.draft.graded_picks : undefined
 
   return (
     <div className="mk-page">
@@ -170,13 +176,13 @@ export default function ManagerPage() {
               <div className="lg-figs">
                 <Fig label="autodraft rate" value={pct(p.draft_flags.autodraft_rate)} n={p.draft_flags.n} />
                 {p.draft && typeof p.draft.mean_value === 'number' && (
-                  <Fig label="value per pick vs ADP" value={signed(p.draft.mean_value as number)} />
+                  <Fig label="value per pick vs ADP" value={signed(p.draft.mean_value as number)} n={gradedPicks} />
                 )}
                 {p.draft && typeof p.draft.steal_rate === 'number' && (
-                  <Fig label="steal rate" value={pct(p.draft.steal_rate as number)} />
+                  <Fig label="steal rate" value={pct(p.draft.steal_rate as number)} n={gradedPicks} />
                 )}
                 {p.draft && typeof p.draft.reach_rate === 'number' && (
-                  <Fig label="reach rate" value={pct(p.draft.reach_rate as number)} />
+                  <Fig label="reach rate" value={pct(p.draft.reach_rate as number)} n={gradedPicks} />
                 )}
               </div>
             </section>

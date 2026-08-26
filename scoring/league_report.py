@@ -363,6 +363,9 @@ def team_profiles(conn) -> list:
             "avg_finish": round(sum(s["final_rank"] for s in done) / len(done), 2) if done else None,
             "ppg": round(sum(p for p, _ in ppg_games) / ppg_total_games, 1) if ppg_total_games else None,
             "drafts": int(my_picks["season"].nunique()) if not my_picks.empty else 0,
+            # The count the three rates below rest on, so a page can say how
+            # small the sample is.
+            "graded_picks": int(len(graded)),
             "mean_value": round(float(graded["value"].astype(float).mean()), 2) if len(graded) else None,
             "steal_rate": round(float((graded["verdict"] == "steal").mean()), 3) if len(graded) else None,
             "reach_rate": round(float((graded["verdict"] == "reach").mean()), 3) if len(graded) else None,
