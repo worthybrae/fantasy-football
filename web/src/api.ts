@@ -1457,3 +1457,113 @@ export const fetchMarketSlot = (slot: number) =>
 
 export const fetchMarketPlayers = (slot: number) =>
   archive<MarketPlayers>(`/api/market/players?slot=${slot}`)
+
+/** One drafted pick as the report card cites it. */
+export interface ReportPick {
+  player_name: string
+  position: string | null
+  round: number | null
+  overall_pick: number
+  market_rank: number | null
+  value: number | null
+  verdict: 'steal' | 'value' | 'market' | 'early' | 'reach' | null
+}
+
+export interface ReportCard {
+  manager: string
+  team_name: string
+  team_id: number | null
+  grade: string
+  value_total: number
+  value_per_pick: number | null
+  graded_picks: number
+  steals: number
+  reaches: number
+  best_pick: ReportPick | null
+  worst_pick: ReportPick | null
+  shape: { positions: Record<string, number>; first_round: Record<string, number | null> }
+  nickname: string | null
+  blurb: string | null
+}
+
+export interface PowerRank {
+  rank: number
+  manager: string
+  team_name: string
+  score: number
+  first_year: boolean
+  line: string | null
+}
+
+export interface TeamSeason {
+  season: number
+  wins: number | null
+  losses: number | null
+  ties: number | null
+  points_for: number | null
+  final_rank: number | null
+  playoff_seed: number | null
+}
+
+export interface TeamProfile {
+  manager: string
+  team_name: string
+  seasons: TeamSeason[]
+  titles: number[]
+  playoffs: number[]
+  completed: number
+  win_pct: number | null
+  avg_finish: number | null
+  ppg: number | null
+  drafts: number
+  mean_value: number | null
+  steal_rate: number | null
+  reach_rate: number | null
+  first_pick_positions: Record<string, number>
+  career_best: ReportPick | null
+  career_worst: ReportPick | null
+  model_notes: string[]
+}
+
+/** `numbers_only` is a complete report with no prose -- the writer was off
+ *  or declined. `failed` carries a `reason`. */
+export interface LeagueReport {
+  league_id: string
+  season: number
+  league_name: string
+  teams: number
+  generated_at: string | null
+  model: string | null
+  status: 'ready' | 'numbers_only' | 'failed'
+  reason?: string
+  intro: string | null
+  power_rankings: PowerRank[]
+  report_cards: ReportCard[]
+  profiles: TeamProfile[]
+}
+
+export interface ReportSummary {
+  season: number
+  generated_at: string
+  status: LeagueReport['status']
+}
+
+export async function fetchLeagueReports(leagueId: string): Promise<ReportSummary[]> {
+  const res = await fetch(`/api/leagues/${encodeURIComponent(leagueId)}/reports`)
+  if (!res.ok) throw new Error(await detailText(res))
+  return res.json()
+}
+
+/** Null on 404: no report for that season yet. */
+export async function fetchLeagueReport(leagueId: string, season: number | string): Promise<LeagueReport | null> {
+  const res = await fetch(`/api/leagues/${encodeURIComponent(leagueId)}/report/${season}`)
+  if (res.status === 404) return null
+  if (!res.ok) throw new Error(await detailText(res))
+  return res.json()
+}
+
+export async function buildLeagueReport(leagueId: string, season: number | string): Promise<{ status: string }> {
+  const res = await fetch(`/api/leagues/${encodeURIComponent(leagueId)}/report/${season}`, { method: 'POST' })
+  if (!res.ok) throw new Error(await detailText(res))
+  return res.json()
+}

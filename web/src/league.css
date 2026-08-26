@@ -1,0 +1,84 @@
+/* The league report page. Mobile first: the link is opened from a group
+   chat on a phone. Widths above 720px get two columns of cards. Tokens are
+   the app's own (index.css); `is-steal` / `is-reach` / `is-flat` carry the
+   same meaning they do on the draft board's ticker. */
+
+.lr-page {
+  min-height: 100vh;
+  background: var(--bg-0);
+  color: var(--text-1);
+  font-family: var(--font-ui);
+  font-size: var(--text-md);
+  line-height: 1.5;
+}
+.lr-bar { display: flex; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+.lr-logo { display: inline-flex; color: inherit; text-decoration: none; }
+
+.lr-main { max-width: 960px; margin: 0 auto; padding: 16px; }
+.lr-note { max-width: 960px; margin: 24px auto; padding: 0 16px; color: var(--text-2); }
+.lr-note.is-fail { color: var(--fail); }
+
+.lr-hero { padding: 8px 0 20px; }
+.lr-kicker { margin: 0; color: var(--text-3); font-size: var(--text-sm); text-transform: uppercase; letter-spacing: .08em; }
+.lr-title { margin: 4px 0 8px; font-size: 28px; line-height: 1.1; }
+.lr-intro { margin: 0; font-size: var(--text-lg); color: var(--text-1); }
+
+.lr-section { padding: 12px 0 20px; border-top: 1px solid var(--border); }
+.lr-h2 { margin: 0 0 12px; font-size: var(--text-xl); }
+
+.lr-ranks { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.lr-rank { display: grid; grid-template-columns: 36px 1fr; gap: 10px; align-items: start; }
+.lr-rank-n { font-size: 22px; color: var(--accent); line-height: 1.1; }
+.lr-rank-team { margin: 0; font-weight: 600; }
+.lr-rank-manager { margin: 0; color: var(--text-3); font-size: var(--text-sm); }
+.lr-rank-line { margin: 2px 0 0; color: var(--text-2); }
+.lr-first { color: var(--accent); }
+
+.lr-cards, .lr-histories { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+@media (min-width: 720px) { .lr-cards, .lr-histories { grid-template-columns: 1fr 1fr; } }
+
+.lr-card { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; background: var(--bg-1); }
+.lr-card-head { display: grid; grid-template-columns: 48px 1fr auto; gap: 10px; align-items: center; }
+.lr-grade { font-family: var(--font-mono); font-size: 34px; font-weight: 700; line-height: 1; text-align: center; }
+.lr-grade-a .lr-grade { color: var(--ok); }
+.lr-grade-b .lr-grade { color: var(--ramp-strong); }
+.lr-grade-c .lr-grade { color: var(--ramp-mid); }
+.lr-grade-d .lr-grade { color: var(--accent); }
+.lr-grade-f .lr-grade { color: var(--fail); }
+.lr-card-team { margin: 0; font-weight: 600; }
+.lr-card-manager { margin: 0; color: var(--text-3); font-size: var(--text-sm); }
+.lr-nickname { color: var(--text-2); font-style: italic; }
+.lr-card-stat { margin: 0; font-size: var(--text-sm); text-align: right; }
+.lr-sep { margin: 0 6px; color: var(--text-3); }
+.is-steal { color: var(--ok); }
+.is-reach { color: var(--fail); }
+.is-flat { color: var(--text-3); }
+
+.lr-blurb { margin: 10px 0 8px; }
+.lr-pick { margin: 4px 0; display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; font-size: var(--text-sm); }
+.lr-pick-label { color: var(--text-3); width: 40px; }
+.lr-pick-name { font-weight: 600; }
+.lr-pick-where { color: var(--text-3); }
+.lr-pos { font-family: var(--font-mono); font-size: var(--text-xs); padding: 0 4px; border-radius: var(--radius); color: #fff; }
+.lr-pos-qb { background: var(--pos-qb); }
+.lr-pos-rb { background: var(--pos-rb); }
+.lr-pos-wr { background: var(--pos-wr); }
+.lr-pos-te { background: var(--pos-te); }
+.lr-pos-k { background: var(--pos-k); }
+.lr-pos-dst { background: var(--pos-dst); }
+.lr-shape { margin: 8px 0 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.lr-shape-chip { font-family: var(--font-mono); font-size: var(--text-xs); padding: 1px 6px; border-radius: 10px; color: #fff; }
+
+.lr-history { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; }
+.lr-history-head { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; }
+.lr-history-team { margin: 0; font-weight: 600; }
+.lr-history-manager { margin: 0; color: var(--text-3); font-size: var(--text-sm); grid-column: 1; }
+.lr-history-pct { grid-column: 2; grid-row: 1 / span 2; color: var(--text-2); font-size: var(--text-sm); align-self: center; }
+.lr-seasons { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.lr-season { display: inline-flex; gap: 6px; align-items: baseline; font-size: var(--text-sm); }
+.lr-season-year { color: var(--text-3); }
+.lr-season.is-title .lr-season-rec { color: var(--accent); }
+.lr-crown { color: var(--accent); }
+.lr-habits { margin: 8px 0 0; color: var(--text-2); font-size: var(--text-sm); }
+
+.lr-foot { padding: 16px 0 32px; color: var(--text-3); font-size: var(--text-xs); }
