@@ -6,7 +6,7 @@ import duckdb
 import pandas as pd
 import pytest
 
-from pipeline.db import write_table
+from pipeline.db import read_table, write_table
 from scoring import manager_profile as mp
 
 A, B, C, D = ("{A}", "{B}", "{C}", "{D}")
@@ -378,3 +378,56 @@ def test_defining_line_falls_back_to_the_record_with_no_extreme():
     facts_by_member = {"rookie": rookie, "veteran": veteran}
     assert mp.defining_line("rookie", facts_by_member) == "first season in the league"
     assert mp.defining_line("veteran", facts_by_member) == "7-6 last season, avg finish 3.0"
+
+
+def test_overview_and_profile_json_serialise_with_a_nameless_teamless_member(lineups_league):
+    """A member with no display_name and no team (an ESPN co-owner row, or a
+    member who never fielded a team) must not blow up JSON encoding anywhere
+    display names are threaded through: the overview grid, and a profile's
+    own name fields and head-to-head opponent names."""
+    conn = lineups_league
+    members_df = read_table(conn, "league_members")
+    nameless = pd.DataFrame([{
+        "season": 2025, "member_id": "{E}", "display_name": None, "first_name": None,
+        "last_name": None, "team_id": None, "draft_day_rank": None, "acquisitions": None,
+        "drops": None, "trades": None, "lineup_moves": None, "ir_moves": None,
+    }])
+    write_table(conn, "league_members", pd.concat([members_df, nameless], ignore_index=True))
+
+    o = mp.league_overview(conn)
+    json.dumps(o)   # must not raise TypeError on a pandas NA
+    grid = {m["member_id"]: m for m in o["members"]}
+    assert grid["{E}"]["display_name"] is None
+
+    p = mp.profile(conn, A)
+    json.dumps(p)   # must not raise either -- A's head-to-head never touches E,
+                     # but every display name here is read off the same members() frame
+
+
+def test_members_normalises_display_name_even_when_the_whole_column_is_null(tmp_path):
+    """DuckDB can't infer VARCHAR from an all-null column, so it round-trips
+    as pandas NA rather than None -- the exact mechanism that broke
+    `first_name` (always null in every fixture in this file). A single
+    null amid real names round-trips as plain None already (see the
+    nameless-member test above); this is the shape that actually needs
+    members() to guard it."""
+    conn = duckdb.connect(str(tmp_path / "nameless.duckdb"))
+    write_table(conn, "league_members", pd.DataFrame([{
+        "season": 2025, "member_id": "{Z}", "display_name": None, "first_name": None,
+        "last_name": None, "team_id": 1, "draft_day_rank": 1, "acquisitions": 0,
+        "drops": 0, "trades": 0, "lineup_moves": 0, "ir_moves": 0,
+    }]))
+    write_table(conn, "league_standings", pd.DataFrame([{
+        "season": 2025, "team_id": 1, "manager": "m1", "team_name": "Team 1",
+        "wins": 0, "losses": 0, "ties": 0, "points_for": 100.0, "points_against": 0.0,
+        "playoff_seed": None, "final_rank": 1,
+    }]))
+    assert mp.members(conn).iloc[0].display_name is None
+
+    o = mp.league_overview(conn)
+    json.dumps(o)
+    assert o["members"][0]["display_name"] is None
+
+    p = mp.profile(conn, "{Z}")
+    json.dumps(p)
+    assert p["display_name"] is None

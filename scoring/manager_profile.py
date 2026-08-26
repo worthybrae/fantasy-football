@@ -55,8 +55,8 @@ def members(conn) -> pd.DataFrame:
         played = g[g.team_id.notna()]
         rows.append({
             "member_id": swid,
-            "display_name": g.iloc[-1].display_name,
-            "first_name": g.iloc[-1].first_name,
+            "display_name": _str(g.iloc[-1].display_name),
+            "first_name": _str(g.iloc[-1].first_name),
             "seasons": [int(s) for s in played.season],
             "teams": {int(r.season): int(r.team_id) for r in played.itertuples()},
         })
@@ -585,8 +585,8 @@ def profile(conn, member_id: str) -> dict | None:
            for (a, b), rec in head_to_head(conn).items() if a == member_id]
     h2h.sort(key=lambda x: -x["games"])
     return {
-        "member_id": member_id, "display_name": _str(me.display_name),
-        "first_name": _str(me.first_name), "seasons": me.seasons,
+        "member_id": member_id, "display_name": me.display_name,
+        "first_name": me.first_name, "seasons": me.seasons,
         "head_to_head": h2h,
         **_facts(conn, member_id),
     }
