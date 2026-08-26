@@ -94,6 +94,30 @@ def test_finishes_read_the_standings_through_the_members_table(league):
     assert f["points_per_season"] == 325.0
 
 
+def test_the_season_being_played_shows_with_blanks(league):
+    """`league_members` carries a season the moment ESPN rolls the league
+    over to it; `league_standings` carries a season only once it has ended.
+    The header counts the running season, so the table must show it too --
+    with blanks, not by leaving it out -- while the all-time figures still
+    rest on the seasons that finished."""
+    conn = league
+    write_table(conn, "league_members",
+                pd.DataFrame(_members(2024) + _members(2025) + _members(2026)))
+    f = mp.finishes(conn, A)
+    assert [s["season"] for s in f["seasons"]] == [2024, 2025, 2026]
+    running = f["seasons"][-1]
+    assert running["final_rank"] is None and running["wins"] is None
+    assert running["team_name"] is None and running["points_for"] is None
+    # And the manager's one-line summary still reads the last season that
+    # ended, not the blanks of the one being played.
+    facts = {swid: mp._facts(conn, swid) for swid in (A, B, C, D)}
+    assert mp.defining_line(A, facts).startswith("0-0 last season")
+    # Still ESPN's draft-day projection, which it has from the moment the
+    # season opens.
+    assert running["draft_day_rank"] == 1 and running["outperformance"] is None
+    assert f["n"] == 2 and f["avg_finish"] == 2.5
+
+
 def test_playoffs_come_from_the_bracket_not_the_seed(league):
     p = mp.playoffs(league, A)
     assert p["appearances"] == [2024] and p["bracket_wins"] == 1 and p["bracket_losses"] == 0
@@ -168,12 +192,34 @@ def _lineup(season, week, team, pid, name, pos, slot, actual, projected=None):
 
 @pytest.fixture
 def activity(league):
-    """On top of `league`: 2025 transactions and lineups.
+    """On top of `league`: 2025 transactions and lineups, in ESPN's shapes.
 
-    A (team 1) claims player 100 in week 2 and wins it; claims 101 in week
-    3 and loses it to B (same process run, B's executed, A's failed); adds
-    102 as a free agent on a Tuesday; cancels a claim on 103.
-    A proposes a trade to B in week 3 (A sends 200, gets 300); B accepts.
+    A processed claim keeps its outcome row (execution type PROCESS, or
+    CANCEL when it was withdrawn), which names the claim it answers in
+    `related_txn_id`. The claim's own EXECUTE row is usually gone by then;
+    sometimes ESPN keeps it, so one of A's claims here has both rows and
+    must still count once. A claim nothing has answered yet is a pending
+    EXECUTE row on its own.
+
+    A (team 1), season 2025:
+      * week 2, claim on 100 WON -- the pending row `w1` (Monday) and its
+        outcome `w1p` (Wednesday), one claim between them;
+      * week 3, claim on 101 LOST to B (FAILED_INVALIDPLAYERSOURCE,
+        Wednesday) -- B's own claim on 101 won the same run;
+      * week 3, free-agent add of 102 with a drop of 50 (Tuesday);
+      * week 3, claim on 103 CANCELED (Thursday);
+      * week 4, claim on 105 FAILED_ROSTERLIMIT (Wednesday) -- self
+        inflicted, not lost to anyone;
+      * week 4, claim on 104 still PENDING (Wednesday), nothing answering it.
+
+    So, by hand: 5 claims (won 1, lost 1, failed 1, canceled 1, pending 1),
+    a win rate of 1/(1+1) = 0.5 with the roster-limit failure out of the
+    denominator, 1 free-agent add, 1 drop, and by weekday -- read off the
+    outcome rows, never the pending row that preceded them -- Mon 0, Tue 1
+    (the add), Wed 4, Thu 1. Busiest week: week 3, with the lost claim and
+    the free-agent add.
+
+    Trades: A proposes to B in week 3 (A sends 200, gets 300); B accepts.
     After the trade, 300 scores 20 and 25 for A in weeks 4-5; 200 scores
     10 and 10 for B. Balance for A: (20+25) - (10+10) = +25.
     B proposes a trade to A in week 4; A declines."""
@@ -183,16 +229,18 @@ def activity(league):
              when="2025-09-15T18:00:00Z"),
         _txn(2025, 2, "w1p", 1, A, "WAIVER", "EXECUTED", "PROCESS", [_add(100, 1)],
              related="w1", when="2025-09-17T07:00:00Z"),
-        _txn(2025, 3, "w2", 1, A, "WAIVER", "PENDING", "EXECUTE", [_add(101, 1)]),
         _txn(2025, 3, "w2p", 1, A, "WAIVER", "FAILED_INVALIDPLAYERSOURCE", "PROCESS",
              [_add(101, 1)], related="w2", when="2025-09-24T07:00:00Z"),
-        _txn(2025, 3, "w2b", 2, B, "WAIVER", "PENDING", "EXECUTE", [_add(101, 2)]),
         _txn(2025, 3, "w2bp", 2, B, "WAIVER", "EXECUTED", "PROCESS", [_add(101, 2)],
              related="w2b", when="2025-09-24T07:00:00Z"),
         _txn(2025, 3, "fa1", 1, A, "FREEAGENT", "EXECUTED", "EXECUTE",
              [_add(102, 1), _drop(50, 1)], when="2025-09-23T15:00:00Z"),   # a Tuesday
-        _txn(2025, 3, "wc", 1, A, "WAIVER", "PENDING", "EXECUTE", [_add(103, 1)]),
-        _txn(2025, 3, "wcc", 1, A, "WAIVER", "CANCELED", "CANCEL", [_add(103, 1)], related="wc"),
+        _txn(2025, 3, "wcc", 1, A, "WAIVER", "CANCELED", "CANCEL", [_add(103, 1)],
+             related="wc", when="2025-09-25T12:00:00Z"),
+        _txn(2025, 4, "w3p", 1, A, "WAIVER", "FAILED_ROSTERLIMIT", "PROCESS",
+             [_add(105, 1)], related="w3", when="2025-10-01T07:00:00Z"),
+        _txn(2025, 4, "wp", 1, A, "WAIVER", "PENDING", "EXECUTE", [_add(104, 1)],
+             when="2025-10-01T18:00:00Z"),
         _txn(2025, 3, "tp1", 1, A, "TRADE_PROPOSAL", "PENDING", "EXECUTE",
              [_trade_item(200, 1, 2), _trade_item(300, 2, 1)]),
         _txn(2025, 3, "ta1", 2, B, "TRADE_ACCEPT", "EXECUTED", "PROCESS",
@@ -217,16 +265,24 @@ def activity(league):
     return conn
 
 
-def test_waivers_count_claims_wins_losses_and_free_agents(activity):
+def test_waivers_count_every_claim_however_it_ended(activity):
+    """The numbers derived by hand in the fixture's own docstring: five
+    claims on 100, 101, 103, 104 and 105, one of them still pending and one
+    of them carrying the pending row ESPN kept beside its outcome."""
     w = mp.waivers(activity, A)
-    assert w["n"] == 3                      # claims made: 100, 101, 103
-    assert w["claims"] == 3 and w["won"] == 1 and w["lost"] == 1 and w["canceled"] == 1
+    assert w["n"] == 5
+    assert w["claims"] == 5 and w["won"] == 1 and w["lost"] == 1
+    assert w["failed"] == 1 and w["canceled"] == 1
+    # The roster-limit failure is A's own doing, not a claim lost to a
+    # rival, so it stays out of the rate.
+    assert w["win_rate"] == 0.5
     assert w["free_agent_adds"] == 1 and w["drops"] == 1
-    assert w["adds_by_weekday"]["Tue"] == 1
-    assert w["busiest_week"] == {"season": 2025, "week": 3, "moves": 2}   # won/lost/fa: week 3 has fa + lost
+    assert w["adds_by_weekday"] == {"Mon": 0, "Tue": 1, "Wed": 4, "Thu": 1,
+                                    "Fri": 0, "Sat": 0, "Sun": 0}
+    assert w["busiest_week"] == {"season": 2025, "week": 3, "moves": 2}   # the lost claim and the add
     assert "bids" not in w                  # no FAAB this league
     b = mp.waivers(activity, B)
-    assert b["won"] == 1 and b["lost"] == 0
+    assert b["claims"] == 1 and b["won"] == 1 and b["lost"] == 0
 
 
 def test_trades_count_proposals_outcomes_partners_and_balance(activity):
@@ -425,7 +481,10 @@ def test_defining_line_falls_back_to_the_record_with_no_extreme():
     }
     veteran = {
         "finishes": {"n": 1, "avg_finish": 3.0,
-                     "seasons": [{"wins": 7, "losses": 6}]},
+                     "seasons": [{"wins": 7, "losses": 6, "final_rank": 3},
+                                 # The season being played: no record yet,
+                                 # so the line reads the one before it.
+                                 {"wins": None, "losses": None, "final_rank": None}]},
         "playoffs": no_extreme, "luck": no_extreme, "waivers": no_extreme,
         "trades": no_extreme, "lineups": no_extreme, "draft_flags": no_extreme,
     }
@@ -434,11 +493,13 @@ def test_defining_line_falls_back_to_the_record_with_no_extreme():
     assert mp.defining_line("veteran", facts_by_member) == "7-6 last season, avg finish 3.0"
 
 
-def test_overview_and_profile_json_serialise_with_a_nameless_teamless_member(lineups_league):
+def test_a_member_who_never_fielded_a_team_gets_no_card(lineups_league):
     """A member with no display_name and no team (an ESPN co-owner row, or a
-    member who never fielded a team) must not blow up JSON encoding anywhere
-    display names are threaded through: the overview grid, and a profile's
-    own name fields and head-to-head opponent names."""
+    member who never fielded a team) has no season, no record and nothing
+    to say, so the grid leaves them out rather than printing a card that
+    reads "0 seasons, first season in the league". Nothing anywhere may
+    blow up JSON encoding on their pandas NAs either -- not the grid, not a
+    profile's own name fields, not head-to-head opponent names."""
     conn = lineups_league
     members_df = read_table(conn, "league_members")
     nameless = pd.DataFrame([{
@@ -451,7 +512,9 @@ def test_overview_and_profile_json_serialise_with_a_nameless_teamless_member(lin
     o = mp.league_overview(conn)
     json.dumps(o)   # must not raise TypeError on a pandas NA
     grid = {m["member_id"]: m for m in o["members"]}
-    assert grid["{E}"]["display_name"] is None
+    assert "{E}" not in grid and grid.keys() == {A, B, C, D}
+    # The profile route still answers for them.
+    assert mp.profile(conn, "{E}")["display_name"] is None
 
     p = mp.profile(conn, A)
     json.dumps(p)   # must not raise either -- A's head-to-head never touches E,

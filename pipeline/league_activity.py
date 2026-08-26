@@ -13,6 +13,10 @@ ESPN's shapes, as probed on 2026-08-25 (league 53929318):
     `primaryOwner`, the record, the playoff seed, the final rank, ESPN's
     draft-day projected rank, and `transactionCounter` with the season's
     activity totals.
+  * `mSettings`: `settings.rosterSettings.lineupSlotCounts` (the league's
+    starting slots, which the optimal lineup is measured against) and
+    `settings.acquisitionSettings.isUsingAcquisitionBudget` (whether that
+    season ran on FAAB).
   * `mMatchupScore`: `schedule[]`, one entry per matchup, `playoffTierType`
     naming the bracket, `winner` HOME/AWAY/TIE/UNDECIDED, and each side's
     points in total and by scoring period. A bye has one side only.
@@ -35,7 +39,7 @@ import time
 import pandas as pd
 
 from pipeline.db import read_table, write_table
-from pipeline.espn_league import ESPN_POSITION_BY_ID
+from pipeline.espn_league import ESPN_POSITION_BY_ID, _rank_or_none
 
 MEMBER_COLUMNS = ["season", "member_id", "display_name", "first_name", "last_name",
                   "team_id", "draft_day_rank", "acquisitions", "drops", "trades",
@@ -90,7 +94,9 @@ def parse_members(payload: dict, season: int) -> pd.DataFrame:
         counter = team.get("transactionCounter") or {}
         by_owner[team.get("primaryOwner")] = {
             "team_id": _int(team.get("id")),
-            "draft_day_rank": _int(team.get("draftDayProjectedRank")),
+            # ESPN writes 0 for a rank it never set (a season it did not
+            # project); that is an absence, not a first-place projection.
+            "draft_day_rank": _rank_or_none(team.get("draftDayProjectedRank")),
             "acquisitions": _int(counter.get("acquisitions")),
             "drops": _int(counter.get("drops")),
             "trades": _int(counter.get("trades")),
@@ -227,7 +233,7 @@ def parse_draft_flags(payload: dict, season: int, owners: dict) -> pd.DataFrame:
 
 
 BASE = "https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl"
-SEASON_VIEWS = ("mTeam", "mMatchupScore", "mDraftDetail")
+SEASON_VIEWS = ("mTeam", "mSettings", "mMatchupScore", "mDraftDetail")
 WEEK_VIEWS = ("mTransactions2", "mRoster")
 RAW_COLUMNS = ["season", "view", "week", "fetched_at", "payload_json"]
 
@@ -368,11 +374,13 @@ def import_activity(conn, league_id: str, fetch_json, seasons: list, current_sea
     `seasons` is what `import_seasons` found drafted, newest first. A
     finished season already on file is skipped whole. The current season
     is read again when its newest stored answer is older than
-    `max_age_hours`; within it, a week whose games were already over as of
-    the *previously* stored standings, and is already stored, is not read
-    again -- a week that was still the latest at last check gets one more
-    read even once the season has moved past it, since its stats may have
-    only settled since then.
+    `max_age_hours` -- or when a season-level view is missing from the file
+    altogether, which is how a view added to the walk reaches a league
+    imported before it existed. Within a season being read, a week whose
+    games were already over as of the *previously* stored standings, and is
+    already stored, is not read again -- a week that was still the latest at
+    last check gets one more read even once the season has moved past it,
+    since its stats may have only settled since then.
 
     Raises whatever `fetch_json` raises other than FileNotFoundError, after
     recording the failure on `progress`. A 404 on a week is treated as an
@@ -391,10 +399,16 @@ def import_activity(conn, league_id: str, fetch_json, seasons: list, current_sea
             raw = _raw(conn)
             old_latest = _stored_latest(raw, season)
             finished = season < current_season
-            if finished and all(_have(raw, season, v, 0) for v in SEASON_VIEWS):
+            # Every season-level view on file, whatever the clock says. A
+            # view added to the walk (mSettings was) is missing from every
+            # season already stored, and the freshness rule below would
+            # leave the current season without it for a day -- on a page
+            # that reads the settings to say anything about lineups at all.
+            have_views = all(_have(raw, season, v, 0) for v in SEASON_VIEWS)
+            if finished and have_views:
                 progress.finish(season)
                 continue
-            if not finished and not _stale(raw, season, max_age_hours):
+            if not finished and have_views and not _stale(raw, season, max_age_hours):
                 progress.finish(season)
                 continue
             payloads = {}

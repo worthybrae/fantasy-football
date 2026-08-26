@@ -119,7 +119,7 @@ export default function ManagerPage() {
                 <tbody>
                   {p.finishes.seasons.map((s) => (
                     <tr key={s.season} className={s.final_rank === 1 ? 'is-title' : ''}>
-                      <td>{s.season}</td><td className="lg-td-text">{s.team_name}</td>
+                      <td>{s.season}</td><td className="lg-td-text">{s.team_name ?? '—'}</td>
                       <td>{s.wins ?? '—'}-{s.losses ?? '—'}{s.ties ? `-${s.ties}` : ''}</td>
                       <td>{num(s.points_for, 0)}</td><td>{s.playoff_seed ?? '—'}</td>
                       <td>{s.final_rank ?? '—'}</td><td>{s.draft_day_rank ?? '—'}</td>

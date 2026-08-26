@@ -20,10 +20,11 @@ from pathlib import Path
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from api import reports
 from api.league_access import owned_league
 from pipeline import espn_drafts as drafts
 from pipeline import leagues
-from pipeline.db import DEFAULT_PATH, get_conn, read_table
+from pipeline.db import DEFAULT_PATH, read_table
 from pipeline.league_activity import CURRENT_MAX_AGE_HOURS, Progress, _raw, _stale
 from pipeline.league_history import PAUSE_SECONDS
 from pipeline.leagues import league_db_path
@@ -50,11 +51,25 @@ def _path(league_id: str) -> str:
     return league_db_path(league_id, root=_leagues_root())
 
 
-def _imported(league_id: str) -> bool:
+def _read(league_id: str):
+    """A read-only connection to the league's file, or None when there is
+    no file yet.
+
+    Through `api.reports._open`, which carries the two things a read path
+    here needs and `get_conn` does not: a retry when the importer (or a
+    live draft) holds the write lock for the moment we ask, and no DDL of
+    its own -- a GET must not write a schema into somebody's league file.
+    """
     path = _path(league_id)
     if not Path(path).exists():
+        return None
+    return reports._open(path, read_only=True)
+
+
+def _imported(league_id: str) -> bool:
+    conn = _read(league_id)
+    if conn is None:
         return False
-    conn = get_conn(path)
     try:
         return not read_table(conn, "league_members").empty
     finally:
@@ -189,13 +204,19 @@ def register_league_history_routes(app, store=None, fetch=None, runner=None,
             raise HTTPException(status_code=404, detail="No history imported yet.")
 
         def build():
-            conn = get_conn(_path(league_id))
+            conn = _read(league_id)
+            if conn is None:
+                raise HTTPException(status_code=404, detail="No history imported yet.")
             try:
                 overview = manager_profile.league_overview(conn)
                 raw = read_table(conn, "league_raw")
             finally:
                 conn.close()
-            newest = None if raw.empty else str(raw.fetched_at.max())
+            # ISO 8601 in UTC, not a pandas repr in whatever zone the
+            # session read it back in: the page prints this to a reader who
+            # may be anywhere.
+            newest = (None if raw.empty
+                      else manager_profile.to_utc(raw.fetched_at.max()).isoformat())
             return dict(overview, league_id=league_id, imported_at=newest)
         return _answer(league_id, "overview", build)
 
@@ -206,7 +227,9 @@ def register_league_history_routes(app, store=None, fetch=None, runner=None,
             raise HTTPException(status_code=404, detail="No history imported yet.")
 
         def build():
-            conn = get_conn(_path(league_id))
+            conn = _read(league_id)
+            if conn is None:
+                raise HTTPException(status_code=404, detail="No history imported yet.")
             try:
                 return manager_profile.profile(conn, member_id)
             finally:
@@ -219,7 +242,9 @@ def register_league_history_routes(app, store=None, fetch=None, runner=None,
 
 def _fresh(league_id: str) -> bool:
     """Newest raw answer for the current season within a day."""
-    conn = get_conn(_path(league_id))
+    conn = _read(league_id)
+    if conn is None:
+        return False
     try:
         return not _stale(_raw(conn), CURRENT_SEASON, CURRENT_MAX_AGE_HOURS)
     finally:

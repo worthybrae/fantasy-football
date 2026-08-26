@@ -1687,7 +1687,8 @@ export interface ManagerProfile {
                   margin: number; playoff_games: number; n: number }[]
   luck: { n: number; luck: number | null;
           seasons: { season: number; games: number; actual_wins: number; expected_wins: number; luck: number }[] }
-  waivers: { n: number; claims: number; won: number; lost: number; canceled: number; win_rate: number | null;
+  waivers: { n: number; claims: number; won: number; lost: number; failed: number;
+             canceled: number; win_rate: number | null;
              free_agent_adds: number; drops: number; adds_by_weekday: Record<string, number>;
              busiest_week: { season: number; week: number; moves: number } | null; seasons: number[];
              bids?: { n: number; mean: number; max: number; spent: number } }

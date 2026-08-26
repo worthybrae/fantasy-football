@@ -41,6 +41,15 @@ TEAM_PAYLOAD = {
                "latestScoringPeriod": 19, "previousSeasons": [2023, 2024]},
 }
 
+SETTINGS_PAYLOAD = {
+    "seasonId": 2025,
+    "settings": {
+        "rosterSettings": {"lineupSlotCounts": {"0": 1, "2": 1, "4": 1, "16": 1,
+                                                "23": 1, "20": 5}},
+        "acquisitionSettings": {"isUsingAcquisitionBudget": False, "acquisitionBudget": 100},
+    },
+}
+
 MATCHUP_PAYLOAD = {
     "seasonId": 2025,
     "schedule": [
@@ -138,6 +147,17 @@ def test_members_are_one_row_per_member_with_their_team_and_counters():
     assert (df.season == 2025).all()
 
 
+def test_a_draft_day_rank_of_zero_is_no_projection():
+    """ESPN writes 0 for a rank it never set -- a season it did not project
+    at all. Stored as 0 it reads as "projected first", which is the one
+    thing it cannot mean."""
+    payload = json.loads(json.dumps(TEAM_PAYLOAD))
+    payload["teams"][1]["draftDayProjectedRank"] = 0
+    df = act.parse_members(payload, 2025)
+    assert pd.isna(df[df.member_id == SWID_B].iloc[0].draft_day_rank)
+    assert df[df.member_id == SWID_A].iloc[0].draft_day_rank == 3
+
+
 def test_primary_owners_maps_team_to_member():
     assert act.primary_owners(TEAM_PAYLOAD) == {1: SWID_A, 2: SWID_B}
 
@@ -227,6 +247,7 @@ def _served(season, weeks=(1, 2), final=2):
                   latestScoringPeriod=final, currentMatchupPeriod=final + 1)
     served = {
         (season, "mTeam", None): dict(TEAM_PAYLOAD, seasonId=season, status=status),
+        (season, "mSettings", None): dict(SETTINGS_PAYLOAD, seasonId=season),
         (season, "mMatchupScore", None): dict(MATCHUP_PAYLOAD, seasonId=season),
         (season, "mDraftDetail", None): dict(DRAFT_PAYLOAD, seasonId=season),
     }
@@ -250,7 +271,8 @@ def test_the_walk_stores_raw_answers_and_builds_every_table(tmp_path):
                                   seasons=[2024], current_season=2025)
     raw = read_table(conn, "league_raw")
     assert set(zip(raw.season, raw.view, raw.week)) == {
-        (2024, "mTeam", 0), (2024, "mMatchupScore", 0), (2024, "mDraftDetail", 0),
+        (2024, "mTeam", 0), (2024, "mSettings", 0), (2024, "mMatchupScore", 0),
+        (2024, "mDraftDetail", 0),
         (2024, "mTransactions2", 1), (2024, "mTransactions2", 2),
         (2024, "mRoster", 1), (2024, "mRoster", 2)}
     assert len(read_table(conn, "league_members")) == 3
@@ -259,7 +281,7 @@ def test_the_walk_stores_raw_answers_and_builds_every_table(tmp_path):
     assert len(read_table(conn, "league_transactions")) == 3
     assert len(read_table(conn, "league_lineups")) == 6
     assert len(read_table(conn, "league_draft_flags")) == 2
-    assert summary == {"seasons": [2024], "requests": 7, "weeks": {2024: 2}}
+    assert summary == {"seasons": [2024], "requests": 8, "weeks": {2024: 2}}
 
 
 def test_a_finished_season_is_never_fetched_twice(tmp_path):
@@ -291,6 +313,26 @@ def test_the_current_season_refetches_only_what_moved(tmp_path):
     weeks = sorted(int(u.split("scoringPeriodId=")[1]) for u in calls if "scoringPeriodId=" in u)
     assert weeks == [2, 2, 3, 3]
     assert len(read_table(conn, "league_lineups")) == 9      # three weeks, three rows each
+
+
+def test_a_view_the_walk_never_had_is_read_even_when_the_season_is_fresh(tmp_path, monkeypatch):
+    """A season-level view added to the walk -- mSettings was -- has to
+    reach a league imported before it existed. The current season is
+    otherwise skipped whole while its stored answers are less than a day
+    old, so a freshness rule that only reads the clock would leave the new
+    view missing from the season being played until the day was up."""
+    conn = duckdb.connect(str(tmp_path / "league.duckdb"))
+    served = _served(2025, weeks=(1, 2), final=2)
+    act.import_activity(conn, "53929318", _fetch_json(served, []), seasons=[2025],
+                        current_season=2025)
+    monkeypatch.setattr(act, "SEASON_VIEWS", act.SEASON_VIEWS + ("mLater",))
+    served[(2025, "mLater", None)] = {"seasonId": 2025, "later": True}
+    calls = []
+    act.import_activity(conn, "53929318", _fetch_json(served, calls), seasons=[2025],
+                        current_season=2025)
+    assert any("view=mLater" in u for u in calls)
+    raw = read_table(conn, "league_raw")
+    assert (2025, "mLater", 0) in set(zip(raw.season, raw.view, raw.week))
 
 
 def test_progress_publishes_the_shape_up_front_and_ticks(tmp_path):

@@ -44,6 +44,19 @@ def _str(value):
     return str(value)
 
 
+def to_utc(ts) -> pd.Timestamp:
+    """One stored instant, in UTC.
+
+    A timestamp written as UTC comes back out of DuckDB as TIMESTAMP WITH
+    TIME ZONE in the session's own zone, so anything read off the clock --
+    the weekday a claim landed on, the hour an import ran -- would
+    otherwise depend on where the server is standing. A naive value is
+    read as UTC, which is what the importer wrote.
+    """
+    ts = pd.Timestamp(ts)
+    return ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+
+
 def members(conn) -> pd.DataFrame:
     """One row per member across seasons: `member_id`, `display_name` (the
     newest season's), `seasons` (ascending), `teams` ({season: team_id})."""
@@ -85,21 +98,30 @@ def finishes(conn, member_id: str) -> dict:
     seasons = []
     # `st` is a columnless frame when `league_standings` does not exist yet
     # (a league whose activity has been walked but never drafted) --
-    # `st.season` below would raise AttributeError on that shape, so there
-    # is nothing to loop over rather than nothing found per season.
+    # `st.season` below would raise AttributeError on that shape, and
+    # nothing is known about any season then, so there is nothing to list
+    # rather than a row of blanks for each.
     for season in sorted(mine) if not st.empty else []:
         row = st[(st.season == season) & (st.team_id == mine[season])]
         me = mem[(mem.season == season) & (mem.member_id == member_id)]
-        if row.empty:
-            continue
-        r = row.iloc[0]
+        # A season the member is in that has no standings row is the season
+        # being played: ESPN records how it ended only once it has. It is
+        # still one of their seasons, so it is carried through with what is
+        # known and blanks for the rest -- dropped, it would leave a manager
+        # whose header counts this season a table that does not.
+        r = row.iloc[0] if not row.empty else None
         projected = _int(me.iloc[0].draft_day_rank) if not me.empty else None
-        final = _int(r.final_rank)
+        final = _int(r.final_rank) if r is not None else None
         seasons.append({
-            "season": int(season), "team_name": r.team_name,
-            "wins": _int(r.wins), "losses": _int(r.losses), "ties": _int(r.ties),
-            "points_for": _num(r.points_for), "points_against": _num(r.points_against),
-            "playoff_seed": _int(r.playoff_seed), "final_rank": final,
+            "season": int(season),
+            "team_name": _str(r.team_name) if r is not None else None,
+            "wins": _int(r.wins) if r is not None else None,
+            "losses": _int(r.losses) if r is not None else None,
+            "ties": _int(r.ties) if r is not None else None,
+            "points_for": _num(r.points_for) if r is not None else None,
+            "points_against": _num(r.points_against) if r is not None else None,
+            "playoff_seed": _int(r.playoff_seed) if r is not None else None,
+            "final_rank": final,
             "draft_day_rank": projected,
             "outperformance": (projected - final) if projected is not None and final is not None else None,
         })
@@ -303,12 +325,33 @@ def _faab(conn) -> set:
 
 
 def waivers(conn, member_id: str) -> dict:
+    """Every claim this member put in, and how each one ended.
+
+    ESPN keeps a claim's own row (execution type EXECUTE, status PENDING)
+    only while the waiver run has yet to answer it. Once the run has, the
+    outcome row -- PROCESS for a claim that was decided, CANCEL for one
+    withdrawn -- is what is left, naming the claim it answers in
+    `related_txn_id`. Both shapes turn up in the same league's log, so a
+    claim is counted as its outcome row, or as a pending row nothing has
+    answered yet, and never as both.
+    """
     t = _txns(conn)
     mine = t[t.member_id == member_id]
-    claims = mine[(mine.type == "WAIVER") & (mine.execution_type == "EXECUTE")]
-    outcomes = mine[(mine.type == "WAIVER") & (mine.execution_type != "EXECUTE")]
+    waiver = mine[mine.type == "WAIVER"]
+    outcomes = waiver[waiver.execution_type != "EXECUTE"]
+    answered = set(outcomes.related_txn_id.dropna())
+    pending = waiver[(waiver.execution_type == "EXECUTE") & (~waiver.txn_id.isin(answered))]
+    claims = pd.concat([outcomes, pending])
     won = outcomes[outcomes.status == "EXECUTED"]
-    lost = outcomes[outcomes.status.str.startswith("FAILED", na=False)]
+    # Lost means lost to a rival: FAILED_INVALIDPLAYERSOURCE is ESPN's word
+    # for "somebody else's claim on this player ran first". The other
+    # FAILED_ reasons are self-inflicted -- roster full, player already
+    # dropped, position limit -- and say nothing about how the claim fared
+    # against the league, so they are counted apart and kept out of the win
+    # rate's denominator.
+    lost = outcomes[outcomes.status == "FAILED_INVALIDPLAYERSOURCE"]
+    failed = outcomes[outcomes.status.str.startswith("FAILED", na=False)
+                      & (outcomes.status != "FAILED_INVALIDPLAYERSOURCE")]
     canceled = outcomes[outcomes.status == "CANCELED"]
     fa = mine[(mine.type == "FREEAGENT") & (mine.status == "EXECUTED")]
     # Count DROP items across executed free-agent adds and won waiver claims
@@ -319,9 +362,12 @@ def waivers(conn, member_id: str) -> dict:
             if item.get("type") == "DROP":
                 drops += 1
     by_day = {d: 0 for d in WEEKDAYS}
+    # A claim's weekday is the one on its outcome row: that is the row a
+    # processed claim leaves behind, and the moment the player actually
+    # changed hands.
     for ts in pd.concat([fa.proposed_at, claims.proposed_at]):
         if pd.notna(ts):
-            by_day[WEEKDAYS[pd.Timestamp(ts).dayofweek]] += 1
+            by_day[WEEKDAYS[to_utc(ts).dayofweek]] += 1
     moves = pd.concat([fa, won, lost]).groupby(["season", "week"]).size()
     busiest = None
     if len(moves):
@@ -330,7 +376,7 @@ def waivers(conn, member_id: str) -> dict:
     out = {
         "n": int(len(claims)),
         "claims": int(len(claims)), "won": int(len(won)), "lost": int(len(lost)),
-        "canceled": int(len(canceled)),
+        "failed": int(len(failed)), "canceled": int(len(canceled)),
         "win_rate": round(len(won) / (len(won) + len(lost)), 3) if (len(won) + len(lost)) else None,
         "free_agent_adds": int(len(fa)), "drops": int(drops),
         "adds_by_weekday": by_day, "busiest_week": busiest,
@@ -434,7 +480,10 @@ def trades(conn, member_id: str) -> dict:
         "accepted": len(ledger),
         "declined_by_me": int(declines[declines.member_id == member_id].related_txn_id.isin(their_ids).sum()),
         "declined_by_them": int(declines[declines.member_id != member_id].related_txn_id.isin(my_ids).sum()),
-        "vetoed": int(vetoes.related_txn_id.isin(my_ids | their_ids).sum()),
+        # A veto is a vote and a proposal can draw several, so this counts
+        # the proposals that were vetoed, not the votes cast against them.
+        "vetoed": int(vetoes[vetoes.related_txn_id.isin(my_ids | their_ids)]
+                      .related_txn_id.nunique()),
         "partners": [{"member_id": m, "display_name": display.get(m, m), "trades": c}
                      for m, c in sorted(partners.items(), key=lambda kv: -kv[1])],
         "balance": round(sum(l["balance"] for l in ledger), 1) if ledger else None,
@@ -462,6 +511,8 @@ def optimal_points(entries: list, slot_counts: dict) -> float:
     pool = sorted(((pts, pos) for pos, pts in entries if pts is not None), reverse=True)
     total = 0.0
     for slot_id, count in slot_counts.items():
+        # A starting slot with no one position of its own (a superflex, or
+        # ESPN's OP) is skipped: its points go uncounted rather than guessed.
         pos = ESPN_SLOT_POSITIONS.get(int(slot_id))
         if pos is None:
             continue
@@ -497,8 +548,12 @@ def lineups(conn, member_id: str) -> dict:
                 continue
             starters = scored[~scored.lineup_slot.isin([ESPN_BENCH_SLOT, ESPN_IR_SLOT])]
             started = float(starters.actual_points.sum())
+            # A player on IR could not have been started that week whatever
+            # he scored, so he is no part of the best lineup available. The
+            # bench is.
+            eligible = scored[scored.lineup_slot != ESPN_IR_SLOT]
             optimal = optimal_points([(r.position, float(r.actual_points))
-                                      for r in scored.itertuples()], slots)
+                                      for r in eligible.itertuples()], slots)
             started_out += int(starters.injury_status.isin(["OUT", "IR", "SUSPENSION"]).sum())
             weeks.append({"season": int(season), "week": int(week), "started": round(started, 2),
                           "optimal": optimal, "left": round(max(0.0, optimal - started), 2)})
@@ -564,8 +619,12 @@ def defining_line(member_id: str, facts_by_member: dict) -> str:
             continue
         return label
     fin = mine["finishes"]
-    if fin["n"]:
-        last = fin["seasons"][-1]
+    # The last season that ENDED. The season being played is carried in
+    # `seasons` with blanks where its record will go, and "None-None last
+    # season" is not a record.
+    done = [s for s in fin["seasons"] if s.get("final_rank") is not None]
+    if done:
+        last = done[-1]
         return f"{last['wins']}-{last['losses']} last season, avg finish {fin['avg_finish']}"
     return "first season in the league"
 
@@ -578,7 +637,12 @@ def _facts(conn, member_id: str) -> dict:
 
 
 def league_overview(conn) -> dict:
+    # A member who has never fielded a team of their own -- a co-owner ESPN
+    # lists beside the manager -- has no season, no record and nothing to
+    # say; a card reading "0 seasons, first season in the league" is worse
+    # than no card at all. The profile route still answers for them.
     m = members(conn)
+    m = m[m.seasons.map(bool)] if not m.empty else m
     facts = {r.member_id: _facts(conn, r.member_id) for r in m.itertuples()}
     grid = []
     for r in m.itertuples():

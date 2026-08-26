@@ -1,5 +1,6 @@
 """The league-history routes: who may ask, what starts an import, what the
 page reads while it runs and after."""
+import datetime as dt
 import json
 import tempfile
 import threading
@@ -288,3 +289,29 @@ def test_a_failure_before_the_job_starts_releases_the_reservation(owner, monkeyp
     should_boom["on"] = False
     retry = client.post(f"/api/leagues/{LEAGUE}/history")
     assert retry.status_code == 202 and retry.json()["status"] == "running"
+
+
+def test_a_league_file_that_will_not_open_reads_as_no_history(owner, monkeypatch):
+    """Every read path goes through `api.reports._open`, which retries once
+    when the importer (or a live draft) holds the write lock, opens
+    read-only so a GET writes no schema of its own, and answers with
+    nothing when there is nothing to open. A GET must read that as "no
+    history yet" and answer 404 rather than falling over on a None."""
+    client = _client(_fetch(_entries_payload((LEAGUE, "Mine"))), runner=_sync)
+    client.post(f"/api/leagues/{LEAGUE}/history")
+    assert client.get(f"/api/leagues/{LEAGUE}/history").status_code == 200
+    lh._ANSWERS.clear()      # answered from the file, not the five-minute cache
+
+    monkeypatch.setattr(lh.reports, "_open", lambda *a, **k: None)
+    assert client.get(f"/api/leagues/{LEAGUE}/history").status_code == 404
+    assert client.get(f"/api/leagues/{LEAGUE}/managers/{SWID_A}").status_code == 404
+
+
+def test_imported_at_is_iso_8601_in_utc(owner):
+    """A pandas repr in whatever zone the reading session happened to be in
+    is not a timestamp anyone else can read."""
+    client = _client(_fetch(_entries_payload((LEAGUE, "Mine"))), runner=_sync)
+    client.post(f"/api/leagues/{LEAGUE}/history")
+    imported_at = client.get(f"/api/leagues/{LEAGUE}/history").json()["imported_at"]
+    stamp = dt.datetime.fromisoformat(imported_at)
+    assert stamp.utcoffset() == dt.timedelta(0)
