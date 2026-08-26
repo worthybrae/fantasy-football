@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
-import { mintDraftToken, type TokenConnectParams, type UpcomingDraft } from '../api'
+import { Link, useNavigate } from 'react-router-dom'
+import {
+  buildLeagueReport, fetchLeagueReports, mintDraftToken,
+  type ReportSummary, type TokenConnectParams, type UpcomingDraft,
+} from '../api'
 import { calendarLabel, countdownTo, secondsUntil } from '../lib/countdown'
 import { Logo } from './Logo'
 import MockLobby from './MockLobby'
@@ -95,6 +98,35 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
   // requests that can disagree. Null until the first read lands, which is why
   // the bar says nothing rather than "0 mock rooms open".
   const [roomCount, setRoomCount] = useState<number | null>(null)
+
+  const navigate = useNavigate()
+  // league_id -> its stored reports, newest first. One read per card when
+  // the dashboard mounts; undefined until it lands, so the card shows no
+  // report link rather than a wrong one.
+  const [reports, setReports] = useState<Record<string, ReportSummary[]>>({})
+  const [buildingFor, setBuildingFor] = useState<string | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    for (const league of leagues) {
+      if (isMock(league)) continue
+      fetchLeagueReports(league.league_id)
+        .then((rows) => { if (!cancelled) setReports((r) => ({ ...r, [league.league_id]: rows })) })
+        .catch(() => { /* no link, then */ })
+    }
+    return () => { cancelled = true }
+  }, [leagues])
+
+  const build = useCallback(async (league: UpcomingDraft) => {
+    const season = league.season ?? new Date().getFullYear()
+    setBuildingFor(league.league_id)
+    try {
+      await buildLeagueReport(league.league_id, season)
+      navigate(`/leagues/${league.league_id}/report/${season}#building`)
+    } catch (err) {
+      setError(String((err as Error).message || err))
+      setBuildingFor(null)
+    }
+  }, [navigate])
 
   // TWO ROWS: LEAGUES, THEN MOCKS. A mock room you have taken a seat in
   // arrives in the same ESPN list as your real leagues, but it is a different
@@ -285,6 +317,25 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
                         </span>
                         Enter the room
                       </button>
+                      {!isMock(league) && (
+                        reports[league.league_id]?.length ? (
+                          <Link
+                            className="db-go db-league-go db-go-view"
+                            to={`/leagues/${league.league_id}/report/${reports[league.league_id][0].season}`}
+                          >
+                            Report card
+                          </Link>
+                        ) : (
+                          <button
+                            type="button"
+                            className="db-go db-league-go db-go-view"
+                            disabled={buildingFor === league.league_id}
+                            onClick={() => build(league)}
+                          >
+                            {buildingFor === league.league_id ? 'Building…' : 'Build report card'}
+                          </button>
+                        )
+                      )}
                     </div>
                   </li>
                 )

@@ -1088,6 +1088,16 @@
 .db-league-foot {
   margin-top: auto;
   min-width: 0;
+  /* Not a flex row until there is a second control to fit into it: the
+     paid button alone never needed one. A report link or build button now
+     joins it on an upcoming card, and both wear .db-league-go's own
+     width: 100% -- so without a row to wrap them, they'd stack edge to
+     edge with nothing between. flex-wrap keeps that stacking (each still
+     claims the full width and drops to its own line) and gap gives the
+     two controls the breathing room a single button never had to ask for. */
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 /* The way in, across the whole foot of the card. */
