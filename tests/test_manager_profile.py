@@ -244,6 +244,60 @@ def test_trades_count_proposals_outcomes_partners_and_balance(activity):
     assert b["balance"] == pytest.approx(-25.0) and b["declined_by_them"] == 1
 
 
+def test_trades_do_not_double_count_a_second_trade_accept_row(league):
+    """A real ESPN quirk: once a proposal clears its review window with no
+    veto, ESPN logs the acceptance twice under the same related_txn_id --
+    once bare (no items, the counterpart's own accept click) and once with
+    the full item list (execution type PROCESS, the system's confirmation).
+    Both rows pass the old status filter, so the trade was counted -- and
+    its balance summed -- twice. It must count once, keyed on whichever row
+    actually names the players."""
+    conn = league
+    t = [
+        _txn(2025, 3, "tp1", 1, A, "TRADE_PROPOSAL", "PENDING", "EXECUTE",
+             [_trade_item(200, 1, 2), _trade_item(300, 2, 1)]),
+        _txn(2025, 3, "ta1-bare", 2, B, "TRADE_ACCEPT", None, "EXECUTE",
+             [], related="tp1", when="2025-09-25T09:00:00Z"),
+        _txn(2025, 3, "ta1-process", 2, B, "TRADE_ACCEPT", "EXECUTED", "PROCESS",
+             [_trade_item(200, 1, 2), _trade_item(300, 2, 1)], related="tp1",
+             when="2025-09-25T10:00:00Z"),
+    ]
+    write_table(conn, "league_transactions", pd.DataFrame(t))
+    lu = [
+        _lineup(2025, 4, 1, 300, "Got Back", "RB", 2, 20.0),
+        _lineup(2025, 5, 1, 300, "Got Back", "RB", 2, 25.0),
+        _lineup(2025, 4, 2, 200, "Sent Back", "RB", 2, 10.0),
+        _lineup(2025, 5, 2, 200, "Sent Back", "RB", 2, 10.0),
+    ]
+    write_table(conn, "league_lineups", pd.DataFrame(lu))
+    t_a = mp.trades(conn, A)
+    assert t_a["accepted"] == 1 and t_a["n"] == 1
+    assert t_a["balance"] == pytest.approx(25.0)
+    assert t_a["ledger"][0]["sent"] == [{"player_id": 200, "name": "Sent Back"}]
+    assert t_a["ledger"][0]["received"] == [{"player_id": 300, "name": "Got Back"}]
+
+
+def test_trades_exclude_a_proposal_that_was_later_vetoed(league):
+    """A TRADE_ACCEPT with no status is ESPN's normal shape for "accepted,
+    pending the review window" -- but if a TRADE_VETO lands against the
+    same proposal before that window closes, the trade never happened and
+    must not appear as accepted."""
+    conn = league
+    t = [
+        _txn(2025, 3, "tp1", 1, A, "TRADE_PROPOSAL", "PENDING", "EXECUTE",
+             [_trade_item(200, 1, 2), _trade_item(300, 2, 1)]),
+        _txn(2025, 3, "ta1", 2, B, "TRADE_ACCEPT", None, "EXECUTE", [],
+             related="tp1", when="2025-09-25T09:00:00Z"),
+        _txn(2025, 4, "tv1", 3, C, "TRADE_VETO", "EXECUTED", "EXECUTE", [],
+             related="tp1", when="2025-09-26T09:00:00Z"),
+    ]
+    write_table(conn, "league_transactions", pd.DataFrame(t))
+    t_a = mp.trades(conn, A)
+    assert t_a["accepted"] == 0 and t_a["n"] == 0
+    assert t_a["ledger"] == []
+    assert t_a["vetoed"] == 1
+
+
 def test_player_names_come_from_any_week_a_player_was_rostered(activity):
     names = mp.player_names(activity)
     assert names[300] == "Got Back" and 999 not in names

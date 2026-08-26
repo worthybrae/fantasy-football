@@ -382,9 +382,22 @@ def trades(conn, member_id: str) -> dict:
     my_ids = set(mine_p.txn_id)
     their_ids = set(received.txn_id)
     # ESPN's TRADE_ACCEPT rows carry status None in some seasons and
-    # EXECUTED in others; both mean the trade went through.
-    executed = accepts[accepts.related_txn_id.isin(my_ids | their_ids)
-                       & (accepts.status.isna() | (accepts.status == "EXECUTED"))]
+    # EXECUTED in others; both mean the trade went through -- unless a
+    # TRADE_VETO later landed against the same proposal, which means it
+    # never did.
+    vetoed_ids = set(vetoes.related_txn_id.dropna())
+    candidates = accepts[accepts.related_txn_id.isin(my_ids | their_ids)
+                         & (accepts.status.isna() | (accepts.status == "EXECUTED"))
+                         & (~accepts.related_txn_id.isin(vetoed_ids))]
+    # ESPN sometimes logs one proposal's acceptance as two TRADE_ACCEPT
+    # rows -- a bare "the other side clicked accept" event with no items,
+    # and, once the review window closes clean, a second row (execution
+    # type PROCESS) that restates the full item list. Keep one row per
+    # proposal so a single trade is not counted, and its balance not
+    # summed, twice; prefer whichever row actually names what moved.
+    executed = (candidates.assign(_n_items=candidates["items"].map(len))
+                .sort_values("_n_items", ascending=False)
+                .drop_duplicates("related_txn_id", keep="first"))
     partners = defaultdict(int)
     ledger = []
     for r in executed.itertuples():
