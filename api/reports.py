@@ -96,12 +96,24 @@ def _open(path: str, read_only: bool):
     Same shape as `api/mocks.py`'s corpus reader: DuckDB is single-writer per
     file, and a build racing a live draft's own connection to the same file
     is unlucky rather than doomed.
+
+    The default league's file is also the one `api/main.py` opens read-write
+    and keeps for the life of the process (players, market, demo...). In
+    that one process DuckDB refuses to also open a read-only handle to the
+    same file -- "Can't open a connection to same database file with a
+    different configuration than existing connections", the same refusal
+    `test_the_farm_runs_as_its_own_process` documents for the mock farm. A
+    read-write handle shares that already-open connection's configuration
+    and serves a read just as well, so fall back to one rather than 500
+    every report request for the one league this app actually runs live.
     """
     last = None
     for attempt in range(LOCK_TRIES):
         try:
             return duckdb.connect(path, read_only=True) if read_only else get_conn(path)
         except Exception as exc:                # noqa: BLE001
+            if read_only and "different configuration" in str(exc).lower():
+                return get_conn(path)
             if "lock" not in str(exc).lower():
                 raise
             last = exc
