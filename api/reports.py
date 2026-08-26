@@ -24,6 +24,7 @@ import json
 import threading
 import time
 import traceback
+from contextlib import contextmanager
 from pathlib import Path
 
 import duckdb
@@ -97,23 +98,32 @@ def _open(path: str, read_only: bool):
     file, and a build racing a live draft's own connection to the same file
     is unlucky rather than doomed.
 
-    The default league's file is also the one `api/main.py` opens read-write
-    and keeps for the life of the process (players, market, demo...). In
-    that one process DuckDB refuses to also open a read-only handle to the
-    same file -- "Can't open a connection to same database file with a
-    different configuration than existing connections", the same refusal
-    `test_the_farm_runs_as_its_own_process` documents for the mock farm. A
-    read-write handle shares that already-open connection's configuration
-    and serves a read just as well, so fall back to one rather than 500
-    every report request for the one league this app actually runs live.
+    TWO WAYS TO BE REFUSED, and only one of them is a lock. DuckDB caches
+    one database INSTANCE per file per process and every connection to it
+    must agree on the configuration, so `read_only=True` against a file this
+    same process already holds read-write is refused outright -- "Can't open
+    a connection to same database file with a different configuration than
+    existing connections", no "lock" anywhere in it. That is the ordinary
+    case here, not the exotic one: `api/main.py` holds the default league's
+    file for the life of the process, and `api/live.py` holds a live
+    league's own `league_conn` for the whole draft, which is exactly when
+    the draft-end hook and the report pages want to read it.
+    `pipeline/mock_farm.py`'s snapshot reader matches the same two words for
+    the same reason.
+
+    Resolved by falling back to a plain `duckdb.connect(path)`, which joins
+    that already-open instance and reads it just as well. NOT `get_conn`:
+    that runs DDL (meta, drafted, draft_order, and an ALTER on an older
+    `drafted`), and these are public, unauthenticated read paths that must
+    not write a schema into somebody's league file.
     """
     last = None
     for attempt in range(LOCK_TRIES):
         try:
             return duckdb.connect(path, read_only=True) if read_only else get_conn(path)
         except Exception as exc:                # noqa: BLE001
-            if read_only and "different configuration" in str(exc).lower():
-                return get_conn(path)
+            if read_only and "configuration" in str(exc).lower():
+                return duckdb.connect(path)
             if "lock" not in str(exc).lower():
                 raise
             last = exc
@@ -299,25 +309,34 @@ def register_report_routes(app, store=None, fetch=None, spawn=None, root: str | 
             return entries_for(session)
         return espn_drafts.league_entries(session.swid, session.cookies, None, fetch=fetch)
 
+    @contextmanager
+    def _stored(league_id: str, when_missing: str | None):
+        """The league's own file, open for one read and closed afterwards.
+
+        Both GETs do the same three things -- open (or fall back, see
+        `_open`), read, close -- and differ only on a league that has no
+        file at all: the index answers an empty list, one report answers
+        404. `when_missing` is that 404's detail; None yields `conn is None`
+        to the caller instead.
+        """
+        conn = open_read(league_id, root=root)
+        if conn is None and when_missing is not None:
+            raise HTTPException(status_code=404, detail=when_missing)
+        try:
+            yield conn
+        finally:
+            if conn is not None:
+                conn.close()
+
     @app.get("/api/leagues/{league_id}/reports")
     def reports_index(league_id: str):
-        conn = open_read(league_id, root=root)
-        if conn is None:
-            return []
-        try:
-            return list_reports(conn)
-        finally:
-            conn.close()
+        with _stored(league_id, None) as conn:
+            return list_reports(conn) if conn is not None else []
 
     @app.get("/api/leagues/{league_id}/report/{season}")
     def report(league_id: str, season: int, response: Response):
-        conn = open_read(league_id, root=root)
-        if conn is None:
-            raise HTTPException(status_code=404, detail="No report for this league.")
-        try:
+        with _stored(league_id, "No report for this league.") as conn:
             payload = load_report(conn, season)
-        finally:
-            conn.close()
         if payload is None:
             raise HTTPException(status_code=404, detail="No report for this season.")
         response.headers["Cache-Control"] = CACHE_HEADER
