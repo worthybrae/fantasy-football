@@ -1,0 +1,160 @@
+import json
+
+import pandas as pd
+import pytest
+from fastapi.testclient import TestClient
+
+from pipeline.db import get_conn, read_table, write_table
+from tests.test_league_report import seed_league
+
+
+@pytest.fixture
+def league_root(tmp_path, monkeypatch):
+    """A leagues root with one imported league, 424242, and billing off."""
+    root = tmp_path / "leagues"
+    root.mkdir()
+    seed_league(str(root / "424242.duckdb")).close()
+    monkeypatch.delenv("STRIPE_SECRET_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    return str(root)
+
+
+def _app(tmp_path, league_root, session=None, entries=None, spawn=None):
+    from api import reports
+    # A bare app with only the report routes registered against the fixture
+    # root -- create_app() would register its own set against the real root
+    # and the two would clash, and create_app is already exercised by
+    # tests/test_api.py.
+    from fastapi import FastAPI
+    bare = FastAPI()
+    reports.register_report_routes(
+        bare, root=league_root, spawn=spawn or (lambda name, fn: fn()),
+        session_for=(lambda request: session),
+        entries_for=(lambda sess: entries or []))
+    return TestClient(bare)
+
+
+def test_store_and_load_round_trip(tmp_path):
+    from api import reports
+    conn = get_conn(str(tmp_path / "t.duckdb"))
+    assert reports.list_reports(conn) == []
+    assert reports.load_report(conn, 2024) is None
+    reports.store_report(conn, {"season": 2024, "status": "ready", "model": "m", "x": 1})
+    reports.store_report(conn, {"season": 2024, "status": "ready", "model": "m", "x": 2})
+    reports.store_report(conn, {"season": 2023, "status": "numbers_only", "model": None})
+    got = reports.load_report(conn, 2024)
+    assert got["x"] == 2 and got["generated_at"]
+    rows = reports.list_reports(conn)
+    assert [r["season"] for r in rows] == [2024, 2023]
+    assert set(rows[0]) == {"season", "generated_at", "status"}
+
+
+def test_build_report_stores_numbers_only_without_a_client(league_root):
+    from api import reports
+    payload = reports.build_report("424242", 2024, client=None, root=league_root)
+    assert payload["status"] == "numbers_only" and payload["model"] is None
+    conn = get_conn(f"{league_root}/424242.duckdb")
+    assert reports.load_report(conn, 2024)["report_cards"][0]["grade"] == "A"
+
+
+def test_build_report_uses_the_writer(league_root):
+    from api import reports
+    from tests.test_blurbs import FakeClient, _Response
+    managers = [f"m{i}" for i in range(1, 9)]
+    answer = json.dumps({"intro": "Hi", "cards": [
+        {"manager": m, "nickname": "N", "blurb": "B"} for m in managers],
+        "rankings": [{"manager": m, "line": "L"} for m in managers]})
+    payload = reports.build_report("424242", 2024, client=FakeClient([_Response(answer)]),
+                                   root=league_root)
+    assert payload["status"] == "ready" and payload["model"] == "claude-haiku-4-5"
+    assert payload["intro"] == "Hi" and payload["report_cards"][0]["nickname"] == "N"
+
+
+def test_build_report_stores_a_failure(league_root):
+    from api import reports
+    payload = reports.build_report("424242", 2019, root=league_root)
+    assert payload["status"] == "failed" and "no graded picks" in payload["reason"]
+
+
+def test_spawn_build_is_single_flight(league_root):
+    from api import reports
+    held = []
+    def spawn(name, fn):
+        held.append(fn)          # do not run yet
+    assert reports.spawn_build("424242", 2024, spawn=spawn, root=league_root)
+    assert reports.building("424242", 2024)
+    assert not reports.spawn_build("424242", 2024, spawn=spawn, root=league_root)
+    held[0]()
+    assert not reports.building("424242", 2024)
+
+
+def test_get_reports_lists_and_serves(tmp_path, league_root):
+    from api import reports
+    reports.build_report("424242", 2024, root=league_root)
+    client = _app(tmp_path, league_root)
+    assert client.get("/api/leagues/999/reports").json() == []
+    assert client.get("/api/leagues/999/report/2024").status_code == 404
+    rows = client.get("/api/leagues/424242/reports").json()
+    assert rows[0]["season"] == 2024 and rows[0]["status"] == "numbers_only"
+    resp = client.get("/api/leagues/424242/report/2024")
+    assert resp.status_code == 200
+    assert resp.headers["cache-control"] == "public, max-age=300"
+    assert resp.json()["league_name"] == "Test League"
+    assert client.get("/api/leagues/424242/report/2019").status_code == 404
+
+
+def test_post_requires_a_session_that_owns_the_league(tmp_path, league_root):
+    client = _app(tmp_path, league_root, session=None)
+    assert client.post("/api/leagues/424242/report/2024").status_code == 403
+
+    class Sess:
+        swid = "{X}"
+        cookies = {"SWID": "{X}", "espn_s2": "s"}
+    client = _app(tmp_path, league_root, session=Sess(), entries=[{"league_id": "1"}])
+    assert client.post("/api/leagues/424242/report/2024").status_code == 403
+
+
+def test_post_refuses_a_mock_league(tmp_path, league_root, monkeypatch):
+    from api import billing
+    monkeypatch.setattr(billing, "is_free_draft", lambda league_id: True)
+
+    class Sess:
+        swid = "{X}"
+        cookies = {}
+    client = _app(tmp_path, league_root, session=Sess(), entries=[{"league_id": "424242"}])
+    assert client.post("/api/leagues/424242/report/2024").status_code == 400
+
+
+def test_post_builds_and_answers_202(tmp_path, league_root, monkeypatch):
+    from api import billing, reports
+    from pipeline import league_history
+    monkeypatch.setattr(billing, "is_free_draft", lambda league_id: False)
+    imported = []
+    monkeypatch.setattr(reports, "import_history",
+                        lambda league_id, cookies, **kw: imported.append(league_id))
+
+    class Sess:
+        swid = "{X}"
+        cookies = {"SWID": "{X}", "espn_s2": "s"}
+    client = _app(tmp_path, league_root, session=Sess(), entries=[{"league_id": "424242"}])
+    resp = client.post("/api/leagues/424242/report/2024")
+    assert resp.status_code == 202 and resp.json() == {"status": "building"}
+    # The synchronous spawn ran the job: history was refreshed, report stored.
+    assert imported == ["424242"]
+    assert client.get("/api/leagues/424242/report/2024").status_code == 200
+
+
+def test_post_while_building_does_not_start_another(tmp_path, league_root, monkeypatch):
+    from api import billing, reports
+    monkeypatch.setattr(billing, "is_free_draft", lambda league_id: False)
+    held = []
+
+    class Sess:
+        swid = "{X}"
+        cookies = {}
+    client = _app(tmp_path, league_root, session=Sess(), entries=[{"league_id": "424242"}],
+                  spawn=lambda name, fn: held.append(fn))
+    assert client.post("/api/leagues/424242/report/2024").status_code == 202
+    assert client.post("/api/leagues/424242/report/2024").status_code == 202
+    assert len(held) == 1
+    held[0]()

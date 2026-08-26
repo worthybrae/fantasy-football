@@ -843,6 +843,11 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
     from api.seo import register_seo_routes
     register_seo_routes(app, conn)
 
+    # League reports: public reads of a stored report, owner-only builds.
+    # Before the SPA for the same reason the SEO pages are.
+    from api.reports import register_report_routes
+    register_report_routes(app)
+
     # THE BUILT FRONTEND, LAST. Its fallback route matches every path there
     # is, so anything registered after it would be unreachable -- see
     # api/static.py, which also explains why the SPA is served from this
