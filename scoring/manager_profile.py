@@ -247,3 +247,160 @@ def seasons_strip(conn) -> list:
             "top_scorer": who(scored.iloc[0].team_id) if not scored.empty else None,
         })
     return out
+
+
+WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+def _txns(conn) -> pd.DataFrame:
+    t = read_table(conn, "league_transactions")
+    if t.empty:
+        return pd.DataFrame(columns=["season", "week", "txn_id", "related_txn_id", "team_id",
+                                     "member_id", "type", "status", "execution_type",
+                                     "bid_amount", "proposed_at", "items_json"])
+    t = t.copy()
+    t["items"] = t.items_json.map(lambda s: json.loads(s) if isinstance(s, str) else [])
+    return t
+
+
+def player_names(conn) -> dict:
+    """player id -> the name the roster gave it, from any week it was rostered."""
+    lu = read_table(conn, "league_lineups")
+    if lu.empty:
+        return {}
+    named = lu[lu.player_name.notna()].drop_duplicates("player_id", keep="last")
+    return {int(r.player_id): str(r.player_name) for r in named.itertuples()}
+
+
+def _faab(conn) -> set:
+    """Seasons whose settings used an acquisition budget. Read from the raw
+    mSettings answer when it is stored; absent otherwise (or when the
+    league database has no `league_raw` table at all, as in tests)."""
+    raw = read_table(conn, "league_raw")
+    out = set()
+    if raw.empty:
+        return out
+    for r in raw[raw.view == "mSettings"].itertuples():
+        settings = (json.loads(r.payload_json).get("settings") or {}).get("acquisitionSettings") or {}
+        if settings.get("isUsingAcquisitionBudget"):
+            out.add(int(r.season))
+    return out
+
+
+def waivers(conn, member_id: str) -> dict:
+    t = _txns(conn)
+    mine = t[t.member_id == member_id]
+    claims = mine[(mine.type == "WAIVER") & (mine.execution_type == "EXECUTE")]
+    outcomes = mine[(mine.type == "WAIVER") & (mine.execution_type != "EXECUTE")]
+    won = outcomes[outcomes.status == "EXECUTED"]
+    lost = outcomes[outcomes.status.str.startswith("FAILED", na=False)]
+    canceled = outcomes[outcomes.status == "CANCELED"]
+    fa = mine[(mine.type == "FREEAGENT") & (mine.status == "EXECUTED")]
+    # Count DROP items across executed free-agent adds and won waiver claims
+    # (a claim or an FA add can carry a drop alongside it in the same items list).
+    drops = 0
+    for items in pd.concat([fa["items"], won["items"]]):
+        for item in items:
+            if item.get("type") == "DROP":
+                drops += 1
+    by_day = {d: 0 for d in WEEKDAYS}
+    for ts in pd.concat([fa.proposed_at, claims.proposed_at]):
+        if pd.notna(ts):
+            by_day[WEEKDAYS[pd.Timestamp(ts).dayofweek]] += 1
+    moves = pd.concat([fa, won, lost]).groupby(["season", "week"]).size()
+    busiest = None
+    if len(moves):
+        (season, week), count = moves.idxmax(), int(moves.max())
+        busiest = {"season": int(season), "week": int(week), "moves": count}
+    out = {
+        "n": int(len(claims)),
+        "claims": int(len(claims)), "won": int(len(won)), "lost": int(len(lost)),
+        "canceled": int(len(canceled)),
+        "win_rate": round(len(won) / (len(won) + len(lost)), 3) if (len(won) + len(lost)) else None,
+        "free_agent_adds": int(len(fa)), "drops": int(drops),
+        "adds_by_weekday": by_day, "busiest_week": busiest,
+        "seasons": sorted(int(s) for s in mine.season.unique()),
+    }
+    faab = _faab(conn)
+    bids = claims[claims.season.isin(faab)] if faab else claims.iloc[0:0]
+    if len(bids):
+        out["bids"] = {"n": int(len(bids)), "mean": round(float(bids.bid_amount.mean()), 1),
+                       "max": float(bids.bid_amount.max()),
+                       "spent": float(won[won.season.isin(faab)].bid_amount.sum())}
+    return out
+
+
+def _rest_of_season_points(lu: pd.DataFrame, season: int, after_week: int,
+                           player_id: int, team_id: int) -> float:
+    rows = lu[(lu.season == season) & (lu.week > after_week) & (lu.player_id == player_id)
+              & (lu.team_id == team_id) & (lu.actual_points.notna())]
+    return float(rows.actual_points.sum())
+
+
+def trades(conn, member_id: str) -> dict:
+    t = _txns(conn)
+    teams = _teams_for(conn, member_id)
+    lu = read_table(conn, "league_lineups")
+    names = player_names(conn)
+    display = {r.member_id: r.display_name for r in members(conn).itertuples()}
+    owner = _team_of(conn)
+    proposals = t[t.type == "TRADE_PROPOSAL"]
+
+    def counterpart(items, season):
+        for i in items:
+            for key in ("toTeamId", "fromTeamId"):
+                tid = i.get(key)
+                if tid and tid != teams.get(season):
+                    return owner.get((season, int(tid)))
+        return None
+
+    def involves(row):
+        return any(teams.get(int(row.season)) in (i.get("fromTeamId"), i.get("toTeamId"))
+                   for i in row["items"])
+
+    mine_p = proposals[proposals.member_id == member_id]
+    received = proposals[(proposals.member_id != member_id) & proposals.apply(involves, axis=1)] \
+        if len(proposals) else proposals
+    accepts = t[(t.type == "TRADE_ACCEPT")]
+    declines = t[t.type == "TRADE_DECLINE"]
+    vetoes = t[t.type == "TRADE_VETO"]
+    my_ids = set(mine_p.txn_id)
+    their_ids = set(received.txn_id)
+    # ESPN's TRADE_ACCEPT rows carry status None in some seasons and
+    # EXECUTED in others; both mean the trade went through.
+    executed = accepts[accepts.related_txn_id.isin(my_ids | their_ids)
+                       & (accepts.status.isna() | (accepts.status == "EXECUTED"))]
+    partners = defaultdict(int)
+    ledger = []
+    for r in executed.itertuples():
+        season = int(r.season)
+        my_team = teams.get(season)
+        items = r.items
+        other = counterpart(items, season)
+        partners[other] += 1
+        sent = [i for i in items if i.get("fromTeamId") == my_team]
+        got = [i for i in items if i.get("toTeamId") == my_team]
+        other_team = next((i.get("toTeamId") for i in sent), None)
+        week = int(r.week)
+        balance = (sum(_rest_of_season_points(lu, season, week, int(i["playerId"]), my_team) for i in got)
+                   - sum(_rest_of_season_points(lu, season, week, int(i["playerId"]), other_team) for i in sent))
+        ledger.append({
+            "season": season, "week": week, "with": other,
+            "with_name": display.get(other, other),
+            "sent": [{"player_id": int(i["playerId"]), "name": names.get(int(i["playerId"]), str(i["playerId"]))} for i in sent],
+            "received": [{"player_id": int(i["playerId"]), "name": names.get(int(i["playerId"]), str(i["playerId"]))} for i in got],
+            "balance": round(balance, 1),
+        })
+    ledger.sort(key=lambda x: (x["season"], x["week"]), reverse=True)
+    return {
+        "n": len(ledger),
+        "proposed": int(len(mine_p)), "received": int(len(received)),
+        "accepted": len(ledger),
+        "declined_by_me": int(declines[declines.member_id == member_id].related_txn_id.isin(their_ids).sum()),
+        "declined_by_them": int(declines[declines.member_id != member_id].related_txn_id.isin(my_ids).sum()),
+        "vetoed": int(vetoes.related_txn_id.isin(my_ids | their_ids).sum()),
+        "partners": [{"member_id": m, "display_name": display.get(m, m), "trades": c}
+                     for m, c in sorted(partners.items(), key=lambda kv: -kv[1])],
+        "balance": round(sum(l["balance"] for l in ledger), 1) if ledger else None,
+        "ledger": ledger,
+    }
