@@ -271,6 +271,16 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
               ))}
               {upcoming.map((league) => {
                 const count = countdownTo(secondsUntil(league.draft_at, now))
+                // A REPORT THAT EXISTS, not merely a row that exists. A
+                // pre-draft press of the button below builds the upcoming
+                // season, which has no picks yet, and stores a `failed` row
+                // saying so -- and on the next poll a truthiness test on the
+                // list would swap the button for a link to a page that only
+                // says it could not be built, permanently. The page itself
+                // still gets every row (a reader may want to see the
+                // failure); the card links only to one worth opening, and
+                // otherwise keeps offering the build.
+                const built = reports[league.league_id]?.find((r) => r.status !== 'failed')
                 return (
                   <li className="db-card db-league" key={league.league_id}>
                     <div className="db-league-top">
@@ -324,10 +334,10 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
                         Enter the room
                       </button>
                       {!isMock(league) && (
-                        reports[league.league_id]?.length ? (
+                        built ? (
                           <Link
                             className="db-go db-league-go db-go-view"
-                            to={`/leagues/${league.league_id}/report/${reports[league.league_id][0].season}`}
+                            to={`/leagues/${league.league_id}/report/${built.season}`}
                           >
                             Report card
                           </Link>
