@@ -71,3 +71,26 @@
 .lg-manager-name:hover { color: var(--accent); }
 .lg-manager-line { margin: 0; color: var(--text-2); font-size: var(--text-sm); }
 .lg-manager-figs { margin: 0; color: var(--text-3); font-size: var(--text-xs); }
+
+/* -- manager page -------------------------------------------------------- */
+.lg-sec { margin-top: 28px; }
+.lg-figs { display: flex; flex-wrap: wrap; gap: 18px 28px; margin-top: 12px; }
+.lg-fig { display: grid; gap: 2px; }
+.lg-fig-value { font-size: 22px; font-weight: 700; color: var(--text-1); }
+.lg-fig-label { font-size: var(--text-xs); color: var(--text-3); text-transform: uppercase; letter-spacing: 0.06em; }
+.lg-n { color: var(--text-3); text-transform: none; letter-spacing: 0; }
+.lg-table { margin-top: 12px; border-collapse: collapse; font-size: var(--text-sm); }
+.lg-table th, .lg-table td { padding: 6px 12px 6px 0; text-align: right; border-bottom: 1px solid var(--border); }
+.lg-table th { color: var(--text-3); font-weight: 600; font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.06em; }
+.lg-table .lg-td-text { text-align: left; font-family: var(--font-sans); }
+.lg-table .lg-td-text a { color: var(--text-1); text-decoration: none; }
+.lg-table .lg-td-text a:hover { color: var(--accent); }
+.lg-table tr.is-title td:first-child::after { content: ' ♛'; color: var(--accent); }
+.is-up { color: var(--ok); }
+.is-down { color: var(--danger, #e5484d); }
+.lg-ledger { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 8px; }
+.lg-trade { display: grid; grid-template-columns: 110px 1fr 70px; gap: 12px; align-items: baseline; font-size: var(--text-sm); }
+.lg-trade-when { color: var(--text-3); }
+.lg-trade-balance { text-align: right; }
+.lg-player { border: 0; padding: 0; margin: 0 2px; background: none; font: inherit; color: var(--text-1); text-decoration: underline dotted; cursor: pointer; }
+.lg-player:hover { color: var(--accent); }

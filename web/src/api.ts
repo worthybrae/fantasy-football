@@ -1694,7 +1694,7 @@ export interface ManagerProfile {
   trades: { n: number; proposed: number; received: number; accepted: number; declined_by_me: number;
             declined_by_them: number; vetoed: number; partners: { member_id: string; display_name: string; trades: number }[];
             balance: number | null;
-            ledger: { season: number; week: number; with: string; with_name: string;
+            ledger: { season: number; week: number; with: string | null; with_name: string | null;
                       sent: { player_id: number; name: string }[]; received: { player_id: number; name: string }[];
                       balance: number }[] }
   lineups: { n: number; weeks: { season: number; week: number; started: number; optimal: number; left: number }[];
