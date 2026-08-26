@@ -11,9 +11,9 @@
 </div>
 <div class="figs">
   <div class="fig"><div class="k">ADP</div><div class="v">{{ '%.1f' % p.adp }}</div></div>
-  <div class="fig"><div class="k">Usual range</div><div class="v">picks {{ p.p10 }}<small>–</small>{{ p.p90 }}</div></div>
-  <div class="fig"><div class="k">Most often</div><div class="v">round {{ p.round_mode }}</div></div>
-  <div class="fig"><div class="k">Drafted in</div><div class="v">{{ (p.share * 100) | round | int }}%<small> of drafts</small></div></div>
+  <div class="fig"><div class="k">Usual picks</div><div class="v">{{ p.p10 }}<small>–</small>{{ p.p90 }}</div></div>
+  <div class="fig"><div class="k">Usual round</div><div class="v">{{ p.round_mode }}</div></div>
+  <div class="fig"><div class="k">Drafted in</div><div class="v">{{ (p.share * 100) | round | int }}%</div></div>
   <div class="fig"><div class="k">Position rank</div><div class="v">{{ p.position }}{{ p.pos_rank }}</div></div>
   <div class="fig"><div class="k">ESPN's own ADP</div><div class="v">{% if p.espn_adp is not none %}{{ '%.1f' % p.espn_adp }}{% else %}—{% endif %}</div></div>
 </div>

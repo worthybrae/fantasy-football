@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { fetchMockRooms, type MockRoom, type UpcomingDraft } from '../api'
+import { fetchMockRooms, fetchRoomProgress, type MockRoom, type RoomProgress,
+         type UpcomingDraft } from '../api'
 import { countdownTo, secondsUntil } from '../lib/countdown'
 
 // ESPN's public mock-draft lobby, as rooms you can take a seat in.
@@ -12,11 +13,12 @@ import { countdownTo, secondsUntil } from '../lib/countdown'
 // which is the whole difference between "go and do this on ESPN" and a button.
 //
 // NOT the same thing as /mocks, which is the boards the farm has already
-// played and recorded. These are rooms nobody has drafted in yet -- plus,
-// pinned at the front, the ones YOU have a seat in: drafting now first, then
-// waiting to start, then everything open. Same card for all three, because
-// they are the same kind of thing at three moments; what changes is the
-// corner mark and the button.
+// played and recorded. These are rooms nobody has drafted in yet -- and, at
+// the front of the same grid, the ones YOU have a seat in: drafting now
+// first, then waiting to start, then everything open. One card for all
+// three, because they are the same kind of thing at three moments; what
+// changes is what the clock slot says (a countdown, or the round and pick),
+// the corner mark, and the button.
 
 // The lobby turns over fast -- rooms fill, rooms start, new ones appear every
 // few minutes -- and the seat counts on these cards move while somebody is
@@ -217,9 +219,18 @@ export default function MockLobby({ onOpen, seated, onEnter, joining, now, onCou
   // paint is not the one paint on which nothing ever moves.
   const lastCounts = useRef<Map<string, number>>(new Map())
   const [changes, setChanges] = useState<Map<string, SeatChange>>(() => new Map())
+  // Round and pick for the rooms you are drafting in, read on the same poll
+  // as the lobby. Keyed by room; a room the server could not read is simply
+  // absent and its card says "drafting" without a number.
+  const [progress, setProgress] = useState<Record<string, RoomProgress>>({})
+  const liveIds = useMemo(
+    () => seated.filter((l) => l.live).map((l) => l.league_id).sort().join(','),
+    [seated])
 
   const read = useCallback(async () => {
-    const next = await fetchMockRooms()
+    const ids = liveIds === '' ? [] : liveIds.split(',')
+    const [next, rows] = await Promise.all([fetchMockRooms(), fetchRoomProgress(ids)])
+    if (ids.length > 0) setProgress(rows)
     const now = Date.now()
     const seen = lastCounts.current
     const moved = new Map<string, SeatChange>()
@@ -249,7 +260,7 @@ export default function MockLobby({ onOpen, seated, onEnter, joining, now, onCou
     setTotal(next.total)
     setReadAt(now)
     onCount?.(next.total)
-  }, [onCount])
+  }, [onCount, liveIds])
 
   useEffect(() => {
     read()
@@ -321,84 +332,6 @@ export default function MockLobby({ onOpen, seated, onEnter, joining, now, onCou
         </span>
       </div>
 
-      {/* YOUR ROOMS FIRST. The lobby card, with the corner saying what the
-          lobby's cards leave blank: this one is yours, and whether it is
-          picking yet. Drafting now takes the page's live dot and the filled
-          button, because it is the one card here you can walk into this
-          minute; a seat still waiting keeps the quiet button that opens
-          the waiting room. Above the filters and outside the pager, since
-          neither is a way of choosing between rooms you are already in. */}
-      {pinned.length > 0 && (
-        <ul className="db-cards ml-seated">
-          {pinned.map((league) => {
-            const room = byId.get(league.league_id)
-            const count = league.live ? null
-              : countdownTo(secondsUntil(league.draft_at, now))
-            const open = room && room.league_size !== null
-              ? Math.max(0, room.league_size - room.teams_joined) : null
-            return (
-              <li className={`db-card${league.live ? ' is-live' : ''}`} key={league.league_id}>
-                <div className="db-card-top">
-                  <span className={`mono db-card-when${league.live ? ' is-live' : ''}${count?.imminent ? ' is-soon' : ''}`}>
-                    {league.live ? 'Now' : count?.text ?? '—'}
-                  </span>
-                  {league.live ? (
-                    <span className="ml-mark is-live">
-                      <span className="db-dot" aria-hidden="true" />
-                      Drafting now
-                    </span>
-                  ) : (
-                    <span className="ml-mark">Your seat</span>
-                  )}
-                </div>
-                <p className="db-card-name">{seatedLabel(league, room)}</p>
-                <div className="db-card-foot">
-                  {room ? (
-                    <span className="ml-seat-line">
-                      <Seats room={room} change={changes.get(room.league_id) ?? null} />
-                      <span className="mono ml-count">
-                        <span className="ml-count-in">{room.teams_joined} in</span>
-                        {open !== null && (
-                          <>
-                            <span className="ml-count-sep" aria-hidden="true">·</span>
-                            <span className={`ml-count-open${open === 0 ? ' is-full' : ''}`}>
-                              {open === 0 ? 'full' : `${open} open`}
-                            </span>
-                          </>
-                        )}
-                      </span>
-                    </span>
-                  ) : (
-                    // Off the lobby's list -- full, or already picking -- so
-                    // the seats are not knowable from here. Your own team's
-                    // name is what there is to say instead.
-                    <span className="ml-seat-line ml-team">{league.team_name}</span>
-                  )}
-                  {league.live ? (
-                    <button
-                      type="button"
-                      className="db-go"
-                      onClick={() => onEnter(league)}
-                      disabled={joining !== null || !league.team_id}
-                    >
-                      {joining === league.league_id ? 'Joining…' : 'Enter draft'}
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      className="db-join"
-                      onClick={() => onOpen(league.league_id)}
-                    >
-                      View room
-                    </button>
-                  )}
-                </div>
-              </li>
-            )
-          })}
-        </ul>
-      )}
-
       {/* One row of pills per thing worth narrowing by, each built from the
           rooms actually open right now (see optionsFor). A pill toggles: a
           second click on the active one is how a reader clears it, which is
@@ -429,18 +362,110 @@ export default function MockLobby({ onOpen, seated, onEnter, joining, now, onCou
         </div>
       )}
 
-      {rooms === null ? (
-        pinned.length === 0 && <p className="db-empty">Reading ESPN’s lobby…</p>
-      ) : others.length === 0 ? (
+      {rooms === null && pinned.length === 0 ? (
+        <p className="db-empty">Reading ESPN’s lobby…</p>
+      ) : rooms !== null && others.length === 0 && pinned.length === 0 ? (
         // Both cases at once, and deliberately: ESPN unreachable and a lobby
         // between batches look identical to a reader, and both are fixed by
         // the same thing, which is waiting a minute.
         <p className="db-empty">No rooms open right now. ESPN starts more every few minutes.</p>
-      ) : shown.length === 0 ? (
+      ) : rooms !== null && shown.length === 0 && pinned.length === 0 ? (
         <p className="db-empty">No open room matches that. Rooms turn over every few minutes.</p>
       ) : (
         <>
           <ul className="db-cards">
+            {/* YOUR ROOMS FIRST, in the same grid. The lobby card, with the
+                corner saying what the lobby's cards leave blank: this one is
+                yours, and whether it is picking yet. A room that is drafting
+                puts its round and pick where the countdown was, lights the
+                card, and takes the filled button -- it is the one card here
+                you can walk into this minute. A seat still waiting keeps
+                the countdown, the pips if the lobby still lists the room,
+                and the quiet button that opens the waiting room. Ahead of
+                the pager's first page rather than paged with the lobby:
+                neither the filters nor "starting later" are ways of choosing
+                between rooms you are already in. */}
+            {current === 0 && pinned.map((league) => {
+              const room = byId.get(league.league_id)
+              const at = progress[league.league_id]
+              const count = league.live ? null
+                : countdownTo(secondsUntil(league.draft_at, now))
+              const open = room && room.league_size !== null
+                ? Math.max(0, room.league_size - room.teams_joined) : null
+              return (
+                <li className={`db-card${league.live ? ' is-live' : ''}`} key={league.league_id}>
+                  <div className="db-card-top">
+                    <span className={`mono db-card-when${league.live ? ' is-live' : ''}${count?.imminent ? ' is-soon' : ''}`}>
+                      {league.live
+                        ? (at?.round ? `R${at.round} · P${at.pick_in_round}` : 'Drafting')
+                        : count?.text ?? '—'}
+                    </span>
+                    {league.live ? (
+                      <span className="ml-mark is-live">
+                        <span className="db-dot" aria-hidden="true" />
+                        Drafting now
+                      </span>
+                    ) : (
+                      <span className="ml-mark">Your seat</span>
+                    )}
+                  </div>
+                  <p className="db-card-name">{seatedLabel(league, room)}</p>
+                  <div className="db-card-foot">
+                    {league.live && at?.picks_made !== null && at?.picks_made !== undefined ? (
+                      // The room's progress in the seat line's own face:
+                      // how much of the draft is done. The team's name is
+                      // not repeated here -- the button needs the width
+                      // more than the card needs to say "yours" twice.
+                      <span className="ml-seat-line">
+                        <span className="mono ml-count">
+                          <span className="ml-count-in">
+                            {at.picks_made} of {at.picks_total ?? '?'} picks
+                          </span>
+                        </span>
+                      </span>
+                    ) : room ? (
+                      <span className="ml-seat-line">
+                        <Seats room={room} change={changes.get(room.league_id) ?? null} />
+                        <span className="mono ml-count">
+                          <span className="ml-count-in">{room.teams_joined} in</span>
+                          {open !== null && (
+                            <>
+                              <span className="ml-count-sep" aria-hidden="true">·</span>
+                              <span className={`ml-count-open${open === 0 ? ' is-full' : ''}`}>
+                                {open === 0 ? 'full' : `${open} open`}
+                              </span>
+                            </>
+                          )}
+                        </span>
+                      </span>
+                    ) : (
+                      // Off the lobby's list -- full, or already picking --
+                      // so the seats are not knowable from here. Your own
+                      // team's name is what there is to say instead.
+                      <span className="ml-seat-line ml-team">{league.team_name}</span>
+                    )}
+                    {league.live ? (
+                      <button
+                        type="button"
+                        className="db-go"
+                        onClick={() => onEnter(league)}
+                        disabled={joining !== null || !league.team_id}
+                      >
+                        {joining === league.league_id ? 'Joining…' : 'Enter draft'}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="db-join"
+                        onClick={() => onOpen(league.league_id)}
+                      >
+                        View room
+                      </button>
+                    )}
+                  </div>
+                </li>
+              )
+            })}
             {visible.map((room) => {
               const aged = (now - readAt) / 1000
               const count = countdownTo(room.starts_in_seconds === null ? null

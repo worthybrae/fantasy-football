@@ -34,6 +34,23 @@
       }
     }
     </script>
+    <!-- Google tag (gtag.js). Guarded on hostname so a local dev server, a
+         vite preview and the screenshot runs in the test suite do not report
+         themselves as traffic; the measurement ID is public either way, it
+         is in the page source of every deployed page. -->
+    <script>
+      if (location.hostname === 'espnfantasydraft.com') {
+        var s = document.createElement('script')
+        s.async = true
+        s.src = 'https://www.googletagmanager.com/gtag/js?id=G-YP3EKCMQJJ'
+        document.head.appendChild(s)
+        window.dataLayer = window.dataLayer || []
+        function gtag(){dataLayer.push(arguments)}
+        window.gtag = gtag
+        gtag('js', new Date())
+        gtag('config', 'G-YP3EKCMQJJ')
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>

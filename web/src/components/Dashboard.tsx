@@ -250,7 +250,9 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
                     <span className="db-league-format">{leagueFormat(league)}</span>
                   </div>
                   <p className="db-card-name db-league-name">
-                    {league.name ?? `League ${league.league_id}`}
+                    <Link className="db-league-link" to={`/league/${encodeURIComponent(league.league_id)}`}>
+                      {league.name ?? `League ${league.league_id}`}
+                    </Link>
                   </p>
                   {league.team_name && (
                     <p className="db-league-team">{league.team_name}</p>
@@ -258,15 +260,20 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
                   {/* The only filled control on the page, and only ever on a
                       card with a clock running in it: accent here means "you
                       can walk into this right now" and nothing else. */}
-                  <button
-                    type="button"
-                    className="db-go db-league-go"
-                    onClick={() => join(league)}
-                    disabled={joining !== null || !league.team_id}
-                  >
-                    {joining === league.league_id ? 'Joining…' : 'Enter the room'}
-                    <span className="db-league-go-arrow" aria-hidden="true">→</span>
-                  </button>
+                  <div className="db-league-foot">
+                    <button
+                      type="button"
+                      className="db-go db-league-go"
+                      onClick={() => join(league)}
+                      disabled={joining !== null || !league.team_id}
+                    >
+                      {joining === league.league_id ? 'Joining…' : 'Enter the room'}
+                      <span className="db-league-go-arrow" aria-hidden="true">→</span>
+                    </button>
+                    <Link className="db-league-view" to={`/league/${encodeURIComponent(league.league_id)}`}>
+                      View league
+                    </Link>
+                  </div>
                 </li>
               ))}
               {upcoming.map((league) => {
@@ -292,7 +299,14 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
                       <span className="db-league-format">{leagueFormat(league)}</span>
                     </div>
                     <p className="db-card-name db-league-name">
-                      {league.name ?? `League ${league.league_id}`}
+                      {/* THE LEAGUE IS A PLACE, and the name is the door to
+                          it: seasons past, the draft, the team -- see
+                          pages/LeaguePage.tsx. The button below is only the
+                          draft room's door, which is locked until ESPN opens
+                          it; the league itself is open any time. */}
+                      <Link className="db-league-link" to={`/league/${encodeURIComponent(league.league_id)}`}>
+                        {league.name ?? `League ${league.league_id}`}
+                      </Link>
                     </p>
                     <p className="db-league-team">
                       {league.team_name}
@@ -333,6 +347,9 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
                         </span>
                         Enter the room
                       </button>
+                      <Link className="db-league-view" to={`/league/${encodeURIComponent(league.league_id)}`}>
+                        View league
+                      </Link>
                       {!isMock(league) && (
                         built ? (
                           <Link

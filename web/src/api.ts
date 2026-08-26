@@ -1095,6 +1095,35 @@ export interface MockRoomState {
   seats: RoomSeat[]
 }
 
+/** How far along one room is -- what the Home page's live cards say. */
+export interface RoomProgress {
+  /** Null when nobody on this side is in the room to hear the picks land --
+   *  ESPN's public read names no player until the draft is over. */
+  picks_made: number | null
+  picks_total: number | null
+  teams: number
+  rounds: number | null
+  /** The pick that is UP, in round terms: 37 made means round 5, pick 6.
+   *  Null with `picks_made`. */
+  round: number | null
+  pick_in_round: number | null
+  in_progress: boolean
+  drafted: boolean
+}
+
+/** One request for every room the reader is drafting in. A room ESPN would
+ *  not read is simply absent from the answer. Never throws: a card that
+ *  cannot say its round keeps saying "drafting". */
+export async function fetchRoomProgress(
+  ids: string[],
+): Promise<Record<string, RoomProgress>> {
+  if (ids.length === 0) return {}
+  const res = await fetch(`/api/espn/rooms/progress?ids=${encodeURIComponent(ids.join(','))}`)
+  if (!res.ok) return {}
+  const body = await res.json()
+  return body && typeof body.rooms === 'object' ? body.rooms : {}
+}
+
 export async function fetchMockRoom(
   leagueId: string, season?: number | null,
 ): Promise<MockRoomState> {

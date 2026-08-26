@@ -9,7 +9,10 @@ import { useEffect } from 'react'
 // The FAQ is real <details> elements and also FAQPage structured data, so
 // the same six answers show under the result in a search as well as here.
 
-const FAQ: { q: string; a: string }[] = [
+// `more` is a sentence that ends the answer with a link out to the ADP pages.
+// It is spliced into the structured data too, so what a search engine reads as
+// the answer is the same text a reader sees, link or no link.
+const FAQ: { q: string; a: string; more?: { text: string; href: string; link: string } }[] = [
   {
     q: 'Does it work with my ESPN league?',
     a: 'Yes, any ESPN fantasy football league whose draft room you can open in a browser — public or private, snake or auction-free formats, any roster settings. It reads your league’s scoring and roster slots and ranks for those.',
@@ -33,6 +36,7 @@ const FAQ: { q: string; a: string }[] = [
   {
     q: 'Where do the rankings come from?',
     a: 'From hundreds of real ESPN mock drafts this site records every day, plus consensus ADP and projections. It knows who actually goes at pick 41 in an ESPN room, not just who a list says should.',
+    more: { text: 'The draft position those mocks produce is public: see', link: 'ADP for every player', href: '/adp' },
   },
 ]
 
@@ -43,10 +47,13 @@ export default function Explainer({ onStart }: { onStart: () => void }) {
     script.text = JSON.stringify({
       '@context': 'https://schema.org',
       '@type': 'FAQPage',
-      mainEntity: FAQ.map(({ q, a }) => ({
+      mainEntity: FAQ.map(({ q, a, more }) => ({
         '@type': 'Question',
         name: q,
-        acceptedAnswer: { '@type': 'Answer', text: a },
+        acceptedAnswer: {
+          '@type': 'Answer',
+          text: more ? `${a} ${more.text} ${more.link}.` : a,
+        },
       })),
     })
     document.head.appendChild(script)
@@ -88,10 +95,17 @@ export default function Explainer({ onStart }: { onStart: () => void }) {
       <div className="xp-ask">
         <h2 className="xp-h2">Questions</h2>
         <div className="xp-faq">
-          {FAQ.map(({ q, a }) => (
+          {FAQ.map(({ q, a, more }) => (
             <details key={q} className="xp-q">
               <summary>{q}</summary>
-              <p>{a}</p>
+              <p>
+                {a}
+                {/* A plain anchor, not react-router's Link: /adp is served by
+                    FastAPI from the corpus, outside this app's router, so a
+                    client-side navigation there would land on a route the
+                    router does not have. */}
+                {more && <> {more.text} <a href={more.href}>{more.link}</a>.</>}
+              </p>
             </details>
           ))}
         </div>

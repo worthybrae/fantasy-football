@@ -1,0 +1,45 @@
+/* The league page (pages/LeaguePage.tsx). Market's page shell -- the same
+   bar, masthead and panel -- with the draft's clock in the masthead's right
+   column, where the archive puts its seat control. */
+
+.lg-when {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  text-align: right;
+}
+
+.lg-when-count {
+  font-size: 34px;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-1);
+}
+
+.lg-when-count.is-soon { color: var(--accent); }
+
+.lg-when-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+
+.lg-when-label .db-dot {
+  width: 7px;
+  height: 7px;
+  background: var(--accent);
+}
+
+.lg-soon {
+  margin-top: 28px;
+}
+
+.lg-back {
+  display: inline-block;
+  margin-top: 14px;
+  color: var(--accent);
+}

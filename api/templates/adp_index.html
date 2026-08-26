@@ -4,6 +4,7 @@
 {% if position %}<div class="crumbs"><a href="/adp">ADP</a> › {{ position }}</div>{% endif %}
 <h1>{{ heading }}</h1>
 <p class="prov">{{ provenance }}</p>
+{% if intro %}<p class="intro">{{ intro }}</p>{% endif %}
 {% if not players %}
 {% if position %}<p>No {{ position }} has gone in these drafts often enough to have a draft position yet.</p>
 {% else %}<p>No drafts recorded yet. The farm records ESPN mock drafts every day; check back tomorrow.</p>
@@ -31,4 +32,12 @@
 <div class="links">{% for n in range(1, rounds + 1) %}<a href="/adp/round/{{ n }}">Round {{ n }}</a>{% endfor %}</div>
 <h2>By position</h2>
 <div class="links">{% for pos in positions %}<a href="/adp/{{ pos | lower }}">{{ pos }}</a>{% endfor %}</div>
+{% if faq %}
+<h2>Questions</h2>
+<div class="faq">
+{% for question, answer in faq %}
+<details><summary>{{ question }}</summary><p>{{ answer }}</p></details>
+{% endfor %}
+</div>
+{% endif %}
 {% endblock %}
