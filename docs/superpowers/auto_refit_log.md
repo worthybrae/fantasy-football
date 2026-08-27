@@ -5,3 +5,4 @@ One row per run of `pipeline.auto_refit` that did real work (a fit + validation)
 | when (UTC) | corpus | labelled | champ t1 | cand t1 | champ nll | cand nll | flat t1 | decision | commit |
 |---|---|---|---|---|---|---|---|---|---|
 | 2026-08-24T15:47:47+00:00 | 204 | 181 | 0.2668 | 0.2668 | 2.6493 | 2.6493 | 0.2313 | no-swap | - |
+| 2026-08-25T17:44:26+00:00 | 666 | 643 | 0.2693 | 0.2693 | 2.6217 | 2.6217 | 0.2341 | no-swap | - |
