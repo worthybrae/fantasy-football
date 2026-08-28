@@ -25,8 +25,9 @@ WHY THE SCORE IS NOT THE EDGE. The edge is a claim about the board that can
 be checked against the two players it compares, so it is what the room prints.
 The score is a ranking quantity and carries the roster in it -- `weight *
 (proj - best_next)`, the roster's need applied to what the pick GAINS rather
-than to the projection it gains it from, and a position already at its roster
-cap is not a candidate at all. Same split, and the same two functions
+than to the projection it gains it from, times the favourites bonus where
+that gain is positive, and a position already at its roster cap is not a
+candidate at all. Same split, and the same two functions
 (`need_kind`, `NEED_WEIGHTS`), as `gain.rank_available` before it.
 """
 from __future__ import annotations
@@ -41,6 +42,13 @@ from scoring.gain import expected_best_next, fills_slot, need_kind
 # made in the quiet before the draft, which is a better moment for that
 # judgement than the eight seconds on the clock -- but it is a preference,
 # not a projection, so it is worth about one tier and no more.
+#
+# IT ONLY EVER HELPS. The score it multiplies is signed -- what the pick
+# gains over waiting -- so applying the bonus to a candidate whose gain is
+# negative would push him DOWN the list for being a favourite, which is the
+# opposite of what the account asked for. Below zero a favourite is scored
+# exactly as a stranger would be, and his lower eligibility threshold
+# (`FAVOURITE_THRESHOLD`) is the only preference he still gets.
 NEED_BONUS = 1.15
 
 # How likely a player has to be to still be there for the plan to plan on
@@ -274,7 +282,10 @@ class _Board:
         self.favourites = set(favourites or ())
         self.is_favourite = np.array([pid in self.favourites
                                       for pid in self.ids], dtype=bool)
-        self.bonus = np.where(self.is_favourite, NEED_BONUS, 1.0)
+
+    def bonus(self, gain: np.ndarray) -> np.ndarray:
+        """The favourites multiplier, applied only where there is a gain."""
+        return np.where(self.is_favourite & (gain > 0), NEED_BONUS, 1.0)
 
     def need(self, settings, roster, turns_left):
         """(weight per player, "cannot be rostered" mask).
@@ -369,6 +380,7 @@ def build_plan(*, proj, positions, player_ids, espn_rank, espn_adp,
                      if next_pick is not None
                      else np.zeros(board.size))
         turns_left = len(turns) - t
+        gain = board.proj - best_next
         weights, capped = board.need(settings, roster, turns_left)
         # THE WEIGHT MULTIPLIES THE DIFFERENCE, not the projection. Weighting
         # the level and subtracting an unweighted expectation compares two
@@ -377,7 +389,7 @@ def build_plan(*, proj, positions, player_ids, espn_rank, espn_adp,
         # 173-point receiver two points clear scored -110.2, so the room
         # planned the receiver. What the roster's need scales is what the
         # pick GAINS.
-        score = weights * (board.proj - best_next) * board.bonus
+        score = weights * gain * board.bonus(gain)
 
         eligible = ~planned & ~capped & ((here >= THRESHOLD)
                                          | (board.is_favourite
@@ -476,8 +488,9 @@ def target_now(*, proj, positions, player_ids, espn_rank, espn_adp,
     # None when there are none left to count, which is its "cannot say".
     turns_left = sum(1 for t in turns if t >= on_the_clock) or None
     roster = dict(roster_counts or {})
+    gain = board.proj - best_next
     weights, capped = board.need(settings, roster, turns_left)
-    score = weights * (board.proj - best_next) * board.bonus
+    score = weights * gain * board.bonus(gain)
     # A player at his position's roster cap has no slot to go in, starter or
     # bench, so he is not a card however the numbers read.
     score = np.where(capped, -np.inf, score)

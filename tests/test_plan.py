@@ -391,3 +391,22 @@ def test_health_level_bands_the_board_the_way_the_room_draws_it():
                            16.3, 20.0])
     assert list(got) == [1, 1, 2, 2, 3, 3, 4, 4, 5, 5]
     assert np.isnan(pl.health_level([np.nan])[0])
+
+
+def test_being_a_favourite_never_costs_a_player_a_place():
+    """The score is signed, so a bonus applied below zero is a penalty. wr2
+    is a favourite eight points under water and rb2 is a stranger nine
+    under: wr2 stays ahead of him, where his projection puts him."""
+    ids = ["rb1", "rb2", "wr1", "wr2"]
+    table = make_table(dict.fromkeys(ids, {}))
+    args = board_args(table, ids, ["RB", "RB", "WR", "WR"],
+                      [300.0, 290.0, 200.0, 191.0], favourites={"wr2"})
+    turns = pl.build_plan(**args)
+    assert turns[0]["target"]["player_id"] == "rb1"
+    assert [a["player_id"] for a in turns[0]["alternates"]] == ["wr1", "wr2"]
+    # Exactly what a stranger would have scored: the same order without him
+    # in the favourites set at all.
+    plain = pl.build_plan(**board_args(
+        table, ids, ["RB", "RB", "WR", "WR"], [300.0, 290.0, 200.0, 191.0]))
+    assert ([a["player_id"] for a in plain[0]["alternates"]]
+            == [a["player_id"] for a in turns[0]["alternates"]])
