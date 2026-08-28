@@ -21,7 +21,8 @@ import pandas as pd
 from pipeline.db import apply_parent_conn_limits, get_conn, read_table
 from pipeline.espn_live import build_crosswalk
 from scoring import league as league_mod
-from scoring.board_cache import cached_build_board
+from scoring.board_cache import (board_fingerprint,  # noqa: F401 -- re-exported
+                                 cached_build_board, cached_build_pool)
 from scoring.draft_model import FEATURE_NAMES, fit_all
 from scoring.draft_sim import build_pool, cold_start_opponent
 
@@ -133,18 +134,6 @@ def _attach_espn_proj(conn, board):
     return board.merge(proj, on="espn_id", how="left")
 
 
-def board_fingerprint(board: pd.DataFrame) -> str:
-    """Identity of the draftable set, order-independent.
-
-    The session caches pool indices. If the board is rebuilt underneath it,
-    those indices point at different players and every recommendation is
-    silently about the wrong person. Row order is an artifact of assembly,
-    not a change in who is draftable, so it is sorted out.
-    """
-    ids = sorted(str(p) for p in board["player_id"])
-    return hashlib.sha256("\n".join(ids).encode()).hexdigest()[:16]
-
-
 def build_session(conn, my_slot: int | None, seed: int = DEFAULT_SEED,
                   league_id: str = "", settings=None,
                   progress=None) -> DraftSession:
@@ -210,7 +199,10 @@ def build_session(conn, my_slot: int | None, seed: int = DEFAULT_SEED,
     progress.fact(players=int(len(board)))
 
     progress.begin("pool")
-    pool = build_pool(conn, board, settings)
+    # Through the pool cache for the same reason the board is: every league
+    # provisioned from one snapshot with the same shape gets the same pool,
+    # and building it is a re-read of `weekly` per connect otherwise.
+    pool = cached_build_pool(conn, board, settings)
     # The value this step actually discovers: where replacement level sits.
     # That is the whole point of pricing a pool -- every vor number the room
     # shows is measured from these two ranks -- and it is read off the

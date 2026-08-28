@@ -73,6 +73,7 @@ completely would mean fingerprinting the full contents of `weekly` (millions
 of cells) on every request, which defeats the point of caching at all. Call
 `board_cache.clear()` after any such direct write in a test or a script.
 """
+import hashlib
 import threading
 from collections import OrderedDict
 
@@ -82,6 +83,7 @@ from pipeline.db import read_table
 from scoring import league
 from scoring.board import build_board
 from scoring.config import DEFAULT_WEIGHTS
+from scoring.draft_sim import build_pool
 
 # Fixed, alphabetical order so two dicts with the same values in a different
 # key order (unlikely from the API, which always builds all five, but not
@@ -253,6 +255,35 @@ def _meta_key(conn) -> tuple:
         (str(r["source"]), str(r["refreshed_at"])) for _, r in meta.iterrows()))
 
 
+def _identity_key(conn) -> tuple:
+    """What the universal data behind `conn` IS, for the cache key.
+
+    Every league file is provisioned from the same snapshot of the shared
+    database (pipeline/leagues), so two league files whose `meta` rows
+    agree hold byte-identical universal tables, and a board built from one
+    is the board for the other: with two hundred rooms in two hundred
+    files, keying on the file would build two hundred identical boards. So
+    the identity is the `meta` fingerprint whenever there is one. A
+    database with no `meta` at all -- a test fixture seeded with
+    write_table and never stamped by record_freshness -- falls back to the
+    file, which is the collision `_db_key` was written for.
+    """
+    meta = _meta_key(conn)
+    return ("meta", meta) if meta else ("path", _db_key(conn))
+
+
+def board_fingerprint(board: pd.DataFrame) -> str:
+    """Identity of the draftable set, order-independent.
+
+    A session caches pool indices. If the board is rebuilt underneath it,
+    those indices point at different players and every recommendation is
+    silently about the wrong person. Row order is an artifact of assembly,
+    not a change in who is draftable, so it is sorted out.
+    """
+    ids = sorted(str(p) for p in board["player_id"])
+    return hashlib.sha256("\n".join(ids).encode()).hexdigest()[:16]
+
+
 def _sim_key(conn) -> tuple:
     avail = read_table(conn, "sim_survival")
     results = read_table(conn, "sim_results")
@@ -285,10 +316,9 @@ def cached_build_board(conn, weights: dict | None = None,
     settings = settings or league.load(conn)
     weights = weights or DEFAULT_WEIGHTS
     key = (
-        _db_key(conn),
+        _identity_key(conn),
         _weights_key(weights),
         league.to_json(settings),
-        _meta_key(conn),
         _sim_key(conn),
     )
 
@@ -351,11 +381,39 @@ def warm(conn) -> list:
     return warmed
 
 
+# The simulation pool beside the board: build_pool re-reads `weekly` whole
+# (2.2-3.6 s, most of a gigabyte in flight) and depends only on the
+# universal data, the board's player set and the league's shape -- so with
+# the same identity, fingerprint and settings it is the same pool for every
+# league. Smaller than the board's cache: a pool is a few numpy arrays, and
+# the settings shapes drafting at once on one evening are few.
+_POOL_MAX_ENTRIES = 16
+_pool_cache: "OrderedDict[tuple, object]" = OrderedDict()
+_pool_inflight: dict = {}
+
+
+def cached_build_pool(conn, board: pd.DataFrame, settings):
+    """Cached `scoring.draft_sim.build_pool`, keyed on what the pool is
+    actually a function of: the universal data (`_identity_key`), the set
+    of players on `board` (`board_fingerprint`) and the league's settings.
+
+    Returns the cached SimPool ITSELF, not a copy: its arrays are read by
+    `survival` and `rank_available` and written by nothing, and a copy per
+    connect would be the memory this cache exists to stop.
+    """
+    key = (_identity_key(conn), board_fingerprint(board),
+           league.to_json(settings))
+    return get_or_build(_pool_cache, _pool_inflight, _lock, key,
+                        lambda: build_pool(conn, board, settings),
+                        _POOL_MAX_ENTRIES)
+
+
 def clear() -> None:
-    """Drop every cached board. Test hook, and the escape valve for the one
+    """Drop every cached board and pool. Test hook, and the escape valve for the one
     gap this cache accepts (see the module docstring): after a test or a
     script writes `weekly`/`adp`/etc. directly via `write_table` without
     also updating `meta`, call this so the next `cached_build_board` call
     can't serve a board built from the old contents."""
     with _lock:
         _cache.clear()
+        _pool_cache.clear()
