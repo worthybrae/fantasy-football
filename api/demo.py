@@ -235,11 +235,35 @@ WARMED_UP_PICKS = 4
 # is left the moment it enters this round.
 HANDOFF_ROUND = 10
 
-# The room the page is currently showing, by league id. This is what keeps
-# the page on one draft: the farm sits in a hundred rooms at once and they
-# run neck and neck, so "the furthest along" is a different room after
-# nearly every pick in the building. Without a memory the hero was a
-# slideshow of strangers -- measured: it changed rooms on most picks.
+# THE FLOOR UNDER EVERY CHOICE, counted in the shown room's own picks.
+# `HANDOFF_ROUND` above keeps the page in a room while that room is still
+# worth watching, which covers most of a farm's day -- but it says nothing
+# about the case that put a slideshow back on the front page: a farm sitting
+# in several rooms that are ALL past the handoff round. None of them is worth
+# staying in, so the choice was re-made from scratch on every call, and among
+# rooms running neck and neck "the furthest along" is a different room after
+# nearly every pick in the building -- so the hero changed drafts on nearly
+# every poll, which is what a reader reported and what the test named for
+# this constant reproduces against the old rule.
+#
+# So a choice is now remembered whether or not it named a room the page would
+# stay in for rounds, and it stands until that room has made ten of its own
+# picks. Ten is about a round of a lobby room (eight to twelve seats): long
+# enough that a reader watches a decision get made and answered rather than a
+# board flashing past, short enough that a room shown only because nothing
+# better existed hands over within a few minutes of a better one appearing.
+#
+# A FLOOR, not a ceiling. A room in its interesting rounds is still kept for
+# as long as `HANDOFF_ROUND` says; this only stops the page letting go of a
+# room it has just picked up.
+STICKY_PICKS = 10
+
+# The room the page is currently showing: which room, the pick it was on when
+# it was chosen, and when that was. This is what keeps the page on one draft:
+# the farm sits in a hundred rooms at once and they run neck and neck, so "the
+# furthest along" is a different room after nearly every pick in the building.
+# Without a memory the hero was a slideshow of strangers -- measured: it
+# changed rooms on most picks.
 #
 # Process-local, seeded from the last persisted answer at startup (see
 # `register_demo_routes`) so a restart is not itself a jump.
@@ -263,16 +287,45 @@ def _worth_staying_in(record: dict) -> bool:
     return _unfinished(record) and _round_of(record) < HANDOFF_ROUND
 
 
-def _liveliest(records: list):
+def _held(record: dict, since, chosen_at, now: float) -> bool:
+    """Whether the page is still inside the floor under its last choice.
+
+    Spent by the room making `STICKY_PICKS` picks, and broken early by the two
+    things that end a draft rather than pause it: the room finishing, and its
+    file going quiet (which `_live_files` has already dealt with by the time
+    this is asked -- a quiet room is not among the records at all).
+
+    The clock is the backstop for the third case, a room whose file keeps
+    being rewritten while its picks have stopped. A hold that can only be
+    spent in picks would never be spent there, and the page would sit on a
+    frozen room for as long as something kept touching the file. So a hold
+    that has not seen a single pick land is given `STALE_SECONDS` -- this
+    module's own answer to "a room that has not moved is over" -- and no more.
+    """
+    if since is None:
+        return False
+    made = _pick_of(record) - int(since)
+    if made >= STICKY_PICKS or not _unfinished(record):
+        return False
+    return made > 0 or now - float(chosen_at or 0.0) <= STALE_SECONDS
+
+
+def _liveliest(records: list, now: float | None = None):
     """The room a stranger should be shown.
 
-    THE ROOM ALREADY ON SCREEN, if it is still worth watching -- see
-    `_SHOWING`. Otherwise, a fresh choice, and each step of it is about what
-    the reader sees rather than about the data: a room in its middle rounds
-    (real players, real prices), furthest along among those; failing that,
-    any unfinished room, so the page shows something true rather than
-    nothing. The choice is remembered, and the next call defers to it.
+    THE ROOM ALREADY ON SCREEN, if the page is still holding it -- either
+    because the floor under the last choice has not been spent yet
+    (`STICKY_PICKS`) or because the room is still worth watching
+    (`HANDOFF_ROUND`). Both live in `_SHOWING`.
+
+    Otherwise, a fresh choice, and each step of it is about what the reader
+    sees rather than about the data: a room in its middle rounds (real
+    players, real prices), furthest along among those; failing that, any
+    unfinished room, so the page shows something true rather than nothing.
+    The choice is remembered, and the next call defers to it.
     """
+    now = time.time() if now is None else now
+
     def in_the_interesting_part(record):
         made = _pick_of(record)
         if not int(record.get("teams") or 0) or made < WARMED_UP_PICKS:
@@ -281,24 +334,31 @@ def _liveliest(records: list):
 
     with _SHOWING_LOCK:
         showing = _SHOWING.get("league_id")
+        since = _SHOWING.get("since_pick")
+        chosen_at = _SHOWING.get("chosen_at")
         if showing is not None:
             for record in records:
                 if (str(record.get("league_id")) == showing
-                        and _worth_staying_in(record)):
+                        and (_held(record, since, chosen_at, now)
+                             or _worth_staying_in(record))):
                     return record
 
         live = [r for r in records if _unfinished(r)]
         good = [r for r in live if in_the_interesting_part(r)]
         pool = good or live
         chosen = max(pool, key=_pick_of) if pool else None
-        # Remembered only when it is a room the page will stay in. A room
-        # past the handoff round, shown because nothing better exists, is
-        # re-chosen every call so that a better one can take over the moment
-        # it appears.
-        if chosen is not None and _worth_staying_in(chosen):
+        # Remembered whether or not it is a room the page would stay in for
+        # rounds. A room past the handoff round, shown because nothing better
+        # exists, used to be re-chosen on every call so that a better one
+        # could take over the moment it appeared -- which, with several such
+        # rooms live at once, is the slideshow `STICKY_PICKS` exists to stop.
+        # It still hands over to a better room, ten of its own picks later.
+        if chosen is not None:
             _SHOWING["league_id"] = str(chosen.get("league_id"))
+            _SHOWING["since_pick"] = _pick_of(chosen)
+            _SHOWING["chosen_at"] = now
         else:
-            _SHOWING.pop("league_id", None)
+            _SHOWING.clear()
         return chosen
 
 
@@ -979,7 +1039,7 @@ def _identity(now: float) -> tuple:
     fingerprint above has already said something moved.
     """
     records = [r for r in (_record(p) for p in _live_files(now)) if r]
-    record = _liveliest(records)
+    record = _liveliest(records, now)
     if record is None:
         # Nothing is drafting, so the page is on the archive -- whose current
         # pick is a function of the clock and therefore moves without any
@@ -1135,7 +1195,7 @@ def _build(conn, now: float | None = None) -> dict:
     # reader after it would miss a cache they should have hit.
     now = time.time() if now is None else now
     records = [r for r in (_record(p) for p in _live_files(now)) if r]
-    record = _liveliest(records)
+    record = _liveliest(records, now)
     mode = "live"
     if record is None:
         # Nothing is drafting: replay a room that was. Said plainly in the
@@ -1559,7 +1619,14 @@ def register_demo_routes(app, conn=None):
     if restored is not None:
         if restored.get("league_id"):
             with _SHOWING_LOCK:
-                _SHOWING.setdefault("league_id", str(restored["league_id"]))
+                if not _SHOWING.get("league_id"):
+                    # The floor comes back with the room, from the pick the
+                    # last answer was written at, so a restart is not a way
+                    # of getting a fresh choice a moment after making one.
+                    made = int(restored.get("picks_made") or 0)
+                    _SHOWING["league_id"] = str(restored["league_id"])
+                    _SHOWING["since_pick"] = made
+                    _SHOWING["chosen_at"] = stamp
         mark = time.monotonic()
         with _LOCK:
             # Identity `None` so it matches nothing: this is served

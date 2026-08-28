@@ -135,6 +135,54 @@ def test_a_room_that_went_quiet_is_left(farm):
     assert demo._identity(time.time())[0] == "222"
 
 
+def test_a_room_is_kept_for_its_first_ten_picks_however_the_others_run(farm):
+    """A room past the handoff round has nothing to recommend it but its pick
+    count, and a farm sitting in several of those at once has a new "furthest
+    along" after nearly every pick in the building -- which is a hero that
+    flips drafts on most polls. The page picks one and keeps it for ten of its
+    own picks before it will look at the others again."""
+    teams = 8
+    _write(farm, _room(league_id="111", picks=teams * 11, teams=teams))
+    _write(farm, _room(league_id="222", picks=teams * 10, teams=teams))
+    assert demo._identity(time.time())[0] == "111"
+    # 222 runs away with it, three picks to every one of 111's. Without a
+    # floor under the choice that is a different room on screen every time.
+    for extra in range(1, demo.STICKY_PICKS):
+        _write(farm, _room(league_id="222", picks=teams * 10 + extra * 3,
+                           teams=teams))
+        _write(farm, _room(league_id="111", picks=teams * 11 + extra,
+                           teams=teams))
+        assert demo._identity(time.time())[0] == "111"
+    # The tenth pick since it was chosen spends the floor, and the room with
+    # the most picks takes over.
+    _write(farm, _room(league_id="111", picks=teams * 11 + demo.STICKY_PICKS,
+                       teams=teams))
+    assert demo._identity(time.time())[0] == "222"
+
+
+def test_a_held_room_that_goes_quiet_is_left_at_once(farm):
+    """The floor is spent in picks, but a room whose file has stopped being
+    written is over -- and being over does not wait for ten of them."""
+    teams = 8
+    path = _write(farm, _room(league_id="111", picks=teams * 11, teams=teams))
+    _write(farm, _room(league_id="222", picks=teams * 10, teams=teams))
+    assert demo._identity(time.time())[0] == "111"
+    ago = time.time() - demo.STALE_SECONDS - 1
+    os.utime(path, (ago, ago))
+    assert demo._identity(time.time())[0] == "222"
+
+
+def test_a_held_room_that_ends_is_left_at_once(farm):
+    """Nor does a room that has drafted its last pick: there is nothing left
+    to hold on to, four picks into the floor or not."""
+    teams = 8
+    _write(farm, _room(league_id="111", picks=20, teams=teams, rounds=3))
+    _write(farm, _room(league_id="222", picks=10, teams=teams))
+    assert demo._identity(time.time())[0] == "111"
+    _write(farm, _room(league_id="111", picks=24, teams=teams, rounds=3))
+    assert demo._identity(time.time())[0] == "222"
+
+
 def test_dir_revision_notices_any_write(farm):
     _write(farm, _room(picks=1))
     before = demo._dir_revision(time.time())
