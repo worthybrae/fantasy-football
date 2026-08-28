@@ -17,19 +17,49 @@ import { Logo } from './Logo'
 // names the thing and offers the one action, over the room rather than
 // instead of it.
 //
-// IT SHOWS EVERY VISIT, TO EVERY VISITOR WHO IS NOT CONNECTED. An earlier
-// version remembered dismissal in `localStorage` and never introduced itself
-// twice, which is the right instinct for a cookie banner and the wrong one
-// here: somebody who closed it to watch a draft and came back a week later
-// arrived at an unexplained draft room belonging to strangers. The one thing
-// that suppresses it is having a session already -- there is nothing to get
-// started with when you are started.
+// IT SHOWS ONCE A TAB, TO EVERY VISITOR WHO IS NOT CONNECTED. Dismissal is
+// remembered in `sessionStorage` and nowhere else, which is the line between
+// the two failures either side of it: `localStorage` meant somebody who came
+// back a week later arrived at an unexplained draft room belonging to
+// strangers, and remembering nothing at all meant the card was back in their
+// face on every navigation inside one visit -- a QA pass found it reappearing
+// on each page, and dismissing it four times is not an introduction, it is an
+// obstacle. A tab is exactly the span of "this visit".
+//
+// AND IT BLOCKS NOTHING. It used to be a full-page scrim with
+// `aria-modal`: `elementFromPoint` over the room behind it returned the
+// scrim, so a visitor's first click on a player row -- the thing the card is
+// pointing AT -- did nothing but dismiss the card, and the page could not be
+// scrolled until they did. The wrapper now takes no pointer events at all
+// (`.wc-scrim` in landing.css) and the card takes its own, so the room stays
+// live and clickable underneath while the card is up.
 //
 // AND IT NEVER TRAPS ANYBODY. Dismissing does not hide the offer, it MOVES
 // it: the card shrinks to the bottom-right corner and stays there for the
 // rest of the visit, so somebody who wanted to watch the draft first can
 // start whenever they decide to. A modal that closes to nothing makes the
 // reader hunt for the way in a second time.
+
+/** Dismissal, remembered for the tab's life and no longer. `sessionStorage`
+ *  on purpose -- see the note above; a private window that refuses it just
+ *  gets the card again, which is the old behaviour rather than a crash. */
+const DISMISSED_KEY = 'welcome-dismissed'
+
+function wasDismissed(): boolean {
+  try {
+    return window.sessionStorage.getItem(DISMISSED_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+function rememberDismissed(): void {
+  try {
+    window.sessionStorage.setItem(DISMISSED_KEY, '1')
+  } catch {
+    /* private window: the card comes back, and nothing else changes */
+  }
+}
 
 /** How long a slide holds. Long enough to read three lines without hurrying,
  *  short enough that a reader who is not reading them still sees two or three
@@ -107,7 +137,8 @@ export default function Welcome({ onStart, live = false, askedAt = 0 }: {
    *  only thing added is the sentence naming what was just refused. */
   askedAt?: number
 }) {
-  const [corner, setCorner] = useState(false)
+  // Opens in the corner for a reader who already put it there this visit.
+  const [corner, setCorner] = useState(wasDismissed)
   const [drafts, setDrafts] = useState<number | null>(null)
   const [profile, setProfile] = useState<ProfilePayload | null>(null)
   const [veteran, setVeteran] = useState<ProfilePayload | null>(null)
@@ -209,7 +240,10 @@ export default function Welcome({ onStart, live = false, askedAt = 0 }: {
     if (askedAt > 0) setCorner(false)
   }, [askedAt])
 
-  const dismiss = useCallback(() => setCorner(true), [])
+  const dismiss = useCallback(() => {
+    rememberDismissed()
+    setCorner(true)
+  }, [])
 
   // Escape closes it, the way every dialog on the web does. Bound only while
   // the card is centred -- once it is a corner chip it is not a dialog and
@@ -223,40 +257,13 @@ export default function Welcome({ onStart, live = false, askedAt = 0 }: {
     return () => window.removeEventListener('keydown', onKey)
   }, [corner, dismiss])
 
-  // THE PAGE DOES NOT MOVE UNDER THE CARD. The scrim covers the viewport but
-  // a wheel over it still scrolled the document, so the pitch, the setup
-  // steps and the footer slid past behind a dialog that was still asking the
-  // reader to decide -- the room the card is talking about scrolled away and
-  // the card stayed. While it is centred there is one thing to do; the page
-  // is there once it is dismissed.
-  //
-  // Only the DOCUMENT is frozen. The room behind keeps its own scroll
-  // containers (`.draft-main`, the ranked list), so a reader who wants to look
-  // at the board before deciding still can -- which is exactly what the card's
-  // second button offers.
-  //
-  // The scrollbar's own width is handed back as padding. Hiding the bar reflows
-  // the whole page by however wide it is, and on a fixed layout like the room
-  // that reads as everything twitching sideways the instant the card appears.
-  // Only on a viewport that HAS an overlay-free scrollbar: the measurement is
-  // 0 on macOS overlay bars and on touch, where padding would be the shift.
-  //
-  // Both properties are restored to whatever they were rather than cleared,
-  // so nothing here can quietly take ownership of a style the page set itself.
-  useEffect(() => {
-    if (corner || connected === null || connected || loads < LOADS_NEEDED) return
-    const { body } = document
-    const overflow = body.style.overflow
-    const padding = body.style.paddingRight
-    const bar = window.innerWidth - document.documentElement.clientWidth
-    body.style.overflow = 'hidden'
-    if (bar > 0) body.style.paddingRight = `${bar}px`
-    return () => {
-      body.style.overflow = overflow
-      body.style.paddingRight = padding
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [corner, connected, loads])
+  // NO BODY LOCK ANY MORE. While this was a modal it froze the page's scroll
+  // and padded the body to cover the scrollbar it removed. It is not a modal:
+  // the room behind it is the argument it is making, and a reader who wants
+  // to scroll past the card to the setup flow below should not have to
+  // dismiss it first. The lock, and the scrollbar compensation that existed
+  // only to hide the lock's own side effect, both went with the scrim.
+
 
   // The primary action takes focus, so the keyboard route is one key rather
   // than a tab through the whole draft room behind it. `loads` is a dep for
@@ -294,14 +301,13 @@ export default function Welcome({ onStart, live = false, askedAt = 0 }: {
   }
 
   return (
-    // `aria-modal` and the scrim are honest here: while this is centred it is
-    // the only thing to interact with. The room underneath keeps running,
-    // which is the point -- it is a live draft, not a screenshot behind a
-    // dialog.
-    <div className="wc-scrim" role="dialog" aria-modal="true"
-         aria-labelledby="wc-title" onMouseDown={(e) => {
-           if (e.target === e.currentTarget) dismiss()
-         }}>
+    // A dialog, NOT a modal one: `aria-modal` would tell a screen reader that
+    // the room behind this is inert, and it is not -- it is a live draft that
+    // can be read and clicked while the card sits over it. The wrapper also
+    // takes no pointer events (landing.css), so it cannot swallow a click
+    // meant for a player row, and there is deliberately no dismiss-on-
+    // backdrop handler: a click out there belongs to whatever is under it.
+    <div className="wc-scrim" role="dialog" aria-labelledby="wc-title">
       <div className="wc-card">
         <button type="button" className="wc-x" onClick={dismiss}
                 aria-label="Close and keep watching the draft">

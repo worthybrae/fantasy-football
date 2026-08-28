@@ -184,23 +184,24 @@
   align-items: center;
   justify-content: center;
   padding: var(--space-4);
-  /* SHEER ON PURPOSE. The draft behind this card is the argument the card is
-     making, so it has to stay legible: names readable, meters readable,
-     picks visibly landing. 0.62 and a 2px blur put a frosted sheet over the
-     product and left the reader looking at a dialog on a dark page. A third
-     of a shade and no blur at all is enough to seat the card in front --
-     the card carries its own fill and a deep shadow, which is what actually
-     separates it. */
-  background: rgba(10, 11, 14, 0.34);
+  /* NO FILL, AND NO POINTER EVENTS. This was a sheer dark scrim, which cost
+     more than it looked: `elementFromPoint` over any player row returned the
+     scrim, so a visitor's first click on the room -- the thing the card is
+     pointing at -- landed on the overlay and only dismissed the card. The
+     dim is gone with it; the card carries its own fill and a deep shadow,
+     which is what actually seated it in front anyway.
+
+     `pointer-events: none` here and `auto` on the card is the whole
+     mechanism: the wrapper still centres the card over the room, and the
+     room underneath stays live, scrollable and clickable. */
+  pointer-events: none;
   animation: wc-in 200ms ease-out;
-  /* The page behind is frozen while this is up (Welcome.tsx locks the body),
-     and this stops a wheel that lands on the scrim from scrolling anything
-     else that happens to be under the pointer either. */
-  overscroll-behavior: contain;
 }
 
 .wc-card {
   position: relative;
+  /* The one thing in this layer that a pointer can reach. */
+  pointer-events: auto;
   animation: wc-pop 320ms cubic-bezier(0.34, 1.4, 0.64, 1) both;
   /* Composited: the animation touches only transform and opacity, so a card
      over a live draft room does not force a paint of the board behind it on
