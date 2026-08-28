@@ -64,10 +64,6 @@ def main(argv=None) -> int:
         "--pick-interval", type=float, default=2.0,
         help="seconds between replayed picks in every room (default 2.0)")
     parser.add_argument(
-        "--pick-interval", type=float, default=None,
-        help="seconds between replayed picks per room (default 2, a stress "
-             "setting; a real room picks every 30-60 s)")
-    parser.add_argument(
         "--workers", type=int, default=None,
         help="LIVE_BUILD_WORKERS for the connect pool, if that switch exists")
     parser.add_argument(
@@ -93,8 +89,6 @@ def main(argv=None) -> int:
     os.environ.setdefault("ESPN_CUSTODY_ALLOW_PLAINTEXT_HTTP", "1")
     if args.workers is not None:
         os.environ["LIVE_BUILD_WORKERS"] = str(args.workers)
-    if args.pick_interval is not None:
-        os.environ["LIVE_FAKE_PICK_INTERVAL"] = str(args.pick_interval)
 
     import uvicorn
 
