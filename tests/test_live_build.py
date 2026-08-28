@@ -86,3 +86,71 @@ def test_a_real_worker_builds_the_session_off_process(tmp_path, monkeypatch):
     assert session.my_slot is None
     assert os.getpid() == os.getpid()      # built elsewhere, unpickled here
     get_conn(league_path).close()
+
+
+def _inline_future(fn, *args):
+    """A Future resolved by running `fn` on a thread -- what a recorder
+    stands in for the pool with, so nothing is spawned."""
+    from concurrent.futures import ThreadPoolExecutor
+    return ThreadPoolExecutor(max_workers=1).submit(fn, *args)
+
+
+def test_a_broken_pool_is_replaced_once_and_the_build_still_lands(tmp_path, monkeypatch):
+    """The first submit meets a pool whose worker died; the pool is dropped,
+    a fresh one is built, and the retry carries the build."""
+    from concurrent.futures.process import BrokenProcessPool
+    monkeypatch.setenv(live_build.WORKERS_ENV, "1")
+    universal, league_path = _league_file(tmp_path, monkeypatch)
+    monkeypatch.setattr("api.live_build.build_session",
+                        lambda cur, my_slot, league_id="", settings=None, progress=None: "built")
+    pools = []
+
+    class _Pool:
+        def __init__(self, broken):
+            self.broken = broken
+
+        def submit(self, fn, *args):
+            if self.broken:
+                raise BrokenProcessPool("a worker died")
+            return _inline_future(fn, *args)
+
+        def shutdown(self, wait=True, cancel_futures=False):
+            pass
+
+    def fake_get_pool():
+        pools.append(_Pool(broken=(len(pools) == 0)))
+        return pools[-1]
+    monkeypatch.setattr("api.live_build._get_pool", fake_get_pool)
+
+    assert live_build.build_in_worker(league_path, universal, "77", None, None, None) == "built"
+    assert len(pools) == 2 and pools[0].broken and not pools[1].broken
+
+
+def test_a_pool_broken_twice_falls_back_to_inline(tmp_path, monkeypatch):
+    from concurrent.futures.process import BrokenProcessPool
+    monkeypatch.setenv(live_build.WORKERS_ENV, "1")
+    universal, league_path = _league_file(tmp_path, monkeypatch)
+    monkeypatch.setattr("api.live_build.build_session",
+                        lambda cur, my_slot, league_id="", settings=None, progress=None: "inline")
+
+    class _Broken:
+        def submit(self, fn, *args):
+            raise BrokenProcessPool("still dead")
+
+        def shutdown(self, wait=True, cancel_futures=False):
+            pass
+    monkeypatch.setattr("api.live_build._get_pool", lambda: _Broken())
+    assert live_build.build_in_worker(league_path, universal, "77", None, None, None) == "inline"
+
+
+def test_a_worker_that_never_answers_is_cancelled_and_the_build_runs_inline(tmp_path, monkeypatch):
+    from concurrent.futures import Future
+    monkeypatch.setenv(live_build.WORKERS_ENV, "1")
+    monkeypatch.setattr("api.live_build.LIVE_BUILD_TIMEOUT", 0.2)
+    universal, league_path = _league_file(tmp_path, monkeypatch)
+    monkeypatch.setattr("api.live_build.build_session",
+                        lambda cur, my_slot, league_id="", settings=None, progress=None: "inline")
+    hung = Future()
+    monkeypatch.setattr("api.live_build.submit", lambda fn, *args: hung)
+    assert live_build.build_in_worker(league_path, universal, "77", None, None, None) == "inline"
+    assert hung.cancelled()

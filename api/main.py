@@ -919,6 +919,14 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
         import anyio
         anyio.to_thread.current_default_thread_limiter().total_tokens = THREADPOOL_TOKENS
 
+    # The build workers (api/live_build.py) are child processes; a
+    # SIGTERM'd parent that does not tell them to stop leaves them to the
+    # platform's grace period. No wait: uvicorn is already closing.
+    @app.on_event("shutdown")
+    async def _stop_build_workers():
+        from api import live_build
+        live_build.shutdown()
+
     # `private, no-store` on every /api answer that named no policy of its
     # own. LAST LINE, so it is the outermost middleware and every response
     # passes through it -- including the 400s CredentialTransportGuard

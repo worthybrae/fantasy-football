@@ -1439,6 +1439,11 @@ SURVIVAL_ROLLOUTS = 400
 # in each room's worker (see _launch_listener) means a room that waited
 # ranks the LATEST pick, never a stale one.
 RECOMPUTE_SLOTS = threading.Semaphore(max(2, os.cpu_count() or 2))
+# How long one room waits for a ranking slot before skipping that ranking.
+# Waited for in half-second steps against the room's own stop event, so a
+# stop never sits behind the queue -- which is what would otherwise turn a
+# busy evening into a 503 on every reconnect (see _stop_listener's timeout).
+RECOMPUTE_WAIT_SECONDS = 20.0
 
 # The point past which every room's ranking gets fewer rollouts. Under it
 # the full SURVIVAL_ROLLOUTS; over it 150, which is still a usable survival
@@ -1461,6 +1466,10 @@ def rollouts_for_load(active_sessions: int) -> int:
 # would follow a recording instead of the draft. Same "1/true/yes/on"
 # reading as the other switches.
 FAKE_SOCKET_ENV = "LIVE_FAKE_SOCKET"
+
+
+class FakeSocketMissing(RuntimeError):
+    """LIVE_FAKE_SOCKET is on and the replay module cannot be imported."""
 
 
 def _switch_on(name: str) -> bool:
@@ -1781,6 +1790,21 @@ class LiveRegistry:
         # The startup restore's thread, shared by every session it rebuilds;
         # each restored session also carries it in state["restore_thread"].
         self.restore_thread = None
+        # WHICH LEAGUE FILES THIS PROCESS HOLDS, and for whom: realpath ->
+        # sid. Claimed by a connect BEFORE it decides whether a worker
+        # process may open the file (DuckDB's lock is per process, so a
+        # file any room here holds -- or is about to -- is not one a worker
+        # can open), and released when the room's connection closes. Two
+        # leaguemates connecting within seconds of each other are the case:
+        # the second finds the first's claim and builds inline, instead of
+        # handing a worker a file the first is about to open.
+        self.held_paths: dict[str, str] = {}
+        # The reaper, started on the first real room rather than at
+        # registration: a test builds dozens of apps, and each would
+        # otherwise carry a sleeping thread for nothing. `reaper` is the
+        # switch register_live_routes passes.
+        self.reaper = True
+        self.reaper_thread = None
 
     def get(self, sid: str) -> "LiveSession | None":
         with self._lock:
@@ -1792,7 +1816,35 @@ class LiveRegistry:
             if s is None:
                 s = LiveSession(sid)
                 self._sessions[sid] = s
-            return s
+            start_reaper = (self.reaper and self.reaper_thread is None
+                            and sid != DEFAULT_SID)
+        if start_reaper:
+            self.start_reaper()
+        return s
+
+    def claim_path(self, path: str, sid: str) -> bool:
+        """Claim a league file for `sid`. True when the claim is now this
+        room's (fresh, or already its own); False when another room holds
+        it -- the caller then builds inline, in this process, where a
+        second connection to an open file is fine."""
+        key = os.path.realpath(path)
+        with self._lock:
+            holder = self.held_paths.get(key)
+            if holder is None or holder == sid:
+                self.held_paths[key] = sid
+                return True
+            return False
+
+    def release_path(self, path: str, sid: str) -> None:
+        """Drop `sid`'s claim on a league file, if it is the holder."""
+        key = os.path.realpath(path)
+        with self._lock:
+            if self.held_paths.get(key) == sid:
+                del self.held_paths[key]
+
+    def path_holder(self, path: str) -> "str | None":
+        with self._lock:
+            return self.held_paths.get(os.path.realpath(path))
 
     def drop(self, sid: str) -> None:
         with self._lock:
@@ -1837,6 +1889,8 @@ class LiveRegistry:
         retire = getattr(self, "_retire", None)
         gone = []
         for sid in self.sids():
+            if sid == DEFAULT_SID:
+                continue            # the tests' room, and never minted
             s = self.get(sid)
             if s is None or now - s.last_activity <= idle:
                 continue
@@ -1857,9 +1911,13 @@ class LiveRegistry:
                 except Exception as exc:      # noqa: BLE001 -- a reaper that
                     # dies is a leak that comes back; log and keep going.
                     print(f"live: reaper pass failed: {exc}")
-        thread = threading.Thread(target=loop, name="live-reaper", daemon=True)
+        with self._lock:
+            if self.reaper_thread is not None:
+                return self.reaper_thread
+            thread = threading.Thread(target=loop, name="live-reaper",
+                                      daemon=True)
+            self.reaper_thread = thread
         thread.start()
-        self.reaper_thread = thread
         return thread
 
 
@@ -2290,9 +2348,12 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
             state["socket"] = None
             old_league_conn = state["league_conn"]
             state["league_conn"] = None
+            old_path = state["league_path"]
             state["league_path"] = None
         if old_league_conn is not None:
             old_league_conn.close()
+        if old_path is not None:
+            registry.release_path(old_path, s.sid)
         return True
 
     def _recompute(s, session, picks_made):
@@ -2397,24 +2458,26 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
             # the numpy is inside the slot: the drafted read above and the
             # store below are milliseconds and must not queue behind a
             # ranking somewhere else.
-            with RECOMPUTE_SLOTS:
-                rollouts = survival(
-                    session.pool, session.settings, session.slot_managers,
-                    session.my_slot, taken, session.betas,
-                    n_rollouts=rollouts_for_load(registry.active_count()),
-                    seed=session.seed,
-                    taken_order=taken_order, on_the_clock=on_the_clock,
-                    horizon=h, nested=session.nested)
-                avail = rollouts["avail_pct"].to_numpy()
+            # The slot itself is taken by the recompute worker that calls
+            # this (see its wait loop), so a direct call from a test runs
+            # unbounded, as it always did.
+            rollouts = survival(
+                session.pool, session.settings, session.slot_managers,
+                session.my_slot, taken, session.betas,
+                n_rollouts=rollouts_for_load(registry.active_count()),
+                seed=session.seed,
+                taken_order=taken_order, on_the_clock=on_the_clock,
+                horizon=h, nested=session.nested)
+            avail = rollouts["avail_pct"].to_numpy()
             # Two questions out of one set of rollouts. `avail` is the turn
             # this list is PRICED against and is what `gain_now` steps to;
             # `avail_next_pct` is my very next turn and is the only one shown
             # as a percentage beside a player's name, because that is the
             # question a reader is asking of it. See `rank_available`.
-                frame = rank_available(
-                    session.pool, session.settings, taken, counts, avail,
-                    my_turns_left,
-                    survive_display=rollouts["avail_next_pct"].to_numpy())
+            frame = rank_available(
+                session.pool, session.settings, taken, counts, avail,
+                my_turns_left,
+                survive_display=rollouts["avail_next_pct"].to_numpy())
         finally:
             cur.close()
         with lock:
@@ -2432,7 +2495,7 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
             # pair is written together or not at all.
             state["horizon_pick"] = int(horizon)
 
-    def _provision_and_build(league_id, team_id, settings=None, progress=None):
+    def _provision_and_build(s, league_id, team_id, settings=None, progress=None):
         """Open (provisioning if needed) the connection this league's session
         lives on, and build the session against it.
 
@@ -2490,14 +2553,32 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
             # to a second process at all -- DuckDB's lock is per process --
             # so that case builds inline, where a second connection to an
             # open file is fine.
-            if live_build.workers() > 0 and not _league_path_held(league_path):
-                session = _build_off_process(league_path, league_id, team_id,
-                                             settings, progress)
+            # The claim comes FIRST, before worker-or-inline is decided
+            # (see LiveRegistry.held_paths): a claim another room already
+            # holds means the file is, or is about to be, open in this
+            # process, and a worker must not be handed it.
+            claimed = registry.claim_path(league_path, s.sid)
+            try:
+                if live_build.workers() > 0 and claimed:
+                    session = _build_off_process(league_path, league_id,
+                                                 team_id, settings, progress)
+                    league_conn = get_conn(league_path)
+                    live_build.apply_conn_limits(league_conn)
+                    if settings is None:
+                        # build_session's own rule for what it fell back to
+                        # (see its settings_source fact): a `league` row is a
+                        # saved league, none is the cold-start default.
+                        progress.fact(settings_source=(
+                            "saved" if not read_table(league_conn, "league").empty
+                            else "default"))
+                    _publish_path(s, league_path)
+                    return league_conn, league_conn, session
                 league_conn = get_conn(league_path)
                 live_build.apply_conn_limits(league_conn)
-                return league_conn, league_conn, session
-            league_conn = get_conn(league_path)
-            live_build.apply_conn_limits(league_conn)
+            except Exception:
+                if claimed:
+                    registry.release_path(league_path, s.sid)
+                raise
         else:
             progress.ok("league", "the shared database")
         work_conn = league_conn if league_conn is not None else conn
@@ -2559,21 +2640,19 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
         except Exception:
             if league_conn is not None:
                 league_conn.close()
+                registry.release_path(league_path, s.sid)
             raise
+        if league_conn is not None:
+            _publish_path(s, league_path)
         return work_conn, league_conn, session
 
-    def _league_path_held(league_path: str) -> bool:
-        """Whether any room in this process has that league file open."""
-        want = os.path.realpath(league_path)
-        for sid in registry.sids():
-            other = registry.get(sid)
-            if other is None:
-                continue
-            with other.lock:
-                held = other.state.get("league_path")
-            if held is not None and os.path.realpath(held) == want:
-                return True
-        return False
+    def _publish_path(s, league_path) -> None:
+        """Record which file the room's connection is on, so the claim can
+        be released with it (see _stop_listener). Written here, as soon as
+        the connection exists, rather than only at launch: a build that
+        fails between the two must still release."""
+        with s.lock:
+            s.state["league_path"] = league_path
 
     def _build_off_process(league_path, league_id, team_id, settings, progress):
         """The worker-pool half of _provision_and_build: hand the build to
@@ -2594,8 +2673,8 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
             progress.fact(my_slot=int(session.my_slot))
         else:
             progress.warn("slot", "waiting on the draft socket")
-        progress.fact(settings_source="espn" if session.settings_from_espn
-                      else "saved")
+        if session.settings_from_espn:
+            progress.fact(settings_source="espn")
         progress.begin("board")
         progress.ok("board", f"{len(session.board)} players · in a worker")
         progress.fact(players=int(len(session.board)))
@@ -2671,7 +2750,7 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
 
         try:
             work_conn, league_conn, session = _provision_and_build(
-                league_id, team_id, settings=espn_settings, progress=progress)
+                s, league_id, team_id, settings=espn_settings, progress=progress)
         except Exception as exc:      # noqa: BLE001 -- re-raised immediately;
             # this only records WHERE it died before FastAPI turns it into a
             # 500. Without it a build that raises (a duplicated player_id in
@@ -2792,7 +2871,12 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
             if _switch_on(FAKE_SOCKET_ENV):
                 # Imported here, on the switch: the replay module is a
                 # load-test tool and this file must import without it.
-                from api.live_fake_socket import run_fake_socket_listener
+                try:
+                    from api.live_fake_socket import run_fake_socket_listener
+                except ImportError as exc:
+                    raise FakeSocketMissing(
+                        f"{FAKE_SOCKET_ENV} is set but api.live_fake_socket "
+                        f"is missing ({exc})") from exc
                 runner = run_fake_socket_listener
             else:
                 # The module attribute, read at call time, so a test that
@@ -2910,6 +2994,32 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
                 with lock:
                     if state["listener"] is not listener:
                         continue
+                # A slot, or not this time. RECOMPUTE_SLOTS is shared by
+                # every room; waited for in short steps so the stop event
+                # is seen within half a second, and given up after
+                # RECOMPUTE_WAIT_SECONDS with the last ranking left in place
+                # and the room told why, rather than blocking a thread the
+                # stop path has to join.
+                deadline = time.monotonic() + RECOMPUTE_WAIT_SECONDS
+                got_slot = False
+                while not stop_event.is_set():
+                    if RECOMPUTE_SLOTS.acquire(timeout=0.5):
+                        got_slot = True
+                        break
+                    if time.monotonic() >= deadline:
+                        break
+                if stop_event.is_set():
+                    if got_slot:
+                        RECOMPUTE_SLOTS.release()
+                    return
+                if not got_slot:
+                    with lock:
+                        if state["listener"] is listener:
+                            state["recompute_error"] = (
+                                "busy: no ranking slot within "
+                                f"{RECOMPUTE_WAIT_SECONDS:.0f}s; showing the "
+                                "previous ranking")
+                    continue
                 # Guarded, because this loop IS the thread's whole body: an
                 # exception propagating out of _recompute returns from
                 # recompute_worker and nothing ever ranks again for the rest
@@ -2958,6 +3068,8 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
                             state["recompute_error"] = None
                         ranked = len(state["candidates"])
                     progress.ok("ranking", f"{ranked} ranked")
+                finally:
+                    RECOMPUTE_SLOTS.release()
 
         def _resolve_slot(c2) -> bool:
             """Resolve my_slot from ESPN's pick order, history, or the
@@ -3156,9 +3268,10 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
                 # (which has no socket row at all), on whichever stage was
                 # still open -- never nowhere.
                 progress.fail("socket", str(exc),
-                              hint="Go back to your ESPN draft tab and click "
-                                   "the ESPN Draft Assist bookmark again -- it "
-                                   "mints a fresh token.")
+                              hint=(str(exc) if isinstance(exc, FakeSocketMissing)
+                                    else "Go back to your ESPN draft tab and "
+                                         "click the ESPN Draft Assist bookmark "
+                                         "again -- it mints a fresh token."))
 
         thread = threading.Thread(target=pump, daemon=True)
         recompute_thread = threading.Thread(target=recompute_worker, daemon=True)
@@ -3191,8 +3304,6 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
                               "recompute_thread": recompute_thread,
                               "listener_error": None, "recompute_error": None,
                               "league_conn": league_conn,
-                              "league_path": (_conn_path(league_conn)
-                                              if league_conn is not None else None),
                               "candidates": [], "as_of_pick": None,
                               "horizon_pick": None,
                               "unmapped": [], "last_poll_at": None})
@@ -3206,6 +3317,10 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
             # out from under anyone.
             if league_conn is not None:
                 league_conn.close()
+                with lock:
+                    old_path, state["league_path"] = state["league_path"], None
+                if old_path is not None:
+                    registry.release_path(old_path, s.sid)
             return None
         recompute_thread.start()
         # ONE recompute at launch, when the slot is already known. Without it
@@ -4542,8 +4657,7 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
             pass
         return True
     registry.set_retire(_retire)
-    if reaper:
-        registry.start_reaper()
+    registry.reaper = reaper
 
     _saved = _load_all_records()
     if _saved:

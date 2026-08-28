@@ -33,7 +33,8 @@ from __future__ import annotations
 import multiprocessing
 import os
 import threading
-from concurrent.futures import Future, ProcessPoolExecutor
+from concurrent.futures import Future, ProcessPoolExecutor, TimeoutError
+from concurrent.futures.process import BrokenProcessPool
 
 WORKERS_ENV = "LIVE_BUILD_WORKERS"
 
@@ -45,6 +46,12 @@ WORKERS_ENV = "LIVE_BUILD_WORKERS"
 # to the container.
 CONN_THREADS = 2
 CONN_MEMORY_LIMIT = "256MB"
+
+# How long a connect waits for its worker. Well past the 35 s the slowest
+# measured build takes, and short enough that a worker that has hung does
+# not hold a request thread for the rest of the evening: on expiry the
+# future is cancelled and that one connect builds inline instead.
+LIVE_BUILD_TIMEOUT = 120.0
 
 _pool_lock = threading.Lock()
 _pool: ProcessPoolExecutor | None = None
@@ -82,14 +89,28 @@ def _get_pool() -> ProcessPoolExecutor:
 
 
 def submit(fn, *args) -> Future:
-    """Run `fn(*args)` in a worker. Requires `workers() > 0`."""
+    """Run `fn(*args)` in a worker. Requires `workers() > 0`.
+
+    A pool whose worker has died (killed by the kernel for memory, most
+    likely) refuses every later submit with BrokenProcessPool, forever.
+    One such refusal drops the pool and builds a fresh one for a single
+    retry; a second refusal propagates, and the caller falls back to
+    building inline for that connect.
+    """
     if workers() <= 0:
         raise RuntimeError(f"{WORKERS_ENV} is not set; nothing to submit to")
-    return _get_pool().submit(fn, *args)
+    try:
+        return _get_pool().submit(fn, *args)
+    except BrokenProcessPool:
+        print("live_build: worker pool is broken; replacing it")
+        shutdown()
+        return _get_pool().submit(fn, *args)
 
 
 def shutdown() -> None:
-    """Stop the pool. Test hook; a process exit reaps the workers anyway."""
+    """Stop the pool without waiting. Called from the app's shutdown hook
+    and when a broken pool is replaced; a process exit reaps the workers
+    anyway."""
     global _pool
     with _pool_lock:
         if _pool is not None:
@@ -151,10 +172,29 @@ def build_in_worker(league_path: str, universal_path: str, league_id: str,
     The league file at `league_path` must already be provisioned from
     `universal_path` by the caller, and the caller must not hold a
     connection to it while this runs -- see the module docstring for why
-    the worker, not the caller, does the opening. In a worker process when
-    `workers() > 0`, inline otherwise.
+    the worker, not the caller, does the opening. `universal_path` is the
+    shared database the league file was seeded from; the worker never
+    opens it (the parent holds it for its whole life) and it is carried
+    here only so the provisioning contract is visible at the call.
+
+    In a worker process when `workers() > 0`, inline otherwise -- and
+    inline for THIS call, with a line in the log, when the pool is broken
+    twice over or the worker does not answer within LIVE_BUILD_TIMEOUT.
+    A connect that falls back is slower, not failed.
     """
     args = (league_path, league_id, settings_json, team_id, season)
     if workers() <= 0:
         return _build_job(*args)
-    return submit(_build_job, *args).result()
+    try:
+        future = submit(_build_job, *args)
+    except BrokenProcessPool as exc:
+        print(f"live_build: worker pool broken twice ({exc}); building "
+              f"league {league_id} inline")
+        return _build_job(*args)
+    try:
+        return future.result(timeout=LIVE_BUILD_TIMEOUT)
+    except TimeoutError:
+        future.cancel()
+        print(f"live_build: worker did not build league {league_id} within "
+              f"{LIVE_BUILD_TIMEOUT:.0f}s; building it inline")
+        return _build_job(*args)

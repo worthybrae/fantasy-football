@@ -15,13 +15,14 @@ import types
 import pytest
 from fastapi.testclient import TestClient
 
-from api import live
+from api import live, live_build
 from api.live import DEFAULT_ROOM_ENV, DEFAULT_SID, SID_COOKIE, SID_MAX_AGE
 
 try:
-    from tests.test_live_api import _seed_minimal_live_db
+    from tests.test_live_api import (_seed_league_one_with_slot_seven,
+                                     _seed_minimal_live_db)
 except ImportError:                       # tests/ is not a package
-    from test_live_api import _seed_minimal_live_db
+    from test_live_api import _seed_league_one_with_slot_seven, _seed_minimal_live_db
 
 HTTPS = "https://testserver"
 
@@ -481,5 +482,123 @@ def test_the_fake_socket_switch_routes_the_pump_to_the_replay(tmp_path, monkeypa
         assert len(fake_calls) == 1
         assert fake_calls[0]["league_id"] == "1" and fake_calls[0]["token"] == "tok-1"
         assert all(h is not None for h in fake_calls[0]["hooks"])
+    finally:
+        _stop_all([a])
+
+
+def test_two_leaguemates_connecting_at_once_share_one_file_safely(tmp_path, monkeypatch):
+    """The second room to claim a league file another room is about to
+    open builds inline in this process, never in a worker that could not
+    open the file: one submit, two rooms, no lock collision."""
+    from concurrent.futures import ThreadPoolExecutor
+    monkeypatch.setenv(live_build.WORKERS_ENV, "1")
+    app, seen, stops = _app(tmp_path, monkeypatch)
+    submits = []
+    hold = threading.Event()
+    real_build = live.build_session
+
+    def slow_worker_build(cur, my_slot, league_id="", settings=None, progress=None):
+        hold.wait(timeout=20)
+        return real_build(cur, my_slot, league_id=league_id, settings=settings)
+    monkeypatch.setattr("api.live_build.build_session", slow_worker_build)
+    runner = ThreadPoolExecutor(max_workers=2)
+
+    def recorder(fn, *args):
+        submits.append(args[1])                  # league_id
+        return runner.submit(fn, *args)
+    monkeypatch.setattr("api.live_build.submit", recorder)
+
+    a, b = _client(app), _client(app)
+    results = {}
+    try:
+        for c in (a, b):
+            assert c.post("/api/live/session").json()["sid_set"] is True
+        ta = threading.Thread(target=lambda: results.update(a=_connect(a, "1", team_id="2")))
+        ta.start()
+        registry = app.state.live_registry
+        deadline = time.monotonic() + 10
+        while registry.path_holder(str(tmp_path / "leagues_root" / "1.duckdb")) is None:
+            assert time.monotonic() < deadline, "the first connect never claimed the file"
+            time.sleep(0.05)
+        tb = threading.Thread(target=lambda: results.update(b=_connect(b, "1", team_id="3")))
+        tb.start()
+        tb.join(timeout=30)          # b builds inline and finishes first
+        assert not tb.is_alive()
+        hold.set()
+        ta.join(timeout=30)
+        assert not ta.is_alive()
+        assert submits == ["1"], "only the first room's build went to a worker"
+        assert registry.active_count() == 2
+        assert a.get("/api/live/state").json()["active"] is True
+        assert b.get("/api/live/state").json()["active"] is True
+    finally:
+        hold.set()
+        _stop_all([a, b])
+        runner.shutdown(wait=False)
+
+
+def test_a_stop_is_not_held_behind_the_ranking_queue(tmp_path, monkeypatch):
+    """With every ranking slot taken, a room's recompute worker waits in
+    short steps and gives up with a note; a stop still completes inside
+    LISTENER_STOP_TIMEOUT."""
+    monkeypatch.setattr("api.live.RECOMPUTE_WAIT_SECONDS", 0.6)
+    app, seen, stops = _app(tmp_path, monkeypatch)
+    # A known slot, or nothing ever asks for a ranking (see _launch_listener).
+    _seed_league_one_with_slot_seven(str(tmp_path / "live.duckdb"),
+                                     str(tmp_path / "leagues_root"))
+    permits = 0
+    while live.RECOMPUTE_SLOTS.acquire(blocking=False):
+        permits += 1
+    a = _client(app)
+    try:
+        _connect(a, "1", team_id="2")
+        deadline = time.monotonic() + 5
+        while True:
+            err = a.get("/api/live/state").json()["recompute_error"]
+            if err and "busy" in err:
+                break
+            assert time.monotonic() < deadline, "no busy note appeared"
+            time.sleep(0.05)
+        started = time.monotonic()
+        assert a.post("/api/live/stop").json()["listener_stopped"] is True
+        assert time.monotonic() - started < live.LISTENER_STOP_TIMEOUT
+    finally:
+        for _ in range(permits):
+            live.RECOMPUTE_SLOTS.release()
+        _stop_all([a])
+
+
+def test_the_reaper_starts_lazily_and_spares_the_default_room(tmp_path, monkeypatch):
+    app, seen, stops = _app(tmp_path, monkeypatch)
+    registry = app.state.live_registry
+    assert registry.reaper_thread is None, "no real room yet, no thread"
+    default = registry.get(DEFAULT_SID)
+    default.last_activity = time.monotonic() - 40 * 3600
+    assert registry.run_once(idle=3 * 3600) == []
+    assert registry.get(DEFAULT_SID) is default
+    registry.get_or_create("first-real-room")
+    assert registry.reaper_thread is not None and registry.reaper_thread.is_alive()
+
+
+def test_a_missing_replay_module_says_so_in_the_room(tmp_path, monkeypatch):
+    import sys
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    monkeypatch.setitem(sys.modules, "api.live_fake_socket", None)   # import fails
+    monkeypatch.setenv(live.FAKE_SOCKET_ENV, "1")
+    from api.main import create_app
+    a = _client(create_app(path))
+    try:
+        _connect(a, "1", team_id="2")
+        deadline = time.monotonic() + 5
+        while True:
+            body = a.get("/api/live/state").json()
+            if body["listener_error"]:
+                break
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        assert "LIVE_FAKE_SOCKET is set but api.live_fake_socket is missing" in body["listener_error"]
+        progress = a.get("/api/live/connect-progress").json()
+        assert "api.live_fake_socket is missing" in (progress["error"] or {}).get("hint", "")
     finally:
         _stop_all([a])
