@@ -493,6 +493,10 @@ def test_two_leaguemates_connecting_at_once_share_one_file_safely(tmp_path, monk
     open the file: one submit, two rooms, no lock collision."""
     from concurrent.futures import ThreadPoolExecutor
     monkeypatch.setenv(live_build.WORKERS_ENV, "1")
+    # A worker build needs a universal snapshot to exist, and an app
+    # built under pytest does not write one unless asked (see
+    # live.SNAPSHOT_IN_TESTS_ENV).
+    monkeypatch.setenv(live.SNAPSHOT_IN_TESTS_ENV, "1")
     app, seen, stops = _app(tmp_path, monkeypatch)
     submits = []
     hold = threading.Event()
@@ -612,6 +616,10 @@ def test_a_file_stays_inline_while_any_room_still_holds_it(tmp_path, monkeypatch
     worker. One submit in total."""
     from concurrent.futures import ThreadPoolExecutor
     monkeypatch.setenv(live_build.WORKERS_ENV, "1")
+    # A worker build needs a universal snapshot to exist, and an app
+    # built under pytest does not write one unless asked (see
+    # live.SNAPSHOT_IN_TESTS_ENV).
+    monkeypatch.setenv(live.SNAPSHOT_IN_TESTS_ENV, "1")
     app, seen, stops = _app(tmp_path, monkeypatch)
     submits = []
     runner = ThreadPoolExecutor(max_workers=1)
@@ -657,6 +665,10 @@ def test_a_worker_that_will_not_cancel_or_finish_refuses_the_connect(tmp_path, m
     inline. Past the timeout and the grace it answers 503 instead."""
     from concurrent.futures import Future
     monkeypatch.setenv(live_build.WORKERS_ENV, "1")
+    # A worker build needs a universal snapshot to exist, and an app
+    # built under pytest does not write one unless asked (see
+    # live.SNAPSHOT_IN_TESTS_ENV).
+    monkeypatch.setenv(live.SNAPSHOT_IN_TESTS_ENV, "1")
     monkeypatch.setattr("api.live_build.LIVE_BUILD_TIMEOUT", 0.2)
     monkeypatch.setattr("api.live_build.LIVE_BUILD_GRACE", 0.2)
     app, seen, stops = _app(tmp_path, monkeypatch)
@@ -702,6 +714,10 @@ def test_a_retry_after_a_build_timeout_does_not_hand_the_file_to_a_second_worker
     in another process, where it is a lock error."""
     from concurrent.futures import Future
     monkeypatch.setenv(live_build.WORKERS_ENV, "1")
+    # A worker build needs a universal snapshot to exist, and an app
+    # built under pytest does not write one unless asked (see
+    # live.SNAPSHOT_IN_TESTS_ENV).
+    monkeypatch.setenv(live.SNAPSHOT_IN_TESTS_ENV, "1")
     monkeypatch.setattr("api.live_build.LIVE_BUILD_TIMEOUT", 0.2)
     monkeypatch.setattr("api.live_build.LIVE_BUILD_GRACE", 0.2)
     app, seen, stops = _app(tmp_path, monkeypatch)
@@ -791,6 +807,10 @@ def test_a_reconnect_while_the_closer_still_holds_the_file_builds_inline(tmp_pat
     and nothing is handed to a worker."""
     from concurrent.futures import ThreadPoolExecutor
     monkeypatch.setenv(live_build.WORKERS_ENV, "1")
+    # A worker build needs a universal snapshot to exist, and an app
+    # built under pytest does not write one unless asked (see
+    # live.SNAPSHOT_IN_TESTS_ENV).
+    monkeypatch.setenv(live.SNAPSHOT_IN_TESTS_ENV, "1")
     app, seen, stops = _app(tmp_path, monkeypatch)
     _seed_league_one_with_slot_seven(str(tmp_path / "live.duckdb"),
                                      str(tmp_path / "leagues_root"))
@@ -847,6 +867,10 @@ def test_a_snapshot_written_after_boot_is_used_by_the_next_connect(tmp_path, mon
     from concurrent.futures import ThreadPoolExecutor
     from pipeline import leagues as leagues_mod
     monkeypatch.setenv(live_build.WORKERS_ENV, "1")
+    # A worker build needs a universal snapshot to exist, and an app
+    # built under pytest does not write one unless asked (see
+    # live.SNAPSHOT_IN_TESTS_ENV).
+    monkeypatch.setenv(live.SNAPSHOT_IN_TESTS_ENV, "1")
     monkeypatch.setattr("pipeline.leagues.snapshot_universal", lambda conn, path: None)
     app, seen, stops = _app(tmp_path, monkeypatch)
     db = str(tmp_path / "live.duckdb")
@@ -888,6 +912,10 @@ def test_a_worker_that_cannot_build_falls_back_to_an_inline_build(tmp_path, monk
     from concurrent.futures import ThreadPoolExecutor
     from pipeline import leagues as leagues_mod
     monkeypatch.setenv(live_build.WORKERS_ENV, "1")
+    # A worker build needs a universal snapshot to exist, and an app
+    # built under pytest does not write one unless asked (see
+    # live.SNAPSHOT_IN_TESTS_ENV).
+    monkeypatch.setenv(live.SNAPSHOT_IN_TESTS_ENV, "1")
     app, seen, stops = _app(tmp_path, monkeypatch)
     db = str(tmp_path / "live.duckdb")
     assert os.path.exists(leagues_mod.snapshot_path_for(db))

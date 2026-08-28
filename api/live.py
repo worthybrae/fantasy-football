@@ -267,6 +267,7 @@ def build_session(conn, my_slot: int | None, seed: int = DEFAULT_SEED,
 
 import re
 import secrets
+import sys
 import threading
 import time
 
@@ -1512,6 +1513,16 @@ class FakeSocketMissing(RuntimeError):
     """LIVE_FAKE_SOCKET is on and the replay module cannot be imported."""
 
 
+# Write the universal snapshot at startup even under pytest. Off by default
+# there, and only there: `import api.main` builds an app, and that app's
+# startup copied the whole universal database -- 215 MB of the owner's real
+# file, since DRAFT_DB_PATH is whatever the developer has exported -- once
+# per test process, for a snapshot almost no test reads. The few that do are
+# the worker-pool ones, which hand a build to a worker only when a snapshot
+# exists; they set this.
+SNAPSHOT_IN_TESTS_ENV = "LIVE_SNAPSHOT_IN_TESTS"
+
+
 def _switch_on(name: str) -> bool:
     return (os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -2204,11 +2215,12 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
     # every connect, so a boot before the first refresh has landed (a fresh
     # volume) starts using workers the moment the refresh writes one.
     snapshot_path = leagues_mod.snapshot_path_for(db_path)
-    try:
-        leagues_mod.snapshot_universal(conn, db_path)
-    except Exception as exc:      # noqa: BLE001 -- provisioning falls back
-        # to the pandas copy without one; the API still comes up.
-        print(f"live: could not write the universal snapshot: {exc}")
+    if "pytest" not in sys.modules or _switch_on(SNAPSHOT_IN_TESTS_ENV):
+        try:
+            leagues_mod.snapshot_universal(conn, db_path)
+        except Exception as exc:      # noqa: BLE001 -- provisioning falls back
+            # to the pandas copy without one; the API still comes up.
+            print(f"live: could not write the universal snapshot: {exc}")
     # The session requests with no cookie resolve to. Created eagerly so
     # `(state, _recompute)` -- what this function returns, and what a dozen
     # tests unpack -- always names a real dict. See DEFAULT_SID.
