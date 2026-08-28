@@ -677,3 +677,46 @@ def test_a_worker_that_will_not_cancel_or_finish_refuses_the_connect(tmp_path, m
         assert a.get("/api/live/connect-progress").json()["phase"] == "failed"
     finally:
         _stop_all([a])
+
+
+def test_a_stop_does_not_wait_for_a_ranking_in_flight(tmp_path, monkeypatch):
+    """Mid-ranking the recompute worker is inside `survival`; a stop must
+    return well inside a second, and the room's league connection is
+    closed -- and its file claim released -- only once that ranking has
+    finished, never underneath it."""
+    app, seen, stops = _app(tmp_path, monkeypatch)
+    _seed_league_one_with_slot_seven(str(tmp_path / "live.duckdb"),
+                                     str(tmp_path / "leagues_root"))
+    entered, release = threading.Event(), threading.Event()
+    real_survival = live.survival
+
+    def slow_survival(*a, **k):
+        entered.set()
+        release.wait(timeout=20)
+        return real_survival(*a, **k)
+    monkeypatch.setattr("api.live.survival", slow_survival)
+    a = _client(app)
+    league_file = str(tmp_path / "leagues_root" / "1.duckdb")
+    try:
+        _connect(a, "1", team_id="2")
+        assert entered.wait(timeout=10), "the launch ranking never started"
+        registry = app.state.live_registry
+        sid = a.cookies.get(SID_COOKIE)
+        started = time.monotonic()
+        body = a.post("/api/live/stop").json()
+        assert time.monotonic() - started < 1.0
+        assert body["listener_stopped"] is True
+        assert a.get("/api/live/state").json()["active"] is False
+        # Still ranking: the file is still held for it.
+        assert registry.holders_of(league_file) == {sid}
+        release.set()
+        deadline = time.monotonic() + 10
+        while registry.holders_of(league_file):
+            assert time.monotonic() < deadline, "the closer never released the file"
+            time.sleep(0.05)
+        # A reconnect after that is an ordinary connect.
+        _connect(a, "1", team_id="2")
+        assert a.get("/api/live/state").json()["active"] is True
+    finally:
+        release.set()
+        _stop_all([a])

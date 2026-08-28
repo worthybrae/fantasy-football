@@ -1444,6 +1444,13 @@ RECOMPUTE_SLOTS = threading.Semaphore(max(2, os.cpu_count() or 2))
 # stop never sits behind the queue -- which is what would otherwise turn a
 # busy evening into a 503 on every reconnect (see _stop_listener's timeout).
 RECOMPUTE_WAIT_SECONDS = 20.0
+# How long a stop waits for the recompute worker before leaving it to
+# finish on its own (see _stop_listener). A worker that is not mid-numpy
+# is in a half-second timed wait on its condition or on a ranking slot and
+# notices its stop event within that; one that is mid-numpy takes what it
+# takes, and nothing waits for it. Half a second, so a stop under a
+# ranking answers well inside one.
+RECOMPUTE_JOIN_SECONDS = 0.5
 
 # The point past which every room's ranking gets fewer rollouts. Under it
 # the full SURVIVAL_ROLLOUTS; over it 150, which is still a usable survival
@@ -2340,11 +2347,24 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
         # using the connection" -- refuse the reconnect and leave the
         # connection open rather than corrupt it, exactly as for the listener
         # alone before the worker existed.
-        for t in (thread, recompute_thread):
-            if t is not None and t.is_alive():
-                t.join(timeout=timeout)
-                if t.is_alive():
-                    return False
+        # The socket pump is joined for the full timeout: it is the thing
+        # that must not still be writing `drafted` when a new listener
+        # starts. The recompute worker is NOT waited for beyond a moment.
+        # Mid-ranking it is inside `survival` -- a second of numpy that
+        # checks nothing -- and under load, queued behind RECOMPUTE_SLOTS
+        # for longer; a stop that waited for it took ten seconds and then
+        # answered False. Its result is discarded by the generation guard
+        # either way (the caller bumps it), and every write it might make
+        # is identity-guarded on a listener this function clears below. The
+        # one thing it may still hold is a cursor on league_conn, so that
+        # connection -- and the file claim -- are closed AFTER it exits,
+        # by a closer thread, never underneath it.
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=timeout)
+            if thread.is_alive():
+                return False
+        if recompute_thread is not None and recompute_thread.is_alive():
+            recompute_thread.join(timeout=min(timeout, RECOMPUTE_JOIN_SECONDS))
         with lock:
             state["listener"] = None
             state["listener_thread"] = None
@@ -2355,10 +2375,19 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
             state["league_conn"] = None
             old_path = state["league_path"]
             state["league_path"] = None
-        if old_league_conn is not None:
-            old_league_conn.close()
-        if old_path is not None:
-            registry.release_path(old_path, s.sid)
+
+        def close_conn():
+            if old_league_conn is not None:
+                old_league_conn.close()
+            if old_path is not None:
+                registry.release_path(old_path, s.sid)
+
+        if recompute_thread is not None and recompute_thread.is_alive():
+            threading.Thread(
+                target=lambda: (recompute_thread.join(), close_conn()),
+                name=f"live-closer-{s.sid[:8]}", daemon=True).start()
+        else:
+            close_conn()
         return True
 
     def _recompute(s, session, picks_made):
