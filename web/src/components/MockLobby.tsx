@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { fetchMockRooms, fetchRoomProgress, type MockRoom, type RoomProgress,
          type UpcomingDraft } from '../api'
-import { countdownTo, secondsUntil } from '../lib/countdown'
+import { Ago, Countdown, CountdownIn } from './Countdown'
 
 // ESPN's public mock-draft lobby, as rooms you can take a seat in.
 //
@@ -176,7 +176,7 @@ function optionsFor(rooms: MockRoom[], facet: Facet): string[] {
     : values.sort()
 }
 
-export default function MockLobby({ onOpen, seated, onEnter, joining, now, onCount }: {
+export default function MockLobby({ onOpen, seated, onEnter, joining, onCount }: {
   /** Opens the room's waiting room -- seats, countdown, who is in. Nothing is
    *  committed by looking: the seat is taken there, by clicking one. */
   onOpen: (leagueId: string) => void
@@ -191,8 +191,6 @@ export default function MockLobby({ onOpen, seated, onEnter, joining, now, onCou
   /** Which room a mint is in flight for, so its button says so and the
    *  others wait. Owned by the page: one join at a time across both rows. */
   joining: string | null
-  /** The page's own clock (Dashboard owns the single interval). */
-  now: number
   /** How many rooms this read found, for the top bar to state. Reported up
    *  rather than fetched twice: two reads of one endpoint are two numbers that
    *  can disagree on the same screen. */
@@ -327,7 +325,7 @@ export default function MockLobby({ onOpen, seated, onEnter, joining, now, onCou
           <span className="db-dot" aria-hidden="true" />
           {rooms === null
             ? 'reading seats…'
-            : `seats checked ${shortAgo(Math.max(0, (now - readAt) / 1000))}`}
+            : <>seats checked <Ago since={readAt} format={shortAgo} /></>}
           {' · ESPN opens a new room every few minutes · free'}
         </span>
       </div>
@@ -388,18 +386,21 @@ export default function MockLobby({ onOpen, seated, onEnter, joining, now, onCou
             {current === 0 && pinned.map((league) => {
               const room = byId.get(league.league_id)
               const at = progress[league.league_id]
-              const count = league.live ? null
-                : countdownTo(secondsUntil(league.draft_at, now))
               const open = room && room.league_size !== null
                 ? Math.max(0, room.league_size - room.teams_joined) : null
               return (
                 <li className={`db-card${league.live ? ' is-live' : ''}`} key={league.league_id}>
                   <div className="db-card-top">
-                    <span className={`mono db-card-when${league.live ? ' is-live' : ''}${count?.imminent ? ' is-soon' : ''}`}>
-                      {league.live
-                        ? (at?.round ? `R${at.round} · P${at.pick_in_round}` : 'Drafting')
-                        : count?.text ?? '—'}
-                    </span>
+                    {/* Drafting rooms print a pick, not a clock -- and a
+                        room with a clock draws its own, so this row is not
+                        rebuilt every second to move four characters. */}
+                    {league.live ? (
+                      <span className="mono db-card-when is-live">
+                        {at?.round ? `R${at.round} · P${at.pick_in_round}` : 'Drafting'}
+                      </span>
+                    ) : (
+                      <Countdown at={league.draft_at} className="mono db-card-when" />
+                    )}
                     {league.live ? (
                       <span className="ml-mark is-live">
                         <span className="db-dot" aria-hidden="true" />
@@ -467,17 +468,13 @@ export default function MockLobby({ onOpen, seated, onEnter, joining, now, onCou
               )
             })}
             {visible.map((room) => {
-              const aged = (now - readAt) / 1000
-              const count = countdownTo(room.starts_in_seconds === null ? null
-                : room.starts_in_seconds - aged)
               const open = room.league_size === null
                 ? null : Math.max(0, room.league_size - room.teams_joined)
               return (
                 <li className="db-card" key={room.league_id}>
                   <div className="db-card-top">
-                    <span className={`mono db-card-when${count?.imminent ? ' is-soon' : ''}`}>
-                      {count?.text ?? '—'}
-                    </span>
+                    <CountdownIn seconds={room.starts_in_seconds} since={readAt}
+                                 className="mono db-card-when" />
                   </div>
                   <p className="db-card-name">{shapeLabel(room) || 'Mock draft'}</p>
                   <div className="db-card-foot">

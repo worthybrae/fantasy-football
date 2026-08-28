@@ -1,15 +1,15 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
-import { afterEach, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import type { Player } from '../api'
 import Dashboard from './Dashboard'
+import { forgetBoard } from '../lib/board'
 
-// WHAT THIS FILE IS FOR. "Your guys" has three states and they are three
-// different panels -- no session, nothing picked yet, and a saved list -- and
-// the one that matters is the first: a dashboard on a server without the
-// favourites routes (or for a reader with no custody session) must show no
-// panel at all rather than an empty picker offering to save something the
-// server will refuse.
+// WHAT THIS FILE IS FOR. Two properties, and the first is the whole reason
+// this page was rebuilt: the dashboard must not fetch the board. It is 250
+// rows with a photograph each, it was fetched on every visit for a panel
+// almost nobody opened, and it is now the dialog's own business. The second is
+// that the three states of "Your guys" are three different cards.
 
 const { fetchFavorites, fetchPlayers, fetchLeagueReports, fetchMockRooms,
         fetchRoomProgress } = vi.hoisted(() => ({
@@ -42,13 +42,21 @@ function player(i: number): Player {
     proj_points: 100,
   }
 }
+const BOARD = Array.from({ length: 30 }, (_, i) => player(i + 1))
 
-function draw(board: 'ok' | 'fails' = 'ok') {
+beforeEach(() => {
+  // The board cache is module-level and outlives a test's mocks, which is the
+  // point of it in a browser and a trap in a file like this one.
+  forgetBoard()
   fetchLeagueReports.mockResolvedValue([])
   fetchMockRooms.mockResolvedValue({ rooms: [], next: null })
   fetchRoomProgress.mockResolvedValue([])
-  if (board === 'fails') fetchPlayers.mockRejectedValue(new Error('players 503'))
-  else fetchPlayers.mockResolvedValue([player(1), player(2), player(3)])
+  fetchPlayers.mockResolvedValue(BOARD)
+})
+
+afterEach(cleanup)
+
+function draw() {
   return render(
     <MemoryRouter>
       <Dashboard leagues={[]} onJoin={() => {}} onOpenRoom={() => {}} />
@@ -56,9 +64,7 @@ function draw(board: 'ok' | 'fails' = 'ok') {
   )
 }
 
-afterEach(cleanup)
-
-test('no session for favourites means no panel at all', async () => {
+test('no session for favourites means no card at all', async () => {
   fetchFavorites.mockResolvedValue(null)
   draw()
   await waitFor(() => expect(fetchFavorites).toHaveBeenCalled())
@@ -66,25 +72,33 @@ test('no session for favourites means no panel at all', async () => {
   expect(fetchPlayers).not.toHaveBeenCalled()
 })
 
-test('nothing picked yet opens the picker', async () => {
+test('nothing picked yet is an invitation, and it costs no board', async () => {
   fetchFavorites.mockResolvedValue([])
   draw()
-  expect(await screen.findByText('Pick your guys')).toBeTruthy()
-  expect(screen.getByText('0 / 5-25')).toBeTruthy()
+  expect(await screen.findByRole('button', { name: 'Pick your guys' })).toBeTruthy()
+  expect(screen.getByText('Your guys')).toBeTruthy()
+  // THE POINT OF THE WHOLE TASK: nothing has asked for /api/players.
+  expect(fetchPlayers).not.toHaveBeenCalled()
 })
 
-test('a board that will not load says so, rather than loading forever', async () => {
-  fetchFavorites.mockResolvedValue([])
-  draw('fails')
-  expect(await screen.findByRole('alert')).toBeTruthy()
-  expect(screen.getByRole('alert').textContent).toContain('players 503')
-  expect(screen.queryByText('Loading the board…')).toBeNull()
-})
-
-test('a saved list is a card, not the picker', async () => {
-  fetchFavorites.mockResolvedValue(['p2', 'p1'])
+test('a saved list is a count and a way back in, still with no board', async () => {
+  fetchFavorites.mockResolvedValue(BOARD.slice(0, 7).map((p) => p.player_id))
   draw()
-  expect(await screen.findByText('Player 2')).toBeTruthy()
-  expect(screen.queryByText('Pick your guys')).toBeNull()
-  expect(screen.getByRole('button', { name: 'Edit' })).toBeTruthy()
+  expect(await screen.findByRole('button', { name: 'Edit' })).toBeTruthy()
+  expect(screen.getByText('7')).toBeTruthy()
+  expect(fetchPlayers).not.toHaveBeenCalled()
+})
+
+test('the board is fetched when the picker is opened, and not before', async () => {
+  fetchFavorites.mockResolvedValue([])
+  draw()
+  const open = await screen.findByRole('button', { name: 'Pick your guys' })
+  expect(fetchPlayers).not.toHaveBeenCalled()
+
+  fireEvent.click(open)
+  // Lazily loaded, so the dialog arrives a tick later.
+  const dialog = await screen.findByRole('dialog')
+  expect(dialog.getAttribute('aria-modal')).toBe('true')
+  await waitFor(() => expect(fetchPlayers).toHaveBeenCalledTimes(1))
+  expect(await screen.findByText('Player 1')).toBeTruthy()
 })

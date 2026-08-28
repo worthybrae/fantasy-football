@@ -1420,64 +1420,113 @@
               var(--bg-1) 55%);
 }
 
-/* -- your guys (FavoritesPicker.tsx, and the card it becomes) -------------
-   A dashboard-sized job: twenty-five names, picked once, nowhere near a pick
-   clock. The picker is the widest thing on this page on purpose -- it is a
-   browsing task, and a two-column list of 250 players in a card-width column
-   would be a scroll nobody finishes. */
+/* -- your guys: the dashboard card, and the dialog it opens ---------------
+   The card holds a sentence and a button, nothing else -- the list of names
+   lives in the dialog, because names would mean fetching the whole board on
+   every visit to this page (see YourGuys.tsx). The picker inside the dialog
+   is the same component it always was; everything from `.fav-modal` down is
+   the room it now sits in. */
 
 .db-fav-card {
-  gap: var(--space-3);
-}
-
-.db-fav-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
-  gap: 5px var(--space-3);
-}
-
-.db-fav-row {
-  display: flex;
+  /* A row, not the column `.db-card` gives everything else here: it is one
+     sentence and one control, and stacking them wasted a card's height on a
+     paragraph nobody reads twice. */
+  flex-direction: row;
   align-items: center;
-  gap: 7px;
-  min-width: 0;
-  font-size: var(--text-sm);
-}
-
-.db-fav-ord {
-  width: 16px;
-  flex-shrink: 0;
-  text-align: right;
-  font-size: var(--text-xs);
-  color: var(--text-3);
-}
-
-.db-fav-name {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-1);
-}
-
-.db-fav-foot {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
+  gap: var(--space-4);
 }
 
 .db-fav-note {
   margin: 0;
+  min-width: 0;
   font-size: var(--text-sm);
+  line-height: 1.5;
   color: var(--text-3);
 }
 
-.db-fav-foot > .db-go {
+.db-fav-card > .db-go {
   margin-left: auto;
   flex-shrink: 0;
+}
+
+/* THE DIALOG. Fixed, over everything, with the page held still behind it
+   (FavoritesModal locks the body's scroll while it is open). The backdrop is
+   a real element rather than a `::before` so a click on it can close the
+   thing -- and so the lazy chunk's fallback can paint the same dim without
+   the panel. */
+.fav-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+  background: rgba(0, 0, 0, 0.62);
+}
+
+.fav-modal {
+  position: relative;
+  width: min(980px, 100%);
+  /* Tall enough to show a working list, never taller than the window: the
+     board inside has its own scroll (`.fav-grid`), so this cap decides how
+     much of it is on screen rather than whether it fits. */
+  max-height: min(86vh, 820px);
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-1);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6);
+}
+
+.fav-modal:focus-visible {
+  outline: none;
+}
+
+/* The picker arrives wearing its own card. Inside the dialog it IS the card,
+   so the border and the fill come off and only its padding stays. */
+.fav-modal .fav {
+  border: 0;
+  border-radius: 0;
+  background: none;
+}
+
+/* Room for the close button, which sits over the picker's own header row. */
+.fav-modal .fav-head {
+  padding-right: 34px;
+}
+
+.fav-modal-close {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  z-index: 1;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: none;
+  font-size: 18px;
+  line-height: 1;
+  color: var(--text-3);
+  cursor: pointer;
+}
+
+.fav-modal-close:hover {
+  border-color: var(--border);
+  color: var(--text-1);
+}
+
+.fav-modal-loading {
+  margin: 0;
+  padding: var(--space-4);
+  font-size: var(--text-md);
+  color: var(--text-3);
+}
+
+.fav-modal .fav-error {
+  padding: var(--space-4);
 }
 
 .fav {
@@ -1756,17 +1805,6 @@
   background: color-mix(in srgb, var(--fail) 10%, var(--bg-1));
   font-size: var(--text-sm);
   color: var(--text-1);
-}
-
-/* The same strip, but inside a section rather than across the top of the
-   page: it is about the favourites panel and nothing else, so it is boxed
-   and padded like a card instead of ruled like a page-wide banner. AFTER
-   `.db-error` on purpose -- both are single-class selectors, so source
-   order is what decides the padding and the bottom border. */
-.db-fav-error {
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--fail);
-  border-radius: var(--radius);
 }
 
 @media (prefers-reduced-motion: reduce) {
