@@ -1245,6 +1245,22 @@ export interface ConnectProgress {
   elapsed_ms: number
 }
 
+// The room cookie, BEFORE a connect. A live session is keyed by an httpOnly
+// cookie the server mints (`espn_live`, see api/live.py). The connect POST
+// and the progress poll are two requests, and the poll starts before the
+// POST reaches the server -- so if the POST were what minted the cookie,
+// the poll's first reads would carry none and land in no room. Awaiting
+// this first puts the same cookie on both. Idempotent: a browser that
+// already has one gets it renewed and `sid_set: false`.
+export async function ensureLiveSession(): Promise<boolean> {
+  const res = await fetch('/api/live/session', { method: 'POST' })
+  if (!res.ok) {
+    throw new Error(`Failed to open a live session (${res.status})`)
+  }
+  const body = await res.json()
+  return Boolean(body.sid_set)
+}
+
 export async function fetchConnectProgress(): Promise<ConnectProgress> {
   const res = await fetch('/api/live/connect-progress')
   if (!res.ok) {

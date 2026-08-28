@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { PaymentRequired } from '../api'
 import Paywall from '../components/Paywall'
-import { connectEspnAccount, connectWithToken, fetchConnectProgress, fetchLiveState,
+import { connectEspnAccount, connectWithToken, ensureLiveSession, fetchConnectProgress, fetchLiveState,
          fetchUpcomingDrafts,
          type ConnectProgress, type LiveState, type TokenConnectParams,
          type UpcomingDrafts } from '../api'
@@ -273,7 +273,12 @@ export default function Landing() {
     }
     if (params) {
       paramsRef.current = params
-      setGate('connecting')
+      // The room cookie first, then the gate. Opening the gate starts BOTH
+      // the connect POST and the progress poll (the two effects below), and
+      // they have to carry the same cookie -- see ensureLiveSession. A
+      // failure here is not fatal: the connect POST mints a cookie of its
+      // own, and only the first poll or two would miss the room.
+      ensureLiveSession().catch(() => {}).then(() => setGate('connecting'))
     }
   }, [])
 

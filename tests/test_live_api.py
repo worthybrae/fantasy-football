@@ -36,7 +36,8 @@ def _connects_land_in_the_default_session(monkeypatch):
     unpacked dict pointing at the same room. tests/test_live_sessions.py is
     where real, distinct sids are exercised.
     """
-    from api.live import DEFAULT_SID
+    from api.live import DEFAULT_ROOM_ENV, DEFAULT_SID
+    monkeypatch.setenv(DEFAULT_ROOM_ENV, "1")
     monkeypatch.setattr("api.live._mint_sid", lambda: DEFAULT_SID)
 
 

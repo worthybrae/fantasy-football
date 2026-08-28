@@ -1,27 +1,36 @@
 """Many live sessions in one process, keyed by the `espn_live` cookie.
 
-tests/test_live_api.py pins every connect to the default session so its
-`state` dict keeps meaning what it always meant. This file is the other
-half: real, distinct sids, and the isolation between them.
+tests/test_live_api.py switches the default room on and pins every connect
+to it so its `state` dict keeps meaning what it always meant. This file is
+the other half: the default room OFF (production's setting), real and
+distinct sids, and the isolation between them.
+
+Clients speak https: the room cookie is `Secure` under the same rule the
+custody cookie follows, and a client on plain http would drop it.
 """
+import threading
+import time
 import types
 
 import pytest
 from fastapi.testclient import TestClient
 
 from api import live
-from api.live import DEFAULT_SID, SID_COOKIE, SID_MAX_AGE
-from api.main import create_app
+from api.live import DEFAULT_ROOM_ENV, DEFAULT_SID, SID_COOKIE, SID_MAX_AGE
 
 try:
     from tests.test_live_api import _seed_minimal_live_db
 except ImportError:                       # tests/ is not a package
     from test_live_api import _seed_minimal_live_db
 
+HTTPS = "https://testserver"
+
 
 @pytest.fixture(autouse=True)
 def _hermetic(tmp_path, monkeypatch):
-    """No network, no real league files, no ESPN lobby lookups."""
+    """No network, no real league files, no ESPN lobby lookups, and no
+    default room -- exactly what a deployment runs with."""
+    monkeypatch.delenv(DEFAULT_ROOM_ENV, raising=False)
     monkeypatch.setattr("pipeline.leagues.LEAGUES_ROOT",
                         str(tmp_path / "leagues_root"))
     monkeypatch.setattr("api.live.fetch_team_slots", lambda *a, **k: {})
@@ -59,11 +68,19 @@ def _connect(client, league_id, team_id="2"):
 
 
 def _app(tmp_path, monkeypatch):
+    # Imported here, not at the top: api.main loads `.env` at import unless
+    # a test is already running, and a collection-time import would switch
+    # billing on (the owner's Stripe key) for every test after this file.
+    from api.main import create_app
     path = str(tmp_path / "live.duckdb")
     _seed_minimal_live_db(path)
     seen, stops = [], []
     monkeypatch.setattr("api.live.run_socket_listener", _fake_socket(seen, stops))
     return create_app(path), seen, stops
+
+
+def _client(app):
+    return TestClient(app, base_url=HTTPS)
 
 
 def _stop_all(clients):
@@ -77,7 +94,7 @@ def _stop_all(clients):
 def test_two_cookies_are_two_rooms_and_stopping_one_leaves_the_other(
         tmp_path, monkeypatch):
     app, seen, stops = _app(tmp_path, monkeypatch)
-    a, b = TestClient(app), TestClient(app)
+    a, b = _client(app), _client(app)
     try:
         _connect(a, "1")
         _connect(b, "2")
@@ -103,12 +120,14 @@ def test_two_cookies_are_two_rooms_and_stopping_one_leaves_the_other(
 def test_a_second_connect_on_the_same_cookie_supersedes_only_itself(
         tmp_path, monkeypatch):
     app, seen, stops = _app(tmp_path, monkeypatch)
-    a = TestClient(app)
+    a = _client(app)
     try:
         _connect(a, "1")
         sid = a.cookies.get(SID_COOKIE)
-        _connect(a, "2")
+        resp = _connect(a, "2")
         assert a.cookies.get(SID_COOKIE) == sid, "a reconnect keeps its room"
+        # ...and renews it for the full twelve hours.
+        assert f"Max-Age={SID_MAX_AGE}" in resp.headers["set-cookie"]
         assert stops[0].is_set(), "the first listener was stopped first"
         assert app.state.live_registry.active_count() == 1
         assert a.get("/api/live/state").json()["league_id"] == "2"
@@ -116,9 +135,11 @@ def test_a_second_connect_on_the_same_cookie_supersedes_only_itself(
         _stop_all([a])
 
 
-def test_no_cookie_sees_no_session_even_while_another_runs(tmp_path, monkeypatch):
+def test_no_cookie_is_no_session_even_while_another_runs(tmp_path, monkeypatch):
+    """With the default room off, a cookieless or unknown-cookie request has
+    no session: nothing to read, nothing to stop, and nothing it can delete."""
     app, seen, stops = _app(tmp_path, monkeypatch)
-    a, stranger = TestClient(app), TestClient(app)
+    a, stranger = _client(app), _client(app)
     try:
         _connect(a, "1")
         assert stranger.cookies.get(SID_COOKIE) is None
@@ -126,27 +147,49 @@ def test_no_cookie_sees_no_session_even_while_another_runs(tmp_path, monkeypatch
         assert body["active"] is False
         assert body["token_received"] is False
         assert stranger.get("/api/live/connect-progress").json()["phase"] == "idle"
-        assert stranger.get("/api/live/board").json() == {"active": False}
-        resp = stranger.post("/api/live/select", json={"player_id": "p1"})
-        assert resp.status_code == 409
-        # A cookie for a room this process never held is the same stranger.
-        ghost = TestClient(app, cookies={SID_COOKIE: "never-minted"})
-        assert ghost.get("/api/live/state").json()["active"] is False
-        assert ghost.get("/api/live/board").status_code == 404
-        assert ghost.post("/api/live/select", json={"player_id": "p1"}).status_code == 409
-        assert ghost.post("/api/live/stop").status_code == 409
+        assert stranger.get("/api/live/board").status_code == 404
+        assert stranger.post("/api/live/select", json={"player_id": "p1"}).status_code == 409
+        assert stranger.post("/api/live/autodraft", json={"on": True}).status_code == 409
+        assert stranger.post("/api/live/stop").status_code == 409
+        assert stranger.post("/api/live/start?my_slot=1").status_code == 409
+        # a's room is untouched by all of that.
+        assert a.get("/api/live/state").json()["active"] is True
+
+        for bad in ("never-minted", DEFAULT_SID, "../../etc", "x" * 200, "a b"):
+            ghost = TestClient(app, base_url=HTTPS, cookies={SID_COOKIE: bad})
+            assert ghost.get("/api/live/state").json()["active"] is False, bad
+            assert ghost.get("/api/live/board").status_code == 404, bad
+            assert ghost.post("/api/live/stop").status_code == 409, bad
     finally:
         _stop_all([a])
 
 
+def test_the_default_room_only_exists_when_switched_on(tmp_path, monkeypatch):
+    """Cookieless requests reach DEFAULT_SID only under LIVE_DEFAULT_ROOM,
+    and a cookieless connect then adopts that room rather than minting."""
+    app, seen, stops = _app(tmp_path, monkeypatch)
+    plain = _client(app)
+    try:
+        assert live.sid_for(types.SimpleNamespace(cookies={})) is None
+        monkeypatch.setenv(DEFAULT_ROOM_ENV, "1")
+        assert live.sid_for(types.SimpleNamespace(cookies={})) == DEFAULT_SID
+        assert plain.get("/api/live/board").json() == {"active": False}
+        resp = _connect(plain, "1")
+        assert f"{SID_COOKIE}={DEFAULT_SID}" in resp.headers["set-cookie"]
+        assert app.state.live_registry.get(DEFAULT_SID).state["session"] is not None
+    finally:
+        _stop_all([plain])
+
+
 def test_connect_token_hands_the_browser_its_room_cookie(tmp_path, monkeypatch):
     app, seen, stops = _app(tmp_path, monkeypatch)
-    a = TestClient(app)
+    a = _client(app)
     try:
         resp = _connect(a, "1")
         header = resp.headers["set-cookie"]
         assert f"{SID_COOKIE}=" in header
         assert "HttpOnly" in header
+        assert "Secure" in header
         assert f"Max-Age={SID_MAX_AGE}" in header and SID_MAX_AGE == 43200
         assert "SameSite=lax" in header
         assert a.cookies.get(SID_COOKIE) != DEFAULT_SID
@@ -154,9 +197,101 @@ def test_connect_token_hands_the_browser_its_room_cookie(tmp_path, monkeypatch):
         _stop_all([a])
 
 
+def test_the_session_endpoint_mints_once_and_renews_after(tmp_path, monkeypatch):
+    app, seen, stops = _app(tmp_path, monkeypatch)
+    a = _client(app)
+    first = a.post("/api/live/session")
+    assert first.json() == {"sid_set": True}
+    sid = a.cookies.get(SID_COOKIE)
+    assert sid and sid != DEFAULT_SID
+    assert f"Max-Age={SID_MAX_AGE}" in first.headers["set-cookie"]
+    second = a.post("/api/live/session")
+    assert second.json() == {"sid_set": False}
+    assert a.cookies.get(SID_COOKIE) == sid
+    assert f"Max-Age={SID_MAX_AGE}" in second.headers["set-cookie"]
+    # No room was created for an idle cookie.
+    assert app.state.live_registry.get(sid) is None
+    assert a.get("/api/live/state").json()["active"] is False
+
+
+def test_progress_polled_during_a_connect_belongs_to_the_polling_client(
+        tmp_path, monkeypatch):
+    """The page asks for its cookie, then starts the connect POST and the
+    progress poll together. The poll must read its own connect's stages
+    from the first read, while the POST is still blocked -- and never
+    another client's -- with real minted sids."""
+    app, seen, stops = _app(tmp_path, monkeypatch)
+    a, other = _client(app), _client(app)
+    try:
+        _connect(other, "2")             # somebody else's finished record
+        assert a.post("/api/live/session").json() == {"sid_set": True}
+
+        # Hold the connect inside build_session so the poll runs mid-connect.
+        real_build = live.build_session
+        entered, release = threading.Event(), threading.Event()
+
+        def slow_build(*args, **kwargs):
+            entered.set()
+            release.wait(timeout=10)
+            return real_build(*args, **kwargs)
+        monkeypatch.setattr("api.live.build_session", slow_build)
+
+        result = {}
+
+        def connect():
+            result["resp"] = a.post("/api/live/connect-token", json={
+                "leagueId": "1", "teamId": "2", "swid": "{X}",
+                "token": "tok-1", "season": "2026"})
+        t = threading.Thread(target=connect)
+        t.start()
+        assert entered.wait(timeout=10)
+        mid = a.get("/api/live/connect-progress").json()
+        assert mid["phase"] == "connecting"
+        assert mid["facts"]["league_id"] == "1"
+        # Mid-build: the stages before the board are done, the rest wait.
+        status = {st["key"]: st["status"] for st in mid["stages"]}
+        assert status["token"] == "ok"
+        assert "pending" in status.values()
+        release.set()
+        t.join(timeout=30)
+        assert result["resp"].status_code == 200, result["resp"].text
+        done = a.get("/api/live/connect-progress").json()
+        assert done["facts"]["league_id"] == "1"
+        assert other.get("/api/live/connect-progress").json()["facts"]["league_id"] == "2"
+    finally:
+        release.set() if "release" in dir() else None
+        _stop_all([a, other])
+
+
+def test_a_new_cookie_taking_the_same_seat_evicts_the_old_room(tmp_path, monkeypatch):
+    """A browser whose cookie expired mid-draft comes back under a new sid
+    for the same (league, team). One seat, one socket: the old room is
+    stopped, its record deleted, and it is gone from the registry."""
+    app, seen, stops = _app(tmp_path, monkeypatch)
+    a, b = _client(app), _client(app)
+    try:
+        _connect(a, "1", team_id="2")
+        old_sid = a.cookies.get(SID_COOKIE)
+        assert app.state.live_registry.active_count() == 1
+        _connect(b, "1", team_id="2")
+        assert stops[0].is_set(), "the old seat's listener was stopped"
+        assert app.state.live_registry.active_count() == 1
+        assert app.state.live_registry.get(old_sid) is None
+        assert a.get("/api/live/state").json()["active"] is False
+        assert b.get("/api/live/state").json()["active"] is True
+        # A different seat in the same league is a leaguemate, not a
+        # duplicate: it stays.
+        c = _client(app)
+        _connect(c, "1", team_id="3")
+        assert app.state.live_registry.active_count() == 2
+        _stop_all([c])
+    finally:
+        _stop_all([a, b])
+
+
 def test_live_settings_follow_the_cookie(tmp_path, monkeypatch):
     app, seen, stops = _app(tmp_path, monkeypatch)
-    a = TestClient(app)
+    a = _client(app)
     try:
         _connect(a, "1")
         sid = a.cookies.get(SID_COOKIE)
@@ -169,5 +304,19 @@ def test_live_settings_follow_the_cookie(tmp_path, monkeypatch):
         # The accessor api/main.py holds answers the same two questions.
         assert app.state.live_settings(mine) is settings
         assert app.state.live_settings(stranger) is None
+    finally:
+        _stop_all([a])
+
+
+def test_sid_activity_is_stamped_by_routes_and_frames(tmp_path, monkeypatch):
+    app, seen, stops = _app(tmp_path, monkeypatch)
+    a = _client(app)
+    try:
+        _connect(a, "1")
+        room = app.state.live_registry.get(a.cookies.get(SID_COOKIE))
+        before = room.last_activity
+        time.sleep(0.01)
+        a.get("/api/live/state")
+        assert room.last_activity > before
     finally:
         _stop_all([a])

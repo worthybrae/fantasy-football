@@ -424,3 +424,51 @@ def test_build_crosswalk_maps_dst_by_team():
     assert x[3117251] == "mccaffrey"                       # ordinary espn_id path
     assert x[_dst_espn_id(33)] == "adp_baltimore_defense"  # -16033, Ravens
     assert x[-16025] == "adp_sf_defense"                   # 49ers, proTeamId 25
+
+
+def _live(*pairs):
+    return LivePicks(pd.DataFrame([{"player_id": p, "pick_no": n} for p, n in pairs],
+                                  columns=COLUMNS), [])
+
+
+def test_two_writers_on_one_file_serialise_instead_of_colliding(tmp_path):
+    """Two leaguemates' listeners write the same league file's `drafted`
+    (api/live.py keeps one room per browser). Unserialised, the second
+    DELETE+INSERT lands inside the first's transaction and dies on the
+    primary key; serialised per file, both land and the table ends up as
+    the longer list."""
+    import threading
+    path = str(tmp_path / "league.duckdb")
+    conn = get_conn(path)
+    a, b = conn.cursor(), conn.cursor()
+    start = threading.Barrier(2)
+    errors = []
+
+    def writer(cur, live):
+        start.wait()
+        for _ in range(25):
+            try:
+                apply_picks(cur, live)
+            except Exception as exc:      # noqa: BLE001 -- what the test is for
+                errors.append(exc)
+
+    ta = threading.Thread(target=writer, args=(a, _live(("p1", 1), ("p2", 2))))
+    tb = threading.Thread(target=writer, args=(b, _live(("p1", 1), ("p2", 2), ("p3", 3))))
+    ta.start(); tb.start(); ta.join(); tb.join()
+    assert errors == []
+    rows = conn.execute("SELECT player_id, pick_no FROM drafted ORDER BY pick_no").fetchall()
+    assert rows == [("p1", 1), ("p2", 2), ("p3", 3)]
+
+
+def test_a_shorter_write_never_rolls_the_table_backwards(tmp_path):
+    """A listener a frame behind the other must not shrink the shared table:
+    the longer set stays, and the skipped write reports zero rows."""
+    conn = get_conn(str(tmp_path / "league.duckdb"))
+    assert apply_picks(conn, _live(("p1", 1), ("p2", 2), ("p3", 3))) == 3
+    assert apply_picks(conn, _live(("p1", 1), ("p2", 2))) == 0
+    rows = conn.execute("SELECT player_id FROM drafted ORDER BY pick_no").fetchall()
+    assert [r[0] for r in rows] == ["p1", "p2", "p3"]
+    # Same length is a replacement, not a shrink: ESPN still wins on content.
+    assert apply_picks(conn, _live(("p1", 1), ("p2", 2), ("p9", 3))) == 3
+    rows = conn.execute("SELECT player_id FROM drafted ORDER BY pick_no").fetchall()
+    assert [r[0] for r in rows] == ["p1", "p2", "p9"]

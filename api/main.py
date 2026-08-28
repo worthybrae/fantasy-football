@@ -215,6 +215,10 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
         only ever replaced by dataclasses.replace on unrelated fields), so
         every request during one draft produces the identical key.
         """
+        # No request means an anonymous, shared answer (the landing
+        # endpoints): the stored league, never anybody's live room.
+        if request is None:
+            return league.load(cur)
         live = app.state.live_settings(request)
         return live if live is not None else league.load(cur)
 
@@ -376,7 +380,7 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
             cur.close()
 
     @app.get("/api/landing/preview")
-    def landing_preview(request: Request, response: Response, limit: int = 12):
+    def landing_preview(response: Response, limit: int = 12):
         """The top of the board, for the landing page's preview panel.
 
         `limit` is clamped, not validated: this feeds a panel whose job is to
@@ -395,8 +399,11 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
             # has to come from the same place /api/players gets it, or a
             # connected draft would put two boards in the cache and pay the
             # 1.6-1.9s build twice to show the same twelve rows.
+            # Anonymous by design: this answer is shared by everybody
+            # (http_cache.public above), so it must not vary with the
+            # caller's own live room. The stored league prices it.
             board = cached_build_board(cur, DEFAULT_WEIGHTS,
-                                       _league_settings(cur, request))
+                                       _league_settings(cur, None))
             n = max(1, min(int(limit), 50))
             top = board.sort_values("rank").head(n)[list(PREVIEW_COLUMNS)]
             top = top.astype(object).where(top.notna(), None)

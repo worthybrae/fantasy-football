@@ -4,6 +4,7 @@ Pure translation: no network and no database beyond reading the crosswalk.
 The poller in `api/live.py` supplies the payload and writes the result, which
 keeps the part with all the edge cases testable against a recorded fixture.
 """
+import threading
 from typing import NamedTuple
 
 import pandas as pd
@@ -130,17 +131,57 @@ def apply_picks(conn, live: LivePicks) -> int:
         raise ValueError(
             "refusing to write a null pick_no: draft_sim._drafted_state "
             "cannot attribute such a pick to a team and would raise")
-    try:
-        conn.execute("BEGIN TRANSACTION")
-        conn.execute("DELETE FROM drafted")
-        for row in live.rows.itertuples(index=False):
-            conn.execute("INSERT INTO drafted VALUES (?, ?)",
-                         [str(row.player_id), int(row.pick_no)])
-        conn.execute("COMMIT")
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
+    # ONE WRITER PER FILE AT A TIME, AND THE TABLE NEVER SHRINKS. Two
+    # leaguemates drafting in the same league from two browsers are two
+    # listeners on two sockets writing the same `drafted` table in the same
+    # league file (see api/live.py's per-session rooms). Unserialised, the
+    # second DELETE+INSERT lands inside the first's transaction and fails on
+    # the primary key, and that room's listener dies with it. The lock is
+    # per database path -- rooms in different leagues never wait on each
+    # other -- and while it is held a write that would leave FEWER picks
+    # than the table already holds is skipped: the two sockets hear the same
+    # draft, so a shorter list is a listener that is a frame or two behind,
+    # and a lagging writer must not roll the shared table backwards. An
+    # EMPTY list is the one exception: nothing lags to zero -- on_change only
+    # fires when the count moved, and a listener's first fold after a JOIN
+    # replay already carries the picks -- so an empty list is ESPN saying
+    # the draft has no picks (a reset), and the table is cleared as before.
+    # The cost, stated: a reset to fewer-but-not-zero picks is no longer
+    # reflected by a wholesale replace; a stop and reconnect is the way
+    # back, and that is rare enough to accept for the isolation.
+    with _write_lock(conn):
+        existing = conn.execute("SELECT count(*) FROM drafted").fetchone()[0]
+        if not live.rows.empty and len(live.rows) < existing:
+            return 0
+        try:
+            conn.execute("BEGIN TRANSACTION")
+            conn.execute("DELETE FROM drafted")
+            for row in live.rows.itertuples(index=False):
+                conn.execute("INSERT INTO drafted VALUES (?, ?)",
+                             [str(row.player_id), int(row.pick_no)])
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
     return len(live.rows)
+
+
+# The per-file write locks behind apply_picks, created on first use. Keyed by
+# what DuckDB reports as the connection's attached files -- a cursor of a
+# connection reports the same files as the connection itself, so every
+# writer on one league file resolves to one lock however it got its handle.
+_WRITE_LOCKS: dict = {}
+_WRITE_LOCKS_GUARD = threading.Lock()
+
+
+def _write_lock(conn) -> threading.Lock:
+    key = tuple(sorted(str(r[2]) for r in
+                       conn.execute("PRAGMA database_list").fetchall()))
+    with _WRITE_LOCKS_GUARD:
+        lock = _WRITE_LOCKS.get(key)
+        if lock is None:
+            lock = _WRITE_LOCKS[key] = threading.Lock()
+        return lock
 
 
 SOCKET_HOST = "wss://fantasydraft.espn.com"

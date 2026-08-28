@@ -1691,7 +1691,13 @@ def _initial_state() -> dict:
             # about. The socket refusing an expired token is NOT this: that
             # happens after the listener is registered, and is reported
             # through listener_error, exactly as it always was.
-            "restore_error": None}
+            "restore_error": None,
+            # (league_id, team_id) of the ESPN seat this room's socket holds,
+            # as strings, set by the connect paths and the restore before the
+            # listener starts. What a new connect scans the registry for, so
+            # one seat never has two sockets: a browser whose cookie expired
+            # mid-draft comes back under a new sid, and the old room must go.
+            "seat": None}
 
 
 class LiveSession:
@@ -1760,10 +1766,44 @@ class LiveRegistry:
         return n
 
 
-def sid_for(request) -> str:
-    """Which session a request is about: its cookie, or the default."""
+# Whether a request with no room cookie may use the default room. Off, a
+# cookieless request has no session at all: state answers inactive, the
+# board 404s, select/stop 409. On -- the tests, and a single-user machine
+# that wants the pre-cookie behaviour -- it resolves to DEFAULT_SID and a
+# cookieless connect adopts that room. Production never sets it. Same
+# "1/true/yes/on" reading api/jobs.py gives its switches.
+DEFAULT_ROOM_ENV = "LIVE_DEFAULT_ROOM"
+
+# What a session id may look like -- the same shape api/live_records.py
+# refuses to turn into a filename. A cookie that fails it is treated as no
+# cookie at all, never as an error: a browser can present anything here.
+_SID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+
+
+def _default_room_allowed() -> bool:
+    return (os.environ.get(DEFAULT_ROOM_ENV) or "").strip().lower() in {
+        "1", "true", "yes", "on"}
+
+
+def _cookie_sid(request) -> "str | None":
+    """The request's room cookie, or None for a missing or malformed one."""
     value = request.cookies.get(SID_COOKIE) if request is not None else None
-    return value or DEFAULT_SID
+    if not value or not _SID_PATTERN.match(value) or value in (".", ".."):
+        return None
+    # The default room's own id is not a cookie anybody is handed unless the
+    # room is switched on; presented by hand with it off, it is a stranger.
+    if value == DEFAULT_SID and not _default_room_allowed():
+        return None
+    return value
+
+
+def sid_for(request) -> "str | None":
+    """Which session a request is about: its cookie, else the default room
+    when that is switched on (DEFAULT_ROOM_ENV), else None -- no session."""
+    sid = _cookie_sid(request)
+    if sid is not None:
+        return sid
+    return DEFAULT_SID if _default_room_allowed() else None
 
 
 def _mint_sid() -> str:
@@ -1771,23 +1811,18 @@ def _mint_sid() -> str:
     return secrets.token_urlsafe(24)
 
 
-def _set_sid_cookie(response, sid: str, request=None) -> None:
-    """Hand the browser its room.
+def _set_sid_cookie(response, sid: str) -> None:
+    """Hand the browser its room, or renew it.
 
-    `secure` follows the wire the request actually arrived on -- TLS, or a
-    proxy that says it ended TLS -- rather than the custody cookie's
-    stricter rule. A browser drops a Secure cookie set over plain HTTP, and
-    the owner's own `make up` at http://localhost is a plain-HTTP room that
-    must keep finding itself on the next poll. Over HTTPS it is Secure, as
-    the custody cookie is.
+    Exactly the custody cookie's transport rule (api/custody.set_session_cookie):
+    `secure` unless plaintext HTTP has been explicitly allowed for local
+    development, so the two cookies live or die together -- a machine that
+    can hold an account session over http://localhost can hold a room too,
+    and one that cannot drops both rather than one.
     """
-    secure = False
-    if request is not None:
-        forwarded = request.headers.get("x-forwarded-proto", "")
-        secure = (request.url.scheme == "https"
-                  or forwarded.split(",")[0].strip().lower() == "https")
     response.set_cookie(SID_COOKIE, sid, max_age=SID_MAX_AGE, httponly=True,
-                        secure=secure, samesite="lax", path="/")
+                        secure=not custody.is_secure_transport("http"),
+                        samesite="lax", path="/")
 
 
 def live_settings(request):
@@ -1875,23 +1910,84 @@ def register_live_routes(app, conn, db_path):
 
     def _session_for(request) -> "LiveSession | None":
         """The request's own room, or None. Stamps liveness on the way."""
-        s = registry.get(sid_for(request))
+        sid = sid_for(request)
+        s = registry.get(sid) if sid is not None else None
         if s is not None:
             s.touch()
         return s
 
+    def _room_sid(request, response) -> str:
+        """The sid a request that is about to START something lands in.
+
+        The cookie's when it carries a usable one -- renewed for the full
+        twelve hours, so a long evening does not expire a room mid-draft;
+        the default room when that is switched on; a freshly minted one
+        otherwise. The cookie rides back on `response` in every case.
+        """
+        sid = _cookie_sid(request)
+        if sid is None:
+            sid = DEFAULT_SID if _default_room_allowed() else _mint_sid()
+        _set_sid_cookie(response, sid)
+        return sid
+
     def _session_for_connect(request, response) -> LiveSession:
-        """The room a connect lands in: the cookie's, or a freshly minted
-        one whose cookie rides back on `response`. A request that already
-        carries a cookie reuses that sid, so a second click supersedes only
-        the clicker's own draft and never anybody else's."""
-        sid = request.cookies.get(SID_COOKIE)
-        if not sid:
-            sid = _mint_sid()
-            _set_sid_cookie(response, sid, request)
-        s = registry.get_or_create(sid)
+        """The room a connect lands in. A request that already carries a
+        cookie reuses that sid, so a second click supersedes only the
+        clicker's own draft and never anybody else's."""
+        s = registry.get_or_create(_room_sid(request, response))
         s.touch()
         return s
+
+    def _clear_room(s) -> None:
+        """Take a room back to "no session" the way /api/live/stop does,
+        after its listener has been asked to stop. Under the room's lock."""
+        s.state["generation"] += 1
+        s.state.update({"session": None, "candidates": [],
+                        "as_of_pick": None, "horizon_pick": None,
+                        "unmapped": [], "last_poll_at": None,
+                        "listener": None, "listener_thread": None,
+                        "listener_stop": None, "recompute_thread": None,
+                        "listener_error": None, "recompute_error": None,
+                        "restore_error": None, "seat": None})
+
+    def _evict_seat(s, league_id, team_id) -> list:
+        """Stop every OTHER room holding the same ESPN seat, so one seat has
+        one socket.
+
+        The ordinary way a seat gets a second room: a browser whose room
+        cookie expired or was cleared mid-draft clicks the bookmark again and
+        arrives under a new sid, while the old room's socket is still open
+        for the same team. A restored session the owner then reconnects to
+        from a fresh browser is the same shape. Their record goes with them
+        -- a restart must not bring the evicted room back. Returns the sids
+        evicted. A connect with no team id (the browser-observer path with a
+        bare waiting-room url) holds no identifiable seat and evicts nobody.
+        """
+        if league_id is None or team_id is None:
+            return []
+        seat = (str(league_id), str(team_id))
+        evicted = []
+        for sid in registry.sids():
+            if sid == s.sid:
+                continue
+            other = registry.get(sid)
+            if other is None:
+                continue
+            with other.lock:
+                if other.state.get("seat") != seat:
+                    continue
+            _stop_listener(other)
+            with other.lock:
+                _clear_room(other)
+            try:
+                _delete_record(other)
+            except Exception:      # noqa: BLE001 -- the eviction stands
+                # whether or not the record could be removed; the reaper's
+                # age rule covers a record left behind.
+                pass
+            registry.drop(sid)
+            evicted.append(sid)
+        return evicted
 
     def _settings_accessor(request=None):
         """The league the request's session is priced under, or None.
@@ -1917,10 +2013,17 @@ def register_live_routes(app, conn, db_path):
         DraftSession built directly by a test may carry no settings at all,
         and "no settings" has to mean the same thing as "no session" --
         api/main.py falls back to `league.load` for both. No request means
-        the default session, which is what a test that installs a session
-        through the returned state dict is asking about.
+        the default room, which is what a test that installs a session
+        through the returned state dict is asking about; api/main.py's
+        landing endpoints never reach this at all (see _league_settings
+        there), because their answers are shared by everybody and must not
+        vary with one caller's draft.
         """
-        s = registry.get(sid_for(request)) if request is not None else default
+        if request is None:
+            s = default
+        else:
+            sid = sid_for(request)
+            s = registry.get(sid) if sid is not None else None
         if s is None:
             return None
         with s.lock:
@@ -2936,9 +3039,30 @@ def register_live_routes(app, conn, db_path):
                 "board_fingerprint": session.board_fingerprint,
                 "my_slot": session.my_slot}
 
+    @app.post("/api/live/session")
+    def live_session(request: Request, response: Response):
+        """Give the browser its room cookie before it starts a connect.
+
+        The connect POST and the connect-progress poll are two requests,
+        and the page starts the poll before the POST has reached the
+        server. If the POST is what mints the cookie, the poll's first
+        reads carry none and land in no room (or, with the default room
+        switched on, in somebody else's). So the page asks for the cookie
+        here first, awaits it, and only then starts both -- see
+        web/src/pages/Landing.tsx. A request that already has a usable
+        cookie gets it renewed and `sid_set: false`; no room is created,
+        and nothing else happens.
+        """
+        had = _cookie_sid(request) is not None
+        _room_sid(request, response)
+        return {"sid_set": not had}
+
     @app.post("/api/live/start")
     def live_start(my_slot: int, request: Request):
-        s = registry.get_or_create(sid_for(request))
+        sid = sid_for(request)
+        if sid is None:
+            raise HTTPException(status_code=409, detail="no live session")
+        s = registry.get_or_create(sid)
         s.touch()
         state, lock = s.state, s.lock
         with lock:
@@ -3773,7 +3897,8 @@ def register_live_routes(app, conn, db_path):
                           "listener": None,
                           "listener_thread": None, "listener_stop": None,
                           "recompute_thread": None, "listener_error": None,
-                          "recompute_error": None, "restore_error": None})
+                          "recompute_error": None, "restore_error": None,
+                          "seat": None})
         # An explicit stop is the user saying this draft is over for them, so
         # the saved token goes with it -- there is nothing left that a restart
         # should silently reconnect to. Done AFTER the listener is stopped, so
@@ -3805,8 +3930,12 @@ def register_live_routes(app, conn, db_path):
 
         team_id = _team_id_from_url(body.url)
         season = _season_from_url(body.url)
+        _evict_seat(s, league_id, team_id)
         work_conn, league_conn, session = _connect_work(
             s, progress, league_id, team_id, season)
+        with s.lock:
+            s.state["seat"] = (None if team_id is None
+                               else (str(league_id), str(team_id)))
 
         # The browser-observer path is the machine owner's: the saved login
         # is the credential, when there is one.
@@ -3910,6 +4039,7 @@ def register_live_routes(app, conn, db_path):
             raise HTTPException(status_code=422, detail="teamId must be numeric")
         progress.ok("token", f"team {team_id} · season {body.season or '?'}")
 
+        _evict_seat(s, body.leagueId, team_id)
         work_conn, league_conn, session = _connect_work(
             s, progress, body.leagueId, team_id, body.season)
 
@@ -3929,6 +4059,7 @@ def register_live_routes(app, conn, db_path):
         # for the connect screen. Set before launch; _launch_listener's own
         # state.update never touches "token".
         with s.lock:
+            s.state["seat"] = (str(body.leagueId), str(team_id))
             s.state["token"] = {
                 "league_id": body.leagueId, "team_id": body.teamId,
                 "swid": body.swid, "token": body.token, "season": body.season,
@@ -4004,7 +4135,7 @@ def register_live_routes(app, conn, db_path):
             # can never find the session it just started).
             if minted is not None:
                 set_session_cookie(launched, minted)
-            _set_sid_cookie(launched, s.sid, request)
+            _set_sid_cookie(launched, s.sid)
         return launched
 
     def _restore_saved_session(sid, record):
@@ -4080,6 +4211,7 @@ def register_live_routes(app, conn, db_path):
         progress.ok("token", f"restored · team {record['team_id']} · "
                              f"season {record['season'] or '?'}")
         progress.fact(restored=True)
+        _evict_seat(s, league_id, record["team_id"])
         try:
             work_conn, league_conn, session = _connect_work(
                 s, progress, league_id, int(record["team_id"]), record["season"])
@@ -4115,6 +4247,7 @@ def register_live_routes(app, conn, db_path):
         # touches the lock.
         real_league = not billing.is_free_draft(league_id)
         with lock:
+            state["seat"] = (str(league_id), str(record["team_id"]))
             # Same in-memory token record a live connect keeps, so
             # /api/live/state's token_received is true for a restored
             # session too -- the landing page reads it to offer the board
