@@ -92,6 +92,16 @@ ENV ESPN_CUSTODY_TRUST_FORWARDED_PROTO=1
 # instance without one should not spend its life retrying. See api/jobs.py.
 ENV RUN_REFRESH_ON_BOOT=1
 
+# Draft-session builds run in this many worker processes instead of on the
+# request thread (api/live_build.py): a connect is up to 30 s of CPU, and
+# under the GIL every poll in the process would wait behind it. Three is
+# sized to the memory a cold build takes (~1.7 GB peak each, before the
+# column projection in scoring/board.py brought that down) on an 8 GB box.
+# `LIVE_FAKE_SOCKET` (replay ESPN's draft socket from a recording, for
+# load tests) and `LIVE_DEFAULT_ROOM` (a cookieless room, for the tests
+# and a single-user machine) are never set in production.
+ENV LIVE_BUILD_WORKERS=3
+
 # `$PORT` is assigned by the platform, so a shell has to expand it -- exec
 # form alone would hand uvicorn the literal string. `exec` then replaces that
 # shell with uvicorn, which matters on every redeploy: without it the shell is

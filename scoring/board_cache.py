@@ -95,12 +95,13 @@ _WEIGHT_KEYS = ("durability", "environment", "production", "role", "schedule")
 # the tab left open. Each cached frame is 249 rows x 27 columns, several of
 # them (stats, market_sources) nested dicts -- on the order of a few hundred
 # KB to low single-digit MB per entry, not free, so the bound is deliberate
-# rather than generous. 16 comfortably holds the default board plus a
-# handful of concurrent slider experiments and a league or two, without ever
-# growing further than that. (It used to have to hold several drafted-state
+# rather than generous. 64 holds the default board plus a handful of
+# concurrent slider experiments and every league drafting at once on a
+# busy evening -- each live room's league is its own settings key -- without
+# ever growing further than that. (It used to have to hold several drafted-state
 # generations too, because every pick minted a new key. It does not any
 # more: a pick changes nothing in the key at all.)
-_MAX_ENTRIES = 16
+_MAX_ENTRIES = 64
 
 _lock = threading.Lock()
 _cache: "OrderedDict[tuple, pd.DataFrame]" = OrderedDict()

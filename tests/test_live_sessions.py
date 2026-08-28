@@ -363,3 +363,123 @@ def test_sid_activity_is_stamped_by_routes_and_frames(tmp_path, monkeypatch):
         assert room.last_activity > before
     finally:
         _stop_all([a])
+
+
+def test_the_load_budget_for_rollouts():
+    assert live.rollouts_for_load(10) == 400
+    assert live.rollouts_for_load(50) == 400
+    assert live.rollouts_for_load(51) == 150
+    assert live.RECOMPUTE_SLOTS._value >= 2
+
+
+def test_the_reaper_drops_idle_rooms_and_keeps_fresh_ones(tmp_path, monkeypatch):
+    """Four hours of silence retires a room -- listener stopped, record
+    gone, dropped from the registry -- while a room touched a minute ago
+    stays. An idle room with nothing in it (what a failed connect leaves
+    behind) goes the same way."""
+    app, seen, stops = _app(tmp_path, monkeypatch)
+    a, b = _client(app), _client(app)
+    try:
+        _connect(a, "1", team_id="2")
+        _connect(b, "2", team_id="2")
+        registry = app.state.live_registry
+        old_sid, fresh_sid = a.cookies.get(SID_COOKIE), b.cookies.get(SID_COOKIE)
+        # ...and an empty room from a cookie that never connected.
+        ghost = registry.get_or_create("ghost-room")
+        now = time.monotonic()
+        registry.get(old_sid).last_activity = now - 4 * 3600
+        ghost.last_activity = now - 4 * 3600
+        registry.get(fresh_sid).last_activity = now - 60
+
+        gone = registry.run_once(idle=3 * 3600, now=now)
+        assert sorted(gone) == sorted([old_sid, "ghost-room"])
+        assert stops[0].is_set() and not stops[1].is_set()
+        assert registry.get(old_sid) is None
+        assert registry.get("ghost-room") is None
+        assert registry.get(fresh_sid) is not None
+        assert registry.active_count() == 1
+        assert a.get("/api/live/state").json()["active"] is False
+        assert b.get("/api/live/state").json()["active"] is True
+        # The evicted room's record went with it; the fresh one's stands.
+        from api.live_records import record_store
+        assert record_store(str(tmp_path / "live.duckdb")).load(old_sid) is None
+        assert record_store(str(tmp_path / "live.duckdb")).load(fresh_sid) is not None
+    finally:
+        _stop_all([a, b])
+
+
+def test_the_reaper_leaves_a_room_whose_listener_will_not_stop(tmp_path, monkeypatch):
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    release = threading.Event()
+
+    def stubborn(listener, league_id, team_id, swid, token, on_change=None,
+                 stop_event=None, on_activity=None, on_socket=None):
+        release.wait(timeout=30)
+    monkeypatch.setattr("api.live.run_socket_listener", stubborn)
+    monkeypatch.setattr("api.live.LISTENER_STOP_TIMEOUT", 0.2)
+    from api.main import create_app
+    app = create_app(path)
+    a = _client(app)
+    try:
+        _connect(a, "1", team_id="2")
+        registry = app.state.live_registry
+        sid = a.cookies.get(SID_COOKIE)
+        now = time.monotonic()
+        registry.get(sid).last_activity = now - 4 * 3600
+        assert registry.run_once(idle=3 * 3600, now=now) == []
+        assert registry.get(sid) is not None
+        assert registry.get(sid).state["listener"] is not None
+    finally:
+        release.set()
+        _stop_all([a])
+
+
+def test_connect_and_frames_stamp_activity(tmp_path, monkeypatch):
+    """A room mid-build is not idle: the connect stamps it, and so does
+    every socket frame after."""
+    app, seen, stops = _app(tmp_path, monkeypatch)
+    a = _client(app)
+    try:
+        assert a.post("/api/live/session").json()["sid_set"] is True
+        room = app.state.live_registry.get_or_create(a.cookies.get(SID_COOKIE))
+        room.last_activity = time.monotonic() - 4 * 3600
+        _connect(a, "1", team_id="2")
+        assert time.monotonic() - room.last_activity < 60
+    finally:
+        _stop_all([a])
+
+
+def test_the_fake_socket_switch_routes_the_pump_to_the_replay(tmp_path, monkeypatch):
+    """LIVE_FAKE_SOCKET on: the pump calls api.live_fake_socket's runner
+    with run_socket_listener's signature, and never the real one."""
+    import sys
+    import types as _types
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    real_calls, fake_calls = [], []
+
+    def real(*a, **k):
+        real_calls.append(a)
+
+    def fake(listener, league_id, team_id, swid, token, on_change=None,
+             stop_event=None, on_activity=None, on_socket=None):
+        fake_calls.append({"league_id": league_id, "team_id": team_id,
+                           "swid": swid, "token": token,
+                           "hooks": (on_change, on_activity, on_socket)})
+        if stop_event is not None:
+            stop_event.wait(timeout=10)
+    monkeypatch.setattr("api.live.run_socket_listener", real)
+    monkeypatch.setitem(sys.modules, "api.live_fake_socket",
+                        _types.SimpleNamespace(run_fake_socket_listener=fake))
+    monkeypatch.setenv(live.FAKE_SOCKET_ENV, "1")
+    from api.main import create_app
+    a = _client(create_app(path))
+    try:
+        _connect(a, "1", team_id="2")
+        assert real_calls == []
+        assert len(fake_calls) == 1
+        assert fake_calls[0]["league_id"] == "1" and fake_calls[0]["token"] == "tok-1"
+        assert all(h is not None for h in fake_calls[0]["hooks"])
+    finally:
+        _stop_all([a])

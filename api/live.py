@@ -283,6 +283,7 @@ from pydantic import BaseModel
 from websockets.exceptions import ConnectionClosed
 
 from api import billing
+from api import live_build
 from api import reports
 from api.custody import (abandon_custody, establish_custody,
                          require_secure, set_session_cookie)
@@ -1430,6 +1431,41 @@ LISTENER_STOP_TIMEOUT = 10.0
 # a short gap, so the trade is not close.
 SURVIVAL_ROLLOUTS = 400
 
+# How many rankings may run at once across every room in the process. A
+# ranking is a second of numpy per pick; two hundred rooms each hearing a
+# pick every thirty seconds is seven a second, which is more cores than a
+# box has, and unbounded they would all run at once and all finish late.
+# Bounded to the core count they queue instead, and the coalescing slot
+# in each room's worker (see _launch_listener) means a room that waited
+# ranks the LATEST pick, never a stale one.
+RECOMPUTE_SLOTS = threading.Semaphore(max(2, os.cpu_count() or 2))
+
+# The point past which every room's ranking gets fewer rollouts. Under it
+# the full SURVIVAL_ROLLOUTS; over it 150, which is still a usable survival
+# estimate (the room prints whole percentages) and keeps a busy evening's
+# rankings inside the pick clock rather than behind it.
+ROLLOUTS_FULL_UNTIL = 50
+ROLLOUTS_REDUCED = 150
+
+
+def rollouts_for_load(active_sessions: int) -> int:
+    """How many survival rollouts one ranking gets, given how many rooms
+    are drafting at once. (`rollouts_for` below is the older budget by
+    picks-until-my-turn, which the manual refresh path still uses.)"""
+    return (SURVIVAL_ROLLOUTS if active_sessions <= ROLLOUTS_FULL_UNTIL
+            else ROLLOUTS_REDUCED)
+
+
+# Replace ESPN's draft socket with a replay (api/live_fake_socket.py), for
+# load tests against a local server. Never set in production: a connect
+# would follow a recording instead of the draft. Same "1/true/yes/on"
+# reading as the other switches.
+FAKE_SOCKET_ENV = "LIVE_FAKE_SOCKET"
+
+
+def _switch_on(name: str) -> bool:
+    return (os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
 
 def rollouts_for(picks_until: int) -> int:
     """Budget by the time actually available.
@@ -1567,6 +1603,14 @@ SID_MAX_AGE = 12 * 3600
 DEFAULT_SID = "__default__"
 
 
+def _conn_path(conn) -> "str | None":
+    """The file a DuckDB connection is on, or None for an in-memory one."""
+    for _oid, _name, path in conn.execute("PRAGMA database_list").fetchall():
+        if path:
+            return str(path)
+    return None
+
+
 def _initial_state() -> dict:
     """A fresh session's state, every key present from the start.
 
@@ -1692,6 +1736,11 @@ def _initial_state() -> dict:
             # happens after the listener is registered, and is reported
             # through listener_error, exactly as it always was.
             "restore_error": None,
+            # The file behind `league_conn`, while it is open (None with it).
+            # What a connect checks before handing a build to a worker
+            # process: a file this process holds is not one another process
+            # can open.
+            "league_path": None,
             # (league_id, team_id) of the ESPN seat this room's socket holds,
             # as strings, set by the connect paths and the restore before the
             # listener starts. What a new connect scans the registry for, so
@@ -1764,6 +1813,54 @@ class LiveRegistry:
                 if s.state["listener"] is not None:
                     n += 1
         return n
+
+    # -- the reaper --------------------------------------------------------
+    #
+    # A room nobody has touched for `idle` seconds is over: its draft ended
+    # hours ago and the browser is closed, or it is the empty entry a
+    # connect that failed left behind. Either way it holds a listener
+    # thread, a DuckDB connection and a few megabytes that will never be
+    # asked for again, and two hundred of those a night is the leak that
+    # ends the season. `retire(s)` is installed by register_live_routes
+    # (stop the listener, delete the record) because those live in its
+    # closure; it answers False when the listener would not stop, and the
+    # room is then left for the next pass rather than dropped with a live
+    # thread inside it.
+
+    def set_retire(self, fn) -> None:
+        self._retire = fn
+
+    def run_once(self, idle: float, now: "float | None" = None) -> list:
+        """Retire every room idle for longer than `idle` seconds; return
+        the sids retired. `now` is injectable for the tests."""
+        now = time.monotonic() if now is None else now
+        retire = getattr(self, "_retire", None)
+        gone = []
+        for sid in self.sids():
+            s = self.get(sid)
+            if s is None or now - s.last_activity <= idle:
+                continue
+            if retire is not None and not retire(s):
+                continue
+            self.drop(sid)
+            gone.append(sid)
+        return gone
+
+    def start_reaper(self, interval: float = 300.0,
+                     idle: float = 3 * 3600.0) -> threading.Thread:
+        """Run `run_once` every `interval` seconds on a daemon thread."""
+        def loop():
+            while True:
+                time.sleep(interval)
+                try:
+                    self.run_once(idle)
+                except Exception as exc:      # noqa: BLE001 -- a reaper that
+                    # dies is a leak that comes back; log and keep going.
+                    print(f"live: reaper pass failed: {exc}")
+        thread = threading.Thread(target=loop, name="live-reaper", daemon=True)
+        thread.start()
+        self.reaper_thread = thread
+        return thread
 
 
 # Whether a request with no room cookie may use the default room. Off, a
@@ -1876,7 +1973,7 @@ def _records(db_path):
     return record_store(db_path)
 
 
-def register_live_routes(app, conn, db_path):
+def register_live_routes(app, conn, db_path, reaper: bool = True):
     """Mount live-draft endpoints.
 
     In-process state, with ONE exception. Everything in `state` below lives
@@ -2137,7 +2234,7 @@ def register_live_routes(app, conn, db_path):
         progress.fact(**facts)      # the first publish, which registers it
         return progress, seq
 
-    def _stop_listener(s, timeout: float = LISTENER_STOP_TIMEOUT) -> bool:
+    def _stop_listener(s, timeout: "float | None" = None) -> bool:
         """Signal the session's listener thread to stop and wait for it to exit.
 
         Not called with `lock` held: joining a thread while holding it would
@@ -2161,6 +2258,10 @@ def register_live_routes(app, conn, db_path):
         (see live_connect) would deadlock or error against one this function
         left open.
         """
+        # Read here, not bound as the default: a test that shortens
+        # LISTENER_STOP_TIMEOUT must be honoured whenever it runs.
+        if timeout is None:
+            timeout = LISTENER_STOP_TIMEOUT
         state, lock = s.state, s.lock
         with lock:
             stop_event = state["listener_stop"]
@@ -2189,6 +2290,7 @@ def register_live_routes(app, conn, db_path):
             state["socket"] = None
             old_league_conn = state["league_conn"]
             state["league_conn"] = None
+            state["league_path"] = None
         if old_league_conn is not None:
             old_league_conn.close()
         return True
@@ -2290,21 +2392,29 @@ def register_live_routes(app, conn, db_path):
             # survival()'s avail_pct is already a 0-1 probability (see its
             # docstring and the "counts / max(n_rollouts, 1)" line it
             # returns) -- rank_available wants exactly that, no rescaling.
-            rollouts = survival(
-                session.pool, session.settings, session.slot_managers,
-                session.my_slot, taken, session.betas,
-                n_rollouts=SURVIVAL_ROLLOUTS, seed=session.seed,
-                taken_order=taken_order, on_the_clock=on_the_clock,
-                horizon=h, nested=session.nested)
-            avail = rollouts["avail_pct"].to_numpy()
+            # Bounded across every room (see RECOMPUTE_SLOTS), and with
+            # fewer rollouts when the evening is busy (rollouts_for_load). Only
+            # the numpy is inside the slot: the drafted read above and the
+            # store below are milliseconds and must not queue behind a
+            # ranking somewhere else.
+            with RECOMPUTE_SLOTS:
+                rollouts = survival(
+                    session.pool, session.settings, session.slot_managers,
+                    session.my_slot, taken, session.betas,
+                    n_rollouts=rollouts_for_load(registry.active_count()),
+                    seed=session.seed,
+                    taken_order=taken_order, on_the_clock=on_the_clock,
+                    horizon=h, nested=session.nested)
+                avail = rollouts["avail_pct"].to_numpy()
             # Two questions out of one set of rollouts. `avail` is the turn
             # this list is PRICED against and is what `gain_now` steps to;
             # `avail_next_pct` is my very next turn and is the only one shown
             # as a percentage beside a player's name, because that is the
             # question a reader is asking of it. See `rank_available`.
-            frame = rank_available(session.pool, session.settings, taken,
-                                   counts, avail, my_turns_left,
-                                   survive_display=rollouts["avail_next_pct"].to_numpy())
+                frame = rank_available(
+                    session.pool, session.settings, taken, counts, avail,
+                    my_turns_left,
+                    survive_display=rollouts["avail_next_pct"].to_numpy())
         finally:
             cur.close()
         with lock:
@@ -2367,9 +2477,27 @@ def register_live_routes(app, conn, db_path):
             existed = os.path.exists(league_path)
             league_path = provision_league(
                 league_id, universal_path=db_path, root=leagues_mod.LEAGUES_ROOT)
-            league_conn = get_conn(league_path)
             progress.ok("league", "already provisioned" if existed
                         else "new file · seeded from the shared database")
+            # OFF THIS PROCESS'S CPU when there is a worker pool (see
+            # api/live_build.py), which is the difference between a dozen
+            # connects at eight o'clock and every poll in the process
+            # stalling for them. The worker opens the league file itself,
+            # so the parent must not be holding it: provision_league above
+            # has closed its handle, and the parent's own connection is
+            # opened only once the session is back. A file another room in
+            # THIS process already holds (a leaguemate's) is not available
+            # to a second process at all -- DuckDB's lock is per process --
+            # so that case builds inline, where a second connection to an
+            # open file is fine.
+            if live_build.workers() > 0 and not _league_path_held(league_path):
+                session = _build_off_process(league_path, league_id, team_id,
+                                             settings, progress)
+                league_conn = get_conn(league_path)
+                live_build.apply_conn_limits(league_conn)
+                return league_conn, league_conn, session
+            league_conn = get_conn(league_path)
+            live_build.apply_conn_limits(league_conn)
         else:
             progress.ok("league", "the shared database")
         work_conn = league_conn if league_conn is not None else conn
@@ -2433,6 +2561,54 @@ def register_live_routes(app, conn, db_path):
                 league_conn.close()
             raise
         return work_conn, league_conn, session
+
+    def _league_path_held(league_path: str) -> bool:
+        """Whether any room in this process has that league file open."""
+        want = os.path.realpath(league_path)
+        for sid in registry.sids():
+            other = registry.get(sid)
+            if other is None:
+                continue
+            with other.lock:
+                held = other.state.get("league_path")
+            if held is not None and os.path.realpath(held) == want:
+                return True
+        return False
+
+    def _build_off_process(league_path, league_id, team_id, settings, progress):
+        """The worker-pool half of _provision_and_build: hand the build to
+        api/live_build and report its stages from the session that comes
+        back. The worker cannot carry a progress object across the process
+        boundary, so the rows are marked here, after the fact -- `slot`
+        running while the worker is busy (it is the first thing the worker
+        resolves), the rest closed together when the session lands."""
+        progress.begin("slot")
+        session = live_build.build_in_worker(
+            league_path, db_path, league_id,
+            league_mod.to_json(settings) if settings is not None else None,
+            team_id, None)
+        teams = getattr(session.settings, "teams", None)
+        if session.my_slot is not None:
+            progress.ok("slot", f"you pick {_ordinal(session.my_slot)}"
+                        + (f" of {teams}" if teams else ""))
+            progress.fact(my_slot=int(session.my_slot))
+        else:
+            progress.warn("slot", "waiting on the draft socket")
+        progress.fact(settings_source="espn" if session.settings_from_espn
+                      else "saved")
+        progress.begin("board")
+        progress.ok("board", f"{len(session.board)} players · in a worker")
+        progress.fact(players=int(len(session.board)))
+        progress.begin("pool")
+        progress.ok("pool", "built in a worker")
+        progress.begin("history")
+        managers = len(session.betas or {})
+        if managers:
+            progress.ok("history", f"{managers} managers")
+        else:
+            progress.ok("history", "none · market prior")
+        progress.fact(managers=int(managers))
+        return session
 
     _SCORING_LABELS = {"ppr": "PPR", "half": "half-PPR", "std": "standard"}
 
@@ -2613,9 +2789,18 @@ def register_live_routes(app, conn, db_path):
                 # successful connect -- so it is the honest place to say so.
                 progress.ok("socket", "connected")
 
-            run_socket_listener(listener, league_id, team_id, swid, token,
-                                on_change=on_change, stop_event=stop_event,
-                                on_activity=on_activity, on_socket=_on_socket)
+            if _switch_on(FAKE_SOCKET_ENV):
+                # Imported here, on the switch: the replay module is a
+                # load-test tool and this file must import without it.
+                from api.live_fake_socket import run_fake_socket_listener
+                runner = run_fake_socket_listener
+            else:
+                # The module attribute, read at call time, so a test that
+                # replaces api.live.run_socket_listener is honoured.
+                runner = run_socket_listener
+            runner(listener, league_id, team_id, swid, token,
+                   on_change=on_change, stop_event=stop_event,
+                   on_activity=on_activity, on_socket=_on_socket)
         return run_fn
 
     def _launch_listener(s, work_conn, league_conn, league_id, session, run_fn,
@@ -3006,6 +3191,8 @@ def register_live_routes(app, conn, db_path):
                               "recompute_thread": recompute_thread,
                               "listener_error": None, "recompute_error": None,
                               "league_conn": league_conn,
+                              "league_path": (_conn_path(league_conn)
+                                              if league_conn is not None else None),
                               "candidates": [], "as_of_pick": None,
                               "horizon_pick": None,
                               "unmapped": [], "last_poll_at": None})
@@ -4230,6 +4417,7 @@ def register_live_routes(app, conn, db_path):
         """
         league_id = record["league_id"]
         s = registry.get_or_create(sid)
+        s.touch()               # a room being rebuilt is not an idle one
         state, lock = s.state, s.lock
         with lock:
             # Captured before any work, and re-checked at the instant this
@@ -4340,6 +4528,22 @@ def register_live_routes(app, conn, db_path):
     # `(state, _recompute)` and a dozen tests unpack exactly those two.
     app.state.live_settings = _settings_accessor
     app.state.live_registry = registry
+
+    def _retire(s) -> bool:
+        """The reaper's hook: stop the room's listener, forget its record.
+        False when the listener would not stop -- the room stays."""
+        if not _stop_listener(s):
+            return False
+        with s.lock:
+            _clear_room(s)
+        try:
+            _delete_record(s)
+        except Exception:      # noqa: BLE001 -- see _evict_seat
+            pass
+        return True
+    registry.set_retire(_retire)
+    if reaper:
+        registry.start_reaper()
 
     _saved = _load_all_records()
     if _saved:

@@ -147,6 +147,10 @@ def _history_round_bucket(round_no: int) -> str:
     return "mid" if round_no <= 8 else "late"
 
 
+# How many requests may be inside threadpool-backed handlers at once.
+THREADPOOL_TOKENS = 200
+
+
 def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
     app = FastAPI(title="Draft Board API")
     # Compression. First, before a single route exists. The other half of
@@ -901,6 +905,19 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
     # throughout it.
     from api.jobs import start_jobs
     start_jobs(conn)
+
+    # ROOM FOR THE POLLS. Every route here is a plain `def`, so Starlette
+    # runs each request on a thread from anyio's default pool -- forty
+    # threads, which was plenty for one draft room and is not for two
+    # hundred polling every 2.5 s alongside their SSE streams and a
+    # handful of connects blocked in a 30 s build. Raised at startup
+    # (the limiter belongs to the running event loop, so it cannot be set
+    # here at construction); the number is a ceiling on concurrency, not
+    # a pool that is created up front.
+    @app.on_event("startup")
+    async def _widen_threadpool():
+        import anyio
+        anyio.to_thread.current_default_thread_limiter().total_tokens = THREADPOOL_TOKENS
 
     # `private, no-store` on every /api answer that named no policy of its
     # own. LAST LINE, so it is the outermost middleware and every response
