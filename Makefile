@@ -2,7 +2,12 @@
 # One-time setup: make setup && make refresh
 # Draft night:    make up   (then open http://localhost:5173)
 
-.PHONY: setup refresh api web up test build image deploy-data farm-secret logs logs-farm logs-errors espn-import fit-managers fit-prior score-ladder espn-ladder sim mock-backfill farm-mocks corpus-report
+.PHONY: setup refresh api web up test load-test build image deploy-data farm-secret logs logs-farm logs-errors espn-import fit-managers fit-prior score-ladder espn-ladder sim mock-backfill farm-mocks corpus-report
+
+# Where `make load-test` puts the database copy it runs against and the
+# server's log. Overridable: `make load-test LOAD_DIR=/var/tmp/load`.
+LOAD_DIR ?= /tmp/draft-load
+LOAD_PORT ?= 8010
 
 setup: ## create venv, install python + web deps
 	python3 -m venv .venv
@@ -106,6 +111,42 @@ up: ## run API + web together; Ctrl-C stops both
 
 test: ## run the python test suite
 	.venv/bin/pytest -q
+
+load-test: ## drive N fake live rooms against a local server
+	# Starts its own server, drives it, prints the numbers, cleans up.
+	# Tunable: make load-test N=100 DURATION=120 RAMP=20 WORKERS=3
+	#
+	# NOTHING HERE TOUCHES ESPN. scripts/load_server.py replaces the draft
+	# socket with a replay of data/draft_room_trace.jsonl (one pick every two
+	# seconds, per room) and switches off the connect path's settings,
+	# team-name and mock-lobby fetches. Everything else is the real app.
+	#
+	# It runs against a COPY of data/nfl.duckdb, because DuckDB is
+	# single-writer and a load run must not take the real file's lock -- so
+	# `make up` can keep running beside it. Each room then provisions its own
+	# data/leagues/9000NN.duckdb (~32MB, N rooms), and the script deletes
+	# exactly those ids on the way out.
+	#
+	# Acceptance: p95 /api/live/state under 300ms, peak server RSS under 6GB.
+	# The target exits non-zero when the run misses either, so it can be read
+	# as a check rather than only as a report.
+	@test -f data/nfl.duckdb || { echo "data/nfl.duckdb is missing -- run make refresh"; exit 1; }
+	@mkdir -p $(LOAD_DIR)
+	@echo "copying data/nfl.duckdb -> $(LOAD_DIR)/load.duckdb ..."
+	@cp data/nfl.duckdb $(LOAD_DIR)/load.duckdb
+	@.venv/bin/python scripts/load_server.py --port $(LOAD_PORT) \
+		--db $(LOAD_DIR)/load.duckdb --workers $(or $(WORKERS),3) \
+		> $(LOAD_DIR)/server.log 2>&1 & \
+	pid=$$!; \
+	trap 'kill $$pid 2>/dev/null; rm -rf $(LOAD_DIR)/load.duckdb $(LOAD_DIR)/load.duckdb.wal $(LOAD_DIR)/load.duckdb.live-sessions' EXIT INT TERM; \
+	echo "server pid $$pid -- log in $(LOAD_DIR)/server.log"; \
+	for i in $$(seq 1 90); do \
+		if curl -sf -o /dev/null http://127.0.0.1:$(LOAD_PORT)/api/live/state; then break; fi; \
+		sleep 1; \
+	done; \
+	.venv/bin/python scripts/load_live.py --url http://127.0.0.1:$(LOAD_PORT) \
+		--sessions $(or $(N),25) --seconds $(or $(DURATION),120) \
+		--ramp $(or $(RAMP),10) --pid $$pid
 
 build: ## run the frontend tests, then typecheck + production-build it
 	# Tests first, so a green build is not the only thing standing between a
