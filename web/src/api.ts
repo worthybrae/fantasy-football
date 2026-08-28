@@ -121,8 +121,32 @@ async function detailText(res: Response): Promise<string> {
 // "everything that mounts on one page load" and nothing else.
 const CACHE_MS = 5_000
 
+// BOUNDED, or the cap on the profile view in CellTip.tsx is decoration: a
+// resolved promise retains what it resolved to, so an entry here holds a
+// whole payload for as long as it is in the map. A draft room open for an
+// afternoon touches a lot of players, and none of these keys is ever asked
+// for a second time once the pointer has moved on.
+//
+// 128 is generous for what one page does at once (a room's poll, a board, and
+// the profiles a reader has hovered) and small enough to bound the memory at
+// something like a handful of megabytes in the worst case. Evicting is always
+// safe: it costs the next caller a request, nothing more.
+const REQUESTS_MAX = 128
+
 type CacheEntry = { at: number; pending: boolean; value: Promise<unknown> }
 const REQUESTS = new Map<string, CacheEntry>()
+
+// Oldest write first, and never one that is still in the air: evicting a
+// pending entry would leave its callers sharing a promise nothing can find
+// while the next caller starts the same request again.
+function evictOldest(): void {
+  if (REQUESTS.size <= REQUESTS_MAX) return
+  for (const [key, entry] of REQUESTS) {
+    if (entry.pending) continue
+    REQUESTS.delete(key)
+    return
+  }
+}
 
 /** One in-flight request per key, and its answer for `ttlMs` afterwards.
  *
@@ -148,10 +172,18 @@ export function cachedGet<T>(
       return value
     })
     .catch((e) => {
-      REQUESTS.delete(key)
+      // IDENTITY, NOT KEY. Between this request starting and failing,
+      // something may have dropped the key and started a fresh one --
+      // `forgetRequest` on a push, or a caller asking for a fresh read. A
+      // bare `delete(key)` would then evict THAT request, the good one, and
+      // every caller sharing it would be left waiting on a promise nothing
+      // can find while the next caller starts a third.
+      if (REQUESTS.get(key) === entry) REQUESTS.delete(key)
       throw e
     })
+  REQUESTS.delete(key)
   REQUESTS.set(key, entry)
+  evictOldest()
   return entry.value as Promise<T>
 }
 

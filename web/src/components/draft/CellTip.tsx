@@ -41,7 +41,7 @@ export function loadProfile(playerId: string): Promise<PlayerProfileData> {
   // call `fetchProfile` directly and so paid for a profile this cache had
   // already fetched -- two requests for the same player, one click apart.
   return cachedGet(`profile/${playerId}`, () => fetchProfile(playerId), PROFILE_MS)
-    .then((data) => { settled.set(playerId, data); return data })
+    .then((data) => { remember(playerId, data); return data })
 }
 
 // ONE CACHE, AND A SYNCHRONOUS VIEW OF IT.
@@ -57,12 +57,42 @@ export function loadProfile(playerId: string): Promise<PlayerProfileData> {
 // A stale entry here is painted and then replaced: every reader that paints
 // from it also calls `loadProfile`, which is a lookup inside the shared
 // window and a real request past it.
-const settled = new Map<string, PlayerProfileData>()
+//
+// BOUNDED, AND STAMPED. Two limits, both about what a long session does to
+// it. A draft room is open for hours and a pointer crosses a lot of rows, so
+// without a cap this grows to the whole board -- 250 profiles at tens of
+// kilobytes each, held for a card that shows one. And a payload that arrived
+// two hours ago carries news and an injury status from two hours ago, which
+// is fine to fetch again behind a drawn card and not fine to PAINT as though
+// it were current.
+const SETTLED_MAX = 64
+const SETTLED_FRESH_MS = 10 * 60_000
+
+const settled = new Map<string, { at: number; data: PlayerProfileData }>()
+
+// Oldest write out first. `Map` iterates in insertion order and a re-write
+// deletes before it sets, so the entry that leaves is the one nobody has
+// looked at for longest -- which on this page is the row furthest back in the
+// sweep that filled the map.
+function remember(playerId: string, data: PlayerProfileData): void {
+  settled.delete(playerId)
+  settled.set(playerId, { at: Date.now(), data })
+  if (settled.size > SETTLED_MAX) {
+    const oldest = settled.keys().next()
+    if (!oldest.done) settled.delete(oldest.value)
+  }
+}
 
 /** What has already arrived for this player, or null. Synchronous, for a
- *  reader that would otherwise draw a spinner over an answer in hand. */
+ *  reader that would otherwise draw a spinner over an answer in hand.
+ *
+ *  Null for an entry past `SETTLED_FRESH_MS`, which sends that reader to
+ *  `loadProfile` and a skeleton instead -- an honest wait for a current
+ *  answer beats an instant one that is an hour old. */
 export function cachedProfile(playerId: string): PlayerProfileData | null {
-  return settled.get(playerId) ?? null
+  const hit = settled.get(playerId)
+  if (!hit) return null
+  return Date.now() - hit.at > SETTLED_FRESH_MS ? null : hit.data
 }
 
 /** Drops one player from both the view and the store, so the next read

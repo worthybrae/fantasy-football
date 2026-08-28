@@ -15,19 +15,26 @@ import { namesFor } from '../lib/playerNames'
 // an invitation when nothing is saved, the list when the names are known, and
 // a count when they are not -- because a column of player ids is a fact about
 // our storage rather than about somebody's team.
-export default memo(function YourGuys({ players, onOpen }: {
+export default memo(function YourGuys({ players, onOpen, refresh = 0 }: {
   /** The saved ids, in their saved order. */
   players: string[]
   /** Opens the picker. Stable (`useCallback` in Dashboard), or the memo
    *  above is decoration. */
   onOpen: () => void
+  /** A counter the page bumps when something might have taught this tab a
+   *  name -- closing the picker, most of all, since opening it is what
+   *  fetches the board these names come from. The names live in a module,
+   *  so nothing else would tell this card to look again. */
+  refresh?: number
 }) {
   const named = useMemo(() => {
     const known = namesFor(players)
     return players.map((id, i) => ({
       id, name: known[i]?.name ?? null, position: known[i]?.position ?? null,
     }))
-  }, [players])
+    // `refresh` is a dependency on purpose: it is the whole mechanism.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [players, refresh])
   const anyNamed = named.some((row) => row.name !== null)
 
   return (

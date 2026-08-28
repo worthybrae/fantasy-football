@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import type { Player } from '../api'
@@ -132,4 +133,37 @@ test('focus starts inside, and Tab cannot leave', async () => {
   last.focus()
   fireEvent.keyDown(document, { key: 'Tab' })
   expect(document.activeElement).toBe(stops[0])
+})
+
+// FOCUS GOES BACK WHERE IT CAME FROM. A dialog that takes focus and returns
+// it to `document.body` leaves the next Tab at the top of the page, and a
+// reader who opened this from the card's own Edit button has to walk the
+// whole dashboard to find that button again.
+function Opener() {
+  const [open, setOpen] = useState(false)
+  return (
+    <>
+      <button type="button" onClick={() => setOpen(true)}>Edit</button>
+      {open && (
+        <FavoritesModal initial={[]} onSaved={() => {}} onClose={() => setOpen(false)} />
+      )}
+    </>
+  )
+}
+
+test('closing hands focus back to whatever opened it', async () => {
+  render(<Opener />)
+  const edit = screen.getByRole('button', { name: 'Edit' })
+  edit.focus()
+  expect(document.activeElement).toBe(edit)
+
+  fireEvent.click(edit)
+  await screen.findByLabelText('Search players')
+  // Inside while it is open...
+  expect(screen.getByRole('dialog').contains(document.activeElement)).toBe(true)
+
+  fireEvent.keyDown(document, { key: 'Escape' })
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  // ...and back on the button afterwards, not on the body.
+  expect(document.activeElement).toBe(edit)
 })
