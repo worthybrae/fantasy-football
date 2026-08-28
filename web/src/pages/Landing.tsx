@@ -145,6 +145,18 @@ function sessionFromHash(hash: string) {
 
 export default function Landing() {
   const [gate, setGate] = useState<Gate>('idle')
+
+  // THE ONE WAY INTO THE CONNECT GATE. Opening it starts two requests at
+  // once -- the connect POST and the progress poll (the effects below) --
+  // and they must carry the same room cookie, so the cookie is fetched
+  // and awaited here before either exists. Every path that wants the gate
+  // (the bookmarklet hash, the Dashboard's join, a retry) goes through
+  // this, so no future path can skip it. A failure is not fatal: the
+  // connect POST mints a cookie of its own, and only the first poll or two
+  // would miss the room.
+  const openConnectGate = useCallback(() => {
+    ensureLiveSession().catch(() => {}).then(() => setGate('connecting'))
+  }, [])
   // The draft the server refused for want of payment, if it did. Held rather
   // than read off `paramsRef` so the paywall names the league the SERVER
   // named -- the two agree today, and a screen that charges for a draft
@@ -273,13 +285,9 @@ export default function Landing() {
     }
     if (params) {
       paramsRef.current = params
-      // The room cookie first, then the gate. Opening the gate starts BOTH
-      // the connect POST and the progress poll (the two effects below), and
-      // they have to carry the same cookie -- see ensureLiveSession. A
-      // failure here is not fatal: the connect POST mints a cookie of its
-      // own, and only the first poll or two would miss the room.
-      ensureLiveSession().catch(() => {}).then(() => setGate('connecting'))
+      openConnectGate()
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // The connect itself: one POST per attempt, and it stays blocked for as
@@ -434,8 +442,8 @@ export default function Landing() {
     paramsRef.current = params
     setError(null)
     setProgress(null)
-    setGate('connecting')
-  }, [])
+    openConnectGate()
+  }, [openConnectGate])
 
   const retry = useCallback(() => {
     setError(null)

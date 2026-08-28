@@ -435,14 +435,16 @@ def test_two_writers_on_one_file_serialise_instead_of_colliding(tmp_path):
     """Two leaguemates' listeners write the same league file's `drafted`
     (api/live.py keeps one room per browser). Unserialised, the second
     DELETE+INSERT lands inside the first's transaction and dies on the
-    primary key; serialised per file, both land and the table ends up as
-    the longer list."""
+    primary key; serialised per file, every write lands whole and the table
+    is always exactly one writer's list, never a torn mix of the two."""
     import threading
     path = str(tmp_path / "league.duckdb")
     conn = get_conn(path)
     a, b = conn.cursor(), conn.cursor()
     start = threading.Barrier(2)
     errors = []
+    short = _live(("p1", 1), ("p2", 2))
+    long = _live(("p1", 1), ("p2", 2), ("p3", 3))
 
     def writer(cur, live):
         start.wait()
@@ -452,23 +454,40 @@ def test_two_writers_on_one_file_serialise_instead_of_colliding(tmp_path):
             except Exception as exc:      # noqa: BLE001 -- what the test is for
                 errors.append(exc)
 
-    ta = threading.Thread(target=writer, args=(a, _live(("p1", 1), ("p2", 2))))
-    tb = threading.Thread(target=writer, args=(b, _live(("p1", 1), ("p2", 2), ("p3", 3))))
+    ta = threading.Thread(target=writer, args=(a, short))
+    tb = threading.Thread(target=writer, args=(b, long))
     ta.start(); tb.start(); ta.join(); tb.join()
     assert errors == []
     rows = conn.execute("SELECT player_id, pick_no FROM drafted ORDER BY pick_no").fetchall()
-    assert rows == [("p1", 1), ("p2", 2), ("p3", 3)]
+    assert rows in ([("p1", 1), ("p2", 2)], [("p1", 1), ("p2", 2), ("p3", 3)])
 
 
-def test_a_shorter_write_never_rolls_the_table_backwards(tmp_path):
-    """A listener a frame behind the other must not shrink the shared table:
-    the longer set stays, and the skipped write reports zero rows."""
+def test_a_shorter_write_never_rolls_the_table_back_past_its_own_floor(tmp_path):
+    """A listener a frame behind ITSELF must not shrink the shared table:
+    with `floor` at its own last write, a shorter non-empty list is skipped
+    and reports zero rows. Same length is a replacement, not a shrink."""
     conn = get_conn(str(tmp_path / "league.duckdb"))
     assert apply_picks(conn, _live(("p1", 1), ("p2", 2), ("p3", 3))) == 3
-    assert apply_picks(conn, _live(("p1", 1), ("p2", 2))) == 0
+    assert apply_picks(conn, _live(("p1", 1), ("p2", 2)), floor=3) == 0
     rows = conn.execute("SELECT player_id FROM drafted ORDER BY pick_no").fetchall()
     assert [r[0] for r in rows] == ["p1", "p2", "p3"]
-    # Same length is a replacement, not a shrink: ESPN still wins on content.
-    assert apply_picks(conn, _live(("p1", 1), ("p2", 2), ("p9", 3))) == 3
+    assert apply_picks(conn, _live(("p1", 1), ("p2", 2), ("p9", 3)), floor=3) == 3
     rows = conn.execute("SELECT player_id FROM drafted ORDER BY pick_no").fetchall()
     assert [r[0] for r in rows] == ["p1", "p2", "p9"]
+    # An empty list is a reset ESPN reported, and still clears.
+    assert apply_picks(conn, LivePicks(pd.DataFrame(columns=COLUMNS), []), floor=3) == 0
+    assert conn.execute("SELECT count(*) FROM drafted").fetchone()[0] == 0
+
+
+def test_a_sessions_first_write_replaces_whatever_a_previous_draft_left(tmp_path):
+    """The floor is the caller's own, never the table's. A league file that
+    still holds thirty picks from last time (reconnects do not clear it,
+    and POST /api/drafted writes it too) must not freeze a new session
+    whose first fold has three: the three land."""
+    conn = get_conn(str(tmp_path / "league.duckdb"))
+    stale = _live(*[(f"old{i}", i) for i in range(1, 31)])
+    assert apply_picks(conn, stale) == 30
+    fresh = _live(("p1", 1), ("p2", 2), ("p3", 3))
+    assert apply_picks(conn, fresh, floor=None) == 3
+    rows = conn.execute("SELECT player_id FROM drafted ORDER BY pick_no").fetchall()
+    assert [r[0] for r in rows] == ["p1", "p2", "p3"]

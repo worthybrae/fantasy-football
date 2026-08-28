@@ -289,6 +289,49 @@ def test_a_new_cookie_taking_the_same_seat_evicts_the_old_room(tmp_path, monkeyp
         _stop_all([a, b])
 
 
+def test_a_seat_whose_listener_will_not_stop_refuses_the_new_room(tmp_path, monkeypatch):
+    """If the old room's listener does not exit in time its thread may still
+    be using its league connection, so the new connect must fail rather
+    than drop the room and reopen the same single-writer file underneath
+    a live thread. Same 503 as the same-cookie supersede path."""
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    release = threading.Event()
+    seen = []
+
+    def stubborn(listener, league_id, team_id, swid, token, on_change=None,
+                 stop_event=None, on_activity=None, on_socket=None):
+        seen.append(league_id)
+        release.wait(timeout=30)          # ignores stop_event on purpose
+    monkeypatch.setattr("api.live.run_socket_listener", stubborn)
+    monkeypatch.setattr("api.live.LISTENER_STOP_TIMEOUT", 0.2)
+    from api.main import create_app
+    app = create_app(path)
+    a, b = _client(app), _client(app)
+    try:
+        _connect(a, "1", team_id="2")
+        old_sid = a.cookies.get(SID_COOKIE)
+        # The page's order: the room cookie first, then the connect. A cookie
+        # minted by a connect that then fails does not reach the browser (an
+        # HTTPException's response is built fresh), which is one more reason
+        # the client asks for it up front.
+        assert b.post("/api/live/session").json() == {"sid_set": True}
+        resp = b.post("/api/live/connect-token", json={
+            "leagueId": "1", "teamId": "2", "swid": "{X}",
+            "token": "tok-1", "season": "2026"})
+        assert resp.status_code == 503, resp.text
+        assert "did not stop" in resp.json()["detail"]
+        assert app.state.live_registry.get(old_sid) is not None
+        assert app.state.live_registry.get(old_sid).state["listener"] is not None
+        assert a.get("/api/live/state").json()["active"] is True
+        assert len(seen) == 1, "no second socket was opened for the seat"
+        progress = b.get("/api/live/connect-progress").json()
+        assert progress["phase"] == "failed"
+    finally:
+        release.set()
+        _stop_all([a, b])
+
+
 def test_live_settings_follow_the_cookie(tmp_path, monkeypatch):
     app, seen, stops = _app(tmp_path, monkeypatch)
     a = _client(app)

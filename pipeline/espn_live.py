@@ -4,6 +4,7 @@ Pure translation: no network and no database beyond reading the crosswalk.
 The poller in `api/live.py` supplies the payload and writes the result, which
 keeps the part with all the edge cases testable against a recorded fixture.
 """
+import os
 import threading
 from typing import NamedTuple
 
@@ -110,7 +111,7 @@ def translate(payload: dict, crosswalk: dict) -> LivePicks:
     return LivePicks(pd.DataFrame(rows, columns=COLUMNS), unmapped)
 
 
-def apply_picks(conn, live: LivePicks) -> int:
+def apply_picks(conn, live: LivePicks, floor: "int | None" = None) -> int:
     """Make `drafted` equal ESPN's pick list exactly. Returns rows written.
 
     Wholesale replacement, never a patch. If our table and ESPN's list
@@ -120,6 +121,13 @@ def apply_picks(conn, live: LivePicks) -> int:
     Replacing means the table is always exactly what ESPN says.
 
     That is also the reconciliation rule for the manual `D` hotkey: ESPN wins.
+
+    `floor` is how many picks THIS caller last wrote, or None on its first
+    write. A non-empty list shorter than the caller's own last write is a
+    fold that fell a frame behind and is skipped (0 returned) rather than
+    rolling the table back; see the note below. The floor is the caller's
+    own, never the table's: rows a previous draft left in this league's
+    file are exactly what a session's first write must replace.
 
     Validation (null pick_no) runs before any mutation. DELETE and INSERTs are
     wrapped in an explicit transaction so the table either fully becomes ESPN's
@@ -138,21 +146,23 @@ def apply_picks(conn, live: LivePicks) -> int:
     # second DELETE+INSERT lands inside the first's transaction and fails on
     # the primary key, and that room's listener dies with it. The lock is
     # per database path -- rooms in different leagues never wait on each
-    # other -- and while it is held a write that would leave FEWER picks
-    # than the table already holds is skipped: the two sockets hear the same
-    # draft, so a shorter list is a listener that is a frame or two behind,
-    # and a lagging writer must not roll the shared table backwards. An
-    # EMPTY list is the one exception: nothing lags to zero -- on_change only
-    # fires when the count moved, and a listener's first fold after a JOIN
-    # replay already carries the picks -- so an empty list is ESPN saying
-    # the draft has no picks (a reset), and the table is cleared as before.
-    # The cost, stated: a reset to fewer-but-not-zero picks is no longer
-    # reflected by a wholesale replace; a stop and reconnect is the way
-    # back, and that is rare enough to accept for the isolation.
+    # other -- and a write shorter than the CALLER'S OWN last write is
+    # skipped: the two sockets hear the same draft, so a shorter list is
+    # this listener a frame or two behind itself, and a lagging writer must
+    # not roll the shared table backwards. Measured against the caller's
+    # floor and not the table's row count, because the table can hold what
+    # a previous draft in this league file left behind (a reconnect does not
+    # clear it, and POST /api/drafted writes it too) and a session's first
+    # write must replace that rather than freeze against it. An EMPTY list
+    # is the one exception: nothing lags to zero -- on_change only fires
+    # when the count moved, and a listener's first fold after a JOIN replay
+    # already carries the picks -- so an empty list is ESPN saying the draft
+    # has no picks (a reset), and the table is cleared as before. The cost,
+    # stated: a reset to fewer-but-not-zero picks that one listener has
+    # already written past is no longer reflected until it reconnects.
+    if not live.rows.empty and floor is not None and len(live.rows) < floor:
+        return 0
     with _write_lock(conn):
-        existing = conn.execute("SELECT count(*) FROM drafted").fetchone()[0]
-        if not live.rows.empty and len(live.rows) < existing:
-            return 0
         try:
             conn.execute("BEGIN TRANSACTION")
             conn.execute("DELETE FROM drafted")
@@ -175,7 +185,7 @@ _WRITE_LOCKS_GUARD = threading.Lock()
 
 
 def _write_lock(conn) -> threading.Lock:
-    key = tuple(sorted(str(r[2]) for r in
+    key = tuple(sorted(os.path.realpath(str(r[2])) for r in
                        conn.execute("PRAGMA database_list").fetchall()))
     with _WRITE_LOCKS_GUARD:
         lock = _WRITE_LOCKS.get(key)

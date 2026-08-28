@@ -1950,7 +1950,7 @@ def register_live_routes(app, conn, db_path):
                         "listener_error": None, "recompute_error": None,
                         "restore_error": None, "seat": None})
 
-    def _evict_seat(s, league_id, team_id) -> list:
+    def _evict_seat(s, league_id, team_id, progress=None) -> list:
         """Stop every OTHER room holding the same ESPN seat, so one seat has
         one socket.
 
@@ -1962,9 +1962,23 @@ def register_live_routes(app, conn, db_path):
         -- a restart must not bring the evicted room back. Returns the sids
         evicted. A connect with no team id (the browser-observer path with a
         bare waiting-room url) holds no identifiable seat and evicts nobody.
+
+        A room whose listener will not stop in time is NOT dropped: its
+        thread is still alive and may be using its league connection, so
+        dropping it would leak that connection with no owner while this
+        connect reopened the same single-writer file. The connect fails
+        with the same 503 the same-cookie supersede path answers (see
+        _connect_work's reset stage), and the old room stays where it is.
+
+        THE WINDOW, stated rather than hidden: a room publishes its seat
+        only after _connect_work has built its session, so two connects for
+        one seat that overlap inside that build do not see each other here
+        and both start a socket. Closing it means claiming the seat before
+        the build and releasing it on failure; not done now.
         """
         if league_id is None or team_id is None:
             return []
+        progress = progress or _NO_PROGRESS
         seat = (str(league_id), str(team_id))
         evicted = []
         for sid in registry.sids():
@@ -1976,7 +1990,19 @@ def register_live_routes(app, conn, db_path):
             with other.lock:
                 if other.state.get("seat") != seat:
                     continue
-            _stop_listener(other)
+            if not _stop_listener(other):
+                # No key: this room's plan carries a `reset` row only when
+                # it had a listener of its own, so the failure lands on
+                # whichever stage is still open rather than nowhere.
+                progress.fail(
+                    None, "another room for this seat is still running",
+                    hint="Wait a few seconds and click the bookmark again. "
+                         "Two sockets for one team is the one thing this "
+                         "refuses to risk.")
+                raise HTTPException(
+                    status_code=503,
+                    detail="another session for this seat did not stop in "
+                           "time -- try again")
             with other.lock:
                 _clear_room(other)
             try:
@@ -2647,6 +2673,14 @@ def register_live_routes(app, conn, db_path):
         # check rather than raising on the frame-reading thread.
         total_picks = ((getattr(session.settings, "teams", 0) or 0)
                        * (getattr(session.settings, "rounds", 0) or 0))
+        # How many picks THIS listener last wrote to `drafted`, the floor
+        # apply_picks holds its next write to (see its docstring): a fold
+        # that is a frame behind this listener's own last one must not roll
+        # the shared table back, while its FIRST write always lands -- the
+        # table may hold rows from a previous draft in this league's file,
+        # which a reconnect does not clear and which are exactly what this
+        # session must replace.
+        written = {"rows": None}
 
         # The recompute request queue -- coalescing, depth one. search_pick
         # (this engine's predecessor) was seconds-slow; running it inline in
@@ -2855,7 +2889,8 @@ def register_live_routes(app, conn, db_path):
                 c2 = work_conn.cursor()
                 try:
                     live = listener.picks()
-                    apply_picks(c2, live)
+                    if apply_picks(c2, live, floor=written["rows"]) or live.rows.empty:
+                        written["rows"] = len(live.rows)
                     made = c2.execute(PICKS_MADE_SQL).fetchone()[0]
                 finally:
                     c2.close()
@@ -3930,7 +3965,7 @@ def register_live_routes(app, conn, db_path):
 
         team_id = _team_id_from_url(body.url)
         season = _season_from_url(body.url)
-        _evict_seat(s, league_id, team_id)
+        _evict_seat(s, league_id, team_id, progress)
         work_conn, league_conn, session = _connect_work(
             s, progress, league_id, team_id, season)
         with s.lock:
@@ -4039,7 +4074,7 @@ def register_live_routes(app, conn, db_path):
             raise HTTPException(status_code=422, detail="teamId must be numeric")
         progress.ok("token", f"team {team_id} · season {body.season or '?'}")
 
-        _evict_seat(s, body.leagueId, team_id)
+        _evict_seat(s, body.leagueId, team_id, progress)
         work_conn, league_conn, session = _connect_work(
             s, progress, body.leagueId, team_id, body.season)
 
@@ -4211,8 +4246,8 @@ def register_live_routes(app, conn, db_path):
         progress.ok("token", f"restored · team {record['team_id']} · "
                              f"season {record['season'] or '?'}")
         progress.fact(restored=True)
-        _evict_seat(s, league_id, record["team_id"])
         try:
+            _evict_seat(s, league_id, record["team_id"], progress)
             work_conn, league_conn, session = _connect_work(
                 s, progress, league_id, int(record["team_id"]), record["season"])
         except Exception as exc:      # noqa: BLE001 -- this is a bare daemon
