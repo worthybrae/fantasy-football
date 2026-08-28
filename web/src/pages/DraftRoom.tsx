@@ -6,7 +6,8 @@ import { fetchBoard, fetchLiveState, fetchPlayers, selectPlayer, setAutodraft,
          type RosterPlayer } from '../api'
 import ClockPanel from '../components/draft/ClockPanel'
 import RosterPanel, { type RosterSlot } from '../components/draft/RosterPanel'
-import TopThree from '../components/draft/TopThree'
+import TargetCards from '../components/draft/TargetCards'
+import PlanPanel from '../components/draft/PlanPanel'
 import AvailableList from '../components/draft/AvailableList'
 import ConfirmPick, { type PickStatus } from '../components/draft/ConfirmPick'
 import Paywall from '../components/Paywall'
@@ -14,7 +15,6 @@ import PickTicker from '../components/draft/PickTicker'
 import PlayerOverlay, { type OverlayTarget } from '../components/draft/PlayerOverlay'
 import { seedFromBoardPlayer, seedFromCandidate, seedFromPlayer } from '../components/draft/playerSeed'
 import DraftBoardGrid from '../components/DraftBoardGrid'
-import { nextPickFor } from '../components/draft/pickOrder'
 import { Logo } from '../components/Logo'
 import { useDocumentMeta } from '../lib/documentMeta'
 
@@ -209,7 +209,7 @@ export default function DraftRoom() {
   // going -- held here (not inside ConfirmPick) because a poll landing
   // mid-confirm must not lose track of what's being sent, and because the
   // 'sending' request itself (selectPlayer) has to survive whatever
-  // AvailableList/TopThree re-render around it. null means no dialog is
+  // AvailableList/TargetCards re-render around it. null means no dialog is
   // open at all; ConfirmPick only ever mounts while this is non-null (see
   // the render below), so it never has to handle a null candidate itself.
   const [confirming, setConfirming] = useState<LiveCandidate | null>(null)
@@ -357,7 +357,7 @@ export default function DraftRoom() {
 
   // The tab group's hint (see the mock), now riding in the top bar beside
   // the tabs themselves. This is also `players`' only read site in this
-  // task: the join table is fetched here for Task 8's AvailableList/TopThree
+  // task: the join table is fetched here for AvailableList/TargetCards
   // to consume once they exist, but nothing else in this shell needs a
   // player's name or team yet.
   const playerCount = Object.keys(players).length
@@ -459,8 +459,8 @@ export default function DraftRoom() {
     ? state.candidates_as_of_pick + 1
     : null
 
-  // The same two pick numbers the old banner named, handed to TopThree to
-  // render on its own header row instead of as a strip of its own (see the
+  // The same two pick numbers the old banner named, handed to TargetCards
+  // to render on its own header row instead of as a strip of its own (see the
   // comment where that banner used to be). `state.picks_made + 1` rather
   // than `thisPickNo`, deliberately: `thisPickNo` is null once the draft is
   // over, and a recompute outstanding at that moment is still recomputing
@@ -469,40 +469,27 @@ export default function DraftRoom() {
     ? { forPick: state.picks_made + 1, listedForPick: rankedForPickNo }
     : null
 
-  // The pick the ranked list was actually measured against, named exactly
-  // as the server reports it. NOT derived here from `nextPickFor` any more:
-  // that answers "which pick do I take next", and since the horizon skips
-  // turns too close to carry any signal (a wheel, or the 1-pick gap that
-  // put a kicker 6th at pick 1 -- see scoring/draft_sim.horizon_picks) the
-  // two genuinely differ. Deriving it client-side would caption the list
-  // with a pick it was not measured against, which is worse than saying
-  // nothing. ClockPanel keeps its own `nextPickFor` because "when do I pick
-  // next" really is that question.
-  //
-  // null -> TopThree drops the clause entirely rather than guessing:
-  // `horizon_pick` is null both before any gain-ranked list exists and when
-  // the horizon ran off the end of the draft, and the second case is the
-  // one `horizon_is_end_of_draft` names instead of inventing a pick number.
-  const horizonLabel = state?.active
-    ? state.horizon_is_end_of_draft
-      ? 'the end of the draft'
-      : state.horizon_pick !== null ? `pick ${state.horizon_pick}` : null
-    : null
+  // NEITHER A HORIZON NOR A NEXT-PICK LABEL IS COMPUTED HERE ANY MORE. Both
+  // used to be sentences this page built to caption figures measured
+  // somewhere else -- the horizon the old ranking was priced against, and
+  // the turn survival was counted to. The payload now names its own pick:
+  // every candidate row carries `lasts_at_pick`, and every plan turn carries
+  // its `pick_no`, so the cards and the table caption themselves off the
+  // same figure they print. ClockPanel keeps its own `nextPickFor` because
+  // "when do I pick next" really is a question about the schedule.
 
-  // The reader's own next turn, which is the pick the LASTS figure is
-  // measured to now. `nextPickFor` scans strictly past the pick it is given,
-  // so handing it the pick on the clock answers "my turn AFTER this one"
-  // whenever that pick is mine -- which is exactly the turn the server
-  // measures when it calls survival with `on_the_clock`. ClockPanel makes
-  // its own identical call rather than sharing this one: there it answers a
-  // different question ("when do I pick next") that happens to be the same
-  // arithmetic, and tying them together would mean one caption moving
-  // because the other's question changed.
-  const nextPickLabel = state?.active && state.my_slot !== null
-      && state.settings?.teams
-    ? `pick ${nextPickFor(state.picks_made + 1, state.my_slot,
-                          state.settings.teams as number)}`
-    : null
+  // The plan: the reader's remaining turns, each with a target and two
+  // alternates. `?? []` because a server one deploy behind this field omits
+  // the key -- see LiveState's own comment.
+  const plan = state?.active ? state.plan ?? [] : []
+
+  // Who the reader starred, read off the list the server already marked
+  // rather than fetched again here: the room's candidates carry `favourite`,
+  // and the plan panel needs the same answer for players it names.
+  const favouriteIds = useMemo(
+    () => new Set((state?.candidates ?? [])
+      .filter((c) => c.favourite).map((c) => c.player_id)),
+    [state?.candidates])
 
   // "Roster after" for the confirm dialog: my_roster's current length plus
   // this pick, over the room's own total slot count (`slots`, already built
@@ -578,6 +565,23 @@ export default function DraftRoom() {
       seed: { name: rp.name, position: rp.position, team: null, bye: null, rookie: false, figures: [] },
     })
   }
+
+  // The plan panel's own click, which knows only an id. The candidate row
+  // is the richer seed (it carries the two figures the plan is arguing
+  // from), so it is tried first and the join table is the fallback -- a
+  // planned target for a turn four rounds out can legitimately be somebody
+  // the current candidate list has already dropped.
+  const handleOpenPlanPlayer = useCallback((id: string) => {
+    const candidate = state?.active
+      ? state.candidates.find((c) => c.player_id === id)
+      : undefined
+    if (candidate) {
+      setOpenPlayer({ playerId: id, seed: seedFromCandidate(candidate, players[id]) })
+      return
+    }
+    const player = players[id]
+    if (player) setOpenPlayer({ playerId: id, seed: seedFromPlayer(player) })
+  }, [state, players])
 
   // Same reason as handleOpenCandidate. Captures nothing but state setters,
   // which React guarantees are stable, so this identity never changes.
@@ -852,8 +856,8 @@ export default function DraftRoom() {
 
       {/* A pick the socket confirmed that the crosswalk could not resolve to
           a board player. He is off the board in ESPN and still sitting in the
-          ranked list here, recommendable, with `survive_pct` counting him as
-          available. api/live.py has served these since Task 5 and the room
+          list here, recommendable, and counted as available by the Lasts
+          column. api/live.py has served these since Task 5 and the room
           rendered them nowhere -- a regression against the deleted
           LiveDraft.tsx, which had exactly this banner. Spec section 6 asks
           for it by name as the surface a crosswalk-gap 400 should also
@@ -879,8 +883,8 @@ export default function DraftRoom() {
 
       {/* The "recomputing for pick N -- the list below is still for pick M"
           banner used to render here, between the alert strip and
-          `.draft-body`. It is now TopThree's own header row (see `recompute`
-          below and TopThree's prop comment): a banner that mounts and
+          `.draft-body`. It is now TargetCards' own header row (see
+          `recompute` below and that component's prop comment): a banner that mounts and
           unmounts between polls adds a strip of height and takes it away
           again, and everything below it -- including the Draft button the
           cursor is already resting on -- moves with it. Same information,
@@ -922,7 +926,7 @@ export default function DraftRoom() {
             </div>
           ) : tab === 'available'
             ? (
-              // TopThree ABOVE AvailableList's own filter row/table --
+              // TargetCards ABOVE AvailableList's own filter row/table --
               // the mock draws the filter row first (search+pills, then
               // top three, then the table). Deliberately not matched:
               // under a 30-second clock the recommendation is what the
@@ -933,13 +937,12 @@ export default function DraftRoom() {
               // mock, not an oversight -- do not "fix" this back to
               // match the mock's own ordering.
               <>
-                  <TopThree
+                <TargetCards
+                  plan={plan}
                   candidates={state?.candidates ?? []}
                   players={players}
                   onDraft={handleDraftClick}
                   isMyTurn={isMyTurn && !locked}
-                  horizonLabel={horizonLabel}
-                  nextPickLabel={nextPickLabel}
                   pickNo={thisPickNo}
                   settings={state?.settings}
                   recompute={recompute}
@@ -1004,7 +1007,18 @@ export default function DraftRoom() {
                 onSetAutodraft={handleSetAutodraft}
               />
               {state.active ? (
-                <RosterPanel slots={slots} onOpenPlayer={handleOpenRosterPlayer} />
+                <>
+                  <RosterPanel slots={slots} onOpenPlayer={handleOpenRosterPlayer} />
+                  {/* UNDER THE ROSTER, because it is the same question one
+                      step further out: the roster is the holes, the plan is
+                      how they get filled. */}
+                  <PlanPanel
+                    plan={plan}
+                    players={players}
+                    favourites={favouriteIds}
+                    onOpenPlayer={handleOpenPlanPlayer}
+                  />
+                </>
               ) : (
                 <p className="rail-empty draft-rail-loading">No roster to show.</p>
               )}

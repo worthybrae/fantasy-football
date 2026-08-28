@@ -2,9 +2,9 @@
 // their own -- the same two functions, byte for byte, with a comment in
 // DraftRoom pointing at ClockPanel's as the precedent. That was tolerable
 // while both copies only ever labelled a figure; it stopped being tolerable
-// once the two answered the same question ("which pick is `gain_now`
-// measured against?") in two places at once, because a divergence between
-// them is then a wrong number on screen, not a style nit.
+// once the two answered the same question ("which pick am I waiting for?")
+// in two places at once, because a divergence between them is then a wrong
+// number on screen, not a style nit.
 
 // Overall pick number (1-based) for `slot` (1-based) in round `round`
 // (0-based), snake order: forward in even rounds, reversed in odd. Mirrors

@@ -30,7 +30,7 @@
 .lr-rank { display: grid; grid-template-columns: 36px 1fr; gap: 10px; align-items: start; }
 .lr-rank-n { font-size: 22px; color: var(--accent); line-height: 1.1; }
 /* min-width: 0 is the grid-item counterpart of the flex one in App.css
-   (.draft-main, .top3-recompute): without it a long team or manager name
+   (.draft-main, .target-recompute): without it a long team or manager name
    refuses to shrink below its content and pushes the card past 100vw. */
 .lr-rank-who { min-width: 0; }
 .lr-rank-team { margin: 0; font-weight: 600; overflow-wrap: anywhere; }

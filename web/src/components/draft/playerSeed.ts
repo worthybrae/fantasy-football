@@ -1,5 +1,6 @@
 import type { BoardPlayer, LiveCandidate, Player } from '../../api'
 import type { ProfileSeed } from '../PlayerProfile'
+import { needIsOpenSlot, needLabel } from './need'
 
 // What the room already knows about a player, turned into the header +
 // figure row PlayerProfile paints on the frame the overlay opens (see
@@ -7,9 +8,10 @@ import type { ProfileSeed } from '../PlayerProfile'
 // measured 3.5s, and the pick clock is 30).
 //
 // Three builders because the room holds three different rows about the same
-// player and they carry different things: the ranked list's LiveCandidate
-// (gain vs waiting, survival, which roster slot he fills -- the numbers the
-// pick is actually made on, but no name or team at all), the board grid's
+// player and they carry different things: the available list's LiveCandidate
+// (whether he lasts, what the edge is, which roster slot he fills -- the
+// numbers the pick is actually made on, but no name or team at all), the
+// board grid's
 // BoardPlayer (a landed pick: what he cost against ADP, his VOR, his
 // projection), and the one-time /api/players join table's Player (identity,
 // tier, ADP, the model's own rank). Each seeds what it knows and no more --
@@ -41,13 +43,6 @@ function fmtTier(tier: number | null | undefined): string {
   return tier === null || tier === undefined ? '—' : `T${tier}`
 }
 
-// Same rule as `.confirm-figure.is-open` -- FLEX
-// counts as a starting slot, `BENCH` and gain.py's `—` do not. (The
-// available table's own copy of this rule went with its Roster slot column.)
-function fillsIsOpenSlot(fills: string | null): boolean {
-  return fills !== null && fills !== 'BENCH' && fills !== '—'
-}
-
 // A row of the ranked available list (the Available tab, and the top three
 // cards above it). `player` is the join-table row for the same id, which may
 // legitimately be missing: the list is keyed on player_id and renders that
@@ -64,21 +59,19 @@ export function seedFromCandidate(c: LiveCandidate, player: Player | undefined):
     // for word -- see AvailableList.tsx's comment for what each means.
     figures: [
       { label: 'Proj', value: String(Math.round(c.proj_points)) },
-      { label: 'Over replacement', value: fmtSigned(c.vor_points) },
-      { label: 'Gain vs waiting', value: fmtSigned(c.gain_now) },
-      // Deliberately not "Lasts to pick N" here: the horizon that number is
-      // measured against is a sentence DraftRoom builds, and a figure
-      // caption in a 6-column strip has no room for it. The list this
-      // overlay opened from carries the labelled version.
-      { label: 'He lasts', value: c.survive_pct === null ? '—' : `${Math.round(c.survive_pct)}%` },
-      { label: 'Roster slot', value: c.fills ?? '—', accent: fillsIsOpenSlot(c.fills) },
-      { label: 'ADP', value: fmtRank(player?.market_rank ?? null) },
+      { label: 'Edge', value: fmtSigned(c.edge_pts) },
+      // Deliberately not "Lasts to pick N" here: the pick that number is
+      // measured to is one the list beside this overlay already names, and
+      // a figure caption in a 6-column strip has no room for it.
+      { label: 'He lasts', value: c.lasts_pct === null ? '—' : `${Math.round(c.lasts_pct)}%` },
+      { label: 'Roster slot', value: needLabel(c.need), accent: needIsOpenSlot(c.need) },
+      { label: 'ADP', value: fmtRank(c.espn_adp) },
       { label: 'Tier', value: fmtTier(player?.tier) },
     ],
   }
 }
 
-// A landed pick on the snake board. No gain/survival/fills: he is already
+// A landed pick on the snake board. No lasts/edge/need: he is already
 // drafted, so there is no pick to gain anything by, and inventing those
 // three from the ranked list would be describing a decision nobody is
 // making. `value` is signed against ADP -- positive means he fell (a
@@ -118,7 +111,12 @@ export function seedFromPlayer(p: Player): ProfileSeed {
       { label: 'Rank', value: `#${p.rank}` },
       { label: 'Tier', value: fmtTier(p.tier) },
       { label: 'ADP', value: fmtRank(p.market_rank) },
-      { label: 'Edge', value: fmtSigned(p.edge) },
+      // "vs market", not "Edge". The room now spends the word Edge on
+      // points -- what taking a player now is worth against waiting -- and
+      // this is the older, unrelated figure: how many rank places the
+      // market and the board disagree by. Two meanings for one label in
+      // one figure strip is worse than a longer caption.
+      { label: 'vs market', value: fmtSigned(p.edge) },
     ],
   }
 }

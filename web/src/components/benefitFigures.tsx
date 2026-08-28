@@ -2,7 +2,7 @@ import type { ReactNode } from 'react'
 import type { LiveCandidate, LiveMock, LiveSettings, MarketSlot, Player } from '../api'
 import { TurnBar } from './TurnBar'
 import { CellTip, loadProfile } from './draft/CellTip'
-import TopThree from './draft/TopThree'
+import TargetCards from './draft/TargetCards'
 import ScheduleRanks from './profile/ScheduleRanks'
 import ComparableSeasons from './profile/ComparableSeasons'
 import VegasCard from './profile/VegasCard'
@@ -134,17 +134,23 @@ function Recommendation({ room, profile }: {
     player_id: row.player_id,
     position: row.position ?? profile.header.position,
     proj_points: row.proj_points ?? 0,
-    vor_points: row.vor_points ?? 0,
-    gain_now: row.gain_now,
-    gain_next: row.gain_next,
-    edge_next: row.edge_next,
-    survive_pct: row.survive_pct,
-    fills: row.fills,
+    espn_rank: row.espn_rank ?? null,
+    espn_pos_rank: row.espn_pos_rank ?? null,
+    espn_adp: row.espn_adp ?? null,
+    // See DemoRoom's own copy of this mapping: `adp` is the market's
+    // answer, so it lands in the consensus field and nowhere else.
+    market_rank: row.market_rank ?? row.adp ?? null,
+    lasts_pct: row.lasts_pct ?? null,
+    lasts_at_pick: row.lasts_at_pick ?? null,
+    edge_pts: row.edge_pts ?? null,
+    need: row.need ?? null,
+    favourite: false,
     rank: row.rank ?? 1,
   }
   const pick = (room?.picks_made ?? 0) + 1
   return (
-    <TopThree
+    <TargetCards
+      plan={[]}
       candidates={[candidate]}
       // One entry is all it reads: `players[id]`, for the name, the face,
       // the meters and the market ranks. `ProfileHeader` IS a board row
@@ -152,7 +158,6 @@ function Recommendation({ room, profile }: {
       players={{ [row.player_id]: profile.header as unknown as Player }}
       onDraft={() => { /* nobody drafts from a landing page */ }}
       isMyTurn={false}
-      nextPickLabel={room?.on_the_clock ? `pick ${pick + (room.teams ?? 8)}` : null}
       pickNo={pick}
       settings={(room?.settings ?? null) as LiveSettings | null}
       recompute={null}

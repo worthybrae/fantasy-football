@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import {
-  buildLeagueReport, fetchLeagueReports, mintDraftToken,
-  type ReportSummary, type TokenConnectParams, type UpcomingDraft,
+  buildLeagueReport, fetchFavorites, fetchLeagueReports, fetchPlayers,
+  mintDraftToken,
+  type Player, type ReportSummary, type TokenConnectParams, type UpcomingDraft,
 } from '../api'
 import { calendarLabel, countdownTo, secondsUntil } from '../lib/countdown'
+import FavoritesPicker from './FavoritesPicker'
 import { Logo } from './Logo'
 import MockLobby from './MockLobby'
 
@@ -109,6 +111,38 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
   // paying it once a minute per league costs nothing worth guarding.
   // Undefined until the first read lands, so the card shows no report link
   // rather than a wrong one.
+  // YOUR GUYS. Three states, and they are three different panels:
+  //   null   -- there is no account session to read them from (the server's
+  //             own 401), or the read failed. No panel at all: this page
+  //             cannot offer to save something it cannot load.
+  //   []     -- signed in, nothing picked yet. The onboarding picker.
+  //   [...]  -- picked. The compact card, with a way back into the picker.
+  // Read once per mount rather than on the league poll: a favourites list
+  // changes when somebody changes it, which is on this page, in front of us.
+  const [favorites, setFavorites] = useState<string[] | null>(null)
+  const [editing, setEditing] = useState(false)
+  // The board, fetched only once there is a favourites panel to spend it on
+  // -- it is a 250-row payload and a dashboard with no session for it has no
+  // use for a single row.
+  const [board, setBoard] = useState<Player[]>([])
+
+  useEffect(() => {
+    let cancelled = false
+    fetchFavorites()
+      .then((ids) => { if (!cancelled) setFavorites(ids) })
+      .catch(() => { if (!cancelled) setFavorites(null) })
+    return () => { cancelled = true }
+  }, [])
+
+  useEffect(() => {
+    if (favorites === null || board.length > 0) return
+    let cancelled = false
+    fetchPlayers()
+      .then((rows) => { if (!cancelled) setBoard(rows) })
+      .catch(() => { /* the panel says it is still loading, and stays honest */ })
+    return () => { cancelled = true }
+  }, [favorites, board.length])
+
   const [reports, setReports] = useState<Record<string, ReportSummary[]>>({})
   const [buildingFor, setBuildingFor] = useState<string | null>(null)
   useEffect(() => {
@@ -376,6 +410,60 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
             </ul>
           )}
         </section>
+
+        {/* YOUR GUYS, between the leagues and the lobby. Above the mock
+            rooms deliberately: this is a thing to do once, before a draft,
+            and a reader who has not done it should meet it before he meets
+            twenty rooms he could join instead. */}
+        {favorites !== null && (
+          <section className="db-sec">
+            <div className="db-sec-head">
+              <h2 className="db-sec-title">Your guys</h2>
+              {favorites.length > 0 && !editing && (
+                <span className="mono db-sec-count">{favorites.length}</span>
+              )}
+            </div>
+            {board.length === 0 ? (
+              <p className="db-empty">Loading the board…</p>
+            ) : editing || favorites.length === 0 ? (
+              <FavoritesPicker
+                players={board}
+                initial={favorites}
+                onSaved={(ids) => { setFavorites(ids); setEditing(false) }}
+                onCancel={favorites.length > 0 ? () => setEditing(false) : undefined}
+              />
+            ) : (
+              <div className="db-card db-fav-card">
+                <ul className="db-fav-list">
+                  {favorites.map((id, i) => {
+                    const player = board.find((p) => p.player_id === id)
+                    return (
+                      <li key={id} className="db-fav-row">
+                        <span className="db-fav-ord mono">{i + 1}</span>
+                        {player && (
+                          <span className={`pos-badge pos-badge-${player.position.toLowerCase()}`}>
+                            {player.position}
+                          </span>
+                        )}
+                        <span className="db-fav-name">{player?.name ?? id}</span>
+                      </li>
+                    )
+                  })}
+                </ul>
+                <div className="db-fav-foot">
+                  <p className="db-fav-note">
+                    The draft room stars them, and the plan reaches for them a
+                    round earlier than it would reach for anybody else.
+                  </p>
+                  <button type="button" className="db-go db-league-go db-go-view"
+                          onClick={() => setEditing(true)}>
+                    Edit
+                  </button>
+                </div>
+              </div>
+            )}
+          </section>
+        )}
 
         <MockLobby
           onOpen={onOpenRoom}

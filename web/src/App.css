@@ -574,7 +574,7 @@ td:first-child {
    "recomputing for pick N" strip) is gone on purpose, not by oversight: a
    banner that mounts and unmounts between polls moves everything below it,
    Draft button included, mid-pick. That state now renders inside
-   `.top3-head` instead -- see `.top3-recompute` below. Do not reintroduce a
+   `.target-head` instead -- see `.target-recompute` below. Do not reintroduce a
    banner tier for a transient state. */
 .draft-alert-banner {
   flex-shrink: 0;
@@ -1489,6 +1489,186 @@ button.roster-row:focus-visible {
 
 /* -- available list toolbar: search + position pills -- */
 
+/* -- the plan, under the roster (PlanPanel.tsx) --------------------------
+   Same panel furniture as the roster above it -- head, caption, count, a
+   list of rows -- because it answers the next question in the same
+   sentence: these are the holes, and this is how they get filled. */
+
+.plan-panel {
+  /* Shrinks before the roster does and never grows past a third of the
+     rail: the roster is the thing a reader checks every pick, and the plan
+     is what he reads between them. `min-height: 0` is what actually lets it
+     shrink -- a flex item's default `min-height: auto` refuses to go below
+     its content, which would push the rail past the bottom of the room. */
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 42%;
+  border-top: 1px solid var(--border);
+  padding: var(--space-3) var(--space-3) var(--space-4);
+  overflow-y: auto;
+}
+
+.plan-panel-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.plan-panel-count {
+  margin-left: auto;
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+.plan-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.plan-turn {
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-1);
+}
+
+/* The pick number leads, because the plan is a schedule: a reader finds his
+   round first and the name second. */
+.plan-turn-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 5px;
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.plan-pick {
+  color: var(--accent);
+}
+
+.plan-round {
+  margin-left: auto;
+}
+
+.plan-target {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+}
+
+button.plan-target {
+  cursor: pointer;
+}
+
+button.plan-target:hover .plan-name,
+button.plan-target:focus-visible .plan-name {
+  color: var(--accent);
+}
+
+button.plan-target:focus-visible {
+  outline: 1px solid var(--accent-border);
+  outline-offset: 2px;
+}
+
+.plan-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+.plan-star {
+  margin-right: 3px;
+  color: var(--accent);
+}
+
+.plan-nums {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+}
+
+.plan-lasts {
+  color: var(--text-2);
+}
+
+.plan-edge {
+  color: var(--text-3);
+}
+
+.plan-reasons {
+  list-style: none;
+  margin: 5px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* One line per reason, ellipsized: the rail is a column, and the full
+   sentence is on the card when this turn comes round. */
+.plan-reason {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  line-height: 1.35;
+  color: var(--text-3);
+}
+
+.plan-reason.is-pro::before {
+  content: '+ ';
+  color: var(--ok-soft);
+  font-weight: 700;
+}
+
+.plan-reason.is-con::before {
+  content: '− ';
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.plan-alts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 5px;
+  margin-top: 5px;
+  font-size: 10px;
+  color: var(--text-3);
+}
+
+.plan-alts-cap {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 9px;
+}
+
+.plan-alt:not(:last-child)::after {
+  content: ' ·';
+}
+
 .avail-toolbar {
   display: flex;
   align-items: center;
@@ -1572,12 +1752,21 @@ button.roster-row:focus-visible {
    alone. */
 .avail-table th.avail-col-rank,
 .avail-table td.avail-col-rank {
-  width: 40px;
+  /* 54, not 40: the column that used to print a two-digit list position
+     now prints ESPN's rank under a four-letter header, and 40px cut the
+     caret off the end of it. */
+  width: 54px;
   text-align: right;
   padding-right: 10px;
 }
-.avail-col-pos { width: 52px; }
-.avail-col-num { width: 78px; text-align: right; }
+/* Badge plus ESPN's positional rank ("RB 4"), which is 6px more than the
+   badge alone needed. */
+.avail-col-pos { width: 58px; }
+/* 70, down from 78: the redesign added two numeric columns (Edge, and the
+   market's consensus beside ESPN's ADP), and the name column is the one
+   that pays for every other column's fixed width. Still wide enough for
+   "100%" and "-12" with the sort caret beside the header. */
+.avail-col-num { width: 70px; text-align: right; }
 /* Wide enough for 18 pips (6px + 1px gap each, MissedPips in
    AvailableList.tsx) plus a two-digit number and the cell's own 20px of
    padding -- 125 + 6 + 16 + 20 = 167, rounded up for breathing room. Left-
@@ -1868,6 +2057,22 @@ button.roster-row:focus-visible {
    the one a Tab press reaches. The row's own hover tint (the global
    `tbody tr:hover`) is what says the rest of it is clickable too. */
 
+/* The favourite's star, inside the name button so it moves with the name
+   and never sits in a column of its own -- fourteen columns is enough. */
+.avail-star {
+  margin-right: 3px;
+  font-size: 10px;
+  color: var(--accent);
+}
+
+/* ESPN's positional rank, riding with the position badge: "RB 4". Quiet,
+   because the badge is the thing being scanned and this is its detail. */
+.avail-posrank {
+  margin-left: 4px;
+  font-size: 10px;
+  color: var(--text-3);
+}
+
 .avail-name {
   font-size: var(--text-sm);
   font-weight: 500;
@@ -1961,35 +2166,35 @@ button.roster-row:focus-visible {
   opacity: 0.6;
 }
 
-/* -- top three -- */
+/* -- the plan's cards for one turn (TargetCards.tsx) -- */
 
-.top3 {
+.target {
   flex-shrink: 0;
   padding: var(--space-3) var(--space-4) 0;
 }
 
-.top3-head {
+.target-head {
   display: flex;
   align-items: baseline;
   gap: var(--space-2);
   margin-bottom: var(--space-2);
 }
 
-.top3-cap {
+.target-cap {
   color: var(--accent);
 }
 
-.top3-hint {
+.target-hint {
   font-size: var(--text-xs);
   color: var(--text-3);
 }
 
-/* The recompute indicator, always in the DOM (TopThree.tsx renders it empty
-   when there is nothing to say -- see its comment for why).
+/* The recompute indicator, always in the DOM (TargetCards.tsx renders it
+   empty when there is nothing to say -- see its comment for why).
 
    Every rule here exists to guarantee this row's height and its other two
    items' positions never change when the text appears:
-     - identical font-size/line-height to `.top3-hint`, so a populated
+     - identical font-size/line-height to `.target-hint`, so a populated
        indicator can never be the tallest thing in the row;
      - `margin-left: auto` parks it at the far right, so its own width
        changes push nothing -- there is nothing to its right;
@@ -1998,9 +2203,9 @@ button.roster-row:focus-visible {
        either wrap (row grows -- the exact reflow this replaced) or overflow
        into `.draft-main`, whose `overflow-y: auto` computes overflow-x to
        auto and would answer with a horizontal scrollbar. */
-.top3-recompute {
+.target-recompute {
   margin-left: auto;
-  /* Out of `.top3-head`'s baseline group on purpose: a flex container's
+  /* Out of `.target-head`'s baseline group on purpose: a flex container's
      baseline is its first item's, which here is a bare 9px circle with no
      text baseline at all. Centering it instead keeps the row's height a
      function of the caption and hint alone -- the two items that are always
@@ -2023,7 +2228,7 @@ button.roster-row:focus-visible {
    line box. `flex-shrink: 0` so the ellipsis eats the sentence, never the
    spinner -- a spinner squeezed to nothing is a loading indicator that
    stops indicating. */
-.top3-recompute-dot {
+.target-recompute-dot {
   flex-shrink: 0;
   width: 9px;
   height: 9px;
@@ -2034,21 +2239,12 @@ button.roster-row:focus-visible {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .top3-recompute-dot {
+  .target-recompute-dot {
     animation: none;
   }
 }
 
-/* Defect 2: where the three recommendation cards sit when my_slot is not
-   yet resolved and there is nothing ranked to show -- same bottom padding
-   and divider `.top3-grid` would otherwise supply, so the section doesn't
-   visually collapse just because the cards are absent this poll. */
-.top3-hint-standalone {
-  padding-bottom: var(--space-3);
-  border-bottom: 1px solid var(--border);
-}
-
-.top3-grid {
+.target-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--space-3);
@@ -2056,7 +2252,7 @@ button.roster-row:focus-visible {
   border-bottom: 1px solid var(--border);
 }
 
-.top3-card {
+.target-card {
   padding: var(--space-3);
   border-radius: 4px;
   background: var(--bg-1);
@@ -2065,32 +2261,32 @@ button.roster-row:focus-visible {
 
 /* The best of the three, called out the same way `.board-col-mine` calls
    out the viewer's own column -- an accent border, not a fill, so it reads
-   as "the top pick" without competing with the roster-slot and survival
+   as "the target" without competing with the roster-slot and availability
    colors inside the card. */
-.top3-card-lead {
+.target-card-lead {
   border-color: var(--accent-border);
 }
 
-.top3-card-head {
+.target-card-head {
   display: flex;
   align-items: center;
   gap: 7px;
 }
 
-.top3-rank {
+.target-rank {
   font-size: var(--text-xs);
   font-weight: 700;
   color: var(--accent);
 }
 
-/* The card's own open-the-profile control (TopThree.tsx). It replaces the
-   name span as `.top3-card-head`'s flex item, so it inherits the two rules
+/* The card's own open-the-profile control (TargetCards.tsx). It replaces the
+   name span as `.target-card-head`'s flex item, so it inherits the two rules
    that item carried -- `min-width: 0` plus `overflow: hidden`, which are
    what let a long name ellipsize instead of shoving the Draft button off
-   the card. `.top3-name` keeps the ellipsis itself and is blockified for
+   the card. `.target-name` keeps the ellipsis itself and is blockified for
    it: text-overflow does nothing on an inline box, and it is now inside a
    button rather than being the flex item. */
-.top3-name-btn {
+.target-name-btn {
   min-width: 0;
   overflow: hidden;
   padding: 0;
@@ -2100,18 +2296,18 @@ button.roster-row:focus-visible {
   cursor: pointer;
 }
 
-.top3-name-btn:hover .top3-name,
-.top3-name-btn:focus-visible .top3-name {
+.target-name-btn:hover .target-name,
+.target-name-btn:focus-visible .target-name {
   color: var(--accent);
   text-decoration: underline;
 }
 
-.top3-name-btn:focus-visible {
+.target-name-btn:focus-visible {
   outline: 1px solid var(--accent-border);
   outline-offset: 2px;
 }
 
-.top3-name {
+.target-name {
   display: block;
   min-width: 0;
   overflow: hidden;
@@ -2122,13 +2318,7 @@ button.roster-row:focus-visible {
   color: var(--text-1);
 }
 
-.top3-team {
-  flex-shrink: 0;
-  font-size: var(--text-xs);
-  color: var(--text-3);
-}
-
-.top3-card-head .avail-draft-btn {
+.target-card-head .avail-draft-btn {
   margin-left: auto;
   flex-shrink: 0;
 }
@@ -2139,7 +2329,7 @@ button.roster-row:focus-visible {
    told apart in about a second under a clock, and a photograph does that
    faster than a name. The ring is the position's hue, which is why the badge
    can go when there is a photo. */
-.top3-shot {
+.target-shot {
   width: 46px;
   height: 46px;
   border-radius: 50%;
@@ -2149,7 +2339,7 @@ button.roster-row:focus-visible {
   flex-shrink: 0;
 }
 
-.top3-id {
+.target-id {
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -2158,7 +2348,7 @@ button.roster-row:focus-visible {
 
 /* Position, team and bye on one quiet line under the name -- three facts
    that identify him and none that argue for him. */
-.top3-sub {
+.target-sub {
   font-size: 10px;
   letter-spacing: 0.04em;
   color: var(--text-3);
@@ -2167,7 +2357,7 @@ button.roster-row:focus-visible {
 /* THE TWO NUMBERS THE PICK TURNS ON. Equal width, equal size, side by side:
    they are the same kind of claim about the same decision, and giving either
    of them more room would be an argument this card is not making. */
-.top3-heroes {
+.target-figs {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-3);
@@ -2176,144 +2366,38 @@ button.roster-row:focus-visible {
   border-top: 1px solid var(--border);
 }
 
-.top3-hero {
+.target-fig {
   display: flex;
   flex-direction: column;
   gap: 5px;
   min-width: 0;
 }
 
-.top3-hero-num {
+.target-fig-num {
   font-size: 30px;
   font-weight: 700;
   line-height: 1;
   color: var(--text-1);
 }
 
-.top3-hero-num.is-up {
+.target-fig-num.is-up {
   color: var(--ok-soft);
 }
 
-.top3-hero-num.is-down {
+.target-fig-num.is-down {
   color: var(--fail-soft);
 }
 
-.top3-hero-unit {
+.target-fig-unit {
   margin-left: 2px;
   font-size: 11px;
   font-weight: 600;
   color: var(--text-3);
 }
 
-/* The proportion the dial used to draw, at 3px. It costs one line and keeps
-   "4%" from reading the same as "40%" at a glance. */
-.top3-hero-rule {
-  display: block;
-  height: 3px;
-  border-radius: 2px;
-  background: var(--bg-2);
-  overflow: hidden;
-}
-
-.top3-hero-rule > span {
-  display: block;
-  height: 100%;
-  border-radius: 2px;
-  min-width: 2px;
-}
-
-/* The table's RANK arc at hero scale, standing where the survival figure
-   stands on the waiting cards: same 30px line the number occupies, so the
-   two variants of the card do not differ in height by a pixel. Slots come
-   up from the table's 3px because this one IS the figure, not a cell. */
-.top3-hero-arc {
-  display: block;
-  height: 30px;
-}
-
-.top3-hero-arc .finish-arc {
-  height: 100%;
-}
-
-.top3-hero-arc .finish-arc-slot {
-  width: 8px;
-  border-radius: 2px;
-}
-
-.top3-hero-arc .finish-arc-bar {
-  border-radius: 2px;
-}
-
-.top3-hero-arc-none {
-  font-size: 30px;
-  font-weight: 700;
-  line-height: 1;
-  color: var(--text-3);
-}
-
-.top3-hero-cap {
+.target-fig-cap {
   font-size: 10px;
   line-height: 1.3;
-  color: var(--text-3);
-}
-
-/* -- his season, week by week --------------------------------------------- */
-
-/* The hover panel's own chart, at card scale. Eighteen columns in a 370px
-   card means each one is about half the width it gets in the panel, so the
-   numbers above the bars come down a point and the bars themselves lose a
-   third of their height -- the SHAPE of the row is the message here, and the
-   panel is still one hover away for anybody who wants to read the values. */
-.top3-season {
-  margin-top: var(--space-3);
-  padding-top: var(--space-3);
-  border-top: 1px solid var(--border);
-  /* Reserved, so three cards whose fetches land at different moments do not
-     shove the table under them about. */
-  min-height: 92px;
-}
-
-.top3-season .draft-cap {
-  display: flex;
-  align-items: baseline;
-  gap: 7px;
-  margin-bottom: 8px;
-}
-
-.top3-season-avg {
-  font-size: 9px;
-  letter-spacing: 0;
-  text-transform: none;
-  color: var(--text-3);
-}
-
-.top3-season .ctip-chart {
-  gap: 2px;
-}
-
-.top3-season .ctip-col {
-  min-width: 0;
-  flex: 1;
-}
-
-.top3-season .ctip-col-val {
-  font-size: 8px;
-}
-
-.top3-season .ctip-col-slot {
-  width: 100%;
-  height: 44px;
-}
-
-.top3-season .ctip-col-label {
-  font-size: 8px;
-}
-
-/* Nothing to draw yet, or nothing to draw at all. Same height either way. */
-.top3-season.is-empty {
-  display: flex;
-  align-items: center;
-  font-size: 10.5px;
   color: var(--text-3);
 }
 
@@ -2324,88 +2408,19 @@ button.roster-row:focus-visible {
    a card whose only button is Draft, and the help cursor -- the question
    mark -- reads as "this thing is confusing" rather than as "there is more
    here". The panel itself is the affordance; it opens in 130ms. */
-.top3-hoverable {
+.target-hoverable {
   display: inline-flex;
   border-radius: 3px;
 }
 
-.top3-hoverable:focus-visible {
+.target-hoverable:focus-visible {
   outline: 2px solid var(--accent-border);
   outline-offset: 3px;
 }
 
-/* The survival rule keeps a plain sentence: it is the one bar on the card
-   with no chart behind it -- the number is counted from rollouts, not from a
-   season log -- so there is nothing for a panel to draw. */
-.top3-tip {
-  position: relative;
-  display: inline-flex;
-  border-radius: 3px;
-}
-
-.top3-tip:focus-visible {
-  outline: 2px solid var(--accent-border);
-  outline-offset: 2px;
-}
-
-/* Around the survival rule the wrapper has to be a block, or the 3px bar
-   becomes a zero-width flex item. The padding is the hover target -- three
-   pixels is not one -- and the negative margin gives it back, so nothing
-   below moves. */
-.top3-hero .top3-tip {
-  display: block;
-  width: 100%;
-  padding: 7px 0;
-  margin: -7px 0;
-}
-
-.top3-tip-box {
-  position: absolute;
-  bottom: calc(100% + 8px);
-  left: 0;
-  z-index: 5;
-  width: max-content;
-  max-width: 230px;
-  padding: 7px 9px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg-2);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
-  font-size: 10.5px;
-  line-height: 1.4;
-  color: var(--text-1);
-  opacity: 0;
-  visibility: hidden;
-  transform: translateY(3px);
-  transition: opacity 90ms ease, transform 90ms ease, visibility 0s linear 90ms;
-  pointer-events: none;
-}
-
-.top3-tip:hover .top3-tip-box,
-.top3-tip:focus-visible .top3-tip-box {
-  opacity: 1;
-  visibility: visible;
-  transform: translateY(0);
-  transition-delay: 0s;
-}
-
-/* The third card sits at the right edge of the room, so its box opens
-   leftward rather than off the screen. */
-.top3-grid > .top3-card:last-child .top3-tip-box {
-  left: auto;
-  right: 0;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .top3-tip-box {
-    transition: none;
-    transform: none;
-  }
-}
-
 /* -- what kind of player he is ------------------------------------------- */
 
-.top3-meters {
+.target-meters {
   display: flex;
   align-items: flex-end;
   gap: var(--space-3);
@@ -2414,7 +2429,7 @@ button.roster-row:focus-visible {
   border-top: 1px solid var(--border);
 }
 
-.top3-meter {
+.target-meter {
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -2424,12 +2439,12 @@ button.roster-row:focus-visible {
    card's footnote: three ratings and a market reference, read last or not at
    all. At the caption size used elsewhere they were competing with the
    figures they are subordinate to. */
-.top3-meter .draft-cap {
+.target-meter .draft-cap {
   font-size: 8.5px;
   letter-spacing: 0.07em;
 }
 
-.top3-meter-none {
+.target-meter-none {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   color: var(--text-3);
@@ -2437,7 +2452,7 @@ button.roster-row:focus-visible {
 
 /* Where the market has him, at the weight of a footnote: it is the thing the
    rest of the card is arguing with, not part of the argument. */
-.top3-market {
+.target-market {
   display: flex;
   align-items: flex-end;
   gap: var(--space-3);
@@ -2447,7 +2462,7 @@ button.roster-row:focus-visible {
 /* Baseline-aligned with the meters' bars, and sized between them and the
    figures above: the market is context, so it should be readable without
    being the thing you read first. */
-.top3-market-val {
+.target-market-val {
   display: inline-flex;
   align-items: baseline;
   gap: 3px;
@@ -2461,7 +2476,7 @@ button.roster-row:focus-visible {
 /* How far past his price he already is -- the pick ticker's own figure, in
    the ticker's own two tones, so a green triangle means the same thing in
    the strip under the room and on the card above it. */
-.top3-market-move {
+.target-market-move {
   display: inline-flex;
   align-items: baseline;
   gap: 1px;
@@ -2469,12 +2484,82 @@ button.roster-row:focus-visible {
   font-weight: 600;
 }
 
-.top3-market-move.is-steal {
+.target-market-move.is-steal {
   color: var(--ok-soft);
 }
 
-.top3-market-move.is-reach {
+.target-market-move.is-reach {
   color: var(--fail-soft);
+}
+
+/* One of your guys. Gold, at the weight of the name it sits in front of --
+   the star is an answer to "why is he here", so it belongs where the eye
+   lands rather than in a corner of the card. */
+.target-star {
+  margin-right: 4px;
+  font-size: 11px;
+  color: var(--accent);
+}
+
+/* Which roster hole he fills, on the identity line rather than as a figure
+   of its own: it is a fact about your roster, not a number about him. Only
+   an open starting slot is accented -- see need.ts. */
+.target-need {
+  margin-left: 5px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--bg-2);
+  color: var(--text-3);
+}
+
+.target-need.is-open {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+}
+
+/* THE PLAN'S REASONING. Two tones and one column, not two columns: a card
+   is 370px wide and a reader reads down it, so pros and cons in parallel
+   columns would be two lists nobody finishes. Every line comes from
+   scoring/plan.py -- nothing on this card writes an argument of its own. */
+.target-reasons {
+  list-style: none;
+  margin: var(--space-3) 0 0;
+  padding: var(--space-3) 0 0;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.target-reason {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 10.5px;
+  line-height: 1.35;
+  color: var(--text-2);
+}
+
+/* The mark carries the direction, so the sentence does not have to: a
+   reader scanning four lines sees three plusses and a minus before reading
+   a word of it. Fixed width so the text starts on one left edge. */
+.target-reason-mark {
+  flex-shrink: 0;
+  width: 9px;
+  font-family: var(--font-mono);
+  font-weight: 700;
+}
+
+.target-reason.is-pro .target-reason-mark {
+  color: var(--ok-soft);
+}
+
+.target-reason.is-con .target-reason-mark {
+  color: var(--accent);
+}
+
+.target-reason.is-con {
+  color: var(--text-3);
 }
 
 
@@ -2718,7 +2803,7 @@ button.roster-row:focus-visible {
 
 /* An open starter/flex slot reads in accent. The last member of a set that
    had three: `.avail-fills.is-open` went when the available table dropped
-   that column, and `.top3-figure.is-open` went when the recommendation cards
+   that column, and `.target-figure.is-open` went when the recommendation cards
    stopped tabulating the roster slot and started drawing the pick instead. */
 .confirm-figure.is-open {
   color: var(--accent);
@@ -3625,7 +3710,7 @@ button.roster-row:focus-visible {
 }
 
 /* Kept, though the .landing-spinner it was written for is gone: two other
-   spinners in this file (.pp-loading-dot, .top3-recompute-dot) animate on
+   spinners in this file (.pp-loading-dot, .target-recompute-dot) animate on
    it, and deleting it would have stopped both dead. */
 @keyframes landing-spin {
   to { transform: rotate(360deg); }

@@ -27,6 +27,23 @@ function fmtRank(n: number | null): string {
   return Number.isInteger(n) ? String(n) : n.toFixed(1)
 }
 
+// Whole points, signed. The edge is one projection minus another, so its
+// first decimal is arithmetic rather than information -- and a column of
+// "+3.4" against "+3" is a column that reads as more precise than the
+// thing it measures.
+function fmtSigned(n: number): string {
+  const r = Math.round(n)
+  return r > 0 ? `+${r}` : `${r}`
+}
+
+// Rounded BEFORE the sign is read, exactly as panels.ts's `signedChange`
+// does it: a +0.4 edge prints "+0" and painting that green would claim a
+// gain the number is not showing.
+function edgeTone(edge: number): string {
+  const shown = Math.round(edge)
+  return shown > 0 ? 'is-up' : shown < 0 ? 'is-down' : ''
+}
+
 const POSITIONS = ['ALL', 'QB', 'RB', 'WR', 'TE', 'K', 'DST']
 
 // -- last season's per-game bars -------------------------------------------
@@ -152,56 +169,29 @@ export const GameBars = memo(function GameBars({ points, season, position }: {
 
 // -- sorting ---------------------------------------------------------------
 //
-// WHY THIS TABLE NO LONGER SHOWS `gain_now`, `vor_points` OR `fills`:
-// the model is unchanged. `gain_now` still ranks this list server-side (see
-// scoring/gain.py and api/live.py's _recompute), it is still what `c.rank`
-// -- the `#` column and the default sort here -- counts down, and it still
-// picks and orders the three recommendation cards above this table, which
-// explain the pick in a sentence. What changed is that the table stopped
-// showing the working: three columns nobody could read without a paragraph
-// of explanation, so they were deliberately deleted at the owner's request
-// ("im not sure what they even are"). They were NOT lost in a refactor --
-// do not "restore" them. If a number here ever needs defending again, the
-// place for it is TopThree's sentence, not a fourth column of jargon.
-//
-// The same three figures DO still appear on the surfaces this table opens
-// -- the recommendation cards, the confirm dialog, the profile overlay's
-// seed row -- and the same complaint applied to their captions there, so
-// they were renamed rather than abbreviated further. One label per
-// quantity, everywhere:
-//   `gain_now`    -> "Gain vs waiting"  (what taking him now is worth
-//                    against the best survivor at his position at the
-//                    measured horizon -- signed, and honestly negative when
-//                    waiting is the better play, which "Cost to wait" would
-//                    have inverted)
-//   `vor_points`  -> "Over replacement" (the app already says "value over
-//                    replacement" in prose on the landing page, the board
-//                    preview and TopThree's own fallback hint; this is just
-//                    that phrase unabbreviated)
-//   `fills`       -> "Roster slot"      (not bare "Slot": this room already
-//                    uses "slot" for the user's own DRAFT slot)
-// Renaming any of them in one place only is the exact inconsistency the
-// rename existed to remove.
-// (Removing `fills` also removed the accent treatment that marked
-// an open starter slot; that signal lives on in RosterPanel, which is where
-// a reader looks for "what do I still need" anyway. It is deliberately not
-// re-drawn here.)
+// THE ROOM'S ORDER IS ESPN'S ORDER. The model that used to rank this list
+// (`gain_now`, and the `vor_points`/`fills` it was built from) is gone from
+// the payload entirely -- it still runs for the simulation and the report
+// pages, but nothing here re-ranks the board any more. The two computed
+// numbers on a row are `lasts_pct` and `edge_pts`, both measured to the
+// reader's own next turn, and both have their own column. Do not "restore"
+// the old three: they are not missing, they are not sent.
 
-type SortKey = 'rank' | 'pos' | 'player' | 'finish' | 'health' | 'steady' | 'change' | 'proj' | 'lasts' | 'adp' | 'espn'
+type SortKey = 'espn' | 'pos' | 'player' | 'finish' | 'health' | 'steady' | 'change' | 'proj' | 'lasts' | 'edge' | 'adp' | 'cons'
 type SortDir = 'asc' | 'desc'
 
 // The direction a column gets on its FIRST click -- "best first" for that
-// particular column, which is not the same arrow everywhere: rank/ADP/ESPN
-// are ranks (1 is best, so ascending), proj/lasts are quantities (bigger is
-// better, so descending). HEALTH follows proj/lasts's logic, not
-// rank/ADP's -- five bars is the best outcome a row can have, so its
-// first click is ascending too, same as a rank where 1 is best. Clicking an
-// already-sorted header flips it, so both directions stay reachable on every
-// column; this only decides which one you land on without having to click
-// twice.
+// particular column, which is not the same arrow everywhere: ESPN/ADP/
+// consensus are ranks (1 is best, so ascending), proj/lasts/edge are
+// quantities (bigger is better, so descending). HEALTH follows the
+// quantities' logic, not the ranks' -- five bars is the best outcome a row
+// can have, so its first click is descending. Clicking an already-sorted
+// header flips it, so both directions stay reachable on every column; this
+// only decides which one you land on without having to click twice.
 const NATURAL_DIR: Record<SortKey, SortDir> = {
-  rank: 'asc', pos: 'asc', player: 'asc', finish: 'asc', health: 'desc', steady: 'desc', change: 'desc', proj: 'desc', lasts: 'desc', adp: 'asc',
-  espn: 'asc',
+  espn: 'asc', pos: 'asc', player: 'asc', finish: 'asc', health: 'desc',
+  steady: 'desc', change: 'desc', proj: 'desc', lasts: 'desc', edge: 'desc',
+  adp: 'asc', cons: 'asc',
 }
 
 // Position sorts in the pill row's order (QB, RB, WR, TE, K, DST), not
@@ -422,7 +412,7 @@ function sortValue(
   key: SortKey, c: LiveCandidate, player: Player | undefined,
 ): number | string | null {
   switch (key) {
-    case 'rank': return c.rank
+    case 'espn': return c.espn_rank
     case 'pos': return posIndex(c.position)
     case 'player': return (player?.name ?? c.player_id).toLowerCase()
     // A recency-weighted average finish, not the latest season alone. On the
@@ -435,9 +425,14 @@ function sortValue(
     case 'steady': return player?.consistency_pct ?? null
     case 'change': return player?.proj_change ?? null
     case 'proj': return c.proj_points
-    case 'lasts': return c.survive_pct
-    case 'adp': return player?.market_rank ?? null
-    case 'espn': return player?.espn_ppr_rank ?? null
+    case 'lasts': return c.lasts_pct
+    case 'edge': return c.edge_pts
+    // Both ranks come off the CANDIDATE row, not the join table: the server
+    // computed the order from these, and a column sorting on a second copy
+    // of the same figure is a column that can disagree with the list it is
+    // sorting.
+    case 'adp': return c.espn_adp
+    case 'cons': return c.market_rank
   }
 }
 
@@ -503,42 +498,41 @@ interface AvailableListProps {
 
 // -- pulse: how urgently a row should draw the eye -------------------------
 //
-// `survive_pct` already prints two cells to the right, in `riskTone`'s own
+// `lasts_pct` already prints in its own column, in `riskTone`'s own
 // red/amber/green language -- this is the SAME number read as motion
 // instead of digits, for the same reason Health and Steady are bar meters
 // and not raw ones: a reader scanning ~250 rows under a thirty-second clock
 // is not going to read every percentage, but a row that is visibly pulsing
 // red is impossible to miss.
 //
-// Framed as DANGER (1 - survive_pct/100), not survival, because the pulse
+// Framed as DANGER (1 - lasts_pct/100), not survival, because the pulse
 // answers a different question than the printed cell does -- "should I be
 // looking here" rather than "will he last" -- and those two framings point
 // opposite directions on the same number.
 //
-// SQUARED, not linear. `lastsTitle` above explains why the horizon this
-// column measures against is picked to keep survival rates spread out
-// across the whole row rather than pinned near 0% or 100% -- which means a
-// real cluster of rows sits around 40-60% survival (danger 0.4-0.6) at any
-// given moment. A linear pulse would have that whole cluster visibly
+// SQUARED, not linear. Whenever the wait is a round or more, a real cluster
+// of rows sits in the middle of the range (danger 0.4-0.6) rather than
+// pinned at either end of it. A linear pulse would have that whole cluster
+// visibly
 // breathing at 40-60% of full intensity, which is most of the board
 // moving over one middling number. Squaring keeps that cluster down at
 // 16-36% of peak -- present on close inspection, not the loudest thing on
-// screen -- while a genuine long shot (danger 0.8+, survive_pct under 20%)
+// screen -- while a genuine long shot (danger 0.8+, lasts_pct under 20%)
 // still climbs past 64%, so the rows actually in jeopardy are the ones the
 // animation is built to catch. A near-certain survivor (danger under ~0.2,
-// survive_pct above 80%) lands under 4% of peak intensity, which reads as
+// lasts_pct above 80%) lands under 4% of peak intensity, which reads as
 // visually still -- a table where every row moves is a table where nothing
 // does, which is exactly the noise the owner asked this to avoid.
 //
-// `null` is not survive_pct's zero -- it means there is no roster to
-// survive FOR yet (no `my_slot` resolved), and the cell two columns over
+// `null` is not lasts_pct's zero -- it means there is no next turn to
+// survive TO (no seat resolved, or the last round), and the Lasts cell
 // already refuses to colour a dash for exactly that reason (see the
 // comment on that `<td>` below). A pulse is a claim about a probability
 // too, so it follows the same rule: null in, null out, never coerced to a
 // zero-intensity (still-technically-animating) pulse.
-function pulseIntensity(survivePct: number | null): number | null {
-  if (survivePct === null) return null
-  const danger = 1 - Math.max(0, Math.min(100, survivePct)) / 100
+function pulseIntensity(lastsPct: number | null): number | null {
+  if (lastsPct === null) return null
+  const danger = 1 - Math.max(0, Math.min(100, lastsPct)) / 100
   return danger * danger
 }
 
@@ -546,7 +540,7 @@ function pulseIntensity(survivePct: number | null): number | null {
 //
 // The keyframes scale `--fail` by `--pulse * 12%` and `--pulse * 38%`, so at
 // an intensity of 0.02 both stops land under 0.8% opacity -- and at 0 (a
-// player at `survive_pct: 100`) both evaluate to `transparent`, an animation
+// player at `lasts_pct: 100`) both evaluate to `transparent`, an animation
 // between two identical invisible values. That is not free. `background` is
 // a PAINT property: unlike `opacity` and `transform` it cannot be handed to
 // the compositor, so every frame of it re-rasterizes the row on the main
@@ -555,21 +549,20 @@ function pulseIntensity(survivePct: number | null): number | null {
 // the zero-intensity rows are, so leaving them animating meant paying full
 // paint cost for most of the table to show nothing.
 //
-// 0.02 is the squared-danger of survive_pct ~86%, which is already inside
+// 0.02 is the squared-danger of lasts_pct ~86%, which is already inside
 // the band pulseIntensity's own comment calls "visually still". Nothing that
 // was legible stops being drawn; what stops is animating what was already
 // invisible.
 const PULSE_FLOOR = 0.02
 
-// The ranked available pool: search + position filter above a table that
-// opens in the server's own `gain_now` order (`#`) and can be re-sorted by
-// any column from its header.
+// The available pool: search + position filter above a table that opens in
+// ESPN's own rank order and can be re-sorted by any column from its header.
 //
 // Client-side sorting is confined to THIS component's own copy of the list
-// on purpose. `candidates` is DraftRoom's `state.candidates`, handed to
-// TopThree as well; the three recommendation cards must always be the
-// server's top three in the server's order no matter what this table is
-// sorted by, so nothing here may reorder the prop itself. `.filter()`
+// on purpose. `candidates` is DraftRoom's `state.candidates`, handed to the
+// target cards as well; those name the plan's own three players for one
+// turn, and a table sorted by Growth must not reach up and reorder them, so
+// nothing here may reorder the prop itself. `.filter()`
 // already returns a fresh array and `.sort()` below only ever touches that
 // -- the shared array is never mutated.
 //
@@ -614,7 +607,7 @@ const AvailableRow = memo(function AvailableRow({
   // even when taken (cheap, a couple of arithmetic ops) so the class/style
   // logic just below reads as one rule rather than two branches that have
   // to agree with each other.
-  const pulse = isTaken ? null : pulseIntensity(c.survive_pct)
+  const pulse = isTaken ? null : pulseIntensity(c.lasts_pct)
   // ONE derived answer for both the class and the custom property below.
   // They have to agree -- a `--pulse` with no class to read it is wasted
   // work, a class with no `--pulse` animates against an undefined value --
@@ -652,8 +645,24 @@ const AvailableRow = memo(function AvailableRow({
                   // every one of those rows.
                   style={animated ? ({ '--pulse': pulse } as CSSProperties) : undefined}
                   aria-hidden={isTaken || undefined}>
-                <td className="avail-col-rank mono">{c.rank}</td>
-                <td className="avail-col-pos">{posBadge(c.position)}</td>
+                {/* ESPN'S RANK LEADS THE ROW, because ESPN's rank is the
+                    order the room is in. There is no separate `#` column
+                    any more: it printed the row's position in a list this
+                    column already decides, so on the default sort the two
+                    counted down side by side saying the same thing. A
+                    player ESPN does not rank at all reads as a dash and
+                    sorts to the bottom (see compareRows). */}
+                <td className="avail-col-rank mono">{c.espn_rank ?? '—'}</td>
+                {/* Badge and positional rank in one cell: "RB 4" is how
+                    anybody says it out loud, and a second column printing
+                    the 4 on its own would have needed its own header to
+                    explain which rank it meant. */}
+                <td className="avail-col-pos">
+                  {posBadge(c.position)}
+                  {c.espn_pos_rank !== null && (
+                    <span className="avail-posrank mono">{c.espn_pos_rank}</span>
+                  )}
+                </td>
                 <td className="avail-col-name">
                   {/* A button, not a link: this opens an overlay over the
                       room, and an <a href> here would offer a navigation
@@ -666,6 +675,15 @@ const AvailableRow = memo(function AvailableRow({
                     onClick={() => onOpenPlayer(c)}
                     title="Open profile"
                   >
+                    {/* One of your guys. A star rather than a colour: the
+                        row already spends colour on probability and points,
+                        and a fourth meaning for green would make all three
+                        harder to read. Labelled, because a star with no
+                        name is furniture to a screen reader. */}
+                    {c.favourite && (
+                      <span className="avail-star" role="img"
+                            aria-label="One of your guys">★</span>
+                    )}
                     <span className="avail-name">{player?.name ?? c.player_id}</span>
                   </button>
                   {player && (
@@ -768,7 +786,7 @@ const AvailableRow = memo(function AvailableRow({
                     </span>
                   )}
                 </td>
-                {/* null survive_pct (no roster to survive FOR yet) gets no
+                {/* null lasts_pct (no next turn to last until) gets no
                     riskTone color at all -- riskTone's red/amber/green ramp
                     is a claim about a real probability, and coloring a dash
                     would imply one exists. The row's own pulse (`pulse`,
@@ -776,12 +794,24 @@ const AvailableRow = memo(function AvailableRow({
                     reason -- see pulseIntensity's comment. */}
                 <td
                   className="avail-col-num mono"
-                  style={c.survive_pct === null ? undefined : { color: riskTone(c.survive_pct) }}
+                  style={c.lasts_pct === null ? undefined : { color: riskTone(c.lasts_pct) }}
                 >
-                  {c.survive_pct === null ? '—' : `${Math.round(c.survive_pct)}%`}
+                  {c.lasts_pct === null ? '—' : `${Math.round(c.lasts_pct)}%`}
                 </td>
-                <td className="avail-col-num mono avail-adp">{fmtRank(player?.market_rank ?? null)}</td>
-                <td className="avail-col-num mono avail-adp">{fmtRank(player?.espn_ppr_rank ?? null)}</td>
+                {/* Signed, and toned by the sign: a positive edge is points
+                    you keep by taking him now, a negative one is points
+                    waiting would hand you. Rounded to whole points -- the
+                    figure is a difference between two projections, and its
+                    first decimal is noise. */}
+                <td className="avail-col-num mono">
+                  {c.edge_pts === null ? '—' : (
+                    <span className={`delta-tone ${edgeTone(c.edge_pts)}`}>
+                      {fmtSigned(c.edge_pts)}
+                    </span>
+                  )}
+                </td>
+                <td className="avail-col-num mono avail-adp">{fmtRank(c.espn_adp)}</td>
+                <td className="avail-col-num mono avail-adp">{fmtRank(c.market_rank)}</td>
                 <td className="avail-col-btn">
                   <button
                     type="button"
@@ -806,9 +836,11 @@ export default function AvailableList({
 }: AvailableListProps) {
   const [search, setSearch] = useState('')
   const [pos, setPos] = useState('ALL')
-  // Opens on the server's ranking, which is the whole point of the list --
-  // any other default would hide the model's answer behind a click.
-  const [sort, setSort] = useState<{ key: SortKey; dir: SortDir }>({ key: 'rank', dir: 'asc' })
+  // ESPN's rank, ascending -- the order the room is drafting in, and the
+  // order the server already built the list in. Any other default would put
+  // this board's opinion in front of the platform's, which is the exact
+  // thing this redesign took out.
+  const [sort, setSort] = useState<{ key: SortKey; dir: SortDir }>({ key: 'espn', dir: 'asc' })
 
   // -- header tooltips: state, positioning, dismissal --
   //
@@ -945,13 +977,13 @@ export default function AvailableList({
   }, [players])
 
   // Whether any row on this board can pulse at all, and therefore whether the
-  // toolbar owes the reader a key for it. `survive_pct` is null for a whole
-  // board when nothing has a seat to survive FOR (see pulseIntensity), and a
+  // toolbar owes the reader a key for it. `lasts_pct` is null for a whole
+  // board when there is no next turn to survive TO (see pulseIntensity), and a
   // legend for a signal that is not on screen is furniture. `.some` over a
   // few hundred rows on a list that is rebuilt every recompute is nothing
   // next to the sparklines below it.
   const pulses = useMemo(
-    () => candidates.some((c) => c.survive_pct !== null), [candidates])
+    () => candidates.some((c) => c.lasts_pct !== null), [candidates])
 
   // A player leaving the board is the single most informative event in a
   // draft, and until now it was also the least visible: the row simply was
@@ -1186,11 +1218,13 @@ export default function AvailableList({
   // confirmed accurate, except `healthTitle` (the meter replaced a bare
   // number, so its own tooltip has to describe the strip) and `lastsTitle`
   // (see the comment above that one).
-  const rankTitle = "This board's own rank of who to take now. Not ADP and "
-    + 'not projected points -- it ranks by how much you gain by taking this '
-    + 'player now versus waiting until your next pick, weighted by whether '
-    + 'your roster can actually start him.'
-  const posTitle = "The player's position."
+  const espnTitle = "ESPN's own rank in the draft lobby you are drafting "
+    + 'in -- the order this list opens in. Nothing here re-ranks the board: '
+    + 'the two computed columns (Lasts and Edge) say what the order costs '
+    + 'you, they do not change it. A dash is a player ESPN does not rank at '
+    + 'all; he sorts to the bottom rather than to the top.'
+  const posTitle = "The player's position, and his rank within it on ESPN's "
+    + 'list -- "RB 4" is the fourth running back ESPN has.'
   const playerTitle = 'Name, NFL team, and bye week.'
   // Position-dependent colour cut points (barThresholds above) mean a flat
   // "red under 10, green 15+" claim would be wrong for a QB, K, or DST row --
@@ -1248,27 +1282,32 @@ export default function AvailableList({
     + "reads against the weekly scores you have watched all year. It assumes "
     + "a full season, so it says nothing about whether he will be available "
     + "for it; that is what Health answers."
-  // "Chance he's still there when you pick again" -- the reader's own next
-  // turn, which is what this column answers now. It used to answer the
-  // horizon the RANKING is priced against (a fixed distance, roughly a round
-  // to a round and a half of opponent picks), which is a different pick
-  // whenever the reader is at the wheel and reads as a much longer wait than
-  // the one they are about to make.
-  //
-  // The ranking still prices that further turn -- it has to, since a step of
-  // a position's supply curve over one opponent pick is near zero for
-  // everybody -- so the two figures on a card answer two questions and say
-  // which is which. See scoring/gain.rank_available.
-  const lastsTitle = "Chance he's still on the board when your next turn "
-    + 'comes round -- measured over the picks between now and then, not to '
-    + 'some fixed distance. At the wheel, with your two picks back to back, '
-    + 'nearly everybody survives and this column says so; a long wait is '
-    + 'where it starts separating names. A low percentage is the argument '
-    + 'for taking him now.'
-  const adpTitle = 'Average draft position across the consensus of public '
-    + 'sources -- where the market as a whole takes him.'
-  const espnTitle = "ESPN's own ranking, shown so you can see where this "
-    + "board disagrees with the platform you're drafting on."
+  // MEASURED, not simulated. This is the share of recorded ESPN mock drafts
+  // in which a player still on the board at this pick was still on it at the
+  // reader's next turn -- 854 drafts and 109k picks today. No opponent model
+  // stands behind it any more, which is why the sentence can say what the
+  // number is counted from.
+  const lastsTitle = "Chance he is still on the board when your next turn "
+    + 'comes round. Counted from real ESPN mock drafts: of the drafts where '
+    + 'he was still available at this pick, the share where he was still '
+    + 'available at yours. At the wheel, with your two picks back to back, '
+    + 'nearly everybody lasts and this column says so; a long wait is where '
+    + 'it starts separating names. A low percentage is the argument for '
+    + 'taking him now.'
+  const edgeTitle = 'What taking him now is worth in POINTS: his projection '
+    + 'minus the best player at his position you can expect to still be '
+    + 'there at your next turn, weighted by how likely each of them is to '
+    + 'last. Positive means waiting costs you; negative means waiting is the '
+    + 'better play and the column says so rather than talking you into a '
+    + 'pick.'
+  const adpTitle = "ESPN's own average draft position -- the pick he "
+    + 'actually goes at in their drafts, which is not always where their '
+    + 'rank puts him. Blank when ESPN has too few drafts behind a player for '
+    + 'the number to mean anything.'
+  const consTitle = 'Where the market as a whole ranks him: the median of '
+    + 'five public sources. Read it against ESPN to the left -- a player the '
+    + 'consensus likes far more than ESPN does is one the room you are in '
+    + 'may let fall.'
   const draftColTitle = "Draft this player onto your roster. Only enabled on "
     + 'your turn.'
 
@@ -1276,7 +1315,7 @@ export default function AvailableList({
   // instead of each header carrying its own `title` -- see sortableTh's
   // comment for why.
   const tipCopy: Record<TipId, string> = {
-    rank: rankTitle,
+    espn: espnTitle,
     pos: posTitle,
     player: playerTitle,
     games: gamesTitle,
@@ -1286,8 +1325,9 @@ export default function AvailableList({
     change: changeTitle,
     proj: projTitle,
     lasts: lastsTitle,
+    edge: edgeTitle,
     adp: adpTitle,
-    espn: espnTitle,
+    cons: consTitle,
     draft: draftColTitle,
   }
 
@@ -1337,7 +1377,7 @@ export default function AvailableList({
       <table className="avail-table">
         <thead>
           <tr>
-            {sortableTh('rank', '#', 'avail-col-rank')}
+            {sortableTh('espn', 'ESPN', 'avail-col-rank')}
             {sortableTh('pos', 'Pos', 'avail-col-pos')}
             {sortableTh('player', 'Player', 'avail-col-name')}
             {/* The one header in this table that is NOT a control. There is
@@ -1373,19 +1413,19 @@ export default function AvailableList({
             {sortableTh('steady', 'Reliable', 'avail-col-steady')}
             {sortableTh('change', 'Growth', 'avail-col-change')}
             {sortableTh('proj', 'Proj/G', 'avail-col-num')}
-            {/* One word. A header naming the horizon at all ("Lasts to pick
-                13") reads as a promise that pick 13 is the user's own turn,
-                which it verifiably never is (see lastsTitle's own comment)
-                -- so the header stays bare and the horizon lives in the
-                toolbar note and the tooltip instead, as a DISTANCE rather
-                than a pick number. */}
+            {/* One word, and no pick number in it. The pick these two are
+                measured to is the reader's own next turn, which moves every
+                time somebody picks -- a header that named it would be a
+                header that needed rewriting twice a minute. The tooltip and
+                the cards name it instead. */}
             {sortableTh('lasts', 'Lasts', 'avail-col-num')}
+            {sortableTh('edge', 'Edge', 'avail-col-num')}
             {sortableTh('adp', 'ADP', 'avail-col-num')}
-            {/* ESPN's own PPR rank, always on screen next to this board's
-                `#` and the market's ADP -- the owner asked to be able to see
-                where ESPN has a player against where this board has him,
-                without going into the profile for it. */}
-            {sortableTh('espn', 'ESPN', 'avail-col-num')}
+            {/* The five-source consensus rank, next to ESPN's ADP so the
+                two markets can be read against each other -- the owner
+                asked to see where ESPN disagrees with everyone else without
+                going into the profile for it. */}
+            {sortableTh('cons', 'Cons', 'avail-col-num')}
             <th
               className="avail-col-btn"
               onMouseEnter={(e) => scheduleTip('draft', e.currentTarget)}
@@ -1411,9 +1451,10 @@ export default function AvailableList({
           ))}
           {rows.length === 0 && (
             <tr>
-              {/* 10 = the nine columns above (rank, pos, player, games,
-                  missed, proj, lasts, adp, espn) plus the draft button's. */}
-              <td colSpan={10} className="avail-empty">
+              {/* 14 = the thirteen columns above (espn, pos, player,
+                  games, finish, health, reliable, growth, proj, lasts,
+                  edge, adp, cons) plus the draft button's. */}
+              <td colSpan={14} className="avail-empty">
                 {candidates.length === 0 ? 'No candidates yet.' : 'No players match this filter.'}
               </td>
             </tr>

@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import type { LiveCandidate, Player } from '../../api'
+import { needIsOpenSlot, needLabel } from './need'
 
 function posBadge(position: string) {
   return <span className={`pos-badge pos-badge-${position.toLowerCase()}`}>{position}</span>
@@ -7,25 +8,16 @@ function posBadge(position: string) {
 
 // `null` (see AvailableList.tsx's own copy of this function for the full
 // rationale) renders as a dash. In practice a candidate never reaches this
-// dialog with a null gain_now -- ConfirmPick only ever mounts for a pick
-// made while it is actually your turn, which requires my_slot to already be
-// resolved -- but the type is honest about every LiveCandidate, not just
-// the ones this call site happens to see, so this handles it the same way
-// every other reader of the type does rather than asserting it away.
+// dialog with a null edge -- ConfirmPick only ever mounts for a pick made
+// while it is actually your turn, which requires a seat and therefore a
+// next turn to measure to -- but the type is honest about every
+// LiveCandidate, not just the ones this call site happens to see, so this
+// handles it the same way every other reader of the type does rather than
+// asserting it away.
 function fmtSigned(n: number | null): string {
   if (n === null) return '—'
   const r = Math.round(n)
   return r > 0 ? `+${r}` : `${r}`
-}
-
-// duplicated from AvailableList.tsx/TopThree.tsx -- same rule, same reason
-// to keep it in sync: an open starter/flex slot reads in accent, `BENCH`
-// and gain.py's `—` read muted. Folded-in review finding: this dialog's
-// own Roster slot figure was left plain while both other views already
-// applied the rule -- one meaning, drawn the same way everywhere it
-// appears.
-function fillsIsOpenSlot(fills: string | null): boolean {
-  return fills !== null && fills !== 'BENCH' && fills !== '—'
 }
 
 export type PickStatus = 'idle' | 'sending' | 'done' | 'failed'
@@ -96,18 +88,18 @@ export default function ConfirmPick({
           <span className="confirm-player-name">{player?.name ?? candidate.player_id}</span>
           {player && <span className="confirm-player-team mono">{player.team}</span>}
         </div>
-        {/* Same captions as TopThree's cards and playerSeed's seed row,
-            deliberately word-for-word -- see AvailableList.tsx's comment. */}
+        {/* Same captions as the target cards and playerSeed's seed row,
+            deliberately word-for-word. */}
         <div className="confirm-figures">
           <div>
             <div className="draft-cap">Roster slot</div>
-            <div className={`confirm-figure mono${fillsIsOpenSlot(candidate.fills) ? ' is-open' : ''}`}>
-              {candidate.fills ?? '—'}
+            <div className={`confirm-figure mono${needIsOpenSlot(candidate.need) ? ' is-open' : ''}`}>
+              {needLabel(candidate.need)}
             </div>
           </div>
           <div>
-            <div className="draft-cap">Gain vs waiting</div>
-            <div className="confirm-figure mono">{fmtSigned(candidate.gain_now)}</div>
+            <div className="draft-cap">Edge</div>
+            <div className="confirm-figure mono">{fmtSigned(candidate.edge_pts)}</div>
           </div>
           {rosterAfter && (
             <div>

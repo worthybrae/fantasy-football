@@ -1420,6 +1420,315 @@
               var(--bg-1) 55%);
 }
 
+/* -- your guys (FavoritesPicker.tsx, and the card it becomes) -------------
+   A dashboard-sized job: twenty-five names, picked once, nowhere near a pick
+   clock. The picker is the widest thing on this page on purpose -- it is a
+   browsing task, and a two-column list of 250 players in a card-width column
+   would be a scroll nobody finishes. */
+
+.db-fav-card {
+  gap: var(--space-3);
+}
+
+.db-fav-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 5px var(--space-3);
+}
+
+.db-fav-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  font-size: var(--text-sm);
+}
+
+.db-fav-ord {
+  width: 16px;
+  flex-shrink: 0;
+  text-align: right;
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+.db-fav-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-1);
+}
+
+.db-fav-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.db-fav-note {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+
+.db-fav-foot > .db-go {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.fav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-1);
+}
+
+.fav-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+
+.fav-head-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.fav-title {
+  margin: 0 0 4px;
+  font-size: var(--text-lg);
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+.fav-note {
+  margin: 0;
+  max-width: 62ch;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--text-3);
+}
+
+.fav-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+/* The count and the rule in one glyph string, in the room's own mono so it
+   reads as a measurement rather than as a sentence. It goes accent only
+   once Save will actually work -- the affordance and the rule in one. */
+.fav-count {
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+
+.fav-count.is-ready {
+  color: var(--accent);
+}
+
+.fav-save {
+  padding: 6px 14px;
+  border: 1px solid var(--accent-border);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.fav-save:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+.fav-save:disabled {
+  border-color: var(--border);
+  background: none;
+  color: var(--text-3);
+  cursor: not-allowed;
+}
+
+.fav-cancel {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: none;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.fav-error {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--fail);
+}
+
+/* THE LIST BEING BUILT, above the board it is built from. */
+.fav-chosen {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  min-height: 28px;
+}
+
+.fav-chosen-empty {
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+
+.fav-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--accent-border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  font-size: var(--text-sm);
+  color: var(--text-1);
+  cursor: pointer;
+}
+
+.fav-chip:hover {
+  border-color: var(--fail);
+}
+
+.fav-chip-ord {
+  font-size: var(--text-xs);
+  color: var(--accent);
+}
+
+.fav-chip-x {
+  color: var(--text-3);
+}
+
+.fav-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.fav-search {
+  flex: 1;
+  min-width: 180px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-2);
+  font-size: var(--text-sm);
+  color: var(--text-1);
+}
+
+.fav-search:focus {
+  outline: none;
+  border-color: var(--accent-border);
+}
+
+.fav-pills {
+  display: flex;
+  gap: 4px;
+}
+
+/* A scroll region of its own, and a bounded one: the board is 250 rows and
+   the page under it is a dashboard, not a table. */
+.fav-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 4px;
+  max-height: 340px;
+  overflow-y: auto;
+}
+
+.fav-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.fav-row:hover:not(:disabled) {
+  border-color: var(--border);
+  background: var(--bg-2);
+}
+
+.fav-row.is-on {
+  border-color: var(--accent-border);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.fav-row:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.fav-shot {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--bg-2);
+  flex-shrink: 0;
+}
+
+.fav-row-id {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.fav-row-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+  color: var(--text-1);
+}
+
+.fav-row-sub {
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  color: var(--text-3);
+}
+
+.fav-row-mark {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+
+.fav-row.is-on .fav-row-mark {
+  color: var(--accent);
+}
+
+.fav-empty {
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+
 /* -- states ------------------------------------------------------------- */
 
 /* An empty section is a state, not a failure. */
@@ -2141,7 +2450,7 @@ button.wr-seat:focus-visible {
   border-radius: var(--radius);
 }
 
-/* THE RECOMMENDATION CARD, COMPACTED FOR THIS SLOT.
+/* THE TARGET CARD, COMPACTED FOR THIS SLOT.
  *
  *  It arrives inside the room's own section wrapper, which brings three
  *  things this slide has no use for: the "take one of these" header, the
@@ -2149,29 +2458,23 @@ button.wr-seat:focus-visible {
  *  so it bled off both edges), and the rule the room draws UNDER the cards to
  *  divide them from the table below. That rule was the stray bottom line.
  *
- *  The week-by-week chart comes out too. It is the tallest block on the card
- *  and the one that needs the most width to read, and this slot has neither
- *  to spare. Everything else is the card exactly as the room draws it: the
- *  same figures, the same meters, the same market row. */
-.bf-real .top3 {
+ *  Everything else is the card exactly as the room draws it: the same
+ *  figures, the same meters, the same market row. */
+.bf-real .target {
   padding: 0;
 }
 
-.bf-real .top3-head {
+.bf-real .target-head {
   display: none;
 }
 
-.bf-real .top3-grid {
+.bf-real .target-grid {
   grid-template-columns: minmax(0, 1fr);
   padding-bottom: 0;
   border-bottom: none;
 }
 
-.bf-real .top3-season {
-  display: none;
-}
-
-.bf-real .top3-card {
+.bf-real .target-card {
   padding: 14px;
   /* A grid item's default `min-width: auto` lets it refuse to shrink below
      its own content, so the card pushed its track wider than the dialog and
@@ -2182,13 +2485,13 @@ button.wr-seat:focus-visible {
 
 /* The card's own rows have the same problem one level down: a meters row of
    four cells and a market pair will happily be wider than the card. */
-.bf-real .top3-meters,
-.bf-real .top3-heroes {
+.bf-real .target-meters,
+.bf-real .target-figs {
   min-width: 0;
   flex-wrap: wrap;
 }
 
-.bf-real .top3-hero-cap {
+.bf-real .target-fig-cap {
   overflow-wrap: anywhere;
 }
 

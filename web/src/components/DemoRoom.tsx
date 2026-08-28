@@ -8,7 +8,7 @@ import DraftBoardGrid from './DraftBoardGrid'
 import PickTicker from './draft/PickTicker'
 import PlayerOverlay, { type OverlayTarget } from './draft/PlayerOverlay'
 import RosterPanel from './draft/RosterPanel'
-import TopThree from './draft/TopThree'
+import TargetCards from './draft/TargetCards'
 import { nextPickFor } from './draft/pickOrder'
 import { seedFromBoardPlayer, seedFromCandidate, seedFromPlayer } from './draft/playerSeed'
 
@@ -200,17 +200,29 @@ export default function DemoRoom({ onMode, live = false, site = false }: {
     return () => { cancelled = true }
   }, [])
 
+  // `?? null` on every computed figure rather than a required read: this
+  // payload is api/demo.py's own, built for a room nobody holds a seat in,
+  // and a landing page that draws dashes for a number the demo has not
+  // started sending is a better failure than one that does not draw.
   const candidates: LiveCandidate[] = useMemo(
     () => (room?.shortlist ?? []).map((row) => ({
       player_id: row.player_id,
       position: row.position ?? '',
       proj_points: row.proj_points ?? 0,
-      vor_points: row.vor_points ?? 0,
-      gain_now: row.gain_now,
-      gain_next: row.gain_next,
-    edge_next: row.edge_next,
-      survive_pct: row.survive_pct,
-      fills: row.fills,
+      espn_rank: row.espn_rank ?? null,
+      espn_pos_rank: row.espn_pos_rank ?? null,
+      espn_adp: row.espn_adp ?? null,
+      // `adp` is this payload's older word for where the market has him,
+      // which is what the consensus column means -- mapped rather than
+      // dropped, and never into ESPN's own two columns, which are a
+      // different source and would be a wrong number under a right label.
+      market_rank: row.market_rank ?? row.adp ?? null,
+      lasts_pct: row.lasts_pct ?? null,
+      lasts_at_pick: row.lasts_at_pick ?? null,
+      edge_pts: row.edge_pts ?? null,
+      need: row.need ?? null,
+      // Nobody's guys: this is somebody else's draft, watched from outside.
+      favourite: false,
       rank: row.rank ?? 0,
     })),
     [room],
@@ -231,8 +243,9 @@ export default function DemoRoom({ onMode, live = false, site = false }: {
       draft_started: true,
       candidates,
       candidates_as_of_pick: room.picks_made ?? 0,
-      horizon_pick: null,
-      horizon_is_end_of_draft: false,
+      // No seat, so no turns to plan for -- the cards fall back to the top
+      // of the board (see TargetCards' own `fromCandidate`).
+      plan: [],
       last_poll_at: null,
       stale: false,
       unmapped_picks: [],
@@ -363,13 +376,12 @@ export default function DemoRoom({ onMode, live = false, site = false }: {
             </div>
           ) : tab === 'available' ? (
             <>
-              <TopThree
+              <TargetCards
+                plan={[]}
                 candidates={candidates}
                 players={players}
                 onDraft={() => { /* not your room */ }}
                 isMyTurn={false}
-                horizonLabel={null}
-                nextPickLabel={nextPick === null ? null : `pick ${nextPick}`}
                 pickNo={thisPick}
                 settings={room?.settings ?? null}
                 recompute={null}

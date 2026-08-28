@@ -2,8 +2,8 @@
 // always reads the same color wherever it appears, rather than two views
 // drifting into slightly different ramps over time.
 
-// The alt bar's fill color: a continuous red -> amber -> green ramp keyed to
-// `survive_pct` (the chance a candidate is still there at your next pick),
+// A continuous red -> amber -> green ramp keyed to `lasts_pct` (the measured
+// chance a candidate is still there at your next turn),
 // same color-mix technique as the deleted PlayerCard.tsx's sosTone (two-stop
 // interpolation between the fixed --ok/--fail tokens) but extended to
 // three stops through --accent -- this app's amber -- at the midpoint,
@@ -12,8 +12,8 @@
 // reads --fail; high pct (he'll last, you can wait) reads --ok.
 //
 // Moved here from the deleted LiveDraft.tsx (where it was `riskTone`,
-// keyed to `applied_pct`) so AvailableList and TopThree both import the one
-// copy instead of each carrying their own.
+// keyed to `applied_pct`) so AvailableList and TargetCards both import the
+// one copy instead of each carrying their own.
 export function riskTone(pct: number): string {
   const t = Math.max(0, Math.min(100, pct))
   if (t >= 50) {

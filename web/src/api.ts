@@ -241,49 +241,75 @@ export function ageLabel(createdAt: string): string {
 
 // -- live draft mode --
 
-// One row of the ranked available list. Sorted by `gain_now` descending on
-// the server (scoring/gain.py) -- the value this pick gains over the best
-// player at the same position expected to survive to `horizon_pick` below
-// (the first turn of yours far enough away for the comparison to mean
-// anything, NOT necessarily your immediately-next one), weighted by whether
-// your roster can start him, and `survive_pct` is measured to that same
-// pick. `vor_points` is the raw value over replacement it is derived from;
-// the two differ most exactly where the old EV ranking used to reach. No
-// name/position/team here beyond
-// `position` itself: the live loop is cheap by design (see api/live.py's
-// DraftSession docstring) and joining the rest against the full board is
-// the caller's job, via `player_id` against `fetchPlayers()`'s
-// one-time-fetched list.
+// One row of the available list, in ESPN's own draft-lobby order -- the room
+// does no re-ranking of its own any more (see the redesign spec, section 1).
+// No name/position/team here beyond `position` itself: the live loop is cheap
+// by design (see api/live.py's DraftSession docstring) and joining the rest
+// against the full board is the caller's job, via `player_id` against
+// `fetchPlayers()`'s one-time-fetched list.
 //
-// `gain_now`/`survive_pct`/`fills` are `null` together, never individually,
-// whenever `/api/live/state`'s `my_slot` is itself null: there is no roster
-// to rank a pick FOR yet (see scoring/gain.available_by_vor's own
-// docstring), so the list is sorted by `vor_points` alone instead. One
-// shape either way -- the frontend never branches on "which payload is
-// this," only on whether a given row's own fields are null (AvailableList
-// renders `—`; TopThree does not render its cards at all, see its own
-// comment).
+// The two computed numbers are `lasts_pct` and `edge_pts`, and both are
+// measured against ONE pick: `lasts_at_pick`, the reader's own next turn.
+// Both are null when there is no next turn to measure to -- the last round,
+// or a room with no seat resolved yet -- and the table draws a dash rather
+// than a zero, which would be a claim about a probability nobody computed.
 export type LiveCandidate = {
   player_id: string
   position: string
+  /** The season projection under this league's scoring. The table prints it
+   *  per game; the plan scores on it whole. */
   proj_points: number
-  vor_points: number
-  gain_now: number | null
-  /** What waiting costs in POINTS, priced at your own next turn: his value
-   *  over the best player at his position expected to still be there when
-   *  you pick again. Unweighted by roster need, unlike `gain_now`, which is
-   *  the ranking quantity and is measured against a turn a full round out.
-   *  Null exactly when `gain_now` is. */
-  gain_next: number | null
-  /** His points over the best OTHER player at his position expected at your
-   *  next turn. `gain_next` counts the player himself, so on the clock a
-   *  sure survivor reads 0 no matter how far ahead of his position he is --
-   *  this is the figure the cards switch to while it is your pick. Null
-   *  exactly when `gain_now` is (and on servers predating the field). */
-  edge_next: number | null
-  survive_pct: number | null
-  fills: string | null
+  /** ESPN's own draft-lobby rank, and his rank within his position derived
+   *  from it. Null for a player ESPN does not rank at all -- he keeps the
+   *  consensus rank and sorts after everyone ESPN has an opinion on. */
+  espn_rank: number | null
+  espn_pos_rank: number | null
+  /** ESPN's average draft position. Null when ESPN's own ADP is not usable
+   *  yet (too few drafts behind it), never a guessed one. */
+  espn_adp: number | null
+  /** The five-source consensus rank (scoring/market.py), unchanged. */
+  market_rank: number | null
+  /** The chance he is still on the board at `lasts_at_pick`, measured from
+   *  recorded ESPN mock drafts (scoring/availability.py) -- 0-100. */
+  lasts_pct: number | null
+  lasts_at_pick: number | null
+  /** His projection minus the best player at his position you can expect to
+   *  get at `lasts_at_pick` instead. Positive means taking him now beats
+   *  waiting; negative means waiting does. */
+  edge_pts: number | null
+  /** Which roster slot he would fill -- scoring/gain.need_kind's own words
+   *  ("starter", "flex", "deferred", "bench", "capped"). Null before a seat
+   *  is resolved, since there is no roster to fill. */
+  need: string | null
+  /** One of the reader's own favourite players (api/account.py). */
+  favourite: boolean
+  /** His position in the list as the server built it: ESPN's order, with the
+   *  unranked after it by consensus. The one field guaranteed non-null, so
+   *  it is what every sort falls back to for its tie-break. */
   rank: number
+}
+
+/** One player in the plan: the target of a turn, or one of its alternates.
+ *
+ *  `lasts_pct` and `edge_pts` here are measured at THAT TURN's pick, not at
+ *  the reader's next one -- which is what makes a plan a plan rather than a
+ *  list of today's numbers repeated. Alternates carry empty `pros`/`cons`:
+ *  the reasoning is written for the target, and three paragraphs per turn is
+ *  not a plan anybody reads under a pick clock. */
+export interface PlanPlayer {
+  player_id: string
+  lasts_pct: number | null
+  edge_pts: number | null
+  pros: string[]
+  cons: string[]
+}
+
+/** One of the reader's remaining turns, with who to take on it. */
+export interface LivePlanTurn {
+  pick_no: number
+  round: number
+  target: PlanPlayer
+  alternates: PlanPlayer[]
 }
 
 // A pick the socket reported but the crosswalk could not resolve to a
@@ -362,20 +388,15 @@ export interface LiveState {
   // `isRecomputing` in LiveDraft.tsx, a file this branch deleted -- and
   // with it, for a while, the indicator itself.)
   candidates_as_of_pick: number | null
-  // The pick `gain_now` and `survive_pct` were actually measured against:
-  // the first turn of yours at least a full round of opponent picks away
-  // (scoring/draft_sim.horizon_picks), which at the wheel and at short gaps
-  // is NOT your immediately-next pick. Stored server-side alongside
-  // `candidates` under the same lock, so it always describes the list that
-  // came with it rather than the poll that fetched it.
-  //
-  // null when no gain-ranked list exists yet (no session, or my_slot
-  // unresolved so the list is vor_points-only) AND when the horizon is the
-  // end of the draft -- `horizon_is_end_of_draft` is what tells those apart,
-  // and it exists because the alternative was serving pick 121 of a
-  // 120-pick draft. Never both: a number here means a pick that exists.
-  horizon_pick: number | null
-  horizon_is_end_of_draft: boolean
+  /** The reader's remaining turns, each with a target and two alternates
+   *  (scoring/plan.py). In pick order, so the first entry is the turn on the
+   *  clock while it is the reader's, and his next one while it is not.
+   *
+   *  Optional, and read as `?? []` everywhere: a server one deploy behind
+   *  this field omits the key entirely, and a room that renders no plan is
+   *  a room missing a panel rather than a room that throws. Empty is also
+   *  the honest answer for a spectator with no seat. */
+  plan?: LivePlanTurn[]
   last_poll_at: string | null
   // True whenever the listener hasn't successfully polled in the last 15s
   // (api/live.py's STALE_AFTER_SECONDS) -- including "never polled."
@@ -807,12 +828,6 @@ export interface LiveMockCandidate {
   player_id: string
   position: string | null
   proj_points: number | null
-  vor_points: number | null
-  gain_now: number | null
-  gain_next: number | null
-  edge_next: number | null
-  survive_pct: number | null
-  fills: string | null
   rank: number | null
   name: string | null
   team: string | null
@@ -820,6 +835,19 @@ export interface LiveMockCandidate {
   adp: number | null
   vs_adp: number | null
   board_rank: number | null
+  // The room's own computed pair and ESPN's ranks, optional here rather than
+  // required: this payload is built by api/demo.py, which is deployed with
+  // the room but has its own shape, and a landing page that renders dashes
+  // for a figure the demo has not started sending yet is a better failure
+  // than one that does not render.
+  espn_rank?: number | null
+  espn_pos_rank?: number | null
+  espn_adp?: number | null
+  market_rank?: number | null
+  lasts_pct?: number | null
+  lasts_at_pick?: number | null
+  edge_pts?: number | null
+  need?: string | null
 }
 
 export interface LiveMock {
@@ -987,6 +1015,48 @@ export async function mintDraftToken(
     swid: String(body.swid), token: String(body.token),
     season: String(body.season),
   }
+}
+
+// -- your guys (the account's favourite players) ---------------------------
+//
+// Five to twenty-five player ids, in the order they were picked, stored
+// against the ESPN account behind the custody session (api/account.py). The
+// draft room's plan targets them -- see scoring/plan.py -- which is the whole
+// reason they exist: a plan that ignores who you actually want to draft is a
+// plan for somebody else's team.
+
+/** The lowest and highest a saved list may be. The server enforces the same
+ *  pair and answers 422 outside it; the picker states it up front so nobody
+ *  meets that 422 by surprise. */
+export const FAVORITES_MIN = 5
+export const FAVORITES_MAX = 25
+
+/** The account's favourites, in their saved order.
+ *
+ *  `null`, not an empty list, when there is no custody session to read them
+ *  from (the server's own 401): "nobody is signed in here" and "signed in
+ *  with nothing saved yet" are different pages, and only the second one gets
+ *  the picker. */
+export async function fetchFavorites(): Promise<string[] | null> {
+  const res = await fetch('/api/account/favorites')
+  if (res.status === 401) return null
+  if (!res.ok) throw new Error(`Failed to load favorites (${res.status}): ${await detailText(res)}`)
+  const body = await res.json()
+  return Array.isArray(body.players) ? body.players.map(String) : []
+}
+
+/** Replaces the saved set with `players`, in the order given. Throws the
+ *  server's own sentence on a 422 -- the bounds and the "not on the board"
+ *  refusal are both worth reading verbatim. */
+export async function saveFavorites(players: string[]): Promise<string[]> {
+  const res = await fetch('/api/account/favorites', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ players }),
+  })
+  if (!res.ok) throw new Error(await detailText(res))
+  const body = await res.json().catch(() => ({ players }))
+  return Array.isArray(body.players) ? body.players.map(String) : players
 }
 
 // -- open ESPN mock rooms, and taking a seat in one ------------------------
