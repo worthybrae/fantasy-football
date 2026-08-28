@@ -2067,10 +2067,12 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
     registry = LiveRegistry()
     # The read-only copy provisioning reads from (pipeline/leagues), written
     # here once and again by the refresh loop (api/jobs.py) after every
-    # refresh. None when the database is not a file.
-    snapshot_path = None
+    # refresh. The PATH is fixed; whether a snapshot is there is checked on
+    # every connect, so a boot before the first refresh has landed (a fresh
+    # volume) starts using workers the moment the refresh writes one.
+    snapshot_path = leagues_mod.snapshot_path_for(db_path)
     try:
-        snapshot_path = leagues_mod.snapshot_universal(conn, db_path)
+        leagues_mod.snapshot_universal(conn, db_path)
     except Exception as exc:      # noqa: BLE001 -- provisioning falls back
         # to the pandas copy without one; the API still comes up.
         print(f"live: could not write the universal snapshot: {exc}")
@@ -2607,27 +2609,29 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
             # most of a gigabyte resident in this process per evening. A
             # worker provisions for itself, from the same snapshot, so the
             # parent's part here is only the inline case -- and with no
-            # snapshot at all (a test database that was never snapshotted)
-            # the worker cannot provision, so the build stays inline too.
+            # snapshot on disk right now (a fresh volume before its first
+            # refresh, a test database) the worker cannot provision, so
+            # the build stays inline too.
             snapshot = snapshot_path
-            have_snapshot = snapshot is not None and os.path.exists(snapshot)
-            if not (live_build.workers() > 0 and have_snapshot):
+            have_snapshot = os.path.exists(snapshot)
+            worker_path = live_build.workers() > 0 and have_snapshot
+            if not worker_path:
                 league_path = provision_league(
                     league_id, universal_path=db_path,
                     root=leagues_mod.LEAGUES_ROOT, snapshot=snapshot)
-            progress.ok("league", "already provisioned" if existed
-                        else "new file · seeded from the shared database")
+                progress.ok("league", "already provisioned" if existed
+                            else "new file · seeded from the shared database")
             # OFF THIS PROCESS'S CPU when there is a worker pool (see
             # api/live_build.py), which is the difference between a dozen
             # connects at eight o'clock and every poll in the process
-            # stalling for them. The worker opens the league file itself,
-            # so the parent must not be holding it: provision_league above
-            # has closed its handle, and the parent's own connection is
-            # opened only once the session is back. A file another room in
-            # THIS process already holds (a leaguemate's) is not available
-            # to a second process at all -- DuckDB's lock is per process --
-            # so that case builds inline, where a second connection to an
-            # open file is fine.
+            # stalling for them. The worker provisions and opens the league
+            # file itself, so the parent must not be holding it; the
+            # parent's own connection is opened only once the session is
+            # back. A file another room in THIS process already holds (a
+            # leaguemate's, or one a closer is still closing) is not
+            # available to a second process at all -- DuckDB's lock is per
+            # process -- so that case builds inline, where a second
+            # connection to an open file is fine.
             # The registration comes FIRST, before worker-or-inline is
             # decided (see LiveRegistry.path_holders): any other room
             # holding the file means it is, or is about to be, open in this
@@ -2635,9 +2639,26 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
             # either way, and released with the connection.
             sole = registry.claim_path(league_path, s.sid)
             try:
-                if live_build.workers() > 0 and sole and have_snapshot:
-                    session = _build_off_process(league_path, league_id,
-                                                 team_id, settings, progress)
+                session = None
+                if worker_path and sole:
+                    try:
+                        session = _build_off_process(league_path, league_id,
+                                                     team_id, settings, progress)
+                    except HTTPException:
+                        raise                   # a refusal, not a failure
+                    except Exception as exc:    # noqa: BLE001 -- see below
+                        # The worker could not build this league (most
+                        # often: it could not provision it, because the
+                        # snapshot was mid-replace or unreadable). Nothing
+                        # holds the file -- the worker closed or never
+                        # opened it -- so this connect builds inline, from
+                        # the live database, and says so.
+                        print(f"live: worker build of league {league_id} "
+                              f"failed ({exc}); building inline")
+                        session = None
+                if session is not None:
+                    progress.ok("league", "already provisioned" if existed
+                                else "new file · seeded from the shared database")
                     league_conn = get_conn(league_path)
                     apply_parent_conn_limits(league_conn)
                     if settings is None:
@@ -2649,6 +2670,14 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
                             else "default"))
                     _publish_path(s, league_path)
                     return league_conn, league_conn, session
+                if worker_path:
+                    # Reached only after a worker failure or a lost sole
+                    # claim: provision inline now, from the live database.
+                    league_path = provision_league(
+                        league_id, universal_path=db_path,
+                        root=leagues_mod.LEAGUES_ROOT, snapshot=snapshot)
+                    progress.ok("league", "already provisioned" if existed
+                                else "new file · seeded from the shared database")
                 league_conn = get_conn(league_path)
                 apply_parent_conn_limits(league_conn)
             except Exception:
@@ -2792,11 +2821,13 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
         # Exactly one listener per session. Rather than refuse a reconnect --
         # which would trap a caller recovering from a dead listener behind a
         # separate, easy-to-forget /api/live/stop -- this session's old one
-        # is always stopped and joined FIRST. That is also where its
-        # per-league connection is closed, so the single-writer DuckDB file
-        # is free before _provision_and_build reopens it. If it will not stop
-        # in time, refuse rather than race it. Other sessions are untouched:
-        # another drafter's room is theirs, whatever league it is in.
+        # is always stopped and joined FIRST. Its per-league connection is
+        # closed there too -- or, with a ranking still in flight, handed to
+        # a closer that keeps the file claimed until it has closed it, so
+        # _provision_and_build reopens the file inline rather than in a
+        # worker. If the listener will not stop in time, refuse rather than
+        # race it. Other sessions are untouched: another drafter's room is
+        # theirs, whatever league it is in.
         if not _stop_listener(s):
             progress.fail(
                 "reset", "the previous listener is still running",

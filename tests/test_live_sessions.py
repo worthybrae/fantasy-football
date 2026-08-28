@@ -8,6 +8,7 @@ distinct sids, and the isolation between them.
 Clients speak https: the room cookie is `Secure` under the same rule the
 custody cookie follows, and a client on plain http would drop it.
 """
+import os
 import threading
 import time
 import types
@@ -776,5 +777,74 @@ def test_a_reconnect_while_the_closer_still_holds_the_file_builds_inline(tmp_pat
         assert registry.holders_of(league_file) == {sid}
     finally:
         release.set()
+        _stop_all([a])
+        runner.shutdown(wait=False)
+
+
+def test_a_snapshot_written_after_boot_is_used_by_the_next_connect(tmp_path, monkeypatch):
+    """No snapshot at app build (a fresh volume): connects build inline.
+    Once one is written, the next connect goes to a worker."""
+    from concurrent.futures import ThreadPoolExecutor
+    from pipeline import leagues as leagues_mod
+    monkeypatch.setenv(live_build.WORKERS_ENV, "1")
+    monkeypatch.setattr("pipeline.leagues.snapshot_universal", lambda conn, path: None)
+    app, seen, stops = _app(tmp_path, monkeypatch)
+    db = str(tmp_path / "live.duckdb")
+    assert not os.path.exists(leagues_mod.snapshot_path_for(db))
+    submits = []
+    runner = ThreadPoolExecutor(max_workers=1)
+    real_build = live.build_session
+    monkeypatch.setattr(
+        "api.live_build.build_session",
+        lambda cur, my_slot, league_id="", settings=None, progress=None:
+            real_build(cur, my_slot, league_id=league_id, settings=settings))
+
+    def recorder(fn, *args):
+        submits.append(args[2])
+        return runner.submit(fn, *args)
+    monkeypatch.setattr("api.live_build.submit", recorder)
+    a, b = _client(app), _client(app)
+    try:
+        _connect(a, "1", team_id="2")
+        assert submits == [], "no snapshot, so no worker"
+        # The refresh loop writes one.
+        monkeypatch.undo()
+        from pipeline.db import get_conn
+        c = get_conn(db); leagues_mod.snapshot_universal(c, db); c.close()
+        monkeypatch.setenv(live_build.WORKERS_ENV, "1")
+        monkeypatch.setattr("api.live_build.submit", recorder)
+        monkeypatch.setattr(
+            "api.live_build.build_session",
+            lambda cur, my_slot, league_id="", settings=None, progress=None:
+                real_build(cur, my_slot, league_id=league_id, settings=settings))
+        _connect(b, "2", team_id="2")
+        assert submits == ["2"]
+    finally:
+        _stop_all([a, b])
+        runner.shutdown(wait=False)
+
+
+def test_a_worker_that_cannot_build_falls_back_to_an_inline_build(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from pipeline import leagues as leagues_mod
+    monkeypatch.setenv(live_build.WORKERS_ENV, "1")
+    app, seen, stops = _app(tmp_path, monkeypatch)
+    db = str(tmp_path / "live.duckdb")
+    assert os.path.exists(leagues_mod.snapshot_path_for(db))
+    runner = ThreadPoolExecutor(max_workers=1)
+    submits = []
+
+    def broken(*args):
+        raise RuntimeError("the worker could not provision")
+    monkeypatch.setattr("api.live_build.submit",
+                        lambda fn, *args: (submits.append(args[2]), runner.submit(broken, *args))[1])
+    a = _client(app)
+    try:
+        resp = _connect(a, "1", team_id="2")
+        assert resp.status_code == 200
+        assert submits == ["1"]
+        assert a.get("/api/live/state").json()["active"] is True
+        assert os.path.exists(str(tmp_path / "leagues_root" / "1.duckdb"))
+    finally:
         _stop_all([a])
         runner.shutdown(wait=False)

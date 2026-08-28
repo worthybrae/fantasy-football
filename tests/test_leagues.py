@@ -211,3 +211,38 @@ def test_a_missing_or_unreadable_snapshot_falls_back_to_the_pandas_copy(tmp_path
                             snapshot=str(bad))
     lg = get_conn(path); assert not read_table(lg, "weekly").empty; lg.close()
     assert "copying through pandas" in capsys.readouterr().out
+
+
+def test_a_worker_style_call_never_opens_the_snapshot_read_write(tmp_path):
+    """`universal_path` IS the snapshot (a build worker's call): a missing
+    or unreadable snapshot raises, creates nothing, and leaves the
+    snapshot's bytes exactly as they were -- never the pandas copy, which
+    would open it read-write."""
+    import pytest
+    from pipeline.leagues import provision_league
+    missing = str(tmp_path / "universal-snapshot.duckdb")
+    with pytest.raises(FileNotFoundError):
+        provision_league("6", universal_path=missing, root=str(tmp_path / "lg"), snapshot=missing)
+    assert not (tmp_path / "universal-snapshot.duckdb").exists()
+    assert not (tmp_path / "lg" / "6.duckdb").exists()
+    bad = tmp_path / "bad-snapshot.duckdb"; bad.write_bytes(b"not a duckdb file")
+    with pytest.raises(Exception):
+        provision_league("7", universal_path=str(bad), root=str(tmp_path / "lg"), snapshot=str(bad))
+    assert bad.read_bytes() == b"not a duckdb file"
+    assert not (tmp_path / "lg" / "7.duckdb").exists()
+
+
+def test_snapshot_writes_are_serialised_and_leave_no_tmp_behind(tmp_path):
+    import threading
+    from pipeline.leagues import snapshot_universal
+    shared, conn = _shared(tmp_path)
+    done = []
+    def write():
+        done.append(snapshot_universal(conn, shared))
+    threads = [threading.Thread(target=write) for _ in range(4)]
+    for t in threads: t.start()
+    for t in threads: t.join()
+    assert len(set(done)) == 1
+    leftovers = [p.name for p in tmp_path.iterdir() if ".tmp." in p.name]
+    assert leftovers == []
+    conn.close()

@@ -11,6 +11,7 @@ this project started as does not move.
 """
 import os
 import re
+import threading
 from pathlib import Path
 
 from pipeline.db import DEFAULT_PATH
@@ -67,6 +68,13 @@ from pipeline.db import (UNIVERSAL_TABLES, apply_worker_conn_limits, get_conn,
 # frees. Several processes may hold it read-only at once.
 SNAPSHOT_NAME = "universal-snapshot.duckdb"
 
+# One snapshot write at a time. The boot write and the refresh loop's write
+# both come through snapshot_universal, and two of them interleaving --
+# one copying while the other checkpoints -- would leave a snapshot that
+# is neither. The tmp name carries the pid for the same reason across
+# processes.
+_SNAPSHOT_LOCK = threading.Lock()
+
 
 def snapshot_path_for(universal_path: str) -> str:
     return os.path.join(os.path.dirname(os.path.abspath(universal_path)),
@@ -84,10 +92,17 @@ def snapshot_universal(conn, universal_path: str,
     if not universal_path or not os.path.exists(universal_path):
         return None
     target = snapshot_path or snapshot_path_for(universal_path)
-    conn.execute("CHECKPOINT")
-    tmp = f"{target}.tmp"
-    shutil.copyfile(universal_path, tmp)
-    os.replace(tmp, target)
+    tmp = f"{target}.tmp.{os.getpid()}"
+    with _SNAPSHOT_LOCK:
+        conn.execute("CHECKPOINT")
+        try:
+            shutil.copyfile(universal_path, tmp)
+            os.replace(tmp, target)
+        finally:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
     return target
 
 
@@ -126,42 +141,42 @@ def provision_league(league_id: str, universal_path: str,
     which is precisely the cold-start state `cold_start_fits` handles.
 
     With `snapshot` naming a readable file the copy is DuckDB-native from
-    that snapshot (see SNAPSHOT_NAME); otherwise, or if the attach fails,
-    it is the table-by-table pandas copy from `universal_path`. A build
-    worker must pass the snapshot: it cannot open `universal_path`, which
-    the app process holds.
+    that snapshot (see SNAPSHOT_NAME). Otherwise it is the table-by-table
+    pandas copy from `universal_path` -- which must be the LIVE database,
+    never the snapshot: the pandas copy opens its source read-write, and a
+    snapshot opened read-write is a snapshot mutated, locked against every
+    other process, or -- when it did not exist -- created empty, poisoning
+    every later attach. So a caller that passes the snapshot AS
+    `universal_path` (a build worker, which cannot open the live file) gets
+    an exception when the attach fails, and the app's worker-failed
+    fallback then provisions inline from the live file.
     """
     path = league_db_path(league_id, root=root)
     if league_id in (DEFAULT_LEAGUE, DEFAULT_LEAGUE_ID) or Path(path).exists():
         return path
+    snapshot_only = (snapshot is not None and universal_path is not None
+                     and os.path.abspath(universal_path) == os.path.abspath(snapshot))
     if snapshot and os.path.exists(snapshot):
         try:
             _provision_by_attach(path, snapshot)
             return path
-        except Exception as exc:      # noqa: BLE001 -- the pandas copy is
-            # the fallback for any refusal (a snapshot mid-replace, an
-            # older DuckDB that cannot read it); a half-made file must not
-            # be left to be mistaken for a provisioned league.
-            print(f"leagues: attach provisioning of {league_id} failed "
-                  f"({exc}); copying through pandas")
+        except Exception as exc:      # noqa: BLE001 -- see the docstring:
+            # a half-made file must not be left to be mistaken for a
+            # provisioned league, and the pandas copy is the fallback only
+            # from the live database.
             for suffix in ("", ".wal"):
                 try:
                     os.unlink(path + suffix)
                 except FileNotFoundError:
                     pass
-    src = get_conn(universal_path)
-    try:
-        dst = get_conn(path)
-        try:
-            for table in UNIVERSAL_TABLES:
-                df = read_table(src, table)
-                if not df.empty:
-                    write_table(dst, table, df)
-        finally:
-            dst.close()
-    finally:
-        src.close()
-    return path
+            if snapshot_only:
+                raise
+            print(f"leagues: attach provisioning of {league_id} failed "
+                  f"({exc}); copying through pandas")
+    if snapshot_only:
+        raise FileNotFoundError(
+            f"no universal snapshot at {snapshot} to provision league "
+            f"{league_id} from")
     src = get_conn(universal_path)
     try:
         dst = get_conn(path)
