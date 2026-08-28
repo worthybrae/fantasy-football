@@ -62,3 +62,15 @@ These are the deferred / parked findings the final whole-branch review should tr
 - Build-timeout retry residual (`add_done_callback` on the abandoned future).
 - Snapshot copy at `import api.main` under pytest; billing `_seed_mocks_from_corpus` under the lock on first call; token restore across a custody key rotation.
 - Next performance levers (100 rooms: state p95 1.27 s): rankings into the worker pool; cache `live_state`'s per-poll derivations on `picks_seen`.
+
+## Carried out of the 2026-08-28 evening hotfix reviews (not blocking)
+
+- `tests/test_demo_live.py::test_a_stale_answer_is_served_rather_than_rebuilt` is order-dependent in a full run (passes alone); trace which earlier test leaves the demo warm flag on.
+- Frontend: the board grid's scroll-cancel is dead during the 130 ms hover delay (`DraftBoardGrid.tsx`); the mobile clip has no `controls` if autoplay is refused; the countdown store ticks every second even for drafts days away (a 20 s bucket would do); `REQUESTS` in `api.ts` is size-bounded only (no periodic sweep); `settled` first paint uses a 10-minute age cap — injury badges can be that stale on first paint.
+- `/api/players` ETag: the 304 loses `Vary: Accept-Encoding` (Starlette's small-response gzip branch); the same strong ETag serves gzip and identity bodies. Mark weak or fold the encoding in.
+- `/adp` page-cache stamp does not move when a draft is re-recorded with the same id (`draft_log.record` is delete-then-insert by draft_id).
+- Headshots: K/DST rows have no photo (fine); consider `DEFAULT_WIDTH` per slot rather than one global.
+- Favourites: concurrent double-save on DuckDB answers 503 (Postgres serialises); rows under retired custody key versions are never deleted; the "Your guys" card shows names only after a board has been fetched in the tab.
+- Availability: K/DST have no fitted fallback buckets (own ADP + 12-pick sigma past the corpus depth); a lone K/DST left at exactly one waits for the last turn; a field where every other player is ~0 % puts the candidate's whole projection on the score scale.
+- Live rooms: a retiring room's stop-timeout path re-adopts the orphan under a `sid~token` key; `readopt` orphans keep touching `last_activity` from socket frames, so the reaper cannot fire while ESPN still sends.
+- `live_session` ciphertext rows never age out (`saved_at` unread); token restore is limited to configured custody key versions.
