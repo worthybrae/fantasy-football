@@ -196,10 +196,14 @@ export default function TargetCards({
   }, [panel, hidePanel])
 
   const turn = turnFor(plan, pickNo, onTheClock)
+  // A turn with no clear target (the plan's honest null) still shows its
+  // alternates, if any; with none at all the caption says so rather than
+  // the cards falling back to the top of the board as if there were no plan.
   const rows: PlanPlayer[] = turn
-    ? [turn.target, ...turn.alternates].slice(0, 3)
+    ? [...(turn.target ? [turn.target] : []), ...turn.alternates].slice(0, 3)
     : candidates.slice(0, 3).map(fromCandidate)
-  if (rows.length === 0) return null
+  const noClearTarget = turn !== null && turn.target === null
+  if (rows.length === 0 && !noClearTarget) return null
 
   const byId = new Map(candidates.map((c) => [c.player_id, c]))
   // ON THE CLOCK the plan's first turn IS this pick, so the cards are a
@@ -238,6 +242,12 @@ export default function TargetCards({
           )}
         </span>
       </div>
+      {noClearTarget && rows.length === 0 && (
+        <p className="target-none" role="status">
+          No clear target for pick {turn?.pick_no}: nobody is likely enough to
+          be there, or worth waiting for. The list below is in ESPN&apos;s order.
+        </p>
+      )}
       <div className="target-grid">
         {rows.map((row, i) => {
           const c = byId.get(row.player_id)

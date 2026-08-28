@@ -77,3 +77,12 @@ test('a reader with no turns left gets no panel, not an empty one', () => {
   const { container } = render(<PlanPanel plan={[]} players={PLAYERS} />)
   expect(container.querySelector('.plan-panel')).toBeNull()
 })
+
+
+test('a turn nobody cleared reads "no clear target" and keeps its place', () => {
+  const empty: LivePlanTurn = { pick_no: 36, round: 3, target: null, alternates: [] }
+  render(<PlanPanel plan={[TURN, empty]} players={PLAYERS} />)
+  expect(screen.getByText('Pick 36')).toBeTruthy()
+  expect(screen.getByText('No clear target')).toBeTruthy()
+  expect(screen.getByText('Puka')).toBeTruthy()
+})

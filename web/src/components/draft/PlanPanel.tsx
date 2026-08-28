@@ -69,6 +69,20 @@ export default function PlanPanel({
       <ul className="plan-list">
         {turns.map((turn) => {
           const target = turn.target
+          if (target === null) {
+            // The plan's honest answer for a turn nobody cleared: say so,
+            // in the turn's own slot, so the reader sees the gap rather
+            // than a plan that skips a round.
+            return (
+              <li key={turn.pick_no} className="plan-turn plan-turn-none">
+                <div className="plan-turn-head">
+                  <span className="plan-pick mono">Pick {turn.pick_no}</span>
+                  <span className="plan-round">Round {turn.round}</span>
+                </div>
+                <div className="plan-target plan-none">No clear target</div>
+              </li>
+            )
+          }
           const player = players[target.player_id]
           const name = player?.name ?? target.player_id
           const body = (

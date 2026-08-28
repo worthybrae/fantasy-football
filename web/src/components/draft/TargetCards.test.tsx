@@ -146,3 +146,15 @@ test('with no plan at all, the top of the board stands in', () => {
   expect(screen.getByText('Now One')).toBeTruthy()
   expect(screen.getByText("the top of ESPN's board")).toBeTruthy()
 })
+
+
+test('a turn with no clear target says so instead of borrowing the board', () => {
+  const plan: LivePlanTurn[] = [{ pick_no: 4, round: 1, target: null, alternates: [] }]
+  render(
+    <TargetCards plan={plan} candidates={CANDIDATES} players={PLAYERS}
+                 onDraft={() => {}} isMyTurn={true} onTheClock={true} pickNo={4}
+                 settings={null} recompute={null} onOpenPlayer={() => {}} />,
+  )
+  expect(screen.getByText(/No clear target for pick 4/)).toBeTruthy()
+  expect(screen.queryByText('Now One')).toBeNull()
+})

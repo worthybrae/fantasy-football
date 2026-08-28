@@ -308,7 +308,9 @@ export interface PlanPlayer {
 export interface LivePlanTurn {
   pick_no: number
   round: number
-  target: PlanPlayer
+  /** null when nobody cleared the plan's threshold for this turn -- the
+   *  honest answer, drawn as "no clear target", never a made-up name. */
+  target: PlanPlayer | null
   alternates: PlanPlayer[]
 }
 
