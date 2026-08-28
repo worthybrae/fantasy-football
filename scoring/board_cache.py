@@ -61,6 +61,19 @@ incomplete):
     `sim_results.created_at` and each table's row count, rather than
     hashing the full contents.
 
+WHAT THE KEY IS KEYED ON, first component first: the IDENTITY of the
+universal data behind the connection, not the connection's file. Every
+league file is provisioned from one snapshot of the shared database
+(pipeline/leagues), so two league files whose `meta` rows agree hold
+byte-identical universal tables and one built board is the board for both
+-- which matters because two hundred live rooms are two hundred files, and
+keying on the file would build two hundred identical boards and hold two
+hundred copies of them. So the identity is the `meta` fingerprint whenever
+there is one, and the file path only when `meta` is empty, which is a test
+fixture seeded with write_table and never stamped by record_freshness (see
+`_identity_key`). The rest of the key is the weights, the settings and the
+sim tables, each for the reason given below.
+
 WHAT IS DELIBERATELY NOT DEFENDED: a table swapped out from under a live
 `conn` by something other than pipeline.refresh, run_sim, or the two
 `drafted` writers above (e.g. a test or a script calling `write_table`

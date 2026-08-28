@@ -201,6 +201,14 @@ def run_fake_socket_listener(listener, league_id, team_id, swid, token,
     if pick_interval is None:
         pick_interval = pick_interval_from_env()
     frames = load_frames(trace_path)
+    if not frames:
+        # Nothing to replay, and `loop` would otherwise spin on an empty
+        # inner loop for the life of the room -- a busy core per room, for
+        # a listener that can never report anything. Say so and stop; the
+        # connect sees a listener that ended, which is the truth.
+        print(f"live_fake_socket: no frames in {trace_path}; nothing to "
+              "replay")
+        return
     delays = frame_delays(frames, pick_interval)
     if on_socket is not None:
         # Immediately, unlike the real socket, which waits for its first

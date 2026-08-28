@@ -56,10 +56,11 @@ def main(argv=None) -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8010)
     parser.add_argument(
-        "--db",
-        help="DRAFT_DB_PATH for this process. Point it at a COPY of "
-             "data/nfl.duckdb: DuckDB is single-writer and a load run must "
-             "not take the real file's lock.")
+        "--db", required=True,
+        help="DRAFT_DB_PATH for this process. REQUIRED, and pointed at a "
+             "COPY of data/nfl.duckdb: DuckDB is single-writer, and a load "
+             "run that defaulted to the real file would take the lock the "
+             "dev server and every refresh need.")
     parser.add_argument(
         "--pick-interval", type=float, default=2.0,
         help="seconds between replayed picks in every room (default 2.0)")
@@ -72,11 +73,22 @@ def main(argv=None) -> int:
              "socket is faked. Do not use this for a hundred-room run.")
     args = parser.parse_args(argv)
 
+    # NOT ON A DEPLOYMENT. This runner replaces the draft socket with a
+    # replay and answers "free draft" to every billing question, so a
+    # hundred rooms cost nothing -- which is exactly why it must never be
+    # what a real drafter reaches. Railway sets this variable in every
+    # environment it runs, so its presence is the one signal available
+    # before anything else is imported.
+    if os.environ.get("RAILWAY_ENVIRONMENT"):
+        print("load_server: RAILWAY_ENVIRONMENT is set. This runner fakes "
+              "the draft socket and the billing answer; it is for a local "
+              "load test only. Refusing to start.", flush=True)
+        return 2
+
     # Before importing anything from the app: pipeline.db reads DRAFT_DB_PATH
     # at import time into DEFAULT_PATH, and api.main builds its app -- and its
     # connection -- at import time too.
-    if args.db:
-        os.environ["DRAFT_DB_PATH"] = args.db
+    os.environ["DRAFT_DB_PATH"] = args.db
     os.environ.setdefault("WARM_ON_BOOT", "0")
     # WITHOUT THIS THE LOAD TEST MEASURES NOTHING. The `espn_live` room
     # cookie is set `Secure` unless plaintext http has been explicitly
@@ -104,7 +116,7 @@ def main(argv=None) -> int:
         api.live.billing.is_free_draft = lambda league_id: True
         faked += ["settings/team-name fetch", "mock-lobby lookup"]
 
-    print(f"load_server: db={os.environ.get('DRAFT_DB_PATH', 'data/nfl.duckdb')} "
+    print(f"load_server: db={os.environ['DRAFT_DB_PATH']} "
           f"pick_interval={args.pick_interval}s "
           f"build_workers={os.environ.get('LIVE_BUILD_WORKERS', 'default')}",
           flush=True)

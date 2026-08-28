@@ -156,6 +156,20 @@ def test_a_response_that_never_reached_a_route_is_stamped_too():
     assert res.headers["Cache-Control"] == "private, no-store"
 
 
+def test_the_bare_api_path_is_stamped_too():
+    """`/api` with no trailing slash does not start with `/api/`, so it fell
+    outside the default. Nothing routes there, and what comes back is a 404
+    -- or, when something inside Starlette fails before routing, the 500
+    ServerErrorMiddleware writes. That is the one answer that must never be
+    held by a shared cache, and it was the one answer never stamped."""
+    res = _app().get("/api")
+    assert res.status_code == 404
+    assert res.headers["Cache-Control"] == "private, no-store"
+    # ...and the rule is about this path, not about anything spelled like it.
+    assert http_cache.is_api_path("/api") and http_cache.is_api_path("/api/x")
+    assert not http_cache.is_api_path("/apiary")
+
+
 def test_paths_outside_the_api_are_left_to_their_own_modules():
     """The SPA, its assets and the ADP pages all set headers where they are
     served. Stamping `private` on them from here would make every one of

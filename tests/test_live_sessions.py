@@ -1092,6 +1092,65 @@ def test_a_room_that_will_not_stop_stays_in_the_registry_when_its_sid_is_taken(
         _stop_all([a])
 
 
+def test_evicting_a_seat_stops_every_room_before_it_forgets_any(
+        tmp_path, monkeypatch):
+    """One seat, two old rooms, and the second one will not stop.
+
+    The eviction used to walk the rooms one at a time -- stop it, clear it,
+    delete its record, drop it, next -- so a refusal on the second room
+    arrived with the first already gone: a room emptied and somebody's
+    saved draft deleted for a connect that then failed anyway. Every room
+    is asked to stop first, and nothing is forgotten unless all of them
+    stopped."""
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    release = threading.Event()
+    stops = {}
+
+    def by_team(listener, league_id, team_id, swid, token, on_change=None,
+                stop_event=None, on_activity=None, on_socket=None):
+        stops[str(team_id)] = stop_event
+        if str(team_id) == "3":
+            release.wait(timeout=30)        # this one refuses to stop
+        else:
+            stop_event.wait(timeout=20)
+    monkeypatch.setattr("api.live.run_socket_listener", by_team)
+    monkeypatch.setattr("api.live.LISTENER_STOP_TIMEOUT", 0.2)
+    from api.main import create_app
+    from api.live_records import record_store
+    app = create_app(path)
+    registry = app.state.live_registry
+    records = record_store(path)
+    a, b, c = _client(app), _client(app), _client(app)
+    try:
+        _connect(a, "1", team_id="2")
+        _connect(b, "1", team_id="3")
+        sid_a, sid_b = a.cookies.get(SID_COOKIE), b.cookies.get(SID_COOKIE)
+        # And now b holds a's seat too, which is what a browser whose cookie
+        # was cleared twice mid-draft leaves behind.
+        room_b = registry.get(sid_b)
+        with room_b.lock:
+            room_b.state["seat"] = ("1", "2")
+
+        resp = c.post("/api/live/connect-token", json={
+            "leagueId": "1", "teamId": "2", "swid": "{X}",
+            "token": "tok-1", "season": "2026"})
+        assert resp.status_code == 503, resp.text
+        assert stops["2"].is_set(), "the stoppable room was not asked to stop"
+        assert registry.get(sid_a) is not None
+        assert records.load(sid_a) is not None, \
+            "a refused eviction deleted a room's record anyway"
+
+        # Once the stubborn room lets go, the retry takes both.
+        release.set()
+        assert _connect(c, "1", team_id="2").status_code == 200
+        assert registry.get(sid_a) is None and registry.get(sid_b) is None
+        assert records.load(sid_a) is None
+    finally:
+        release.set()
+        _stop_all([a, b, c])
+
+
 def test_a_room_touched_after_the_reaper_looked_is_kept(tmp_path, monkeypatch):
     app, seen, stops = _app(tmp_path, monkeypatch)
     registry = app.state.live_registry

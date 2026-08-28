@@ -38,16 +38,9 @@ import threading
 from concurrent.futures import Future, ProcessPoolExecutor, TimeoutError
 from concurrent.futures.process import BrokenProcessPool
 
-from pipeline.db import (WORKER_CONN_MEMORY_LIMIT, WORKER_CONN_THREADS,
-                         apply_worker_conn_limits)
+from pipeline.db import apply_worker_conn_limits
 
 WORKERS_ENV = "LIVE_BUILD_WORKERS"
-
-# The worker's build connection gets the WORKER limits from pipeline/db.py;
-# the parent's own per-room connection gets the smaller PARENT ones there.
-# Kept as names here for the callers and tests that read them.
-CONN_THREADS = WORKER_CONN_THREADS
-CONN_MEMORY_LIMIT = WORKER_CONN_MEMORY_LIMIT
 
 # How long a connect waits for its worker. Well past the 35 s the slowest
 # measured build takes, and short enough that a worker that has hung does

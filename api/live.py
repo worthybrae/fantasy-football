@@ -2057,11 +2057,22 @@ class LiveRegistry:
         def loop():
             while True:
                 time.sleep(interval)
+                started = time.monotonic()
                 try:
                     self.run_once(idle)
                 except Exception as exc:      # noqa: BLE001 -- a reaper that
                     # dies is a leak that comes back; log and keep going.
                     print(f"live: reaper pass failed: {exc}")
+                took = time.monotonic() - started
+                if took > interval:
+                    # The pass is sequential and each room's stop can wait
+                    # LISTENER_STOP_TIMEOUT, so enough stubborn rooms push
+                    # one pass past the next one's start. Nothing overlaps
+                    # (there is one reaper thread) but the effective idle
+                    # bound stretches, and that is worth saying out loud
+                    # rather than reading off a graph months later.
+                    print(f"live: reaper pass took {took:.0f}s, longer than "
+                          f"its {interval:.0f}s interval")
         with self._lock:
             if self.reaper_thread is not None:
                 return self.reaper_thread
@@ -2352,12 +2363,22 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
         one seat that overlap inside that build do not see each other here
         and both start a socket. Closing it means claiming the seat before
         the build and releasing it on failure; not done now.
+
+        ALL OR NOTHING ACROSS SEVERAL ROOMS. Two old rooms on one seat is
+        unusual but reachable (a cookie cleared twice), and the eviction
+        used to run room by room: stop, clear, forget, drop, then on to the
+        next. A second room that would not stop then refused the connect
+        with the FIRST one already gone -- a room emptied and somebody's
+        saved draft deleted for a connect that failed anyway. Every room is
+        asked to stop first; only if all of them stopped is any of them
+        forgotten. A refusal leaves rooms whose listener did stop, and the
+        retry drops them in one pass, because their seat is still set.
         """
         if league_id is None or team_id is None:
             return []
         progress = progress or _NO_PROGRESS
         seat = (str(league_id), str(team_id))
-        evicted = []
+        rooms = []
         for sid in registry.sids():
             if sid == s.sid:
                 continue
@@ -2367,19 +2388,30 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
             with other.lock:
                 if other.state.get("seat") != seat:
                     continue
+            rooms.append((sid, other))
+        refused = False
+        for _sid, other in rooms:
+            # Every one of them is asked, not just up to the first refusal:
+            # a room whose listener stops is one socket fewer on this seat
+            # either way, and leaving one running because another would not
+            # stop is the risk this whole function exists to remove.
             if not _stop_listener(other):
-                # No key: this room's plan carries a `reset` row only when
-                # it had a listener of its own, so the failure lands on
-                # whichever stage is still open rather than nowhere.
-                progress.fail(
-                    None, "another room for this seat is still running",
-                    hint="Wait a few seconds and click the bookmark again. "
-                         "Two sockets for one team is the one thing this "
-                         "refuses to risk.")
-                raise HTTPException(
-                    status_code=503,
-                    detail="another session for this seat did not stop in "
-                           "time -- try again")
+                refused = True
+        if refused:
+            # No key: this room's plan carries a `reset` row only when
+            # it had a listener of its own, so the failure lands on
+            # whichever stage is still open rather than nowhere.
+            progress.fail(
+                None, "another room for this seat is still running",
+                hint="Wait a few seconds and click the bookmark again. "
+                     "Two sockets for one team is the one thing this "
+                     "refuses to risk.")
+            raise HTTPException(
+                status_code=503,
+                detail="another session for this seat did not stop in "
+                       "time -- try again")
+        evicted = []
+        for sid, other in rooms:
             with other.lock:
                 _clear_room(other)
             try:

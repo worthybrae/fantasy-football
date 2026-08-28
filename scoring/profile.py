@@ -1109,7 +1109,9 @@ def snap_share_by_game(conn, crosswalk: pd.DataFrame, snap_columns,
     if hit.empty:
         return {}
     # `snap_columns` comes off the frame profile_cache already read, rather
-    # than an information_schema query per request (1.1 ms, measured).
+    # than an information_schema query per build (1.1 ms, measured). Per
+    # BUILD, not per request: the frames are cached (scoring/profile_cache),
+    # so the query this replaces would run once per cache miss.
     cols = set(snap_columns)
     if not {"season", "week", "offense_pct", "pfr_player_id"}.issubset(cols):
         return {}

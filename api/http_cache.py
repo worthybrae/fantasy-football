@@ -76,6 +76,18 @@ MIN_GZIP_BYTES = 1024
 API_PREFIX = "/api/"
 
 
+def is_api_path(path: str) -> bool:
+    """Whether a request path is one of ours to stamp.
+
+    `/api` with no trailing slash is one of ours and does not start with
+    the prefix. Nothing routes there, so what comes back is a 404 -- or,
+    when something inside Starlette fails before routing, the 500
+    ServerErrorMiddleware writes, which is exactly the answer that must
+    not be cacheable and was the one answer never stamped.
+    """
+    return path == "/api" or path.startswith(API_PREFIX)
+
+
 def public(response, s_maxage: int, max_age: int = 0) -> None:
     """Let a shared cache hold this answer for `s_maxage` seconds.
 
@@ -109,7 +121,7 @@ class DefaultPrivate:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or not scope.get("path", "").startswith(API_PREFIX):
+        if scope["type"] != "http" or not is_api_path(scope.get("path", "")):
             await self.app(scope, receive, send)
             return
 

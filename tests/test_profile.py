@@ -470,7 +470,13 @@ def _two_player_weekly_rows():
             {"player_id": pid, "player_display_name": name, "position": "WR",
              "recent_team": team, "opponent_team": opp, "season": season, "week": w,
              "receptions": receptions, "receiving_yards": yards, "targets": targets,
-             "carries": 0}
+             "carries": 0,
+             # NOT IN scoring.board.weekly_columns, and real: the live table
+             # carries about 150 columns and the projected read asks for 39
+             # of them. Without a column here that the projection drops, the
+             # identity tests below compare a frame with itself.
+             "receiving_air_yards": yards * 1.4,
+             "target_share": 0.2}
             for season, n_weeks in weeks_by_season.items()
             for w in range(1, n_weeks + 1)
         ]
@@ -771,11 +777,13 @@ def test_the_projected_reads_build_the_same_frames_as_the_whole_tables(tmp_path)
             assert_series_equal(a, b)
         else:
             assert a == b, field.name
-    # ...and every column it did come back with is one the list asked for.
-    # (This fixture's `weekly` is eleven columns, all of them needed, so
-    # there is nothing here to narrow -- the narrowing is measured on the
-    # real 150-column table, not asserted on a fixture that cannot show it.)
+    # ...and every column it did come back with is one the list asked for,
+    # which is only worth asserting because the fixture carries columns the
+    # list does not ask for (see _two_player_weekly_rows).
     from scoring.board import weekly_columns
+    dropped = {"receiving_air_yards", "target_share"}
+    assert dropped <= set(whole.prior_weekly.columns)
+    assert not (dropped & set(projected.prior_weekly.columns))
     assert set(projected.prior_weekly.columns) <= set(weekly_columns(None))
 
 

@@ -2,6 +2,7 @@ import json
 import math
 import threading
 import uuid
+from contextlib import asynccontextmanager
 
 # FIRST, before anything reads a variable. `api.billing` and
 # `pipeline.credentials` both decide what they are at import time from the
@@ -157,8 +158,35 @@ def _history_round_bucket(round_no: int) -> str:
 THREADPOOL_TOKENS = 200
 
 
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Startup and shutdown, in the one place the pinned FastAPI wants them.
+
+    `@app.on_event` is deprecated in this version and warns on every app
+    built, which in a test run is hundreds of lines. Same two jobs it did.
+
+    ROOM FOR THE POLLS, before the first request. Every route here is a
+    plain `def`, so Starlette runs each request on a thread from anyio's
+    default pool -- forty threads, which was plenty for one draft room and
+    is not for two hundred polling every 2.5 s alongside their SSE streams
+    and a handful of connects blocked in a 30 s build. Set here rather than
+    in create_app because the limiter belongs to the running event loop,
+    and the number is a ceiling on concurrency, not a pool created up front.
+    """
+    import anyio
+    anyio.to_thread.current_default_thread_limiter().total_tokens = THREADPOOL_TOKENS
+    try:
+        yield
+    finally:
+        # The build workers (api/live_build.py) are child processes; a
+        # SIGTERM'd parent that does not tell them to stop leaves them to
+        # the platform's grace period. No wait: uvicorn is already closing.
+        from api import live_build
+        live_build.shutdown()
+
+
 def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
-    app = FastAPI(title="Draft Board API")
+    app = FastAPI(title="Draft Board API", lifespan=_lifespan)
     # Compression. First, before a single route exists. The other half of
     # this -- the `private, no-store` default -- goes on at the very END of
     # this function, because it has to be the outermost middleware to see
@@ -912,26 +940,8 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
     from api.jobs import start_jobs
     start_jobs(conn)
 
-    # ROOM FOR THE POLLS. Every route here is a plain `def`, so Starlette
-    # runs each request on a thread from anyio's default pool -- forty
-    # threads, which was plenty for one draft room and is not for two
-    # hundred polling every 2.5 s alongside their SSE streams and a
-    # handful of connects blocked in a 30 s build. Raised at startup
-    # (the limiter belongs to the running event loop, so it cannot be set
-    # here at construction); the number is a ceiling on concurrency, not
-    # a pool that is created up front.
-    @app.on_event("startup")
-    async def _widen_threadpool():
-        import anyio
-        anyio.to_thread.current_default_thread_limiter().total_tokens = THREADPOOL_TOKENS
-
-    # The build workers (api/live_build.py) are child processes; a
-    # SIGTERM'd parent that does not tell them to stop leaves them to the
-    # platform's grace period. No wait: uvicorn is already closing.
-    @app.on_event("shutdown")
-    async def _stop_build_workers():
-        from api import live_build
-        live_build.shutdown()
+    # The threadpool ceiling and the build-worker shutdown live in
+    # `_lifespan` above, which this app was constructed with.
 
     # `private, no-store` on every /api answer that named no policy of its
     # own. LAST LINE, so it is the outermost middleware and every response

@@ -396,7 +396,11 @@ def report(args, metrics: Metrics, sampler, tally: Tally, elapsed: float) -> boo
 
     p95_state = percentile(metrics.latencies["state"], 95)
     state_ok = bool(metrics.latencies["state"]) and p95_state < P95_STATE_BUDGET_MS
-    rss_ok = peak_mb is None or peak_mb < PEAK_RSS_BUDGET_MB
+    # AN UNSAMPLED RUN CANNOT PASS. Memory is half of what this run is for
+    # -- the failure it was written after was a container killed for RSS,
+    # not a slow poll -- and "no --pid, so no numbers" used to read as a
+    # budget met. It is a run that did not measure, and it says so.
+    rss_ok = peak_mb is not None and peak_mb < PEAK_RSS_BUDGET_MB
     poll_errors = sum(metrics.bad("state").values()) + sum(metrics.bad("board").values())
     # A run that measured nothing must not be allowed to report a pass on the
     # strength of how fast it measured nothing.
@@ -406,7 +410,9 @@ def report(args, metrics: Metrics, sampler, tally: Tally, elapsed: float) -> boo
     why = []
     if not state_ok:
         why.append("p95 state over budget")
-    if not rss_ok:
+    if peak_mb is None:
+        why.append("RSS unsampled -- pass --pid <server pid>")
+    elif not rss_ok:
         why.append("peak RSS over budget")
     if not valid:
         why.append("run not clean")
