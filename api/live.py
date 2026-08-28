@@ -8,6 +8,7 @@ session builds them once and every refresh costs only `survival` plus
 """
 import dataclasses
 import hashlib
+import itertools
 import asyncio
 import json
 import os
@@ -1451,6 +1452,9 @@ RECOMPUTE_WAIT_SECONDS = 20.0
 # takes, and nothing waits for it. Half a second, so a stop under a
 # ranking answers well inside one.
 RECOMPUTE_JOIN_SECONDS = 0.5
+# Numbers the closer tokens (see _stop_listener), so two stops of one room
+# in flight at once hold two distinct claims.
+_CLOSER_SEQ = itertools.count(1)
 
 # The point past which every room's ranking gets fewer rollouts. Under it
 # the full SURVIVAL_ROLLOUTS; over it 150, which is still a usable survival
@@ -2376,18 +2380,42 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
             old_path = state["league_path"]
             state["league_path"] = None
 
-        def close_conn():
+        if recompute_thread is not None and recompute_thread.is_alive():
+            # THE FILE STAYS HELD UNTIL IT IS ACTUALLY CLOSED. The room's
+            # own claim goes now -- this stop has returned True and the
+            # room may reconnect -- but a closer token takes its place, so
+            # a reconnect (same room or a leaguemate) finds the file held
+            # and builds inline, where reopening a file this process still
+            # has open is fine, and never in a worker, where it is not.
+            token = f"{s.sid}:closing:{next(_CLOSER_SEQ)}"
+            if old_path is not None:
+                registry.claim_path(old_path, token)
+                registry.release_path(old_path, s.sid)
+
+            def close_later():
+                recompute_thread.join(timeout=LISTENER_STOP_TIMEOUT)
+                if recompute_thread.is_alive():
+                    # A ranking that has not finished in the whole listener
+                    # timeout is wedged. The connection and the claim are
+                    # left as they are, on purpose and out loud: releasing
+                    # them under a live thread is the lock error this whole
+                    # arrangement exists to avoid. The reaper cannot free
+                    # it either; it is a restart's problem.
+                    print(f"live: room {s.sid[:8]} ranking thread did not "
+                          f"exit in {LISTENER_STOP_TIMEOUT:.0f}s; leaving its "
+                          "connection and file claim held")
+                    return
+                if old_league_conn is not None:
+                    old_league_conn.close()
+                if old_path is not None:
+                    registry.release_path(old_path, token)
+            threading.Thread(target=close_later,
+                             name=f"live-closer-{s.sid[:8]}", daemon=True).start()
+        else:
             if old_league_conn is not None:
                 old_league_conn.close()
             if old_path is not None:
                 registry.release_path(old_path, s.sid)
-
-        if recompute_thread is not None and recompute_thread.is_alive():
-            threading.Thread(
-                target=lambda: (recompute_thread.join(), close_conn()),
-                name=f"live-closer-{s.sid[:8]}", daemon=True).start()
-        else:
-            close_conn()
         return True
 
     def _recompute(s, session, picks_made):

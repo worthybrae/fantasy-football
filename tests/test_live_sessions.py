@@ -707,8 +707,9 @@ def test_a_stop_does_not_wait_for_a_ranking_in_flight(tmp_path, monkeypatch):
         assert time.monotonic() - started < 1.0
         assert body["listener_stopped"] is True
         assert a.get("/api/live/state").json()["active"] is False
-        # Still ranking: the file is still held for it.
-        assert registry.holders_of(league_file) == {sid}
+        # Still ranking: the file is still held for it, under a closer token.
+        holders = registry.holders_of(league_file)
+        assert holders and all(h.startswith(f"{sid}:closing:") for h in holders), holders
         release.set()
         deadline = time.monotonic() + 10
         while registry.holders_of(league_file):
@@ -720,3 +721,60 @@ def test_a_stop_does_not_wait_for_a_ranking_in_flight(tmp_path, monkeypatch):
     finally:
         release.set()
         _stop_all([a])
+
+
+def test_a_reconnect_while_the_closer_still_holds_the_file_builds_inline(tmp_path, monkeypatch):
+    """Stop mid-ranking, reconnect at once with a worker pool: the room's
+    old connection is still open (the closer waits for the ranking), so the
+    file is still held under a closer token, the reconnect builds inline,
+    and nothing is handed to a worker."""
+    from concurrent.futures import ThreadPoolExecutor
+    monkeypatch.setenv(live_build.WORKERS_ENV, "1")
+    app, seen, stops = _app(tmp_path, monkeypatch)
+    _seed_league_one_with_slot_seven(str(tmp_path / "live.duckdb"),
+                                     str(tmp_path / "leagues_root"))
+    submits = []
+    runner = ThreadPoolExecutor(max_workers=1)
+    real_build = live.build_session
+    monkeypatch.setattr(
+        "api.live_build.build_session",
+        lambda cur, my_slot, league_id="", settings=None, progress=None:
+            real_build(cur, my_slot, league_id=league_id, settings=settings))
+
+    def recorder(fn, *args):
+        submits.append(args[2])
+        return runner.submit(fn, *args)
+    monkeypatch.setattr("api.live_build.submit", recorder)
+    entered, release = threading.Event(), threading.Event()
+    real_survival = live.survival
+
+    def slow_survival(*a, **k):
+        entered.set()
+        release.wait(timeout=20)
+        return real_survival(*a, **k)
+    monkeypatch.setattr("api.live.survival", slow_survival)
+    league_file = str(tmp_path / "leagues_root" / "1.duckdb")
+    a = _client(app)
+    try:
+        _connect(a, "1", team_id="2")           # provisioned inline (no snapshot
+        submits_before = len(submits)           # in a test app), see below
+        assert entered.wait(timeout=10)
+        registry = app.state.live_registry
+        sid = a.cookies.get(SID_COOKIE)
+        assert a.post("/api/live/stop").json()["listener_stopped"] is True
+        holders = registry.holders_of(league_file)
+        assert holders and all(h.startswith(f"{sid}:closing:") for h in holders), holders
+        _connect(a, "1", team_id="2")           # the closer still holds it
+        assert len(submits) == submits_before, "the reconnect went to a worker"
+        assert a.get("/api/live/state").json()["active"] is True
+        assert sid in registry.holders_of(league_file)
+        release.set()
+        deadline = time.monotonic() + 10
+        while any(h.startswith(f"{sid}:closing:") for h in registry.holders_of(league_file)):
+            assert time.monotonic() < deadline, "the closer never released its token"
+            time.sleep(0.05)
+        assert registry.holders_of(league_file) == {sid}
+    finally:
+        release.set()
+        _stop_all([a])
+        runner.shutdown(wait=False)
