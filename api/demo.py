@@ -316,26 +316,35 @@ def _in_the_interesting_part(record: dict) -> bool:
 def _next_up(live: list, seen: set):
     """Whose turn it is now, given the rooms that have already had one.
 
-    A ROUND ROBIN, in league id order, because the order has to be the same
-    answer every time it is asked and a league id is the only thing about a
-    room that does not move while it drafts. Ordering on picks or on mtime is
-    what the page was doing before, and those change under it constantly.
+    A TIER, AND THEN A ROUND ROBIN INSIDE IT, in that order.
 
-    Two preferences on top of the order, and they are in this order:
+    The tier is the rooms in their interesting rounds, and it comes first
+    because a turn spent outside it is a wasted one either way: a room in
+    round twelve is drawn REWOUND to round three for the whole of its turn
+    (see `_moment`), so it sits frozen on screen for ten picks the reader
+    cannot see, and a room two picks in is an empty board with a
+    recommendation nobody has had to make a decision against yet. Showing the
+    interesting room a second time is a better page than either. A room
+    outside the tier is not shut out, it is waiting -- it joins the moment it
+    warms up, and it is all there is to show when nothing is in the tier.
 
-      * a room that has not had a turn in the rotation now under way, so the
-        page works its way round the farm rather than settling on a pair;
-      * failing a tie-break between those, a room in its interesting rounds,
-        so a turn is spent on the picks this tool has something to say about.
+    Inside the tier it is a round robin in league id order, because the order
+    has to be the same answer every time it is asked and a league id is the
+    only thing about a room that does not move while it drafts. Ordering on
+    picks or on mtime is what the page was doing before, and those change
+    under it constantly. A room that has not had a turn in the rotation now
+    under way goes first, so the page works its way round the farm rather
+    than settling on a pair.
 
-    When everybody has had a turn the rotation starts again, which is why the
-    caller clears `seen` on the answer this gives from a full house.
+    When everybody in the tier has had a turn the rotation starts again,
+    which is why the caller clears `seen` on the answer this gives from a
+    full house.
     """
     order = sorted(live, key=lambda r: str(r.get("league_id") or ""))
-    pool = [r for r in order if str(r.get("league_id") or "") not in seen]
-    pool = pool or order
-    good = [r for r in pool if _in_the_interesting_part(r)]
-    return (good or pool)[0] if pool else None
+    tier = [r for r in order if _in_the_interesting_part(r)] or order
+    pool = [r for r in tier
+            if str(r.get("league_id") or "") not in seen] or tier
+    return pool[0] if pool else None
 
 
 def _liveliest(records: list, now: float | None = None):
@@ -1642,14 +1651,25 @@ def register_demo_routes(app, conn=None):
     restored = _restore(stamp)
     if restored is not None:
         if restored.get("league_id"):
+            league_id = str(restored["league_id"])
+            # Counted from the pick the ROOM is on, which is not the pick the
+            # last answer drew. A room past `REWIND_ROUND` is served rewound
+            # (see `_moment`), so `picks_made` in that answer can be sixty
+            # picks behind the room -- and a turn counted from there is spent
+            # the instant it is seeded, which turned a restart into exactly
+            # the jump this memory exists to prevent.
+            made = None
+            for record in (_record(path) for path in _live_files(stamp)):
+                if record and str(record.get("league_id") or "") == league_id:
+                    made = _pick_of(record)
+                    break
+            # A full turn rather than whatever was left of the old one: the
+            # persisted answer does not say when the turn began, and half a
+            # turn made up here would be a guess on the page's behalf. A room
+            # that is no longer live is not seeded at all -- there is nothing
+            # to hold on to and the rotation should start clean.
             with _SHOWING_LOCK:
-                if not _SHOWING.get("league_id"):
-                    # The turn comes back with the room, counted from the
-                    # pick the last answer was written at, so a restart is
-                    # not a way of cutting a room's turn short a moment
-                    # after giving it one.
-                    league_id = str(restored["league_id"])
-                    made = int(restored.get("picks_made") or 0)
+                if made is not None and not _SHOWING.get("league_id"):
                     _SHOWING["league_id"] = league_id
                     _SHOWING["since_pick"] = made
                     _SHOWING["chosen_at"] = stamp

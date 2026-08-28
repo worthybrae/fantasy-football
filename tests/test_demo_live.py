@@ -131,6 +131,43 @@ def test_the_rooms_take_it_in_turns_and_the_rotation_comes_round(farm):
         assert demo._identity(time.time())[0] == expected
 
 
+def test_a_deep_room_does_not_take_the_turn_from_an_interesting_one(farm):
+    """The rooms worth showing go first and the rotation runs inside them.
+    A room in round twelve is drawn rewound to round three for the whole of
+    its turn, so it would sit frozen on screen for ten picks the reader cannot
+    see -- showing the interesting room a second time is the better page, and
+    not having had a turn yet does not buy its way past that."""
+    teams = 8
+    _write(farm, _room(league_id="111", picks=20, teams=teams))
+    _write(farm, _room(league_id="222", picks=teams * 12, teams=teams))
+    assert demo._identity(time.time())[0] == "111"
+    # 111's turn ends and it is the only room in the tier, so it goes again
+    # rather than handing ten picks to a room nobody can watch move.
+    _write(farm, _room(league_id="111", picks=20 + demo.STICKY_PICKS,
+                       teams=teams))
+    assert demo._identity(time.time())[0] == "111"
+
+
+def test_a_room_two_picks_in_waits_for_a_board_worth_showing(farm):
+    """Nor does a room that has not warmed up take a turn: an empty board is
+    eight empty columns and a recommendation nobody has had to make a decision
+    against yet. It is waiting, not shut out."""
+    teams = 8
+    _write(farm, _room(league_id="111", picks=2, teams=teams))
+    _write(farm, _room(league_id="222", picks=20, teams=teams))
+    assert demo._identity(time.time())[0] == "222"
+    # 222's turn ends and 111 still has nothing to show, so 222 goes again.
+    _write(farm, _room(league_id="222", picks=20 + demo.STICKY_PICKS,
+                       teams=teams))
+    assert demo._identity(time.time())[0] == "222"
+    # Once it has a board it takes the turn it was waiting for.
+    _write(farm, _room(league_id="111", picks=demo.WARMED_UP_PICKS + 2,
+                       teams=teams))
+    _write(farm, _room(league_id="222", picks=20 + demo.STICKY_PICKS * 2,
+                       teams=teams))
+    assert demo._identity(time.time())[0] == "111"
+
+
 def test_one_live_room_keeps_the_hero_with_nothing_to_rotate_to(farm):
     """A turn ending is not a reason to show nothing. With one room drafting,
     the rotation comes back round to it."""
@@ -444,6 +481,46 @@ def test_a_restart_keeps_showing_the_room_it_was_showing(farm, tmp_path,
     monkeypatch.setattr(demo, "WARM_ON_REGISTER", True)
     with mock.patch.object(demo.threading, "Thread"):
         demo.register_demo_routes(FastAPI(), conn=mock.Mock())
+    assert demo._identity(time.time())[0] == "222"
+
+
+def test_a_restart_counts_the_turn_from_where_the_room_is(farm, tmp_path,
+                                                         monkeypatch):
+    """The persisted answer draws a deep room rewound, so the pick count in it
+    is rounds behind the room itself. A turn counted from there is spent the
+    instant it is seeded, and the restart becomes the jump the memory exists
+    to prevent."""
+    teams = 8
+    _write(farm, _room(league_id="111", picks=teams * 12, teams=teams))
+    _write(farm, _room(league_id="222", picks=20, teams=teams))
+    path = tmp_path / "demo-last.json"
+    path.write_text(json.dumps({"live": True, "mode": "live",
+                                "league_id": "111",
+                                # What the page was actually served: rewound
+                                # to the end of round three.
+                                "picks_made": teams * 3,
+                                "server_now": time.time()}))
+    monkeypatch.setattr(demo, "DEMO_LAST", str(path))
+    monkeypatch.setattr(demo, "WARM_ON_REGISTER", True)
+    with mock.patch.object(demo.threading, "Thread"):
+        demo.register_demo_routes(FastAPI(), conn=mock.Mock())
+    assert demo._identity(time.time())[0] == "111"
+
+
+def test_a_restart_with_its_room_gone_starts_the_rotation_clean(farm, tmp_path,
+                                                                monkeypatch):
+    """And a room that is not drafting any more is not seeded at all: there is
+    nothing to hold on to, and a memory of it would only be rotated past."""
+    _write(farm, _room(league_id="222", picks=20))
+    path = tmp_path / "demo-last.json"
+    path.write_text(json.dumps({"live": True, "mode": "live",
+                                "league_id": "111", "picks_made": 40,
+                                "server_now": time.time()}))
+    monkeypatch.setattr(demo, "DEMO_LAST", str(path))
+    monkeypatch.setattr(demo, "WARM_ON_REGISTER", True)
+    with mock.patch.object(demo.threading, "Thread"):
+        demo.register_demo_routes(FastAPI(), conn=mock.Mock())
+    assert demo._SHOWING.get("league_id") is None
     assert demo._identity(time.time())[0] == "222"
 
 
