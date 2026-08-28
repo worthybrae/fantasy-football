@@ -26,6 +26,23 @@ import pytest
 # repeats this per test, for a test that sets it and forgets.
 os.environ.pop("SUPABASE_DB_URL", None)
 
+# AND THE WARM-UPS, AT IMPORT, which the two session fixtures below cannot
+# reach. `api/main.py` ends with `app = create_app()` at module scope, so
+# importing it -- which tests/test_api.py does at COLLECTION time, before any
+# fixture has run -- builds a whole app and starts its background threads
+# against the real `data/nfl.duckdb` and the real corpus. Those fixtures then
+# turn the flags off for the apps the tests themselves build, and that one is
+# already running.
+#
+# It was survivable while each of those threads did one build and exited. The
+# ADP warm-up now renews itself on a timer (api/seo.py, so /adp is never the
+# request that finds the aggregate cold), which in a five-minute run means a
+# second board build landing in the middle of somebody's test. These three
+# variables are what the modules read as they are imported, so they have to
+# be set before the import, not after it.
+for _switch in ("SEO_WARM", "DEMO_WARM", "WARM_ON_BOOT"):
+    os.environ[_switch] = "0"
+
 
 @pytest.fixture(autouse=True, scope="session")
 def _seo_warm_off():
