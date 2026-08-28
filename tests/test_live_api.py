@@ -1044,9 +1044,17 @@ def test_state_is_never_empty_once_connect_has_resolved_my_slot(
                 f"{label}: empty board at pick 0 -- this is the defect")
             assert client.get("/api/live/state").json()["candidates_as_of_pick"] == 0
         else:
-            # No slot, no turns, no ranking: the list is honestly empty until
-            # the socket names our team (see _resolve_slot), never a stand-in.
-            assert body["candidates"] == [] and body["candidates_as_of_pick"] is None
+            # No slot, no turns: the board is still ranked in ESPN's order,
+            # with nothing to "last" to and no plan, until the socket names
+            # our team (see _resolve_slot).
+            assert _wait_until(
+                lambda: client.get("/api/live/state").json()["candidates"]), (
+                f"{label}: empty board at pick 0 with no slot")
+            body = client.get("/api/live/state").json()
+            assert all(c["lasts_pct"] is None and c["lasts_at_pick"] is None
+                       and c["edge_pts"] is None for c in body["candidates"])
+            assert body["plan"] == []
+            assert [c["rank"] for c in body["candidates"]] == list(range(1, len(body["candidates"]) + 1))
         client.post("/api/live/stop")
 
 
@@ -4598,3 +4606,165 @@ def test_a_cell_for_a_player_nothing_can_name_still_draws():
 
     assert cell["player"]["name"] == "who-is-this"
     assert cell["player"]["headshot"] is None
+
+
+def test_on_the_clock_the_first_turn_is_target_nows_and_argues_about_my_next_turn(
+        tmp_path, monkeypatch):
+    """Spec section 4: on the clock the cards are `target_now`'s, and their
+    "still there" line names the pick I would be waiting for -- the same
+    one the candidate row's `lasts_at_pick` names -- not this pick, where
+    everybody is 100% there and the line says nothing."""
+    state, _recompute = _live_routes_with_conn(tmp_path)
+    session = _live_session()                     # slot 4: picks 4, 13, ...
+    monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (np.zeros(5, bool), [None] * 3))
+    monkeypatch.setattr("api.live._seed_rosters", _no_roster)
+
+    def availability(table, ids, k, n, espn_adp=None, market_rank=None,
+                     positions=None, **_):
+        return np.full(len(list(ids)), 0.6)
+    monkeypatch.setattr("api.live.availability_at", availability)
+    monkeypatch.setattr("scoring.plan.availability_at", availability)
+    _recompute(session, picks_made=3)
+    first = state["plan"][0]
+    assert first["pick_no"] == 4 and first["round"] == 1
+    assert first["target"] is not None
+    assert any("pick 13" in pro for pro in first["target"]["pros"]), first["target"]["pros"]
+    assert not any("pick 4" in pro for pro in first["target"]["pros"])
+    row = next(r for r in state["candidates"] if r["player_id"] == first["target"]["player_id"])
+    assert row["lasts_at_pick"] == 13
+    assert first["target"]["lasts_pct"] == row["lasts_pct"] == 60.0
+
+
+def test_a_turn_nobody_clears_is_serialised_with_a_null_target(tmp_path, monkeypatch):
+    """When no available player is likely enough to be there at a turn,
+    the plan says so with `target: null` -- serialised as JSON null, which
+    the page draws as "no clear target" -- rather than inventing a name."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from pipeline.db import get_conn
+    path = str(tmp_path / "live.duckdb")
+    conn = get_conn(path)
+    app = FastAPI()
+    state, _recompute = register_live_routes(app, conn, path)
+    client = TestClient(app)
+    session = _live_session()                     # not on the clock at pick 1
+    state["session"] = session
+    monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (np.zeros(5, bool), []))
+    monkeypatch.setattr("api.live._seed_rosters", _no_roster)
+
+    def nobody_lasts(table, ids, k, n, espn_adp=None, market_rank=None,
+                     positions=None, **_):
+        return np.full(len(list(ids)), 0.1)
+    monkeypatch.setattr("api.live.availability_at", nobody_lasts)
+    monkeypatch.setattr("scoring.plan.availability_at", nobody_lasts)
+    _recompute(session, picks_made=0)
+    body = client.get("/api/live/state").json()
+    assert body["plan"], "there are turns to plan"
+    assert body["plan"][0]["pick_no"] == 4
+    assert body["plan"][0]["target"] is None
+    assert body["plan"][0]["alternates"] == []
+    assert '"target": null' in client.get("/api/live/state").text.replace(" ", "").replace('"target":null', '"target": null')
+
+
+def _connected_room(tmp_path, monkeypatch, extra_players=None):
+    """A room connected through the token path with a socket that stays
+    open, for tests about what the connect resolves."""
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path, extra_players=extra_players)
+    seen, stops = [], []
+    monkeypatch.setattr("api.live.run_socket_listener", _fake_socket(seen, stops))
+    client = TestClient(create_app(path))
+    resp = client.post("/api/live/connect-token", json={
+        "leagueId": "1", "teamId": "2", "swid": "{X}",
+        "token": "tok", "season": "2026"})
+    assert resp.status_code == 200, resp.text
+    return client
+
+
+def test_favourites_resolved_at_connect_star_the_row(tmp_path, monkeypatch):
+    monkeypatch.setattr("api.live._account_ids_for", lambda swid: ["acct-1"] if swid else [])
+    asked = []
+    monkeypatch.setattr("api.live.billing.favorites",
+                        lambda ids: asked.append(list(ids)) or ["p1"], raising=False)
+    client = _connected_room(tmp_path, monkeypatch, extra_players=[
+        {"player_id": "p2", "name": "B Runner", "position": "RB",
+         "team": "DET", "espn_id": 4430807}])
+    try:
+        assert asked == [["acct-1"]]
+        assert _wait_until(lambda: client.get("/api/live/state").json()["candidates"])
+        rows = {c["player_id"]: c for c in client.get("/api/live/state").json()["candidates"]}
+        assert rows["p1"]["favourite"] is True and rows["p2"]["favourite"] is False
+    finally:
+        client.post("/api/live/stop")
+
+
+def test_a_star_added_mid_draft_reaches_the_room_on_the_next_read(tmp_path, monkeypatch):
+    """The room re-reads the account's stars every FAVOURITES_REFRESH_SECONDS;
+    a PUT in between shows up on the next poll after that, with a fresh
+    ranking behind it."""
+    from api import live as live_mod
+    monkeypatch.setattr("api.live._account_ids_for", lambda swid: ["acct-1"])
+    stars = {"now": ["p1"]}
+    monkeypatch.setattr("api.live.billing.favorites", lambda ids: list(stars["now"]), raising=False)
+    client = _connected_room(tmp_path, monkeypatch, extra_players=[
+        {"player_id": "p2", "name": "B Runner", "position": "RB",
+         "team": "DET", "espn_id": 4430807}])
+    try:
+        assert _wait_until(lambda: client.get("/api/live/state").json()["candidates"])
+        stars["now"] = ["p2"]
+        # Not due yet: the poll keeps the stars it has.
+        rows = {c["player_id"]: c for c in client.get("/api/live/state").json()["candidates"]}
+        assert rows["p1"]["favourite"] is True
+        # Make the read due, then poll: the room re-reads and re-ranks.
+        room = client.app.state.live_registry.get(live_mod.DEFAULT_SID)
+        with room.lock:
+            room.state["favourites_at"] = 0.0
+        client.get("/api/live/state")
+        assert _wait_until(lambda: {c["player_id"]: c["favourite"] for c in
+                                    client.get("/api/live/state").json()["candidates"]}
+                           == {"p1": False, "p2": True})
+        assert room.state["session"].favourites == frozenset({"p2"})
+    finally:
+        client.post("/api/live/stop")
+
+
+def test_a_room_with_no_account_or_a_broken_store_has_no_stars_and_still_works(
+        tmp_path, monkeypatch):
+    from api import billing
+    monkeypatch.setattr("api.live._account_ids_for", lambda swid: ["acct-1"])
+    monkeypatch.setattr(billing, "favorites", lambda ids: (_ for _ in ()).throw(RuntimeError("store down")),
+                        raising=False)
+    client = _connected_room(tmp_path, monkeypatch)
+    try:
+        assert _wait_until(lambda: client.get("/api/live/state").json()["candidates"])
+        assert all(c["favourite"] is False for c in client.get("/api/live/state").json()["candidates"])
+    finally:
+        client.post("/api/live/stop")
+    # And a billing module with no `favorites` at all.
+    monkeypatch.delattr(billing, "favorites", raising=False)
+    from api import live as live_mod
+    assert live_mod._favourites_for(["acct-1"]) == frozenset()
+    monkeypatch.setattr("api.live._account_ids_for", lambda swid: [])
+    assert live_mod._favourites_for([]) == frozenset()
+
+
+def test_a_connect_with_history_fits_nobody(tmp_path, monkeypatch, _isolated_leagues_root):
+    """The room's plan is a rule over counted availability, not a model of
+    each opponent: a league with imported history is connected without
+    `fit_all` (up to 30 s) or the cold-start opponent, and the history
+    stage reports the managers the import already holds."""
+    import scoring.draft_model as draft_model
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    lg_path = _seed_league_one_with_slot_seven(path, _isolated_leagues_root)
+    monkeypatch.setattr(draft_model, "fit_all",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("fit_all ran")))
+    conn = get_conn(lg_path)
+    try:
+        session = build_session(conn, 7, league_id="1")
+    finally:
+        conn.close()
+    assert session.managers == 2
+    assert session.betas == {} and session.nested is None

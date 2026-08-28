@@ -581,7 +581,8 @@ def _seat_counts(picks: list, slot: int | None, positions: dict) -> dict:
     return counts
 
 
-def _ranked(conn, board, picks: list, slot: int | None, limit: int) -> list:
+def _ranked(conn, board, picks: list, slot: int | None, limit: int,
+            teams: int | None = None, rounds: int | None = None) -> list:
     """The room's own ranked list, for the seat on the clock.
 
     THE RAW BOARD IS THE WRONG LIST, and this is the difference between
@@ -598,7 +599,9 @@ def _ranked(conn, board, picks: list, slot: int | None, limit: int) -> list:
     the room reads from its join table (name, team, bye, adp, board_rank).
 
     The three `target_now` picks lead the list, in their order; the rest
-    follow in ESPN order. `limit` caps the whole.
+    follow in ESPN order. `limit` caps the whole. `teams`/`rounds` are the
+    ROOM's shape, so a seat's turns are the room's and not the stored
+    league's; the stored league still supplies the roster shape.
     """
     from api import live as live_mod
     from scoring import league
@@ -606,6 +609,15 @@ def _ranked(conn, board, picks: list, slot: int | None, limit: int) -> list:
     from scoring.plan import health_level, target_now
 
     settings = league.load(conn)
+    if teams or rounds:
+        # `rounds` is not a field but the roster's size (starters + flex +
+        # bench), so the room's round count is set through its bench.
+        import dataclasses
+        lineup = sum(int(v) for v in (settings.starters or {}).values()) \
+            + int(settings.flex_slots or 0)
+        settings = dataclasses.replace(
+            settings, teams=int(teams or settings.teams),
+            bench=max(0, int(rounds or settings.rounds) - lineup))
     pool = _cached_pool(conn, board, settings)
     if isinstance(board, pd.DataFrame) and "espn_rank" not in board.columns and conn is not None:
         board = live_mod._attach_espn_rank(conn, board)
@@ -621,9 +633,11 @@ def _ranked(conn, board, picks: list, slot: int | None, limit: int) -> list:
             and str(p.get("player_id")) in index_by_player]
 
     table = cached_table()
+    # No plan for the landing room -- nobody is drafting from it -- so the
+    # rows and the turns are all it asks for.
     rows, _plan, turns = live_mod.rank_and_plan(
         board, pool, taken, taken_order, counts, mine, int(slot or 1),
-        settings, frozenset(), table, picks_made=len(picks))
+        settings, frozenset(), table, picks_made=len(picks), with_plan=False)
 
     by_id = {}
     if isinstance(board, pd.DataFrame):
@@ -1213,7 +1227,7 @@ def _build(conn, now: float | None = None) -> dict:
                                   board, _settings_payload(conn, teams, rounds)),
         "recent": [row for row in recent if row["name"]],
         "shortlist": _ranked(conn, board, picks, _on_the_clock({**record, "picks": picks}),
-                             SHORTLIST),
+                             SHORTLIST, teams=teams, rounds=rounds),
     }
 
 

@@ -1,11 +1,12 @@
 """Live draft mode: one long-lived session, refreshed as picks land.
 
-`make sim` pays 0.9s building the board, 1.1s building the pool and 14.9s in
-`fit_all` on every invocation. During a draft none of that changes -- the
-coefficients come from history, the board and pool are static -- so the
-session builds them once and every refresh is a lookup: who is still there
-at my next turn (`scoring/availability.py`, counted from recorded drafts),
-what waiting would cost (`scoring/plan.py`), and a plan for the turns left.
+`make sim` pays 0.9s building the board and 1.1s building the pool on every
+invocation. During a draft neither changes -- the board and pool are static
+-- so the session builds them once and every refresh is a lookup: who is
+still there at my next turn (`scoring/availability.py`, counted from
+recorded drafts), what waiting would cost (`scoring/plan.py`), and a plan
+for the turns left. The simulator's manager fits stay with `make sim` and
+the report card; the room does not run them.
 """
 import dataclasses
 import hashlib
@@ -24,8 +25,7 @@ from pipeline.espn_live import build_crosswalk
 from scoring import league as league_mod
 from scoring.board_cache import (board_fingerprint,  # noqa: F401 -- re-exported
                                  cached_build_board, cached_build_pool)
-from scoring.draft_model import FEATURE_NAMES, fit_all
-from scoring.draft_sim import build_pool, cold_start_opponent
+from scoring.draft_sim import build_pool
 
 # Pinned, not generated. See DraftSession.seed.
 DEFAULT_SEED = 20260811
@@ -110,6 +110,10 @@ class DraftSession:
     # A frozenset because the session is frozen and the plan only asks
     # "is he one of mine".
     favourites: frozenset = frozenset()
+    # How many managers the league's imported history names; what the
+    # connect screen's history row reports. Zero for a mock or a first
+    # connect.
+    managers: int = 0
     # The cold-start opponent model, or None. A HybridModel (flat early, nested
     # mid/late -- the measured best predictor) when this league has NO
     # per-manager history to fit, so its mock/first-connect opponents are
@@ -282,41 +286,28 @@ def build_session(conn, my_slot: int | None, seed: int = DEFAULT_SEED,
                         "baseline")
 
     progress.begin("history")
-    # Ticked per manager, because this is the stage the owner actually waits
-    # on and it is the only one with a real fraction to report. `seen` is
-    # written by fit_all's callback on this same thread (fit_all is
-    # synchronous), so no synchronisation is needed for it.
-    seen = {"done": 0, "total": 0, "seasons": ()}
-
-    def _on_manager(done, total, seasons):
-        seen.update(done=done, total=total, seasons=tuple(seasons))
-        progress.value("history", f"{done} of {total} managers"
-                       if done else f"{total} managers to fit")
-
-    fits = fit_all(conn, settings, on_manager=_on_manager)
-    if seen["total"]:
-        progress.ok("history", f"{seen['total']} managers · "
-                               f"{len(seen['seasons'])} seasons")
-        progress.fact(managers=int(seen["total"]),
-                      seasons=len(seen["seasons"]))
+    # What the league's imported history holds, as a count: the plan does
+    # not fit managers any more (scoring/plan.py is a rule over counted
+    # availability, not a model of each opponent), so this stage reports
+    # the history and fits nothing. `fit_all` and the cold-start opponent
+    # stay with the simulator, which `make sim` and the report card still
+    # run; the room does not. `betas` and `nested` are kept on the session
+    # as empty for the code that reads them off a session elsewhere.
+    teams_seen = read_table(conn, "draft_teams")
+    managers = (int(teams_seen["manager"].dropna().nunique())
+                if not teams_seen.empty and "manager" in teams_seen.columns else 0)
+    seasons = (int(teams_seen["season"].dropna().nunique())
+               if not teams_seen.empty and "season" in teams_seen.columns else 0)
+    if managers:
+        progress.ok("history", f"{managers} managers · {seasons} seasons")
     else:
-        # cold_start_fits: no imported draft history for this league at all,
-        # which is the normal case for a mock and for anyone's first connect.
-        # Said outright rather than left as a silent "0 managers": the market
-        # prior IS the model in that case, and it is a different tool than
-        # the one that has read six of your drafts.
-        progress.ok("history", "none · market prior")
-        progress.fact(managers=0, seasons=0)
-    pooled = fits.get("__pooled__", np.zeros(len(FEATURE_NAMES)))
-    betas = {m: fits.get(m, pooled) for m in fits if m != "__pooled__"}
-
-    # The cold-start opponent. With no per-manager fits (`betas` empty -- the
-    # mock and first-connect case), the opponents are simulated with the HYBRID
-    # model, threaded as `nested=` into survival where it serves every seat
-    # whose beta is None (every opponent seat here). A league WITH history keeps
-    # `nested=None`, so its fitted seats use their own betas and unfit seats the
-    # flat pooled prior, exactly as before.
-    nested = cold_start_opponent() if not betas else None
+        # No imported draft history for this league at all, which is the
+        # normal case for a mock and for anyone's first connect. Said
+        # outright rather than left as a silent "0 managers".
+        progress.ok("history", "none")
+    progress.fact(managers=managers, seasons=seasons)
+    betas = {}
+    nested = None
 
     draft_order = read_table(conn, "draft_order")
     slot_managers = dict(zip(draft_order["slot"].astype(int),
@@ -329,7 +320,7 @@ def build_session(conn, my_slot: int | None, seed: int = DEFAULT_SEED,
         started_at=datetime.now(timezone.utc), board=board,
         board_by_id={str(r["player_id"]): r
                      for r in board.to_dict(orient="records")},
-        settings_from_espn=settings_from_espn)
+        settings_from_espn=settings_from_espn, managers=managers)
 
 
 import re
@@ -1451,22 +1442,13 @@ def _slot_from_socket(listener, teams: int):
 # seconds spans a reconnect without crying wolf, yet still surfaces a truly
 # dead listener while a 30-second pick clock leaves time to react.
 STALE_AFTER_SECONDS = 10
-# Measured on the live board, roughly 0.19s/rollout: 25 -> 4.7s, 100 -> 19.5s,
-# 200 -> 35.2s. Those were far too slow to stay current: the on-the-clock
-# budget (200 -> ~35s) meant a fast mock, where auto-picks land every few
-# seconds, blew several picks past our own turn before the recommendation for
-# it finished -- the sidebar showed "no recommendation" exactly when it
-# mattered. Budgets are cut so a recompute lands in ~2-8s: FAR (just watching
-# opponents pick) is smallest because it runs on every single pick and a
-# slightly coarse estimate there is harmless; NOW is largest because it is our
-# actual decision, but still inside a real 30-90s clock with room to spare.
+
 # How long _stop_listener waits for the previous listener thread to notice
 # stop_event and exit (browser close included) before refusing a reconnect
 # rather than risking two sockets for the same team. A module constant, not
 # a literal default, so a test can shrink it and exercise the refusal path
 # without a real ten-second wait.
 LISTENER_STOP_TIMEOUT = 10.0
-
 
 # How many rooms may be drafting at once in this process. A connect past
 # it answers 503 "at capacity" rather than degrading every room already
@@ -1721,11 +1703,10 @@ def _initial_state() -> dict:
             # publish, so a session started that way always finds this None
             # and /api/live/select correctly refuses with 503.
             "socket": None,
-            # The per-session recompute worker (see _launch_listener):
-            # survival/rank_available still take real time (a fraction of a
-            # second, see SURVIVAL_ROLLOUTS), so it runs here, off the
-            # frame-reading thread, or a fast draft's frames would pile up
-            # unread behind it. Tracked so _stop_listener joins it before
+            # The per-session recompute worker (see _launch_listener): a
+            # ranking is milliseconds now, but it still runs here, off the
+            # frame-reading thread, so a burst of frames is never behind
+            # one. Tracked so _stop_listener joins it before
             # closing league_conn -- the worker holds a cursor on that
             # connection mid-search, so closing it out from under the worker
             # would be a use-after-close, the same hazard listener_thread
@@ -2232,7 +2213,7 @@ def _board_column(board, name, index, default=np.nan):
 
 
 def rank_and_plan(board, pool, taken, taken_order, counts, my_indices, my_slot,
-                  settings, favourites, table, picks_made=None):
+                  settings, favourites, table, picks_made=None, with_plan=True):
     """The room's candidate rows and its plan, from what is on the board now.
 
     `taken` is the pool's drafted mask and `taken_order` the drafted pool
@@ -2256,8 +2237,8 @@ def rank_and_plan(board, pool, taken, taken_order, counts, my_indices, my_slot,
     teams, rounds = int(settings.teams), int(settings.rounds)
     snake = snake_slots(teams, rounds)
     made = len(taken_order) if picks_made is None else int(picks_made)
-    turns = [i + 1 for i in range(min(made, len(snake)), len(snake))
-             if snake[i] == my_slot]
+    turns = ([i + 1 for i in range(min(made, len(snake)), len(snake))
+              if snake[i] == my_slot] if my_slot is not None else [])
     pool_ids = np.asarray([str(p) for p in pool.player_id], dtype=object)
     avail_mask = ~np.asarray(taken, dtype=bool)
     ids = pool_ids[avail_mask]
@@ -2335,19 +2316,32 @@ def rank_and_plan(board, pool, taken, taken_order, counts, my_indices, my_slot,
             if pos in ("RB", "WR", "TE") and flex_left > 0:
                 starting.append(pid)
                 flex_left -= 1
-    for pid in starting:
-        bye = pd.to_numeric(_board_column(board, "bye", pd.Index([pid])), errors="coerce").iloc[0]
-        if not np.isnan(bye):
-            roster_byes[pid] = int(bye)
+    if starting:
+        starter_byes = pd.to_numeric(
+            _board_column(board, "bye", pd.Index(starting)), errors="coerce")
+        roster_byes = {pid: int(b) for pid, b in zip(starting, starter_byes)
+                       if not np.isnan(b)}
     plan = []
-    if turns and len(ids):
-        plan = build_plan(proj=proj, positions=positions, player_ids=list(ids),
-                          espn_rank=espn_rank, espn_adp=espn_adp,
-                          market_rank=market_rank, byes=byes,
-                          health=health_level(games_pg), roster_counts=dict(counts),
-                          settings=settings, turns=turns, picks_made=made,
-                          favourites=set(favourites), table=table, names=names,
-                          roster_byes=roster_byes)
+    if with_plan and turns and len(ids):
+        common = dict(proj=proj, positions=positions, player_ids=list(ids),
+                      espn_rank=espn_rank, espn_adp=espn_adp,
+                      market_rank=market_rank, byes=byes,
+                      health=health_level(games_pg), roster_counts=dict(counts),
+                      settings=settings, turns=turns, picks_made=made,
+                      favourites=set(favourites), table=table, names=names,
+                      roster_byes=roster_byes)
+        plan = build_plan(**common)
+        # ON THE CLOCK the first turn is this pick, and its cards are
+        # `target_now`'s (spec section 4): the same score with everybody
+        # available at probability 1, its reasons measured at my NEXT turn
+        # -- the same pick the candidate row's "lasts" names -- rather than
+        # build_plan's "100% still there at this pick", which is true and
+        # says nothing.
+        if plan and turns[0] == made + 1:
+            cards = target_now(**common)
+            plan[0] = {"pick_no": turns[0], "round": (turns[0] - 1) // teams + 1,
+                       "target": cards[0] if cards else None,
+                       "alternates": cards[1:3]}
     return rows, plan, turns
 
 
@@ -2422,27 +2416,37 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
             s.state["favourites_at"] = time.monotonic()
         return dataclasses.replace(session, favourites=favourites)
 
-    def _refresh_favourites(s, state) -> None:
+    def _refresh_favourites(s) -> None:
         """Re-read the account's stars every FAVOURITES_REFRESH_SECONDS and,
         when they changed, put them on the session and ask for a ranking.
-        Called with `s.lock` HELD (from live_state's snapshot), which is why
-        the read itself is done only when it is due and the recompute is
-        requested through the state's own hook rather than called."""
+
+        Called by live_state OUTSIDE the room's lock: the store read is a
+        query against Postgres or a DuckDB file, and nothing that can wait
+        on I/O may run under `lock` (every socket frame and every other
+        poll of this room takes it). The lock is taken twice, briefly --
+        once to decide whether the read is due, once to store what it
+        found and ask for a ranking through the state's own hook.
+        """
         now = time.monotonic()
-        if now - state.get("favourites_at", 0.0) < FAVOURITES_REFRESH_SECONDS:
-            return
-        state["favourites_at"] = now
-        ids = state.get("account_ids") or []
-        if not ids or state["session"] is None:
-            return
+        with s.lock:
+            state = s.state
+            if now - state.get("favourites_at", 0.0) < FAVOURITES_REFRESH_SECONDS:
+                return
+            state["favourites_at"] = now
+            ids = list(state.get("account_ids") or [])
+            if not ids or state["session"] is None:
+                return
         fresh = _favourites_for(ids)
-        if fresh == state.get("favourites"):
-            return
-        state["favourites"] = fresh
-        state["session"] = dataclasses.replace(state["session"], favourites=fresh)
-        ask = state.get("request_recompute")
+        with s.lock:
+            state = s.state
+            if state["session"] is None or fresh == state.get("favourites"):
+                return
+            state["favourites"] = fresh
+            state["session"] = dataclasses.replace(state["session"], favourites=fresh)
+            ask = state.get("request_recompute")
+            session, made = state["session"], int(state.get("picks_seen") or 0)
         if ask is not None:
-            ask(state["session"], int(state.get("picks_seen") or 0))
+            ask(session, made)
 
     def _room_sid(request, response) -> str:
         """The sid a request that is about to START something lands in.
@@ -2794,10 +2798,10 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
         # The socket pump is joined for the full timeout: it is the thing
         # that must not still be writing `drafted` when a new listener
         # starts. The recompute worker is NOT waited for beyond a moment.
-        # Mid-ranking it is inside `survival` -- a second of numpy that
-        # checks nothing -- and under load, queued behind RECOMPUTE_SLOTS
-        # for longer; a stop that waited for it took ten seconds and then
-        # answered False. Its result is discarded by the generation guard
+        # Mid-ranking it is inside `build_plan` -- milliseconds now, but a
+        # stop that waited for the old rollouts took ten seconds and then
+        # answered False, and nothing here depends on the ranking being
+        # fast. Its result is discarded by the generation guard
         # either way (the caller bumps it), and every write it might make
         # is identity-guarded on a listener this function clears below. The
         # one thing it may still hold is a cursor on league_conn, so that
@@ -2877,15 +2881,14 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
 
         `session.my_slot` can still be None here -- the socket hasn't named
         our team yet -- and a plan needs a real slot (whose turns are they?).
-        Skip rather than guess; candidates stay empty until my_slot resolves,
-        which /api/live/state already reports honestly via my_slot being null.
+        The board is ranked in ESPN's order anyway, with no "lasts" and no
+        plan, until my_slot resolves, which /api/live/state reports honestly
+        via my_slot being null.
 
         The work itself is milliseconds: `_drafted_state` on the league
         connection, then `rank_and_plan`, which is one gather out of the
         availability table per remaining turn (scoring/availability.py).
         """
-        if session.my_slot is None:
-            return
         state, lock = s.state, s.lock
         with lock:
             generation = state["generation"]
@@ -2897,7 +2900,8 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
             # session's connection) would rank against the wrong league's
             # `drafted` table.
             active_conn = state["league_conn"] or conn
-            favourites = state.get("favourites") or session.favourites
+            favourites = (state["favourites"] if "favourites" in state
+                          else session.favourites)
         cur = active_conn.cursor()
         try:
             taken, taken_order = _drafted_state(cur, session.pool)
@@ -2907,12 +2911,18 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
         # open. _seed_rosters replays every pick to the slot that was on the
         # clock for it, which is the same attribution the simulator resumes
         # from.
-        rosters, _ = _seed_rosters(session.pool, session.settings, taken_order)
-        mine = rosters[session.my_slot]
+        if session.my_slot is not None:
+            rosters, _ = _seed_rosters(session.pool, session.settings, taken_order)
+            mine = rosters[session.my_slot]
+        else:
+            # No slot yet (the browser-observer path before the socket names
+            # our team): no roster to count and no turns to plan, but the
+            # board is still worth showing in ESPN's order.
+            mine = {"counts": {}, "indices": []}
         candidates, plan, _turns = rank_and_plan(
             session.board, session.pool, taken, taken_order, mine["counts"],
             mine["indices"], session.my_slot, session.settings, favourites,
-            cached_table())
+            cached_table(), picks_made=picks_made)
         with lock:
             if state["generation"] != generation:
                 return          # session stopped/restarted while computing
@@ -3180,12 +3190,9 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
         progress.begin("pool")
         progress.ok("pool", "built in a worker")
         progress.begin("history")
-        managers = len(session.betas or {})
-        if managers:
-            progress.ok("history", f"{managers} managers")
-        else:
-            progress.ok("history", "none · market prior")
-        progress.fact(managers=int(managers))
+        managers = int(getattr(session, "managers", 0) or 0)
+        progress.ok("history", f"{managers} managers" if managers else "none")
+        progress.fact(managers=managers)
         return session
 
     _SCORING_LABELS = {"ppr": "PPR", "half": "half-PPR", "std": "standard"}
@@ -3457,7 +3464,7 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
         # the frame callback (as this used to) blocked the socket read loop
         # for its whole duration, so in a fast draft frames -- picks, CLOCK
         # heartbeats -- piled up unread and the board fell behind. The
-        # replacement (survival + rank_available) is far cheaper, but the
+        # replacement (a counted lookup and a plan) is milliseconds, but the
         # callback still only records "recompute wanted at pick N" and
         # returns instantly; the worker below does the ranking, off-thread
         # regardless of how fast it is, since nothing here depends on it
@@ -3823,13 +3830,7 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
         # since _resolve_slot returns False immediately for a session that
         # has one. So a connect at pick 0 with the slot known sat on the []
         # this function initialises `candidates` to, through the owner's
-        # entire first pick. (The vor fallback in live_state now guarantees
-        # the room is never EMPTY; this is what makes a real, slot-aware
-        # ranking -- gain_now, survive_pct, fills -- actually arrive. Both
-        # are needed: a full recompute measures 0.97-1.49s against the real
-        # 249-player pool at 400 rollouts, which is over a second of board
-        # the fallback has to cover, and reconnecting mid-draft while on the
-        # clock would otherwise get no gain_now at all until the next pick.)
+        # entire first pick.
         #
         # Requested BEFORE thread.start(), i.e. before any frame can arrive:
         # `pending` is a coalescing depth-one slot (latest write wins, not
@@ -3838,11 +3839,11 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
         # `made_at_launch`. Ordering it ahead of the listener removes that
         # race rather than guarding against it.
         #
-        # Skipped when my_slot is None: _recompute returns immediately in
-        # that case anyway (survival needs a real slot), and on_activity's
-        # _resolve_slot path still fires the recompute the moment the socket
-        # names our team -- that path is unchanged and still needed.
-        if session.my_slot is not None:
+        # Requested whether or not my_slot is known: without a slot the
+        # ranking is ESPN's order with no "lasts" and no plan, which is a
+        # room rather than an empty one; on_activity's _resolve_slot path
+        # still fires a full recompute the moment the socket names our team.
+        if True:
             with lock:
                 state["picks_seen"] = made_at_launch
             request_recompute(session, made_at_launch)
@@ -3922,6 +3923,8 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
         s = _session_for(request)
         state, lock = (s.state, s.lock) if s is not None else (_initial_state(),
                                                                 threading.Lock())
+        if s is not None:
+            _refresh_favourites(s)          # its own locking; never under ours
         with lock:
             session = state["session"]
             if session is None:
@@ -3986,7 +3989,6 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
                         "my_roster": []}
             snapshot = dict(state)
             listener = snapshot["listener"]
-            _refresh_favourites(s, state)
             # Straight off the listener, read here rather than after `lock`
             # releases: not because a single int attribute read is unsafe
             # (pipeline/draft_listener.py sets it with a plain assignment,
@@ -4064,7 +4066,9 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
             # connection. The query is one fast COUNT(*), so holding the
             # lock across it costs negligible contention, and it cannot
             # deadlock: the query itself takes no lock of its own, and
-            # nothing else holds `lock` while blocking on the database.
+            # nothing else holds `lock` while blocking on the database --
+            # the favourites re-read above runs its store query outside it
+            # for exactly that reason.
             cur = (snapshot["league_conn"] or conn).cursor()
             try:
                 picks_made = cur.execute(PICKS_MADE_SQL).fetchone()[0]
