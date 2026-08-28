@@ -1286,11 +1286,20 @@ def test_players_carry_last_seasons_points_week_by_week(tmp_path):
 
 
 def test_the_per_game_chart_is_built_once_per_refresh_not_once_per_pick(tmp_path):
-    """The whole reason it is not a `build_board` column: the board cache is
-    keyed on the `drafted` table, so it is thrown away on every pick -- a
-    dozen-plus times an hour on draft night. These arrays depend on nothing a
-    pick can change, so they are keyed like scoring/profile_cache.py is
-    (database + `meta` + the league's rules) and survive it."""
+    """The whole reason it is not a `build_board` column: these arrays depend
+    on nothing a pick can change, so they are keyed like
+    scoring/profile_cache.py is (database + `meta` + the league's rules) and
+    survive one.
+
+    NEITHER CACHE NOTICES A PICK ANY MORE. This used to assert two board
+    builds, because the board cache was keyed on the `drafted` table and a
+    pick threw the whole board away -- a dozen-plus times an hour on draft
+    night, at 1.6s and ~0.9 GB each. The drafted set is now stamped onto the
+    cached frame instead of keying it (see `board_cache._drafted_ids`), so
+    the pick below costs one column rather than one build. What the pick must
+    still do -- show up, immediately, on the very next request -- is
+    tests/test_board_cache.py's `test_a_pick_reuses_the_cached_board` and
+    `test_profile_endpoint_reflects_a_pick_made_after_first_call` above."""
     import scoring.board_cache as bc
     import scoring.game_points as gp
     path = str(tmp_path / "g.duckdb")
@@ -1309,7 +1318,7 @@ def test_the_per_game_chart_is_built_once_per_refresh_not_once_per_pick(tmp_path
     finally:
         bc.build_board, gp._build = real_board, real_games
 
-    # The pick correctly invalidates the board...
-    assert len(boards) == 2
-    # ...and correctly does not invalidate this.
+    # The pick costs one column on a cached frame, not a rebuild...
+    assert len(boards) == 1
+    # ...and this is untouched either way.
     assert len(games) == 1

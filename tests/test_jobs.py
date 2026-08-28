@@ -328,3 +328,38 @@ def test_a_failed_refresh_still_releases_the_farm(monkeypatch):
     except SystemExit:
         pass
     assert ready.is_set()
+
+
+def test_a_database_with_data_warms_its_caches_at_boot(monkeypatch):
+    """A cold process has an empty board cache, so the FIRST reader after a
+    deploy pays 1.6s for the board and 1.9s more for the profile frames --
+    on a click. This is the one job that is not behind a switch, because it
+    costs one build of data the instance already has and nobody waits for
+    it."""
+    monkeypatch.delenv(jobs.REFRESH_ENV, raising=False)
+    monkeypatch.delenv(jobs.FARM_ENV, raising=False)
+    monkeypatch.setattr(jobs, "_read_meta", lambda conn: _meta(NOW))
+    started = []
+    jobs.start_jobs(_Conn([]), spawn=lambda name, fn: started.append(name))
+    assert started == ["warm-caches"]
+
+
+def test_an_empty_volume_is_not_warmed(monkeypatch):
+    """Nothing to build from: no `meta` row means no refresh has ever
+    finished, so warming would cache an empty board under a key the first
+    real refresh immediately retires. That refresh warms it on the way out
+    (pipeline/refresh.main)."""
+    monkeypatch.delenv(jobs.REFRESH_ENV, raising=False)
+    monkeypatch.delenv(jobs.FARM_ENV, raising=False)
+    monkeypatch.setattr(jobs, "_read_meta", lambda conn: pd.DataFrame())
+    started = []
+    jobs.start_jobs(_Conn([]), spawn=lambda name, fn: started.append(name))
+    assert started == []
+
+
+def test_a_connection_that_cannot_answer_is_not_warmed():
+    """"Cannot tell" and "nothing there" get the same answer, because they
+    lead to the same decision and the cost of being wrong is one cold
+    request rather than a failed boot. The fake connections in this file are
+    exactly that case, and so is a database mid-creation."""
+    assert jobs._has_data(_Conn([])) is False

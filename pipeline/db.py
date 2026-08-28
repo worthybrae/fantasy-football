@@ -81,13 +81,47 @@ def write_table(conn, name: str, df: pd.DataFrame) -> None:
     conn.execute(f"CREATE OR REPLACE TABLE {name} AS SELECT * FROM _incoming")
     conn.unregister("_incoming")
 
-def read_table(conn, name: str) -> pd.DataFrame:
+def read_table(conn, name: str, columns: list[str] | None = None) -> pd.DataFrame:
+    """The whole table as a frame, or only `columns` of it.
+
+    `columns` is a projection pushed into SQL rather than a `df[cols]` after
+    the fact, and the difference is the whole point: `weekly` is 174k rows
+    across 150 columns and materializes as 244 MB of pandas, of which ~118 MB
+    is object columns nothing scores (`headshot_url`, `game_id`,
+    `season_type`, the `fg_*_list` strings...). Reading those out of DuckDB
+    only to drop them costs the memory anyway, and on a box serving several
+    drafts at once that memory is the constraint. See
+    `scoring.board.WEEKLY_COLUMNS` for the caller this was written for and
+    how its list is derived.
+
+    A NAME NOT IN THE TABLE IS SKIPPED, NOT AN ERROR. Test fixtures seed a
+    ten-column `weekly` (tests/test_board.py, tests/test_live_api.py) and an
+    older database predates whatever column was added last; either way the
+    caller's list is what it WANTS, and DuckDB would raise `Binder Error` on
+    the first one that is missing. Every consumer of a projected frame
+    already guards optional columns (`if c in wk.columns`), so absent is a
+    state they handle and a hard failure is not.
+
+    A list that intersects the table in nothing returns an empty frame -- the
+    same answer a missing table gives, and the same one the callers' `.empty`
+    checks already handle."""
     exists = conn.execute(
         "SELECT count(*) FROM information_schema.tables WHERE table_name = ?", [name]
     ).fetchone()[0]
     if not exists:
         return pd.DataFrame()
-    return conn.execute(f"SELECT * FROM {name}").df()
+    if columns is None:
+        return conn.execute(f"SELECT * FROM {name}").df()
+    have = {r[1] for r in conn.execute(f"PRAGMA table_info('{name}')").fetchall()}
+    want, seen = [], set()
+    for col in columns:
+        if col in have and col not in seen:
+            seen.add(col)
+            want.append(col)
+    if not want:
+        return pd.DataFrame()
+    projection = ", ".join(f'"{c}"' for c in want)
+    return conn.execute(f"SELECT {projection} FROM {name}").df()
 
 def record_freshness(conn, source: str, ok: bool, rows: int) -> None:
     conn.execute(

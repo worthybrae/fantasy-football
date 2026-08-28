@@ -55,7 +55,7 @@ from scoring import factors, league
 from scoring.composite import compute_composite, apply_vor, assign_tiers
 from scoring.config import DEFAULT_WEIGHTS, RECENCY_WEIGHTS
 from scoring.market import add_market, select_format
-from scoring.ppr import (compute_dst_points, compute_ppr_points,
+from scoring.ppr import (DEFAULT_RULES, compute_dst_points, compute_ppr_points,
                          normalize_rules, prices_defense, prices_kicking)
 from scoring.similarity import player_season_features
 
@@ -71,6 +71,72 @@ _KICKER_FACTORS_THAT_BECOME_REAL = ["production", "durability", "schedule"]
 _DST_FACTORS_THAT_BECOME_REAL = ["production"]
 _ADP_POSITION_ALIASES = {"PK": "K"}
 _ADP_TEAM_ALIASES = {"LAR": "LA", "WSH": "WAS", "JAC": "JAX", "SD": "LAC", "OAK": "LV", "STL": "LA"}
+
+# The `weekly` columns a board build actually reads -- the whole list, and
+# nothing besides. Derived by reading every function this module hands the
+# frame to, not by sampling what looked used.
+#
+# WHY A PROJECTION AT ALL. `weekly` is 174,376 rows across 150 columns and
+# lands in pandas at 244 MB, roughly 118 MB of which is object columns
+# nothing here scores: `headshot_url`, `game_id`, `player_name`,
+# `season_type`, `position_group`, the `fg_made_list`/`fg_missed_list`/
+# `fg_blocked_list` strings. `build_board` read the whole table THREE times
+# -- once directly, once inside `consistency`, once inside `expected_change`
+# -- and one cold build peaked around 1.65 GB of RSS. On a box serving
+# several live drafts at once that peak is the thing that runs out first, so
+# the table is read ONCE and only the columns something reads come back.
+#
+# WHO READS WHAT (every one of these has a reader; grep the name to find it):
+#   player_id, season, week   what every aggregate here keys, windows or
+#                             counts games on
+#   position                  _build_universe, `consistency`'s ranking pool,
+#                             factors.schedule_factor, the K/DST neutrals
+#   recent_team               the historical `team` fallback, and the team
+#                             opportunity totals in player_season_features
+#                             and factors.role_factor
+#   opponent_team             factors.schedule_factor's fantasy-points-allowed
+#   player_display_name       the board's `name`
+#   targets, carries, receptions, receiving_yards, rushing_yards,
+#   receiving_tds, rushing_tds
+#                             similarity._STAT_COLS -- the usage half of
+#                             player_season_features -- plus role_factor's
+#                             opportunity share
+#   completions, attempts, passing_yards, passing_tds, passing_interceptions
+#                             _PASS_COLS, the passing half of `stats`
+#
+# `fantasy_points_ppr` is deliberately absent despite being the obvious
+# candidate: nothing in this repository reads it (every points figure is
+# recomputed under the LEAGUE's own rules by `compute_ppr_points`), so
+# carrying it would be memory spent on a number nobody asks for.
+_WEEKLY_BASE_COLUMNS = (
+    "player_id", "season", "week", "position", "recent_team", "opponent_team",
+    "player_display_name",
+    "targets", "carries", "receptions", "receiving_yards", "rushing_yards",
+    "receiving_tds", "rushing_tds",
+    "completions", "attempts", "passing_yards", "passing_tds",
+    "passing_interceptions",
+)
+
+# ...plus every column a SCORING RULE can name. `compute_ppr_points`
+# multiplies a league's rules dict straight against the frame, and a column
+# that is not there scores zero (`scoring.ppr._col`) rather than raising --
+# which is the one failure mode a projection can introduce and the one that
+# would never be noticed, because a whole position would simply go quiet.
+# Taken from the map that PRODUCES those rules (`league.ESPN_STAT_COLUMNS`)
+# and from full PPR itself, so a new mapping there cannot leave this list
+# behind; `_weekly_columns` then adds whatever the league at hand actually
+# names, for a stored settings row written by a version of that map this one
+# does not have.
+WEEKLY_COLUMNS = tuple(dict.fromkeys(
+    _WEEKLY_BASE_COLUMNS
+    + tuple(DEFAULT_RULES)
+    + tuple(col for cols in league.ESPN_STAT_COLUMNS.values() for col in cols)))
+
+
+def _weekly_columns(rules: dict | None = None) -> list[str]:
+    """WEEKLY_COLUMNS, plus any column `rules` names that it does not carry."""
+    return list(dict.fromkeys(WEEKLY_COLUMNS + tuple(rules or ())))
+
 
 _BOARD_COLUMNS = [
     "player_id", "name", "position", "team", "bye", "production", "durability",
@@ -1080,7 +1146,15 @@ def build_board(conn, weights: dict | None = None,
     # becomes the board's `adp` column / `ffc_rank`; the other three sources
     # are selected inside add_market. ESPN stays PPR (espn_adp is PPR-only).
     fmt = league.scoring_format(settings)
-    weekly = read_table(conn, "weekly")
+    # ONE READ, and only the columns something below scores -- see
+    # WEEKLY_COLUMNS for the list and how it was derived. This used to be
+    # three full reads of a 244 MB frame: here, again inside `consistency`,
+    # and a third time inside `expected_change`. Both of those need the FULL
+    # history rather than the RECENCY_WEIGHTS slice `weekly` becomes a few
+    # lines down, which is why the unnarrowed frame is kept under its own
+    # name and handed to them instead of re-read.
+    weekly_all = read_table(conn, "weekly", columns=_weekly_columns(rules))
+    weekly = weekly_all
     # Career availability is measured BEFORE the recency filter below, and it
     # is the one factor that should be: every other column here scores how
     # good a player has been lately, while this one answers "can he be relied
@@ -1144,7 +1218,7 @@ def build_board(conn, weights: dict | None = None,
     # means: a bar now says "steady among everyone who plays this position",
     # not "steady among the players you could take". See `consistency` for
     # what that costs at the top of the board.
-    uni = uni.merge(consistency(read_table(conn, "weekly"), rules),
+    uni = uni.merge(consistency(weekly_all, rules),
                     on="player_id", how="left")
 
     env = factors.environment_factor(sched) if not sched.empty else pd.DataFrame(columns=["team", "env_raw"])
@@ -1241,7 +1315,7 @@ def build_board(conn, weights: dict | None = None,
     # applies that window itself, as its weighting, and handing it a
     # pre-filtered frame would silently weight a subset of a subset.
     uni = uni.merge(
-        expected_change(read_table(conn, "weekly"),
+        expected_change(weekly_all,
                         uni.set_index("player_id")["proj_points"], rules),
         on="player_id", how="left")
     # `proj_points` now follows this league's scoring on both rungs: the

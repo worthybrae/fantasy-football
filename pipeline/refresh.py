@@ -111,6 +111,25 @@ def main() -> int:
             summary.append(f"  FAIL {name}: {e}")
             any_failed = True
     print("Refresh complete:\n" + "\n".join(summary))
+
+    # REBUILD THE CACHES THE LOOP ABOVE JUST RETIRED. Every key in
+    # scoring/board_cache.py and its two siblings carries a fingerprint of
+    # `meta`, and `record_freshness` moved a row of it for every source --
+    # so the instant this loop ends, nothing in the process holds a usable
+    # cached board and the next person to click pays the whole cold build.
+    # Here nobody is waiting for it.
+    #
+    # This matters because api/jobs.py runs `main()` IN THE SERVER PROCESS
+    # (`_run_refresh`), which is where those caches live. A standalone
+    # `python -m pipeline.refresh` warms caches it is about to throw away
+    # when it exits -- a few seconds at the end of a job that takes minutes,
+    # and not worth a flag to avoid.
+    #
+    # Imported here rather than at module scope: this module is imported by
+    # tooling that has no interest in the scoring stack, and `warm` itself
+    # swallows and logs whatever goes wrong.
+    from scoring import board_cache
+    board_cache.warm(conn)
     return 1 if any_failed else 0
 
 if __name__ == "__main__":

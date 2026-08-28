@@ -348,7 +348,60 @@ def start_jobs(conn, spawn=None) -> list:
             name = f"farm-{i + 1}"
             launch(name, lambda b=batch: _farm_loop(b, ready))
             started.append(name)
+
+    # LAST, and the one job with no environment switch in front of it: it
+    # costs a single build of data this instance already holds, and nobody
+    # is waiting on it. A cold process has an empty board cache
+    # (scoring/board_cache.py), so the FIRST reader after a deploy pays 1.6s
+    # for the board and 1.9s more for the profile frames, on a click. Doing
+    # it here moves that onto a thread nobody is watching.
+    #
+    # Only when there is something to build FROM. A volume that has never
+    # been refreshed has no `meta` rows and no `weekly` either, so warming it
+    # would cache an empty board under a key that the first real refresh
+    # immediately retires -- work for nothing, and a misleading log line. The
+    # refresh loop above will warm it when it finishes (see
+    # pipeline/refresh.main).
+    if _has_data(conn):
+        launch("warm-caches", lambda: _warm_caches(conn))
+        started.append("warm-caches")
     return started
+
+
+def _warm_caches(conn) -> None:
+    """`board_cache.warm`, on its own cursor.
+
+    A cursor rather than the connection itself, for the reason every request
+    handler in api/main.py takes one: this runs alongside the refresh loop,
+    which is writing. The cache key sees through it either way -- `_db_key`
+    is `PRAGMA database_list`, which a cursor answers identically to the
+    connection it came from -- so the frames warmed here are the same entries
+    the request threads go on to hit.
+
+    Imported inside the function: importing the scoring stack costs real time
+    at start-up, and `start_jobs` is called while the app is coming up.
+    """
+    from scoring import board_cache
+    cur = conn.cursor()
+    try:
+        board_cache.warm(cur)
+    finally:
+        cur.close()
+
+
+def _has_data(conn) -> bool:
+    """Whether this database has been refreshed at all -- any `meta` row.
+
+    Anything that goes wrong reading it is a no: the fake connections in
+    tests/test_jobs.py cannot answer this question at all, and neither can a
+    database mid-creation. "Cannot tell" and "nothing there" get the same
+    answer because they lead to the same decision, and the cost of being
+    wrong is one cold request rather than a failed boot.
+    """
+    try:
+        return not _read_meta(conn).empty
+    except Exception:  # noqa: BLE001 -- see the docstring
+        return False
 
 
 def _concurrency() -> int:

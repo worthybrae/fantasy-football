@@ -1505,3 +1505,76 @@ def test_edge_compares_two_positions_in_the_same_pool(tmp_path):
     ranked = board.dropna(subset=["market_rank"])
     expected = (ranked["market_rank"].rank(method="first") - ranked["rank"])
     assert (ranked["edge"] - expected).abs().max() < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# How much of `weekly` a build reads, and how many times.
+# ---------------------------------------------------------------------------
+
+def test_weekly_is_read_once_per_build(tmp_path, monkeypatch):
+    """It used to be three: once in `build_board`, once inside `consistency`,
+    once inside `expected_change`. Three reads of a 174k x 150 table is three
+    244 MB frames alive at overlapping moments, and the peak is what a box
+    serving several drafts at once runs out of first. The two helpers still
+    need the FULL history rather than the RECENCY_WEIGHTS slice, which is why
+    the unnarrowed frame is kept and handed over rather than re-read.
+    """
+    import scoring.board as board_mod
+    conn = _seed(tmp_path)
+    reads = []
+    real = board_mod.read_table
+
+    def counting(c, name, columns=None):
+        reads.append(name)
+        return real(c, name, columns=columns)
+
+    monkeypatch.setattr(board_mod, "read_table", counting)
+    board_mod.build_board(conn)
+    assert reads.count("weekly") == 1
+
+
+def test_the_weekly_projection_covers_every_column_a_rule_can_name(tmp_path):
+    """The one way a column projection can be silently wrong.
+
+    `compute_ppr_points` multiplies a league's rules straight against the
+    frame and treats an absent column as a zero (`scoring.ppr._col`), so a
+    scoring rule whose column was left out of the read does not raise -- it
+    quietly scores that stat at nothing, for every player, forever. This
+    pins the list against the map that PRODUCES those rules, so adding a
+    mapping to `league.ESPN_STAT_COLUMNS` cannot leave the read behind.
+    """
+    from scoring import board as board_mod
+    from scoring.league import ESPN_STAT_COLUMNS
+    from scoring.ppr import DEFAULT_RULES
+
+    mappable = {c for cols in ESPN_STAT_COLUMNS.values() for c in cols}
+    assert mappable <= set(board_mod.WEEKLY_COLUMNS)
+    assert set(DEFAULT_RULES) <= set(board_mod.WEEKLY_COLUMNS)
+
+
+def test_a_league_rule_outside_the_static_list_is_still_read(tmp_path):
+    """A stored `league` row is written by whatever version of
+    `ESPN_STAT_COLUMNS` was current when it was imported, which is not
+    necessarily this one. Whatever the league in hand actually names gets
+    read, on top of the static list."""
+    from scoring import board as board_mod
+
+    assert "penalty_yards" not in board_mod.WEEKLY_COLUMNS
+    assert "penalty_yards" in board_mod._weekly_columns({"penalty_yards": -1.0})
+
+
+def test_the_projection_does_not_change_the_board(tmp_path, monkeypatch):
+    """The projection is a memory change and nothing else: the same fixture
+    built from a full `SELECT *` and from the narrowed read must agree
+    column for column and value for value."""
+    import scoring.board as board_mod
+    from pandas.testing import assert_frame_equal
+
+    narrowed = board_mod.build_board(_seed(tmp_path))
+
+    real = board_mod.read_table
+    monkeypatch.setattr(
+        board_mod, "read_table",
+        lambda c, name, columns=None: real(c, name))
+    everything = board_mod.build_board(_seed(tmp_path / "again"))
+    assert_frame_equal(narrowed, everything)
