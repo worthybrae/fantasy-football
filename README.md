@@ -249,8 +249,18 @@ visitor. One origin keeps the cookie as written.
 
 **One replica, not more.** DuckDB takes a single-writer lock per file, so a
 second instance cannot open the database the first one holds. This is the same
-lock that stops `make fit-prior` running while the API is up. Scaling out
-means moving the mutable tables to Postgres first.
+lock that stops `make fit-prior` running while the API is up. With
+`SUPABASE_DB_URL` set the mutable tables (custody, billing, the live session
+records) already live in Postgres; what still pins the service to one replica
+is the live draft rooms themselves -- each holds an ESPN socket and its state
+in the process that opened it. Splitting those listeners into their own tier
+is the step that lifts the limit.
+
+**The volume grows.** Beside `data/nfl.duckdb` (215 MB) the app writes a
+read-only snapshot of it for provisioning (another 215 MB, rewritten after
+every refresh) and one file per league anybody has ever drafted in under
+`data/leagues/` (about 32 MB each). A hundred leagues is 3.2 GB; the 5 GB
+volume Railway attaches by default is enough for a season, not for several.
 
 ### First deploy (Railway)
 

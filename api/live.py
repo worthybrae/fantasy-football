@@ -1431,7 +1431,41 @@ SURVIVAL_ROLLOUTS = 400
 # Bounded to the core count they queue instead, and the coalescing slot
 # in each room's worker (see _launch_listener) means a room that waited
 # ranks the LATEST pick, never a stale one.
-RECOMPUTE_SLOTS = threading.Semaphore(max(2, os.cpu_count() or 2))
+RECOMPUTE_SLOTS_ENV = "LIVE_RECOMPUTE_SLOTS"
+
+
+def recompute_slots_from_env() -> int:
+    """How many rankings may run at once: the variable, else the core count
+    capped at eight, never fewer than two. Capped because past eight the
+    rankings are fighting the request threads for the GIL rather than
+    using cores; two so a single-core box still overlaps one ranking with
+    the next room's wait."""
+    raw = (os.environ.get(RECOMPUTE_SLOTS_ENV) or "").strip()
+    try:
+        n = int(raw) if raw else min(os.cpu_count() or 2, 8)
+    except ValueError:
+        n = min(os.cpu_count() or 2, 8)
+    return max(2, n)
+
+
+RECOMPUTE_SLOTS = threading.Semaphore(recompute_slots_from_env())
+
+# How many rooms may be drafting at once in this process. A connect past
+# it answers 503 "at capacity" rather than degrading every room already
+# in; a reconnect of a room that already holds a listener is always let
+# through. 150 is under the point where this process's polls slow past a
+# second on an 8 GB box (measured: 100 rooms at a pick per 15 s, state
+# p95 1.3 s).
+MAX_ROOMS_ENV = "LIVE_MAX_ROOMS"
+DEFAULT_MAX_ROOMS = 150
+
+
+def max_rooms_from_env() -> int:
+    raw = (os.environ.get(MAX_ROOMS_ENV) or "").strip()
+    try:
+        return max(1, int(raw)) if raw else DEFAULT_MAX_ROOMS
+    except ValueError:
+        return DEFAULT_MAX_ROOMS
 # How long one room waits for a ranking slot before skipping that ranking.
 # Waited for in half-second steps against the room's own stop event, so a
 # stop never sits behind the queue -- which is what would otherwise turn a
@@ -2127,14 +2161,34 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
     def _session_for_connect(request, response) -> LiveSession:
         """The room a connect lands in. A request that already carries a
         cookie reuses that sid, so a second click supersedes only the
-        clicker's own draft and never anybody else's."""
+        clicker's own draft and never anybody else's.
+
+        THE ROOM CAP IS HERE. Past LIVE_MAX_ROOMS active listeners a NEW
+        room is refused with a 503 the page can read (`error: "at
+        capacity"`), because one more room would slow every room already
+        drafting; a room that already holds a listener may always
+        reconnect -- its socket is what it is trying to replace.
+        """
         sid = _room_sid(request, response)
         s = registry.get_or_create(sid)
         with s.lock:
             retiring = s.state.get("retiring", False)
+            has_listener = s.state["listener"] is not None
         if retiring:
             # The reaper has this one; it will not drop what replaces it.
             s = registry.replace(sid)
+            has_listener = False
+        if not has_listener:
+            cap = max_rooms_from_env()
+            active = registry.active_count()
+            if active >= cap:
+                raise HTTPException(
+                    status_code=503,
+                    detail={"error": "at capacity", "active": active,
+                            "cap": cap,
+                            "message": "This server is following as many "
+                                       "drafts as it can right now. Try "
+                                       "again in a few minutes."})
         s.touch()
         return s
 

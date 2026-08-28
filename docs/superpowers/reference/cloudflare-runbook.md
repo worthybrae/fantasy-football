@@ -87,6 +87,16 @@ by anybody no matter what rule is configured here.
    protection. It challenges obvious automation and leaves search crawlers
    alone, which matters because the ADP pages exist to be crawled.
 
+10. **One rate limit, on the connects.** Security, WAF, Rate limiting rules,
+    Create rule. Match: URI Path equals `/api/live/connect-token` OR URI
+    Path equals `/api/live/connect`, request method POST. Rate: 10 requests
+    per 1 minute, per IP. Action: Block for 10 seconds. A connect is the one
+    request that costs the app real work -- a league file, a board, a
+    socket -- and a browser retrying in a loop, or a script, must not be
+    able to turn that into a queue everybody else waits behind. Ten a
+    minute is far more than a person clicking a bookmark ever needs; the
+    app's own room cap (`LIVE_MAX_ROOMS`) is the other half of this.
+
 ## The two streams
 
 `/api/live/events` and `/api/demo/events` are server-sent event streams that

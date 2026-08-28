@@ -912,3 +912,44 @@ def test_a_room_touched_after_the_reaper_looked_is_kept(tmp_path, monkeypatch):
     finally:
         registry.set_retire(real_retire)
         _stop_all([a])
+
+
+def test_the_room_cap_refuses_new_rooms_but_not_reconnects(tmp_path, monkeypatch):
+    monkeypatch.setenv(live.MAX_ROOMS_ENV, "1")
+    app, seen, stops = _app(tmp_path, monkeypatch)
+    a, b = _client(app), _client(app)
+    try:
+        _connect(a, "1", team_id="2")
+        assert b.post("/api/live/session").json()["sid_set"] is True
+        resp = b.post("/api/live/connect-token", json={
+            "leagueId": "2", "teamId": "2", "swid": "{X}",
+            "token": "tok-2", "season": "2026"})
+        assert resp.status_code == 503, resp.text
+        detail = resp.json()["detail"]
+        assert detail["error"] == "at capacity" and detail["cap"] == 1 and detail["active"] == 1
+        assert app.state.live_registry.active_count() == 1
+        # The room already drafting may reconnect past the cap.
+        assert _connect(a, "1", team_id="2").status_code == 200
+        assert app.state.live_registry.active_count() == 1
+        # And once it stops, the next room is let in.
+        a.post("/api/live/stop")
+        assert _connect(b, "2", team_id="2").status_code == 200
+    finally:
+        _stop_all([a, b])
+
+
+def test_the_knobs_read_the_environment(monkeypatch):
+    monkeypatch.delenv(live.RECOMPUTE_SLOTS_ENV, raising=False)
+    assert 2 <= live.recompute_slots_from_env() <= 8
+    monkeypatch.setenv(live.RECOMPUTE_SLOTS_ENV, "1")
+    assert live.recompute_slots_from_env() == 2
+    monkeypatch.setenv(live.RECOMPUTE_SLOTS_ENV, "12")
+    assert live.recompute_slots_from_env() == 12
+    monkeypatch.setenv(live.RECOMPUTE_SLOTS_ENV, "lots")
+    assert 2 <= live.recompute_slots_from_env() <= 8
+    monkeypatch.delenv(live.MAX_ROOMS_ENV, raising=False)
+    assert live.max_rooms_from_env() == 150
+    monkeypatch.setenv(live.MAX_ROOMS_ENV, "0")
+    assert live.max_rooms_from_env() == 1
+    monkeypatch.setenv(live.MAX_ROOMS_ENV, "many")
+    assert live.max_rooms_from_env() == 150
