@@ -72,9 +72,11 @@ _DST_FACTORS_THAT_BECOME_REAL = ["production"]
 _ADP_POSITION_ALIASES = {"PK": "K"}
 _ADP_TEAM_ALIASES = {"LAR": "LA", "WSH": "WAS", "JAC": "JAX", "SD": "LAC", "OAK": "LV", "STL": "LA"}
 
-# The `weekly` columns a board build actually reads -- the whole list, and
-# nothing besides. Derived by reading every function this module hands the
-# frame to, not by sampling what looked used.
+# The `weekly` columns the scoring stack actually reads -- the whole list,
+# and nothing besides. Derived by reading every function this module hands
+# the frame to, not by sampling what looked used. scoring/profile_cache.py
+# reads through the same list (see `weekly_columns`), so there is one answer
+# to "what does a build need from this table" rather than two that drift.
 #
 # WHY A PROJECTION AT ALL. `weekly` is 174,376 rows across 150 columns and
 # lands in pandas at 244 MB, roughly 118 MB of which is object columns
@@ -124,7 +126,7 @@ _WEEKLY_BASE_COLUMNS = (
 # would never be noticed, because a whole position would simply go quiet.
 # Taken from the map that PRODUCES those rules (`league.ESPN_STAT_COLUMNS`)
 # and from full PPR itself, so a new mapping there cannot leave this list
-# behind; `_weekly_columns` then adds whatever the league at hand actually
+# behind; `weekly_columns` then adds whatever the league at hand actually
 # names, for a stored settings row written by a version of that map this one
 # does not have.
 WEEKLY_COLUMNS = tuple(dict.fromkeys(
@@ -133,8 +135,17 @@ WEEKLY_COLUMNS = tuple(dict.fromkeys(
     + tuple(col for cols in league.ESPN_STAT_COLUMNS.values() for col in cols)))
 
 
-def _weekly_columns(rules: dict | None = None) -> list[str]:
-    """WEEKLY_COLUMNS, plus any column `rules` names that it does not carry."""
+def weekly_columns(rules: dict | None = None) -> list[str]:
+    """WEEKLY_COLUMNS, plus any column `rules` names that it does not carry.
+
+    Public because scoring/profile_cache.py reads `weekly` through it too.
+    That frame needs a strict subset of this one -- everything it derives
+    goes through `player_season_features`, `factors.schedule_factor` or a
+    groupby on (player_id, season, week, recent_team) -- so it carries two
+    columns it does not use (`completions`, `attempts`, about 1.4 MB each).
+    A second list would be two columns smaller and one refactor away from
+    disagreeing with this one about a scoring rule, which is the failure
+    that loses a whole position's points silently."""
     return list(dict.fromkeys(WEEKLY_COLUMNS + tuple(rules or ())))
 
 
@@ -1153,7 +1164,7 @@ def build_board(conn, weights: dict | None = None,
     # history rather than the RECENCY_WEIGHTS slice `weekly` becomes a few
     # lines down, which is why the unnarrowed frame is kept under its own
     # name and handed to them instead of re-read.
-    weekly_all = read_table(conn, "weekly", columns=_weekly_columns(rules))
+    weekly_all = read_table(conn, "weekly", columns=weekly_columns(rules))
     weekly = weekly_all
     # Career availability is measured BEFORE the recency filter below, and it
     # is the one factor that should be: every other column here scores how

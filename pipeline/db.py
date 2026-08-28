@@ -104,7 +104,13 @@ def read_table(conn, name: str, columns: list[str] | None = None) -> pd.DataFram
 
     A list that intersects the table in nothing returns an empty frame -- the
     same answer a missing table gives, and the same one the callers' `.empty`
-    checks already handle."""
+    checks already handle.
+
+    THE FRAME'S COLUMNS COME BACK IN THE CALLER'S ORDER, not the table's, and
+    duplicates in the list are read once: `columns` is a request, and the
+    frame is the answer to it. Nothing downstream indexes a projected frame
+    positionally today -- every consumer names its columns -- but a caller
+    that reads its own list back off the frame should get its own list."""
     exists = conn.execute(
         "SELECT count(*) FROM information_schema.tables WHERE table_name = ?", [name]
     ).fetchone()[0]

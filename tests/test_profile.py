@@ -529,7 +529,9 @@ def test_build_profile_reflects_a_pick_made_after_first_call(tmp_path):
 
     # Mirrors the INSERT api/main.py's POST /api/drafted/{id} and api/live.py
     # both use -- neither goes through this cache, so the cache has to
-    # notice on its own (see _drafted_key in scoring/board_cache.py).
+    # notice on its own (see _drafted_ids in scoring/board_cache.py, which
+    # reads the table fresh on every call and stamps the column onto the
+    # frame it hands back rather than keying the cache on it).
     conn.execute("INSERT INTO drafted VALUES (?, ?)", ["p1", 1])
 
     after = build_profile(conn, "p1")
@@ -732,6 +734,66 @@ def test_profile_frame_cache_is_not_annotated_by_the_player_who_used_it_first(tm
     frames = next(iter(profile_cache._cache.values()))
     assert "pos_finish" not in frames.season_features.columns
     assert "_norm_name" not in frames.prior_weekly.columns
+
+
+def test_the_projected_reads_build_the_same_frames_as_the_whole_tables(tmp_path):
+    """scoring/profile_cache._build reads `weekly` and `snap_counts` through
+    a column list now -- 244 MB and 144 MB read whole, against 39 and 9
+    columns of them -- because this build was the largest single allocation
+    the process made. It is a memory change and nothing else: every frame it
+    hands `build_profile` has to be what it was.
+
+    `prior_weekly` is the one frame that IS narrower, by construction -- it
+    is a slice of the projected table. Its two consumers
+    (`profile.weekly_difficulty` and `_outlook` -> `factors.schedule_factor`)
+    read opponent_team, week, position and the scoring columns, all of which
+    survive, so it is compared on the columns it carries.
+    """
+    from pandas.testing import assert_frame_equal, assert_series_equal
+    from scoring import profile_cache
+
+    conn = _seed_with_real_depth_schema(tmp_path)
+    projected = profile_cache._build(conn, None)
+
+    real = profile_cache.read_table
+    profile_cache.read_table = lambda c, name, columns=None: real(c, name)
+    try:
+        whole = profile_cache._build(conn, None)
+    finally:
+        profile_cache.read_table = real
+
+    for field in dataclasses.fields(profile_cache.ProfileFrames):
+        a, b = getattr(whole, field.name), getattr(projected, field.name)
+        if isinstance(a, pd.DataFrame):
+            assert_frame_equal(a[list(b.columns)] if field.name == "prior_weekly"
+                               else a, b)
+        elif isinstance(a, pd.Series):
+            assert_series_equal(a, b)
+        else:
+            assert a == b, field.name
+    # ...and every column it did come back with is one the list asked for.
+    # (This fixture's `weekly` is eleven columns, all of them needed, so
+    # there is nothing here to narrow -- the narrowing is measured on the
+    # real 150-column table, not asserted on a fixture that cannot show it.)
+    from scoring.board import weekly_columns
+    assert set(projected.prior_weekly.columns) <= set(weekly_columns(None))
+
+
+def test_snap_columns_describes_the_table_not_the_projection(tmp_path):
+    """`snap_columns` answers "what does snap_counts carry" for
+    `profile.snap_share_by_game`, which builds its own SQL and only puts
+    `game_type` in the WHERE clause if the table has one. Read off the
+    projected frame it would answer "what did profile_cache ask for", which
+    is a different question with the same shape -- the kind of wrong that
+    shows up as a silently missing snap column rather than as an error."""
+    from scoring import profile_cache
+
+    conn = _seed_with_real_depth_schema(tmp_path)
+    frames = profile_cache._build(conn, None)
+    on_disk = {r[0] for r in conn.execute(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_name = 'snap_counts'").fetchall()}
+    assert set(frames.snap_columns) == on_disk
 
 
 def test_season_summaries_does_not_annotate_the_features_frame_it_is_given(tmp_path):

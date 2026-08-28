@@ -35,7 +35,16 @@ def _fetch_multi_format(fetch_fn, formats, *args) -> pd.DataFrame:
         raise ValueError(f"{fetch_fn.__name__}: no format returned data")
     return pd.concat(frames, ignore_index=True)
 
-def main() -> int:
+def main(warm: bool = False) -> int:
+    """Refresh every source. `warm` rebuilds the caches this just retired.
+
+    OFF BY DEFAULT, because the caller that wants it is the server and the
+    caller that does not is the command line: `python -m pipeline.refresh`
+    exits the moment this returns, so warming there builds three frames into
+    a process that is about to free them. api/jobs `_run_refresh` runs this
+    IN THE SERVER PROCESS, where those caches live and where the next
+    request is about to want them, and passes True.
+    """
     conn = get_conn()
 
     # Both news jobs want the same 249 board rows, and building the board
@@ -119,17 +128,13 @@ def main() -> int:
     # cached board and the next person to click pays the whole cold build.
     # Here nobody is waiting for it.
     #
-    # This matters because api/jobs.py runs `main()` IN THE SERVER PROCESS
-    # (`_run_refresh`), which is where those caches live. A standalone
-    # `python -m pipeline.refresh` warms caches it is about to throw away
-    # when it exits -- a few seconds at the end of a job that takes minutes,
-    # and not worth a flag to avoid.
-    #
-    # Imported here rather than at module scope: this module is imported by
-    # tooling that has no interest in the scoring stack, and `warm` itself
-    # swallows and logs whatever goes wrong.
-    from scoring import board_cache
-    board_cache.warm(conn)
+    # Imported inside the branch rather than at module scope: this module is
+    # imported by tooling that has no interest in the scoring stack, and the
+    # command-line path never takes this at all. `warm` swallows and logs
+    # whatever goes wrong.
+    if warm:
+        from scoring import board_cache
+        board_cache.warm(conn)
     return 1 if any_failed else 0
 
 if __name__ == "__main__":

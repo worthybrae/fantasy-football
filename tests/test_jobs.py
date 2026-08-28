@@ -333,15 +333,53 @@ def test_a_failed_refresh_still_releases_the_farm(monkeypatch):
 def test_a_database_with_data_warms_its_caches_at_boot(monkeypatch):
     """A cold process has an empty board cache, so the FIRST reader after a
     deploy pays 1.6s for the board and 1.9s more for the profile frames --
-    on a click. This is the one job that is not behind a switch, because it
-    costs one build of data the instance already has and nobody waits for
-    it."""
+    on a click. Default on, unlike the other two switches: it costs one
+    build of data the instance already holds and nobody waits for it.
+
+    (`WARM_ON_BOOT` is deleted rather than set, because the default is the
+    thing being tested -- tests/conftest.py turns it off for the suite, so
+    without this the fixture's answer would be what got asserted.)"""
     monkeypatch.delenv(jobs.REFRESH_ENV, raising=False)
     monkeypatch.delenv(jobs.FARM_ENV, raising=False)
+    monkeypatch.delenv(jobs.WARM_ON_BOOT_ENV, raising=False)
     monkeypatch.setattr(jobs, "_read_meta", lambda conn: _meta(NOW))
     started = []
     jobs.start_jobs(_Conn([]), spawn=lambda name, fn: started.append(name))
     assert started == ["warm-caches"]
+
+
+def test_the_warm_switch_turns_it_off(monkeypatch):
+    """What tests/conftest.py uses, and what a deployment would use to stop
+    a boot-time build without a redeploy. A switch that is on by default
+    still has to be switchable, or the suite has a real board build starting
+    behind every app it creates."""
+    monkeypatch.delenv(jobs.REFRESH_ENV, raising=False)
+    monkeypatch.delenv(jobs.FARM_ENV, raising=False)
+    monkeypatch.setenv(jobs.WARM_ON_BOOT_ENV, "0")
+    monkeypatch.setattr(jobs, "_read_meta", lambda conn: _meta(NOW))
+    started = []
+    jobs.start_jobs(_Conn([]), spawn=lambda name, fn: started.append(name))
+    assert started == []
+
+
+def test_the_suite_itself_has_the_warm_switched_off():
+    """The fixture in tests/conftest.py is what keeps a background build out
+    of every other test in this suite, so it is worth one assertion that it
+    is actually in force rather than silently unregistered."""
+    assert jobs._on(jobs.WARM_ON_BOOT_ENV, default=True) is False
+
+
+def test_warming_never_raises_out_of_its_thread():
+    """It is a daemon thread nobody is waiting on. `board_cache.warm` catches
+    what its three builders throw, but the lines around it can throw too --
+    `conn.cursor()` on a connection a test tore down while the thread was
+    starting is the one that actually happens -- and an exception escaping
+    here is a traceback about work nobody asked for."""
+    class Closed:
+        def cursor(self):
+            raise RuntimeError("Connection Error: connection already closed")
+
+    jobs._warm_caches(Closed())  # no raise
 
 
 def test_an_empty_volume_is_not_warmed(monkeypatch):

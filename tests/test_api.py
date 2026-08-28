@@ -1211,13 +1211,28 @@ def test_a_connected_session_does_not_rebuild_the_board_on_every_request(tmp_pat
     try:
         for _ in range(4):
             client.get("/api/players")
-        client.get("/api/landing/preview")
         client.get("/api/players/k1/profile")
     finally:
         bc.build_board = real
-    # One build for all six requests -- including the landing preview, which
-    # has to take its settings from the same place or a connected draft pays
-    # the build twice.
+    # One build for all five requests the session makes.
+    assert builds == [1]
+
+    # THE LANDING PREVIEW IS THE ONE THAT IS ALLOWED TO DIFFER, and it did
+    # not used to be: it passed the caller's own session settings, so this
+    # test counted six requests and one build. It is now deliberately
+    # anonymous -- `_league_settings(cur, None)`, because the answer carries
+    # `Cache-Control: public` and is shared with everybody, so it must not
+    # vary with whoever happens to be in a draft room. That is a second
+    # league, so it is a second entry, built once and then cached like any
+    # other.
+    builds.clear()
+    bc.build_board = lambda *a, **k: (builds.append(1), real(*a, **k))[1]
+    try:
+        client.get("/api/landing/preview")
+        client.get("/api/landing/preview")
+        client.get("/api/players")
+    finally:
+        bc.build_board = real
     assert builds == [1]
 
 
@@ -1297,9 +1312,10 @@ def test_the_per_game_chart_is_built_once_per_refresh_not_once_per_pick(tmp_path
     night, at 1.6s and ~0.9 GB each. The drafted set is now stamped onto the
     cached frame instead of keying it (see `board_cache._drafted_ids`), so
     the pick below costs one column rather than one build. What the pick must
-    still do -- show up, immediately, on the very next request -- is
-    tests/test_board_cache.py's `test_a_pick_reuses_the_cached_board` and
-    `test_profile_endpoint_reflects_a_pick_made_after_first_call` above."""
+    still do -- show up, immediately, on the very next request -- is pinned
+    by `test_a_pick_reuses_the_cached_board` in tests/test_board_cache.py and
+    by `test_profile_endpoint_reflects_a_pick_made_after_first_call`, in this
+    file, above."""
     import scoring.board_cache as bc
     import scoring.game_points as gp
     path = str(tmp_path / "g.duckdb")

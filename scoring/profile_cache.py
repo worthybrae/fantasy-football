@@ -150,7 +150,7 @@ import numpy as np
 import pandas as pd
 
 from pipeline.db import read_table
-from scoring.board import _norm_name
+from scoring.board import _norm_name, weekly_columns
 # Imported, not re-derived. The brief for this change was explicit that a
 # second, divergent "has the data changed" signal is worse than reusing the
 # board's -- and it is: two keys that disagree by one table would show a
@@ -559,6 +559,24 @@ _LINE_QUALITY_NEEDS = {
 }
 
 
+# Every `snap_counts` column this module and the O-line frames it builds
+# actually touch, and nothing else. The table is 253,106 rows and 144 MB
+# read whole; these nine columns are 21 MB of it.
+#
+# Derived from `_LINE_QUALITY_NEEDS` rather than typed out beside it, because
+# that set is already the authority on what the line frames reach for -- and
+# `_line_frames` refuses to build at all unless every one of them is present,
+# so a column added there without being added here would turn the Blocking
+# card off rather than crash, which is exactly the kind of silence worth
+# designing out. The four `snap_share_by_season` reads (player, team, season,
+# offense_pct) and the three `reconcile_pfr_to_gsis` reads (pfr_player_id,
+# player, season) are all inside that set already; they are named again here
+# so the union is checkable by eye.
+SNAP_COLUMNS = sorted(_LINE_QUALITY_NEEDS["snap_counts"]
+                      | {"player", "team", "season", "offense_pct"}
+                      | {"pfr_player_id"})
+
+
 def _table_columns(conn, name: str) -> set[str]:
     """Column names of `name`, or an empty set if the table doesn't exist.
 
@@ -653,8 +671,16 @@ def _pfr_crosswalk(conn, snaps: pd.DataFrame) -> pd.DataFrame:
 
 
 def _build(conn, rules: dict | None) -> ProfileFrames:
-    weekly = read_table(conn, "weekly")
-    snaps = read_table(conn, "snap_counts")
+    # Both reads are projected, for the reason `pipeline.db.read_table`'s
+    # `columns` argument exists at all: read whole, these two frames are
+    # 244 MB and 144 MB, and this build was the largest single allocation
+    # the process made -- larger than the board's, which is already
+    # projected. Nothing below reads a column outside these lists (see
+    # `scoring.board.weekly_columns` and SNAP_COLUMNS for the derivation of
+    # each), and a column an older database is missing is skipped rather
+    # than raising, exactly as it is for the board.
+    weekly = read_table(conn, "weekly", columns=weekly_columns(rules))
+    snaps = read_table(conn, "snap_counts", columns=SNAP_COLUMNS)
 
     if weekly.empty:
         # Never consumed: `build_profile` short-circuits both the summaries
@@ -698,7 +724,16 @@ def _build(conn, rules: dict | None) -> ProfileFrames:
                    _line_frames(conn, CURRENT_SEASON, snaps))),
         team_week_targets=_team_week_targets(weekly),
         draft_season=CURRENT_SEASON,
-        snap_columns=frozenset(snaps.columns),
+        # THE TABLE'S columns, not the projected frame's. `snaps` above is
+        # nine columns of a wider table now, and this field answers "what
+        # does snap_counts carry" for a consumer that builds its own SQL
+        # against it (`profile.snap_share_by_game` puts `game_type` in a
+        # WHERE clause only if the table has one). Reading it off the
+        # projection would make the answer a property of this module's
+        # shopping list rather than of the database. One
+        # information_schema query per BUILD -- the 1.1 ms the field's
+        # comment above weighs is per REQUEST, which is what it still saves.
+        snap_columns=frozenset(_table_columns(conn, "snap_counts")),
         news_columns=frozenset(_table_columns(conn, "player_news")),
         status_columns=frozenset(_table_columns(conn, "player_status")),
     )

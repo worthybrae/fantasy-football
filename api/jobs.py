@@ -41,6 +41,15 @@ from pipeline.db import read_table
 # Whether this instance refreshes itself at all.
 REFRESH_ENV = "RUN_REFRESH_ON_BOOT"
 
+# Whether this instance warms its caches at boot. DEFAULT ON, unlike the two
+# switches below: warming costs one build of data the instance already holds
+# and saves the first reader after a deploy the 1.6s board and the 1.9s
+# profile frames, so "unset" should mean "yes". The switch exists to turn it
+# OFF -- for the test suite, which builds an app per test and must not have
+# a real board build starting behind every one of them (tests/conftest.py),
+# and for anyone debugging what a process is doing on its own.
+WARM_ON_BOOT_ENV = "WARM_ON_BOOT"
+
 # Whether this instance plays mock drafts to grow the corpus. Separate switch
 # from the refresh: they fail for completely different reasons (a stats feed
 # being down vs an expired ESPN login) and one being off is not a reason for
@@ -171,7 +180,12 @@ def _run_refresh() -> None:
     fighting the app's own connection for the file lock.
     """
     from pipeline import refresh
-    refresh.main()
+    # `warm=True`: this is the in-process caller that refresh.main's flag
+    # exists for. The loop above has just moved every `meta` row, which
+    # retires every cached board, profile frame and game-point set in THIS
+    # process -- so it rebuilds them here rather than leaving the bill for
+    # whoever clicks next.
+    refresh.main(warm=True)
 
     # FOLD THE WRITES INTO THE FILE. DuckDB appends a commit to `<name>.wal`
     # and only merges it at a checkpoint, which a connection held for the
@@ -362,7 +376,7 @@ def start_jobs(conn, spawn=None) -> list:
     # immediately retires -- work for nothing, and a misleading log line. The
     # refresh loop above will warm it when it finishes (see
     # pipeline/refresh.main).
-    if _has_data(conn):
+    if _on(WARM_ON_BOOT_ENV, default=True) and _has_data(conn):
         launch("warm-caches", lambda: _warm_caches(conn))
         started.append("warm-caches")
     return started
@@ -380,13 +394,23 @@ def _warm_caches(conn) -> None:
 
     Imported inside the function: importing the scoring stack costs real time
     at start-up, and `start_jobs` is called while the app is coming up.
+
+    NOTHING HERE MAY RAISE OUT OF THE THREAD. `board_cache.warm` catches what
+    its three builders throw, but everything around it can throw too --
+    `conn.cursor()` on a connection closed while a test tore its app down,
+    the scoring import itself -- and an exception escaping a daemon thread is
+    a traceback on somebody's terminal about work nobody asked for. One line
+    and carry on; a cold cache is the state the next request already handles.
     """
-    from scoring import board_cache
-    cur = conn.cursor()
     try:
-        board_cache.warm(cur)
-    finally:
-        cur.close()
+        from scoring import board_cache
+        cur = conn.cursor()
+        try:
+            board_cache.warm(cur)
+        finally:
+            cur.close()
+    except Exception as exc:  # noqa: BLE001 -- see the docstring
+        print(f"warm-caches: gave up, caches stay cold: {exc!r}", flush=True)
 
 
 def _has_data(conn) -> bool:
@@ -416,11 +440,18 @@ def _concurrency() -> int:
     return max(1, min(want, MAX_FARM_CONCURRENCY))
 
 
-def _on(name: str) -> bool:
-    """A switch is on for "1", "true", "yes" -- and off for anything else,
-    including the empty string a platform writes for a variable somebody
-    added and left blank."""
-    return (os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+def _on(name: str, default: bool = False) -> bool:
+    """A switch is on for "1", "true", "yes" -- and off for anything else.
+
+    An ABSENT or BLANK variable takes `default`, which is False for every
+    switch that costs money or traffic (a refresh, a farm) and True for the
+    one that costs a single local build (WARM_ON_BOOT_ENV). A platform
+    writes the empty string for a variable somebody added and left blank,
+    and that is "I did not choose", which is what a default is for."""
+    raw = (os.environ.get(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
 
 
 def _hours(name: str, fallback: float) -> float:

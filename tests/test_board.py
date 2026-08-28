@@ -1560,7 +1560,7 @@ def test_a_league_rule_outside_the_static_list_is_still_read(tmp_path):
     from scoring import board as board_mod
 
     assert "penalty_yards" not in board_mod.WEEKLY_COLUMNS
-    assert "penalty_yards" in board_mod._weekly_columns({"penalty_yards": -1.0})
+    assert "penalty_yards" in board_mod.weekly_columns({"penalty_yards": -1.0})
 
 
 def test_the_projection_does_not_change_the_board(tmp_path, monkeypatch):

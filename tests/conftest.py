@@ -11,7 +11,12 @@ connection. That build ran concurrently with tests that count board
 builds (`tests/test_demo_live.py`'s stale-answer test failed only in a
 full run, never alone). `tests/test_seo.py` covers the warm-up
 deliberately with its own fixture; nothing else wants it.
+
+AND NEITHER OF THE OTHER TWO WARM-UPS, for the same reason and with the
+same shape -- see `_boot_warm_off`.
 """
+import os
+
 import pytest
 
 
@@ -22,6 +27,41 @@ def _seo_warm_off():
     seo.WARM_ON_REGISTER = False
     yield
     seo.WARM_ON_REGISTER = before
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _boot_warm_off():
+    """The other two background warm-ups stay off under pytest as well.
+
+    Both do the same thing the SEO one does -- start a daemon thread that
+    builds a real board while the test that created the app goes on to count
+    board builds -- and both are on by default in a deployment, which is
+    where they belong:
+
+      * `api/jobs.start_jobs` warms the board, profile and game-point caches
+        when the database it is handed has been refreshed. Switched with an
+        environment variable rather than a module flag because that is what
+        every other job in that file is switched with, and because a
+        deployment may want to turn it off without a redeploy.
+      * `api/demo.register_demo_routes` rebuilds the landing demo. It already
+        reads DEMO_WARM, but at IMPORT time, so the flag is what a fixture
+        can move; that is also how tests/test_demo_live.py turns it back ON
+        for the two tests that watch it, and this default is what lets them.
+
+    Session-scoped and autouse, exactly like `_seo_warm_off`: the point is
+    that no test has to know these threads exist.
+    """
+    from api import demo, jobs
+    before_env = os.environ.get(jobs.WARM_ON_BOOT_ENV)
+    before_demo = demo.WARM_ON_REGISTER
+    os.environ[jobs.WARM_ON_BOOT_ENV] = "0"
+    demo.WARM_ON_REGISTER = False
+    yield
+    demo.WARM_ON_REGISTER = before_demo
+    if before_env is None:
+        os.environ.pop(jobs.WARM_ON_BOOT_ENV, None)
+    else:
+        os.environ[jobs.WARM_ON_BOOT_ENV] = before_env
 
 
 @pytest.fixture(autouse=True)
