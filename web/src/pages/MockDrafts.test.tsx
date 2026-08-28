@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import type { BoardPlayer, LiveBoard, MockDraft } from '../api'
 import MockDrafts from './MockDrafts'
@@ -167,4 +167,42 @@ test('switching away and straight back, before the first board lands', async () 
 
   expect(await screen.findByText('A Board')).toBeTruthy()
   expect(screen.queryByText(/Loading the board/)).toBeNull()
+})
+
+// THE TAB STRIP IS THE ROUTER'S, NOT THE BROWSER'S.
+//
+// A QA pass timed a tab click at 7.65 seconds: a full document load, the SPA
+// booted from cold, every fetch on the page repeated. The strip on this page
+// is `<Link>` and always has been -- the anchors that do reload are (a) the
+// ADP tab, which is a FastAPI-rendered page and must be a real link, and (b)
+// the nav inside those server-rendered pages, which is a template outside
+// web/src. This test is the guard for the half that is in web/src: the three
+// in-app tabs must stay routed, and ADP must stay an anchor.
+function Where() {
+  return <span data-testid="where">{useLocation().pathname}</span>
+}
+
+test('the in-app tabs route, and only ADP leaves the app', async () => {
+  fetchMockDrafts.mockResolvedValue({ drafts: [roomA], first_board: board('A Board') })
+  boardsById()
+  render(
+    <MemoryRouter initialEntries={['/mocks']}>
+      <MockDrafts />
+      <Where />
+    </MemoryRouter>,
+  )
+  await screen.findByText('A Board')
+  const before = window.location.pathname
+
+  fireEvent.click(screen.getByRole('link', { name: 'Home' }))
+  expect(screen.getByTestId('where').textContent).toBe('/')
+  // The document did not move: no reload, no `assign`, no cold boot.
+  expect(window.location.pathname).toBe(before)
+
+  // ADP is deliberately NOT routed -- it is rendered by FastAPI from the
+  // corpus and wants a real page load so a crawler follows it. Not clicked
+  // here, because a real anchor in jsdom is a navigation nobody implements;
+  // what is asserted is that it stayed a plain link to a real path.
+  const adp = screen.getByRole('link', { name: 'ADP' })
+  expect(adp.getAttribute('href')).toBe('/adp')
 })
