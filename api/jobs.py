@@ -214,10 +214,12 @@ def _run_refresh() -> None:
               f"data is committed, the file just lags its WAL", flush=True)
 
 
-def _refresh_loop(conn, max_age_hours: float, ready=None) -> None:
+def _refresh_loop(conn, max_age_hours: float, ready=None, run=None) -> None:
+    """`run` is refresh_once's own injection point, threaded through so a
+    test can hand the loop a refresh that fails without running a real one."""
     while True:
         failed = []
-        refresh_once(conn, max_age_hours, on_error=failed.append)
+        refresh_once(conn, max_age_hours, run=run, on_error=failed.append)
         # THE FARM IS WAITING ON THIS. Set after the first pass whatever the
         # outcome: a refresh that failed still leaves whatever data was
         # already on the volume, and holding the farm back forever because

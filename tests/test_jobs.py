@@ -324,7 +324,7 @@ def test_a_failed_refresh_still_releases_the_farm(monkeypatch):
         raise RuntimeError("nflverse is having a day")
 
     try:
-        jobs._refresh_loop(_Conn([]), 24, ready)
+        jobs._refresh_loop(_Conn([]), 24, ready, run=boom)
     except SystemExit:
         pass
     assert ready.is_set()
