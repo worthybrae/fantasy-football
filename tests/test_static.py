@@ -122,3 +122,33 @@ def test_the_document_and_its_assets_disagree_on_purpose():
         document = client.get("/archive")
         assert asset.headers["Cache-Control"] == "public, max-age=31536000, immutable"
         assert document.headers["Cache-Control"] == "no-cache"
+
+
+def test_head_on_the_document_is_answered_not_refused():
+    """An uptime monitor asks `HEAD /` -- it is the cheapest probe there is,
+    and it was a 405 here. The route answers both methods in its own right,
+    so this holds even without the app-wide rewrite in `api/head.py`."""
+    import tempfile
+    import pathlib
+    with tempfile.TemporaryDirectory() as tmp:
+        client = _app(_built(pathlib.Path(tmp)))
+        for path in ("/", "/archive", "/favicon.svg"):
+            res = client.head(path)
+            assert res.status_code == 200, path
+            assert res.content == b"", path
+        # And the headers are still the ones a GET would have carried --
+        # a probe that cannot read the cache policy is worth less than one
+        # that can.
+        assert (client.head("/").headers["Cache-Control"]
+                == client.get("/").headers["Cache-Control"])
+
+
+def test_head_on_a_missing_api_path_is_still_a_404():
+    """The catch-all's refusal to answer `/api/...` with the document is not
+    weakened by answering a second method: a HEAD to a retired endpoint has
+    to fail as an endpoint, exactly as the GET does."""
+    import tempfile
+    import pathlib
+    with tempfile.TemporaryDirectory() as tmp:
+        client = _app(_built(pathlib.Path(tmp)))
+        assert client.head("/api/nothing-here").status_code == 404

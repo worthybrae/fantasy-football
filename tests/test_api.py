@@ -1398,6 +1398,38 @@ def test_the_cache_middleware_is_wired_into_create_app(tmp_path):
         lobby.clear_cache()
 
 
+def test_head_is_answered_wherever_get_is(tmp_path):
+    """AN UPTIME MONITOR'S FIRST REQUEST. `HEAD /` and `HEAD /api/...` were
+    405 Method Not Allowed on every route in this app, because `@app.get`
+    registers GET and nothing else -- which a monitor reads as an outage.
+
+    The rewrite is app-wide (api/head.py) rather than a `methods=` list on
+    each decorator, so this test is about `create_app` having it installed:
+    a route added tomorrow answers HEAD without anyone remembering to say
+    so. The headers have to be the GET's, or the probe learns nothing it
+    could not have learned from a TCP connect."""
+    client = _client(tmp_path)
+    for path in ("/api/players", "/api/landing/status", "/api/meta",
+                 "/api/landing/preview"):
+        get = client.get(path)
+        head = client.head(path)
+        assert head.status_code == get.status_code == 200, path
+        # No body. That is the entire point of the method.
+        assert head.content == b"", path
+        # ...and every header the GET would have sent, so the policy, the
+        # type and the size are all still legible.
+        assert head.headers["Cache-Control"] == get.headers["Cache-Control"], path
+        assert head.headers["Content-Type"] == get.headers["Content-Type"], path
+
+
+def test_head_does_not_invent_a_method_a_route_refuses(tmp_path):
+    """The rewrite hands the request downstream as a GET; it does not hand a
+    POST-only route a caller it never agreed to serve. `/api/drafted/{id}`
+    takes POST and DELETE, and a HEAD to it stays a 405."""
+    client = _client(tmp_path)
+    assert client.head("/api/drafted/p1").status_code == 405
+
+
 def test_a_public_landing_answer_does_not_vary_with_a_cookie(tmp_path):
     """THE ONE MISTAKE A LATER HEADER EDIT CANNOT UNDO. `public` tells a
     shared cache it may hand this response to the next visitor. If the

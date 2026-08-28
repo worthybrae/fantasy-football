@@ -950,6 +950,12 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
     # The threadpool ceiling and the build-worker shutdown live in
     # `_lifespan` above, which this app was constructed with.
 
+    # `HEAD` answered wherever `GET` is. Outside routing, so it covers the
+    # SPA document, the ADP pages and every /api read at once -- an uptime
+    # monitor's `HEAD /` was a 405 on all of them. See api/head.py.
+    from api.head import install as install_head
+    install_head(app)
+
     # `private, no-store` on every /api answer that named no policy of its
     # own. LAST LINE, so it is the outermost middleware and every response
     # passes through it -- including the 400s CredentialTransportGuard
