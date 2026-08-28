@@ -879,6 +879,13 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
     from api.billing import register_billing_routes
     register_billing_routes(app)
 
+    # Per-account preferences -- today, the favourites the draft plan targets.
+    # After billing because it reads through the same account id, and given
+    # `conn` because the one thing it validates is that a favourite names a
+    # player this board knows. See api/account.py.
+    from api.account import register_account_routes
+    register_account_routes(app, conn)
+
     # Upcoming drafts and server-side token minting. Registered after custody
     # because it reads through it: the session these routes act as is the one
     # `custody_for` resolves, and only in its total absence this machine's own

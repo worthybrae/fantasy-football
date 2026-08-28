@@ -155,9 +155,27 @@ _SCHEMA = (
     """CREATE TABLE IF NOT EXISTS mock_room (
         league_id VARCHAR PRIMARY KEY,
         seen_at TIMESTAMP NOT NULL)""",
+    # The players an account has starred. HERE, in the entitlement store,
+    # rather than in a fourth database, because it is keyed by exactly the
+    # same thing an entitlement is -- `store.account_id(swid)` -- and a
+    # preference that could not be read in the same round trip as the
+    # purchase would be a second connection for no gain. It says as little
+    # about the person as the entitlement row does: an account id nobody can
+    # test for membership without the custody key, and a list of public
+    # player ids.
+    #
+    # `ord` is the order the user put them in, not a rank we computed: the
+    # picker is an ordered list and the draft plan reads it that way, so the
+    # position has to survive the round trip. Zero-based, dense.
+    """CREATE TABLE IF NOT EXISTS favorite_player (
+        account_id VARCHAR NOT NULL,
+        player_id VARCHAR NOT NULL,
+        ord INTEGER NOT NULL,
+        created_at TIMESTAMP NOT NULL,
+        PRIMARY KEY (account_id, player_id))""",
 )
 
-# The same three tables in Postgres spellings, derived rather than written out
+# The same four tables in Postgres spellings, derived rather than written out
 # again so that adding a column cannot leave the two backends holding
 # different tables. TIMESTAMPTZ for the same reason pipeline/pgstore.to_pg
 # exists: these are audit columns, and one that is silently wrong by a session
@@ -194,12 +212,47 @@ class _Duck:
             raise StoreError(f"the entitlement store refused a statement "
                              f"({type(exc).__name__})") from None
 
+    def transaction(self, statements) -> None:
+        """Several `(sql, params)` pairs, all of them or none.
+
+        ON A CURSOR RATHER THAN THE SHARED CONNECTION. A transaction is state
+        on the connection, and this class deliberately keeps ONE connection
+        for the whole process -- so two threads opening a transaction on it
+        would be one `BEGIN` inside another, which DuckDB refuses, and a
+        rollback by either would discard the other's work. `cursor()` hands
+        out a separate connection to the same database with its own
+        transaction, which is the same reason `api/main.py` takes one per
+        request.
+
+        The `finally` is what actually makes this all-or-nothing, whatever
+        goes wrong: closing a cursor with an open transaction discards it, so
+        even a failure this `except` does not name -- a bad parameter type,
+        an interrupt -- cannot leave half a replace behind. The explicit
+        ROLLBACK is there to release the write lock at the moment of the
+        failure rather than at the close.
+        """
+        cursor = self._conn.cursor()
+        try:
+            cursor.execute("BEGIN TRANSACTION")
+            for sql, params in statements:
+                cursor.execute(sql, list(params))
+            cursor.execute("COMMIT")
+        except duckdb.Error as exc:
+            try:
+                cursor.execute("ROLLBACK")
+            except duckdb.Error:      # already rolled back by the failure
+                pass
+            raise StoreError(f"the entitlement store refused a statement "
+                             f"({type(exc).__name__})") from None
+        finally:
+            cursor.close()
+
     def close(self) -> None:
         self._conn.close()
 
 
 class _Pg:
-    """The same three tables in Postgres, shared by every process with the DSN.
+    """The same four tables in Postgres, shared by every process with the DSN.
 
     Which is the entire point of this backend: the file above is correct for
     one process and unusable for two, and an entitlement that only one worker
@@ -240,11 +293,27 @@ class _Pg:
             raise StoreError(f"the entitlement store is not usable "
                              f"({type(exc).__name__})") from None
 
+    def transaction(self, statements) -> None:
+        """Several `(sql, params)` pairs, all of them or none.
+
+        One pooled connection for the lot: psycopg's context manager opens a
+        transaction on entry, commits it on a clean exit and rolls it back on
+        any exception, so "all or none" needs no BEGIN of our own here.
+        """
+        try:
+            with pgstore.pool().connection() as conn:
+                for sql, params in statements:
+                    conn.execute(sql.replace("?", "%s"),
+                                 [pgstore.to_pg(p) for p in params] or None)
+        except self._error as exc:
+            raise StoreError(f"the entitlement store is not usable "
+                             f"({type(exc).__name__})") from None
+
     def _ensure_schema(self) -> None:
         """Create the tables once per process, not once per adapter.
 
         `reset_for_tests` builds a fresh adapter, and on Postgres the tables it
-        would create are already there -- three round trips to say so.
+        would create are already there -- four round trips to say so.
         """
         global _PG_READY
         if _PG_READY:
@@ -278,7 +347,7 @@ pgstore.on_close(_forget_pg_schema)
 def _db():
     """The entitlement store, built once for the process.
 
-    Two backends behind the same two methods, chosen by SUPABASE_DB_URL like
+    Two backends behind the same three methods, chosen by SUPABASE_DB_URL like
     every other store in this project. Nothing below this function knows which
     one it got: both take `?` placeholders and naive UTC datetimes, and both
     answer with a list of tuples.
@@ -653,6 +722,83 @@ def _first_time(event_id: str, kind: str) -> bool:
     # would always find the row -- this call just put it there -- and report
     # every event as new, which is the bug this shape exists to avoid.
     return len(inserted) == 1
+
+
+# -- favourites --------------------------------------------------------------
+#
+# The only thing in this module that is not about money. It lives here because
+# it is keyed by the same account id and stored in the same file, and a second
+# store for one small table would be a second connection, a second set of
+# schema statements and a second thing to get wrong. Nothing below charges for
+# anything or reads a Stripe object.
+
+
+def favorites(account_ids: list) -> list:
+    """The players this account starred, in the order it starred them.
+
+    A LIST OF IDS, not a set, because the order is the preference: the picker
+    is an ordered list and `scoring/plan.py` reads the first names first.
+
+    Takes every id version for the same reason `entitled` does -- a rotated
+    custody key computes a different id for the same person, and rows keep the
+    id they were written under. THE NEWEST VERSION THAT HAS ROWS WINS, rather
+    than a union of all of them: a merge could hand back more than the
+    twenty-five the endpoint accepts, in an order that is nobody's choice, and
+    a list saved after a rotation is by definition the more recent answer.
+    """
+    if not account_ids:
+        return []
+    marks = ", ".join("?" for _ in account_ids)
+    rows = _db().execute(
+        f"""SELECT account_id, player_id FROM favorite_player
+             WHERE account_id IN ({marks}) ORDER BY ord""",
+        [str(account_id) for account_id in account_ids])
+    if not rows:
+        return []
+    chosen: dict = {}
+    for account_id, player_id in rows:
+        chosen.setdefault(str(account_id), []).append(str(player_id))
+    for account_id in account_ids:
+        found = chosen.get(str(account_id))
+        if found:
+            return found
+    return []
+
+
+def set_favorites(account_id: str, player_ids) -> list:
+    """Replace this account's whole list. Returns what was stored.
+
+    ONE TRANSACTION, and that is the entire reason `transaction` exists on the
+    adapters. The write is a replace, so it is a DELETE and an INSERT; if the
+    delete committed and the insert did not, somebody who edited their list
+    would be left with no list at all -- and the endpoint above would then
+    show them the onboarding panel again as if they had never chosen.
+
+    The insert is ONE statement with every row's values in it rather than a
+    row at a time, so a save is two round trips whatever the backend and
+    however long the list.
+
+    No validation here: 5-25, and that every id names a player, are properties
+    of the REQUEST and are checked where the board is in hand (api/account.py).
+    A caller with a legitimate reason to store something else -- a test, a
+    migration -- should not have to argue with this function.
+    """
+    ids = [str(player_id) for player_id in player_ids]
+    statements = [("DELETE FROM favorite_player WHERE account_id = ?",
+                   [str(account_id)])]
+    if ids:
+        now = _now()
+        params: list = []
+        for position, player_id in enumerate(ids):
+            params.extend([str(account_id), player_id, position, now])
+        values = ", ".join("(?, ?, ?, ?)" for _ in ids)
+        statements.append((
+            f"""INSERT INTO favorite_player
+                  (account_id, player_id, ord, created_at)
+                VALUES {values}""",
+            params))
+    _db().transaction(statements)
+    return ids
 
 
 # -- the gate ----------------------------------------------------------------

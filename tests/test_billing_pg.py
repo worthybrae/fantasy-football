@@ -74,3 +74,39 @@ def test_a_replayed_stripe_event_is_only_acted_on_once():
         billing._db().execute("DELETE FROM billing_event WHERE event_id = ?",
                               [event])
         billing.reset_for_tests(None)
+
+
+def test_a_favourites_list_round_trips_and_replaces_in_one_transaction():
+    """Favourites over the other backend.
+
+    Here rather than only in `tests/test_account_api.py` because the store's
+    two halves are exactly where the backends can disagree and a fake would
+    not: the save is ONE multi-row `INSERT ... VALUES (?,?,?,?), (?,?,?,?) ...`
+    whose placeholders have to survive the `?` -> `%s` rewrite, and the
+    replace is a DELETE and that INSERT inside one psycopg transaction rather
+    than the explicit BEGIN/COMMIT DuckDB needs.
+    """
+    account = "pg-test-" + uuid.uuid4().hex
+    older = "pg-test-" + uuid.uuid4().hex
+    six = ["p7", "p3", "p19", "p11", "p2", "p25"]
+    billing.reset_for_tests(None)
+    try:
+        assert billing.favorites([account]) == []
+
+        assert billing.set_favorites(account, six) == six
+        # In the order it was saved, not the order the rows came back.
+        assert billing.favorites([account]) == six
+
+        five = ["p1", "p4", "p5", "p6", "p8"]
+        billing.set_favorites(account, five)
+        assert billing.favorites([account]) == five
+
+        # And the rotation rule: the newest id that has rows is the answer.
+        billing.set_favorites(older, six)
+        assert billing.favorites([account, older]) == five
+        assert billing.favorites([older]) == six
+    finally:
+        for name in (account, older):
+            billing._db().execute(
+                "DELETE FROM favorite_player WHERE account_id = ?", [name])
+        billing.reset_for_tests(None)
