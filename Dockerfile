@@ -101,10 +101,9 @@ ENV RUN_REFRESH_ON_BOOT=1
 # load tests) and `LIVE_DEFAULT_ROOM` (a cookieless room, for the tests
 # and a single-user machine) are never set in production.
 ENV LIVE_BUILD_WORKERS=3
-# Two more knobs api/live.py reads, left at their defaults here:
-# `LIVE_RECOMPUTE_SLOTS` (rankings at once; default min(cores, 8), never
-# under 2) and `LIVE_MAX_ROOMS` (rooms drafting at once before a new connect
-# answers 503 "at capacity"; default 150). See the README's deploy table.
+# One more knob api/live.py reads, left at its default here: `LIVE_MAX_ROOMS`
+# (rooms drafting at once before a new connect answers 503 "at capacity";
+# default 150). See the README's deploy table.
 
 # `$PORT` is assigned by the platform, so a shell has to expand it -- exec
 # form alone would hand uvicorn the literal string. `exec` then replaces that

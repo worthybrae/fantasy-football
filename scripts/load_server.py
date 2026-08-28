@@ -101,6 +101,9 @@ def main(argv=None) -> int:
     os.environ.setdefault("ESPN_CUSTODY_ALLOW_PLAINTEXT_HTTP", "1")
     if args.workers is not None:
         os.environ["LIVE_BUILD_WORKERS"] = str(args.workers)
+    # One line per ranking with its cost, so a run's log answers "how long
+    # does a pick take to rank" without another tool.
+    os.environ.setdefault("LIVE_LOG_RANKINGS", "1")
 
     import uvicorn
 

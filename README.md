@@ -302,7 +302,6 @@ volume Railway attaches by default is enough for a season, not for several.
 | `PUBLIC_BASE_URL` | `https://…` | Where Stripe sends a buyer back to. Behind a proxy the app cannot work this out itself |
 | `SUPABASE_DB_URL` | `postgresql://postgres.<ref>:…@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require` | **Off by default.** A Supabase Postgres DSN via the **session** pooler, port 5432, `sslmode=require`. Not the 6543 transaction pooler: psycopg's prepared statements break there. Absent, custody, billing and the live session records stay in DuckDB files on the volume |
 | `LIVE_BUILD_WORKERS` | `3` | Process-pool size for draft-session builds. Set by the image; 3 is the measured value for an 8 GB box (5 costs 8 GB and slows the polls). `0` runs them inline in the request thread, which is what a checkout and the test suite do |
-| `LIVE_RECOMPUTE_SLOTS` | `min(cores, 8)` | How many rooms' rankings run at once. Never under 2 |
 | `LIVE_MAX_ROOMS` | `150` | Rooms drafting at once before a new connect answers 503 "at capacity". A room already drafting may always reconnect |
 | `WARM_ON_BOOT` | `1` | Build the board, profile and game-points caches at boot so the first reader does not pay for them. `0` in the test suite |
 | `SEO_WARM`, `DEMO_WARM` | `1` | The ADP pages' aggregation and the demo room's board, built at boot for the same reason |
