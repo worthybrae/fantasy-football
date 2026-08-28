@@ -56,7 +56,7 @@ beforeEach(() => {
   fetchLeagueReports.mockResolvedValue([])
   fetchMockRooms.mockResolvedValue({ rooms: [], next: null })
   fetchRoomProgress.mockResolvedValue([])
-  fetchPlayers.mockResolvedValue(BOARD)
+  fetchPlayers.mockImplementation(async () => { rememberNames(BOARD); return BOARD })
 })
 
 afterEach(() => {
@@ -134,4 +134,26 @@ test('with nobody named, it says how many rather than printing ids', async () =>
   expect(await screen.findByText('3 players saved.')).toBeTruthy()
   expect(screen.queryByText('zz1')).toBeNull()
   expect(fetchPlayers).not.toHaveBeenCalled()
+})
+
+// OPENING THE PICKER IS WHAT TEACHES THIS TAB THE NAMES -- it is the only
+// thing on this page that fetches the board. So a reader who opens it and
+// changes nothing must not be left looking at a count over a list the page
+// now knows how to print.
+test('names appear after the picker has been opened and dismissed', async () => {
+  fetchFavorites.mockResolvedValue(['p1', 'p2'])
+  draw()
+  // Nothing in this tab has seen a board yet.
+  expect(await screen.findByText('2 players saved.')).toBeTruthy()
+
+  fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+  await screen.findByRole('dialog')
+  await waitFor(() => expect(fetchPlayers).toHaveBeenCalled())
+
+  fireEvent.keyDown(document, { key: 'Escape' })
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+
+  expect(await screen.findByText('Player 1')).toBeTruthy()
+  expect(screen.getByText('Player 2')).toBeTruthy()
+  expect(screen.queryByText('2 players saved.')).toBeNull()
 })

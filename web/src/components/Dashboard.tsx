@@ -7,6 +7,7 @@ import {
 import LeagueCards from './LeagueCards'
 import { Logo } from './Logo'
 import MockLobby from './MockLobby'
+import { PickerBoundary, PickerFallback } from './PickerBoundary'
 import YourGuys from './YourGuys'
 
 // THE PICKER IS NOT IN THIS PAGE'S BUNDLE. It is a 250-row board with a photo
@@ -110,6 +111,10 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
   // Whether the dialog is open. The board it needs is fetched by the dialog
   // itself, the first time it is opened -- this page never loads it.
   const [picking, setPicking] = useState(false)
+  // Bumped whenever something might have taught this tab a name -- see
+  // `closePicker`. It is a cache-busting counter, not a piece of state
+  // anything reads for its value.
+  const [namesAt, setNamesAt] = useState(0)
 
   useEffect(() => {
     let cancelled = false
@@ -177,7 +182,16 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
   // Stable identities, because YourGuys is memoized and a fresh closure per
   // render would make that memo a comment.
   const openPicker = useCallback(() => setPicking(true), [])
-  const closePicker = useCallback(() => setPicking(false), [])
+  // Closing bumps a counter the card reads. Saving already changes the ids,
+  // so the card redraws on its own; closing WITHOUT saving changes nothing it
+  // can see -- and yet the picker has just fetched the board, so the names it
+  // could not print a moment ago are now in the tab (lib/playerNames.ts).
+  // Without this nudge a reader who opens the picker and presses Escape is
+  // left looking at "7 players saved" over a list the page now knows.
+  const closePicker = useCallback(() => {
+    setPicking(false)
+    setNamesAt((n) => n + 1)
+  }, [])
 
   const join = useCallback(async (league: UpcomingDraft) => {
     if (!league.team_id) return
@@ -272,7 +286,7 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
             account session to read favourites from (`favorites === null`):
             this page cannot offer to save something it cannot load. */}
         {favorites !== null && (
-          <YourGuys players={favorites} onOpen={openPicker} />
+          <YourGuys players={favorites} onOpen={openPicker} refresh={namesAt} />
         )}
 
         <MockLobby
@@ -285,17 +299,24 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
       </div>
 
       {/* Mounted only while it is open, so the fetch, the 252 rows and the
-          photographs exist only while somebody is looking at them. The
-          fallback is the backdrop alone: the chunk is small and local, and a
-          spinner that flashes for one frame is worse than a moment of dim. */}
+          photographs exist only while somebody is looking at them.
+
+          Both the waiting state and the failed one are somebody else's
+          problem by design -- see PickerBoundary.tsx. The short version:
+          the chunk can 404 after a deploy, and an uncaught error inside
+          `Suspense` blanks everything above it, so a 5 KB file would take
+          the dashboard with it. Both stand-ins take the same two exits as
+          the dialog itself. */}
       {picking && favorites !== null && (
-        <Suspense fallback={<div className="fav-modal-backdrop" aria-busy="true" />}>
-          <FavoritesModal
-            initial={favorites}
-            onSaved={(ids) => { setFavorites(ids); setPicking(false) }}
-            onClose={closePicker}
-          />
-        </Suspense>
+        <PickerBoundary onClose={closePicker}>
+          <Suspense fallback={<PickerFallback onClose={closePicker} />}>
+            <FavoritesModal
+              initial={favorites}
+              onSaved={(ids) => { setFavorites(ids); setPicking(false) }}
+              onClose={closePicker}
+            />
+          </Suspense>
+        </PickerBoundary>
       )}
     </main>
   )

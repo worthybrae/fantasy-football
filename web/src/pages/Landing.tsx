@@ -473,7 +473,12 @@ export default function Landing() {
         error={error}
         onEnter={() => navigate('/draft')}
         onRetry={retry}
-        onBack={() => { paramsRef.current = null; setGate('idle') }}
+        // `setProgress(null)` is load-bearing, not tidiness: the room probe
+        // reads `progress !== null` as "a connect is running here" and polls
+        // every 2.5s while it is (lib/useRoomProbe.ts). Backing out of a
+        // failed connect left that record standing, so the landing page went
+        // on asking twice a second, forever, for a connect nobody was making.
+        onBack={() => { paramsRef.current = null; setProgress(null); setGate('idle') }}
       />
     )
   }
@@ -487,7 +492,17 @@ export default function Landing() {
         leagueId={owed.leagueId}
         season={owed.season}
         onPaid={() => { setOwed(null); retry() }}
-        onBack={() => { paramsRef.current = null; setOwed(null); setGate('idle') }}
+        // `setProgress(null)` for the same reason the connect screen's own
+        // Back does it (see above): a reader who walks away from the paywall
+        // has walked away from the connect behind it, and the record left
+        // standing would keep the room probe at its quick cadence for the
+        // rest of the visit.
+        onBack={() => {
+          paramsRef.current = null
+          setOwed(null)
+          setProgress(null)
+          setGate('idle')
+        }}
       />
     )
   }

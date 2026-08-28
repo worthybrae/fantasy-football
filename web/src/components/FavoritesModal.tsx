@@ -76,6 +76,33 @@ export default function FavoritesModal({ initial, onSaved, onClose }: {
     return () => document.removeEventListener('keydown', onKey)
   }, [onClose])
 
+  // FOCUS GOES BACK WHERE IT CAME FROM. The dialog takes focus when it
+  // opens, which is right; what was wrong is where focus landed afterwards.
+  // Closing left it on `document.body`, so the next Tab started at the top of
+  // the page and a reader who opened the picker from the "Edit" button had to
+  // walk the whole dashboard to find that button again -- and a screen reader
+  // was told nothing at all about where it now was.
+  //
+  // Captured on the way in rather than passed down: the control that opened
+  // this is whatever had focus, and this component does not need to know
+  // which one that was. Guarded on `isConnected` because the button may be
+  // gone by the time this unmounts (the card redraws when the list is
+  // saved), and focusing a detached node silently sends focus to the body,
+  // which is the state this exists to avoid.
+  //
+  // CAPTURED DURING THE FIRST RENDER, not in an effect: the effect that traps
+  // focus runs before any effect declared after it and moves focus to the
+  // panel, so an effect here would faithfully capture the dialog itself and
+  // "restore" focus to a node that no longer exists.
+  const opener = useRef<HTMLElement | null>(null)
+  if (opener.current === null) {
+    opener.current = document.activeElement as HTMLElement | null
+  }
+  useEffect(() => () => {
+    const back = opener.current
+    if (back && back.isConnected && typeof back.focus === 'function') back.focus()
+  }, [])
+
   // The page underneath does not scroll while this is open. Restored to
   // whatever it was rather than to `''`: this page is not the only thing that
   // can lock the body, and putting back a value we did not take is how two
