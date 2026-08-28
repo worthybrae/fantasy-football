@@ -1,14 +1,20 @@
 """Entitlements against a real Postgres.
 
-Skipped unless SUPABASE_DB_URL is set. tests/test_billing.py is the suite that
-has to pass on a laptop with no network and it exercises the DuckDB backend;
-this file exists for the handful of things the two backends can disagree
-about and a fake would not -- `?` versus `%s`, and whether an INSERT that hit
-a conflict can be told apart from one that wrote a row.
+Skipped unless SUPABASE_TEST_DB_URL is set. tests/test_billing.py is the suite
+that has to pass on a laptop with no network and it exercises the DuckDB
+backend; this file exists for the handful of things the two backends can
+disagree about and a fake would not -- `?` versus `%s`, and whether an INSERT
+that hit a conflict can be told apart from one that wrote a row.
 
-NOTE for anyone running this by hand: with SUPABASE_DB_URL exported,
-tests/test_billing.py picks the Postgres backend too, because that variable is
-the only thing that chooses. Run this file on its own.
+Run it against a database you are willing to write to:
+
+    SUPABASE_TEST_DB_URL=postgresql://... .venv/bin/pytest tests/test_billing_pg.py
+
+SUPABASE_TEST_DB_URL rather than SUPABASE_DB_URL, because tests/conftest.py
+clears that one for every test: it is the only thing choosing between a DuckDB
+file and a shared Postgres, so a developer with it exported would otherwise
+send the whole suite at a deployment's database. The fixture below sets it
+from this variable, for the length of one test.
 """
 import os
 import uuid
@@ -18,8 +24,16 @@ import pytest
 from api import billing
 from pipeline import pgstore
 
-pytestmark = pytest.mark.skipif(not os.environ.get(pgstore.DSN_ENV),
-                                reason="needs SUPABASE_DB_URL")
+DSN_ENV = "SUPABASE_TEST_DB_URL"
+DSN = os.environ.get(DSN_ENV, "").strip()
+
+pytestmark = pytest.mark.skipif(not DSN, reason=f"needs {DSN_ENV}")
+
+
+@pytest.fixture(autouse=True)
+def _postgres(monkeypatch):
+    """Point every store at the test database, over conftest's delenv."""
+    monkeypatch.setenv(pgstore.DSN_ENV, DSN)
 
 
 def test_a_granted_draft_is_entitled_and_a_refund_takes_it_away():

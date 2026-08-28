@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 from datetime import datetime, timezone
 
 from pipeline import credentials as cred
@@ -242,6 +243,9 @@ _PG_SCHEMA = (
 # ciphertext where the socket expects a nonce.
 _TOKEN_BLOB = "token_blob"
 
+_PG_READY = False
+_PG_LOCK = threading.Lock()
+
 
 def _token_key():
     """The custody key the token rides under, or None if there is not one.
@@ -265,8 +269,25 @@ class _PgRecords(SessionRecordStore):
         import psycopg
 
         self._error = psycopg.Error
-        for statement in _PG_SCHEMA:
-            self._run(statement)
+        self._ensure_schema()
+
+    def _ensure_schema(self) -> None:
+        """Create the table once per process, not once per store.
+
+        `record_store` caches, so in a server this runs once either way -- but
+        the DDL is three round trips to a database in another region, and
+        "the caller might construct one per request" is exactly the assumption
+        that made this worth guarding rather than trusting.
+        """
+        global _PG_READY
+        if _PG_READY:
+            return
+        with _PG_LOCK:
+            if _PG_READY:
+                return
+            for statement in _PG_SCHEMA:
+                self._run(statement)
+            _PG_READY = True
 
     def _run(self, sql: str, params=()) -> list:
         try:
@@ -348,6 +369,35 @@ class _PgRecords(SessionRecordStore):
         self._run("DELETE FROM live_session WHERE sid = ?", [_checked(sid)])
 
 
+# One store per database path, because callers build one per request and a
+# store is not free to build: the Postgres one opens a pool connection to
+# create its table, and neither backend holds anything a caller would want a
+# private copy of. Keyed on None when Postgres is in play, since the database
+# path means nothing there and every path would otherwise get its own.
+_STORES: dict = {}
+_STORES_LOCK = threading.Lock()
+
+
+def _forget_stores() -> None:
+    """Drop the cached stores and the schema flag with the pool they were
+    built against."""
+    global _PG_READY
+    with _PG_LOCK:
+        _PG_READY = False
+    with _STORES_LOCK:
+        _STORES.clear()
+
+
+pgstore.on_close(_forget_stores)
+
+
 def record_store(db_path: str) -> SessionRecordStore:
     """The store this process should use. See the module docstring."""
-    return _PgRecords() if pgstore.enabled() else _FileRecords(db_path)
+    on_postgres = pgstore.enabled()
+    key = None if on_postgres else str(db_path)
+    with _STORES_LOCK:
+        store = _STORES.get(key)
+        if store is None:
+            store = _PgRecords() if on_postgres else _FileRecords(str(db_path))
+            _STORES[key] = store
+        return store

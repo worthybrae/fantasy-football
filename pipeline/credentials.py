@@ -60,6 +60,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
+from time import monotonic
 
 import duckdb
 
@@ -662,8 +663,18 @@ class _DuckBackend:
 # the cascade stays in code (see `_delete_credential`) so that both backends
 # delete in the same order and neither can refuse a "disconnect everywhere".
 _PG_SCHEMA = tuple(
-    statement.replace(" VARCHAR", " TEXT").replace(" TIMESTAMP ", " TIMESTAMPTZ ")
-    for statement in _SCHEMA)
+    statement.replace(" VARCHAR", " TEXT").replace(" TIMESTAMP", " TIMESTAMPTZ")
+    for statement in _SCHEMA) + (
+    # `expires_at` is the reaper's only predicate, and the reaper runs on the
+    # read path (see `resolve`). The DuckDB file holds one deployment's rows
+    # and scans them faster than it could consult an index; a shared Postgres
+    # holds every deployment's, so this is the scan that would grow without
+    # bound.
+    "CREATE INDEX IF NOT EXISTS espn_credential_expires_at "
+    "ON espn_credential (expires_at)",
+    "CREATE INDEX IF NOT EXISTS espn_session_expires_at "
+    "ON espn_session (expires_at)",
+)
 
 _PG_READY = False
 _PG_LOCK = threading.Lock()
@@ -734,6 +745,25 @@ class _PgBackend:
             _PG_READY = True
 
 
+def _forget_pg_schema() -> None:
+    """The tables have to be created again against the next pool."""
+    global _PG_READY
+    with _PG_LOCK:
+        _PG_READY = False
+
+
+pgstore.on_close(_forget_pg_schema)
+
+
+# How often `resolve` runs the reaper on its own account. It runs there at all
+# so that expiry cannot depend on a scheduled job somebody remembered to write
+# -- not so that it can run on every request. A busy deployment resolves a
+# cookie on every page load, and the reaper is two statements against every row
+# in both tables; at that rate it is a scan per request to delete rows that are
+# at most a minute more stale than they would otherwise be.
+REAP_INTERVAL_SECONDS = 60
+
+
 class CredentialStore:
     """The custody tables, and the only code that reads or writes them.
 
@@ -767,6 +797,10 @@ class CredentialStore:
                         else _DuckBackend(self.path))
         self._keys_spec = keys
         self._ttl_days = ttl_days
+        # When `resolve` last ran the reaper, on the monotonic clock. Per
+        # store, which in a server is per process: `default_store` is a
+        # singleton. See `_due_to_reap`.
+        self._last_reap = None
         # How this store proves that whoever sent an espn_s2 owns the account
         # they claim (see `pipeline/espn_identity.py`, and `connect` below for
         # why a write path needs authorization at all). Injected at
@@ -983,11 +1017,27 @@ class CredentialStore:
                                separators=(",", ":")).encode("utf-8")
                 ).decode("ascii")
                 created_at = previous[1] if previous else now
+                # ONE STATEMENT, because this id is not random. It is
+                # HMAC(espn_s2), so two browsers sharing one ESPN session
+                # compute the same id and can be here at the same moment --
+                # and on Postgres each of them is on its own connection with
+                # nothing serialising them. A DELETE followed by an INSERT
+                # would let the second connect's DELETE land between the
+                # first's two statements: one of them takes a primary key
+                # violation (a 503 on a request that was perfectly valid), and
+                # anything reading in the window finds no credential at all
+                # and cleans up the sibling's session row as an orphan.
+                #
+                # The upsert cannot be interleaved with itself. Both connects
+                # write the same blob under the same key, so whichever lands
+                # second is writing what is already there.
                 self.backend.execute(
-                    "DELETE FROM espn_credential WHERE id = ?",
-                    [credential_id])
-                self.backend.execute(
-                    "INSERT INTO espn_credential VALUES (?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO espn_credential VALUES (?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT (id) DO UPDATE SET blob = excluded.blob, "
+                    "key_version = excluded.key_version, "
+                    "created_at = excluded.created_at, "
+                    "last_used_at = excluded.last_used_at, "
+                    "expires_at = excluded.expires_at",
                     [credential_id, blob, key.version, created_at, now,
                      expires_at])
                 # Rows this connect supersedes, both of which have to go rather
@@ -1024,10 +1074,19 @@ class CredentialStore:
             # guessable (no user id, no timestamp, no counter).
             minted = secrets.token_urlsafe(32)
             session_id = self._row_id(minted, key)
-            self.backend.execute("DELETE FROM espn_session WHERE id = ?",
-                                 [session_id])
+            # Same shape as the credential row above, though this id is
+            # 256 random bits and so cannot actually collide. One statement
+            # rather than two anyway: there is no case where the pair is
+            # better, and a DELETE+INSERT sitting next to the one that had to
+            # be replaced is an invitation to copy the wrong one.
             self.backend.execute(
-                "INSERT INTO espn_session VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO espn_session VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (id) DO UPDATE SET "
+                "credential_id = excluded.credential_id, "
+                "key_version = excluded.key_version, "
+                "created_at = excluded.created_at, "
+                "last_used_at = excluded.last_used_at, "
+                "expires_at = excluded.expires_at",
                 [session_id, credential_id, key.version, now, now, expires_at])
             # The credential is alive again whether or not its secret changed,
             # so its clock restarts either way -- otherwise a user who keeps
@@ -1077,14 +1136,19 @@ class CredentialStore:
         # file, and a deployment with no key must not leave a fresh, empty
         # custody database behind as evidence that it tried.
         self.keys
+        # Whether this call is on the same clock the throttle below measures.
+        on_our_clock = now is None
         now = _utc(now)
         with self.backend.lock:
             # Reap first, so an expired row cannot be resolved even by a
             # deployment that never calls `reap` on a schedule. The TTL is the
             # only thing that ever removes an abandoned credential; making it
             # depend on a cron somebody remembered to write would mean it does
-            # not really exist.
-            if self._reap(now)["credentials"]:
+            # not really exist. Once a minute at most -- see `_due_to_reap`,
+            # which is also why an expired row can still resolve for up to
+            # that long after a thirty-day idle timeout runs out.
+            due = self._due_to_reap(on_our_clock)
+            if due and self._reap(now)["credentials"]:
                 # `_compact` replaces the file, so any handle taken before this
                 # is dead -- which is why nothing here holds one and every
                 # statement goes back to the backend for its connection.
@@ -1163,6 +1227,27 @@ class CredentialStore:
             swid=str(payload.get("swid") or ""),
             espn_s2=str(payload.get("espn_s2") or ""),
             expires_at=fresh)
+
+    def _due_to_reap(self, on_our_clock: bool) -> bool:
+        """Whether `resolve` should run the reaper this time.
+
+        Once a minute at most, on the monotonic clock -- which loses nothing:
+        the rows this skips are the same rows the next call reaps, and the TTL
+        they are being measured against is thirty days.
+
+        A caller that supplied its own `now` is NOT on this clock, so the
+        stamp cannot speak for it and the reaper always runs. That is every
+        test of the expiry rule, and it is `connect`, which happens when
+        somebody clicks a button rather than on every page load.
+        """
+        if not on_our_clock:
+            return True
+        elapsed = monotonic()
+        if (self._last_reap is not None
+                and elapsed - self._last_reap < REAP_INTERVAL_SECONDS):
+            return False
+        self._last_reap = elapsed
+        return True
 
     # -- deleting -----------------------------------------------------------
 

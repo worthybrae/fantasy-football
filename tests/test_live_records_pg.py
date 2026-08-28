@@ -1,9 +1,19 @@
 """Live-draft session records against a real Postgres.
 
-Skipped unless SUPABASE_DB_URL is set. tests/test_live_records.py covers the
-file backend and is the one that has to pass with no network; this file
+Skipped unless SUPABASE_TEST_DB_URL is set. tests/test_live_records.py covers
+the file backend and is the one that has to pass with no network; this file
 covers the two things only the Postgres backend does -- a JSONB round trip,
 and keeping the ESPN token out of a shared database in plaintext.
+
+Run it against a database you are willing to write to:
+
+    SUPABASE_TEST_DB_URL=postgresql://... .venv/bin/pytest tests/test_live_records_pg.py
+
+SUPABASE_TEST_DB_URL rather than SUPABASE_DB_URL, because tests/conftest.py
+clears that one for every test: it is the only thing choosing between a DuckDB
+file and a shared Postgres, so a developer with it exported would otherwise
+send the whole suite at a deployment's database. The fixture below sets it
+from this variable, for the length of one test.
 """
 import os
 import uuid
@@ -15,8 +25,16 @@ from api import live, live_records
 from pipeline import credentials as cred
 from pipeline import pgstore
 
-pytestmark = pytest.mark.skipif(not os.environ.get(pgstore.DSN_ENV),
-                                reason="needs SUPABASE_DB_URL")
+DSN_ENV = "SUPABASE_TEST_DB_URL"
+DSN = os.environ.get(DSN_ENV, "").strip()
+
+pytestmark = pytest.mark.skipif(not DSN, reason=f"needs {DSN_ENV}")
+
+
+@pytest.fixture(autouse=True)
+def _postgres(monkeypatch):
+    """Point every store at the test database, over conftest's delenv."""
+    monkeypatch.setenv(pgstore.DSN_ENV, DSN)
 
 
 def _record(hours_old=0, token="tok-abc"):

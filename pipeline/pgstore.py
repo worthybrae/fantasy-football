@@ -33,6 +33,13 @@ DSN_ENV = "SUPABASE_DB_URL"
 _lock = threading.Lock()
 _pool = None
 
+# Called when the pool is dropped. Every store that creates its schema once
+# per process keeps a "already done" flag, and a flag that outlives the pool
+# it was set against is a store that never creates its tables again -- which
+# is wrong for a test that closes the pool between cases, and wrong for a
+# process that reconnects to a database somebody has since rebuilt.
+_on_close: list = []
+
 
 class StoreError(Exception):
     """A store could not be reached or refused the operation.
@@ -68,9 +75,24 @@ def pool():
             if value is None:
                 raise StoreError(f"{DSN_ENV} is not set")
             from psycopg_pool import ConnectionPool
+            # `timeout` is how long a caller waits for a free connection,
+            # not how long a query may run. Five seconds because the caller is
+            # usually a request that has a user waiting on it: a pool with
+            # nothing free is a store that is already failing, and taking ten
+            # seconds to say so just holds a worker open for twice as long.
             _pool = ConnectionPool(value, min_size=1, max_size=8, open=True,
-                                   timeout=10, kwargs={"autocommit": True})
+                                   timeout=5, kwargs={"autocommit": True})
         return _pool
+
+
+def on_close(callback) -> None:
+    """Run `callback` the next time (and every time) the pool is dropped.
+
+    The one thing this is for: schema flags. See `_on_close`.
+    """
+    with _lock:
+        if callback not in _on_close:
+            _on_close.append(callback)
 
 
 # -- the timestamp contract --------------------------------------------------
@@ -106,3 +128,8 @@ def close() -> None:
         if _pool is not None:
             _pool.close()
             _pool = None
+        callbacks = list(_on_close)
+    # Outside the lock: a callback is another module's teardown and may well
+    # ask this one whether it is enabled.
+    for callback in callbacks:
+        callback()

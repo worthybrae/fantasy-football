@@ -25,6 +25,25 @@ def _seo_warm_off():
 
 
 @pytest.fixture(autouse=True)
+def _no_shared_postgres(monkeypatch):
+    """No test reaches a shared Postgres unless it switches one on itself.
+
+    SUPABASE_DB_URL is the only thing that chooses between a DuckDB file and
+    Postgres, in every store that has both -- custody, billing, live-session
+    records. So a developer with that variable exported in their shell, which
+    is exactly what they need to run the `*_pg.py` files or a local server
+    against Supabase, would otherwise point this entire suite at whatever
+    database a deployment uses. `tests/test_billing.py` would then grant and
+    revoke entitlements in it.
+
+    The `*_pg.py` files read SUPABASE_TEST_DB_URL instead and set this one
+    themselves, in their own autouse fixture, which runs after this.
+    """
+    from pipeline import pgstore
+    monkeypatch.delenv(pgstore.DSN_ENV, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _no_history_import(request):
     """History import stays off under pytest, except where a test wants to
     watch it. `api/live.py` now calls `league_history.spawn_import_if_stale`

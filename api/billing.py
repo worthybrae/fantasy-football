@@ -91,6 +91,12 @@ API_VERSION = "2026-07-29.dahlia"
 # session would make the grouping useless.
 INTEGRATION_ID = "draftassist-hnwqkzrb"
 
+# THE ONE STORAGE FAILURE TYPE, whichever backend is underneath, and the same
+# class `pipeline/credentials.py` re-exports. Both adapters below wrap their
+# driver's errors into it, so the routes can answer 503 without knowing which
+# store they were talking to.
+StoreError = pgstore.StoreError
+
 _lock = threading.Lock()
 _store = None
 
@@ -172,10 +178,18 @@ class _Duck:
             self._conn.execute(statement)
 
     def execute(self, sql: str, params=()) -> list:
-        return self._conn.execute(sql, list(params)).fetchall()
+        try:
+            return self._conn.execute(sql, list(params)).fetchall()
+        except duckdb.Error as exc:
+            raise StoreError(f"the entitlement store refused a statement "
+                             f"({type(exc).__name__})") from None
 
     def executemany(self, sql: str, rows) -> None:
-        self._conn.executemany(sql, [list(row) for row in rows])
+        try:
+            self._conn.executemany(sql, [list(row) for row in rows])
+        except duckdb.Error as exc:
+            raise StoreError(f"the entitlement store refused a statement "
+                             f"({type(exc).__name__})") from None
 
     def close(self) -> None:
         self._conn.close()
@@ -190,28 +204,71 @@ class _Pg:
     """
 
     def __init__(self):
-        for statement in _PG_SCHEMA:
-            self.execute(statement)
+        # Imported here rather than at module scope so a checkout with no DSN
+        # never needs the driver at all.
+        import psycopg
+
+        self._error = psycopg.Error
+        self._ensure_schema()
 
     def execute(self, sql: str, params=()) -> list:
         # `?` becomes `%s`. The SQL below is written once for both backends,
         # and no statement in this module contains a literal question mark.
-        with pgstore.pool().connection() as conn:
-            cursor = conn.execute(sql.replace("?", "%s"),
-                                  [pgstore.to_pg(p) for p in params] or None)
-            if cursor.description is None:
-                return []
-            return [tuple(pgstore.from_pg(value) for value in row)
-                    for row in cursor.fetchall()]
+        try:
+            with pgstore.pool().connection() as conn:
+                cursor = conn.execute(
+                    sql.replace("?", "%s"),
+                    [pgstore.to_pg(p) for p in params] or None)
+                if cursor.description is None:
+                    return []
+                return [tuple(pgstore.from_pg(value) for value in row)
+                        for row in cursor.fetchall()]
+        except self._error as exc:
+            raise StoreError(f"the entitlement store is not usable "
+                             f"({type(exc).__name__})") from None
 
     def executemany(self, sql: str, rows) -> None:
-        with pgstore.pool().connection() as conn:
-            conn.cursor().executemany(
-                sql.replace("?", "%s"),
-                [[pgstore.to_pg(p) for p in row] for row in rows])
+        try:
+            with pgstore.pool().connection() as conn:
+                conn.cursor().executemany(
+                    sql.replace("?", "%s"),
+                    [[pgstore.to_pg(p) for p in row] for row in rows])
+        except self._error as exc:
+            raise StoreError(f"the entitlement store is not usable "
+                             f"({type(exc).__name__})") from None
+
+    def _ensure_schema(self) -> None:
+        """Create the tables once per process, not once per adapter.
+
+        `reset_for_tests` builds a fresh adapter, and on Postgres the tables it
+        would create are already there -- three round trips to say so.
+        """
+        global _PG_READY
+        if _PG_READY:
+            return
+        with _PG_LOCK:
+            if _PG_READY:
+                return
+            for statement in _PG_SCHEMA:
+                self.execute(statement)
+            _PG_READY = True
 
     def close(self) -> None:
         """The pool outlives any one store. See pipeline/pgstore.close()."""
+
+
+_PG_READY = False
+_PG_LOCK = threading.Lock()
+
+
+def _forget_pg_schema() -> None:
+    """The tables have to be created again against the next pool."""
+    global _PG_READY
+    with _PG_LOCK:
+        _PG_READY = False
+
+
+pgstore.on_close(_forget_pg_schema)
 
 
 def _db():
@@ -285,6 +342,23 @@ def reset_for_tests(path: str | None = None) -> None:
         _known_mocks.clear()
     if path is not None:
         os.environ[DB_PATH_ENV] = path
+
+
+def _unavailable(exc) -> HTTPException:
+    """The entitlement store could not answer, as a refusal a route can raise.
+
+    503 rather than the 500 an unhandled StoreError would become. The code is
+    fine and the request was fine -- the store is unreachable -- and the three
+    callers all want the same thing from that distinction. The webhook wants it
+    most: Stripe retries on any non-2xx, so a database that is briefly away
+    delays a fulfilment instead of dropping it.
+
+    The type name and nothing else. A psycopg error stringifies to whatever the
+    server said, which can include the DSN.
+    """
+    return HTTPException(
+        status_code=503,
+        detail=f"the entitlement store is not usable ({type(exc).__name__})")
 
 
 # -- which drafts are free ---------------------------------------------------
@@ -385,8 +459,15 @@ def is_free_draft(league_id) -> bool:
             with _lock:
                 _known_mocks.add(league_id)
             return True
-    except Exception:      # noqa: BLE001 -- an unreadable billing database is
-        return True        # not a reason to charge anybody
+    except Exception:      # noqa: BLE001 -- see below
+        # THE TIE GOES TO THE DRAFTER, unchanged, and now with a second way to
+        # get here. It used to mean a corrupt or locked billing file. On
+        # Postgres it also means the network: a pool with nothing free after
+        # five seconds, or a database that is refusing connections, both
+        # arrive as StoreError. Charging somebody for a free mock because a
+        # third party is having a bad minute is a worse failure than a missed
+        # $9.99, so the answer stays "free".
+        return True
     try:
         from api import lobby
         rows = lobby.cached_rows()
@@ -659,7 +740,10 @@ def register_billing_routes(app, store=None):
         if is_free_draft(leagueId):
             return {"enabled": True, "required": False, "entitled": True,
                     "reason": "mock"}
-        paid = entitled(_account_ids(request, store), leagueId, year)
+        try:
+            paid = entitled(_account_ids(request, store), leagueId, year)
+        except StoreError as exc:
+            raise _unavailable(exc) from None
         return {"enabled": True, "required": not paid, "entitled": paid,
                 "league_id": str(leagueId), "season": year}
 
@@ -685,7 +769,11 @@ def register_billing_routes(app, store=None):
         if is_free_draft(body.leagueId):
             raise HTTPException(status_code=400,
                                 detail="Mock drafts are free.")
-        if entitled(ids, body.leagueId, year):
+        try:
+            already_paid = entitled(ids, body.leagueId, year)
+        except StoreError as exc:
+            raise _unavailable(exc) from None
+        if already_paid:
             raise HTTPException(status_code=409,
                                 detail="This draft is already paid for.")
         base = _base_url(request)
@@ -748,7 +836,14 @@ def register_billing_routes(app, store=None):
             # error to explain in detail to whoever sent it.
             raise HTTPException(status_code=400,
                                 detail="bad signature") from None
-        return _handle_event(event)
+        try:
+            return _handle_event(event)
+        except StoreError as exc:
+            # Stripe retries on any non-2xx, so this is a fulfilment that
+            # happens late rather than one that never happens. A 500 would say
+            # the same thing to Stripe and a different thing to whoever reads
+            # the logs.
+            raise _unavailable(exc) from None
 
     return app
 

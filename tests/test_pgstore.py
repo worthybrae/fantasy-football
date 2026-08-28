@@ -27,3 +27,29 @@ def test_pool_refuses_when_disabled(monkeypatch):
     pgstore.close()
     with pytest.raises(pgstore.StoreError):
         pgstore.pool()
+
+
+def test_closing_the_pool_tells_the_stores_that_cached_something_about_it():
+    """Every store that creates its schema once per process keeps a flag
+    saying it has. A flag that outlives the pool it was set against is a store
+    that never creates its tables again -- so `close` is what resets them,
+    through this registry."""
+    fired = []
+
+    def note():
+        fired.append(1)
+
+    try:
+        pgstore.on_close(note)
+        pgstore.close()
+        assert len(fired) == 1
+
+        # Registered once, however many times it is offered -- a module that
+        # registers at import must not accumulate a callback per reload.
+        pgstore.on_close(note)
+        pgstore.close()
+        assert len(fired) == 2
+    finally:
+        # The registry is process-wide and has no unregister: a test that left
+        # its callback in it would fire on every later close in the run.
+        pgstore._on_close.remove(note)

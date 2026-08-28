@@ -643,6 +643,30 @@ def test_reconnecting_with_the_same_session_refreshes_the_one_row(store):
     assert store.resolve(second.cookie).espn_s2 == FAKE_S2
 
 
+def test_two_browsers_sharing_one_espn_session_land_on_one_row(store):
+    """The same case as above, but with NO cookie tying the two together --
+    two browsers that each signed into ESPN and got handed the same `espn_s2`.
+
+    They compute the same row id, because the id is HMAC of the secret. That
+    is the one write in this module where two callers can be aiming at the
+    same primary key at the same moment, so the row is written with a single
+    upsert rather than a DELETE followed by an INSERT: on Postgres those two
+    statements are on two connections with nothing serialising them, and an
+    interleaving costs one of the callers a primary key violation on a request
+    that was perfectly valid.
+
+    Today's semantics, unchanged: one credential, one session per browser, and
+    both cookies still resolve.
+    """
+    first = store.connect(FAKE_SWID, FAKE_S2)
+    second = store.connect(FAKE_SWID, FAKE_S2)
+
+    assert store.counts() == {"credentials": 1, "sessions": 2}
+    assert first.credential_id == second.credential_id
+    assert store.resolve(first.cookie).espn_s2 == FAKE_S2
+    assert store.resolve(second.cookie).espn_s2 == FAKE_S2
+
+
 def test_a_reissued_session_supersedes_the_one_the_cookie_holds(store):
     """ESPN reissues `espn_s2` on every sign-in, so the same person comes back
     with a different secret and therefore a different row id.

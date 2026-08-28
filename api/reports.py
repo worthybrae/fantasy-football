@@ -249,7 +249,8 @@ def cookies_for_connect(request: Request, swid: str, espn_s2: str | None, store=
     Never raises: this runs on the connect path, which must never block on
     a history import it merely triggers. `session_for` -> `custody_for` can
     raise HTTPException(503) when the custody cookie is present but the
-    credential store itself is down (CustodyUnavailable / duckdb.Error) --
+    credential store itself is down: CustodyUnavailable, or the StoreError
+    every backend of that store wraps its driver's failures into --
     that is the right answer for a request ASKING for the stored session,
     but wrong here, where the caller only wants to know whether cookies are
     available at all.
