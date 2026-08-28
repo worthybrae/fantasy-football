@@ -1,6 +1,8 @@
 # tests/test_seo.py
 """The pages a search engine reads: ADP from the corpus, rendered as HTML."""
 import html
+import threading
+import time
 import xml.etree.ElementTree as ET
 
 import duckdb
@@ -570,3 +572,61 @@ def test_the_warm_interval_is_inside_the_life_of_what_it_warms():
     entry lapses between passes and a reader pays for the rebuild, which is
     exactly the state this replaced."""
     assert seo.WARM_SECONDS < market.CACHE_SECONDS
+
+
+def test_a_reader_is_not_made_to_wait_for_the_warm_rebuild(corpus, board):
+    """THE REGRESSION THE FIRST VERSION OF THE WARM LOOP SHIPPED WITH.
+
+    Every /adp route asks `adp_data` for the aggregate before it can reach
+    its own page cache. Hold the aggregate's lock across `build_adp` -- as
+    `rebuild_adp` first did -- and the four-minutely background refresh
+    becomes a stall: a reader arriving during it queues behind the whole
+    1.7s build. That is a worse version of the 1.9s the warm thread exists
+    to remove, and it happens two and a half times as often.
+
+    So the build runs with nothing held and only the finished answer is
+    swapped in (`market.store`). A reader racing a rebuild is served the
+    previous answer immediately.
+    """
+    c = _client(board)
+    c.get("/adp")                       # prime the aggregate and the page
+    primed = seo.adp_data(board)
+
+    started = threading.Event()
+    took = []
+    real = seo.build_adp
+
+    def slow(conn):
+        """A second of work, and no database: the point is the wait, and
+        this thread must not be reading `board` beside the request that is
+        about to."""
+        started.set()
+        time.sleep(1.0)
+        return primed
+
+    seo.build_adp = slow
+    try:
+        def warm():
+            began = time.monotonic()
+            seo.rebuild_adp(board)
+            took.append(time.monotonic() - began)
+
+        thread = threading.Thread(target=warm, daemon=True)
+        thread.start()
+        assert started.wait(5), "the rebuild never started"
+
+        began = time.monotonic()
+        res = c.get("/adp")
+        waited = time.monotonic() - began
+        thread.join(10)
+    finally:
+        seo.build_adp = real
+
+    # The rebuild really was slow -- otherwise the reader's speed below
+    # would be proving nothing at all.
+    assert took and took[0] >= 1.0
+    # ...and the reader went straight through it, with the answer that was
+    # already in hand rather than a wait for the one being built.
+    assert res.status_code == 200
+    assert "10 real ESPN mock drafts" in res.text
+    assert waited < 0.1, f"a reader waited {waited:.2f}s behind the rebuild"

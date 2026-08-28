@@ -353,17 +353,34 @@ def adp_data(conn) -> dict:
 
 
 def rebuild_adp(conn) -> dict:
-    """`build_adp` whether or not the cached answer has expired yet.
+    """`build_adp` whether or not the cached answer has expired yet, without
+    making anybody wait for it.
 
-    What the warm thread calls. `adp_data` would hand back the entry it is
-    trying to replace for as long as that entry is alive, which is exactly
-    the window this is meant to be renewing -- so the key is retired first,
-    under the same lock, and the rebuild happens while the old answer is
-    still what a request racing it would have been given.
+    What the warm thread calls. `adp_data` would hand back the entry this is
+    trying to replace for as long as that entry is alive, so the rebuild has
+    to be forced -- but forcing it must not cost a reader anything, and the
+    first version of this cost them everything.
+
+    NO LOCK AROUND THE BUILD. Held across `build_adp`, `_adp_lock` turned a
+    background refresh into a stall: every /adp route asks `adp_data` for the
+    aggregate before it can reach its own page cache, so a reader arriving
+    during the four-minutely rebuild queued behind it and waited the full
+    1.7s. That is a worse version of the 1.9s this warm thread was written to
+    remove, and it happened two and a half times as often. So the work is
+    done on this thread with nothing held, and only the finished answer is
+    swapped in -- `market.store`, one assignment under that module's own
+    lock. A reader racing a rebuild is served the previous answer at once and
+    never blocks.
+
+    Safe to build outside `_adp_lock` because of what that lock is for: two
+    callers inside `build_adp` at the same moment on ONE connection (see
+    `adp_data`). The warm thread was given `conn.cursor()` of its own for
+    exactly this reason, so it is not sharing statement state with the
+    readers it now runs alongside.
     """
-    with _adp_lock:
-        market.evict(ADP_KEY)
-        return market._cached(ADP_KEY, lambda: build_adp(conn))
+    built = build_adp(conn)
+    market.store(ADP_KEY, built)
+    return built
 
 
 # ---------------------------------------------------------------------------

@@ -121,17 +121,21 @@ def _cached(key, build, complete=None):
     return value
 
 
-def evict(key) -> None:
-    """Retire one cached answer, so the next `_cached` for it rebuilds.
+def store(key, value, ttl: float = CACHE_SECONDS) -> None:
+    """Put an answer built elsewhere into the cache, with a full life.
 
-    For a caller that wants a REBUILD rather than the cached answer -- the
-    background thread in `api/seo.py`, which exists to pay `build_adp`'s
-    couple of seconds before a reader has to. Reaching into `_CACHE` from
-    another module would work and would make this dict part of the informal
-    interface; one named function is the smaller promise.
+    For a caller that wants to pay for a REBUILD off the request path and
+    then hand it over -- the background thread in `api/seo.py`, which exists
+    so that no reader is ever the one who finds `build_adp` cold.
+
+    A swap, deliberately, and not a retire-then-rebuild: the entry is
+    replaced in one step under this lock, so there is never a moment when
+    the key is missing and a reader arriving in it starts a build of their
+    own. That was the whole point of doing the work outside the lock, and
+    an eviction would have handed the cost straight back.
     """
     with _LOCK:
-        _CACHE.pop(key, None)
+        _CACHE[key] = (time.monotonic() + ttl, value)
 
 
 def _board_answered(rows) -> bool:

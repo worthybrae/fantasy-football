@@ -130,11 +130,11 @@ def test_players_serves_a_thumbnail_and_not_the_original_photograph(tmp_path):
     row = next(p for p in c.get("/api/players").json()["players"]
                if p["player_id"] == "p1")
     assert row["headshot"] == ("https://static.www.nfl.com/image/private/"
-                               "f_auto,q_auto,w_96,c_fill,g_face/league/abc")
+                               "f_auto,q_auto,w_128,c_fill,g_face/league/abc")
     # The card's portrait is read straight off `players` rather than off the
     # board, so it is sized somewhere else (scoring/profile.py) and has to be
     # checked somewhere else.
-    assert "w_96" in c.get("/api/players/p1/profile").json()["bio"]["headshot"]
+    assert "w_128" in c.get("/api/players/p1/profile").json()["bio"]["headshot"]
 
 
 def test_players_custom_weights(tmp_path):

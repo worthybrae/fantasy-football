@@ -1,21 +1,21 @@
 """One size of face, asked for where the face leaves the process.
 
 nflverse stores nfl.com's Cloudinary ORIGINAL for every player: 3400x2450
-pixels, 250-870 KB apiece. Nothing this app draws is larger than a 44-pixel
-avatar. A cold landing load measured 10.5 MB, and 10.2 MB of it was these
+pixels, 250-870 KB apiece. The largest slot any of them lands in is a
+52-pixel avatar. A cold landing load measured 10.5 MB, 10.2 MB of it these
 photographs -- every one of them downloaded whole and then scaled down by
 the browser to something the size of a fingernail.
 
 Cloudinary resizes on delivery. The segment after `/image/upload/` (or
 `/image/private/` -- nflverse's rows carry both) is a comma-separated list
-of transform parameters, and adding `w_96,c_fill,g_face` to it asks the CDN
-for a 96-pixel square cropped around the face. Same URL shape, same
+of transform parameters, and adding `w_128,c_fill,g_face` to it asks the CDN
+for a 128-pixel square cropped around the face. Same URL shape, same
 `f_auto,q_auto` the stored URL already carries, a few KB instead of a few
 hundred.
 
 WHY THE STORED URL IS LEFT ALONE. The width is a property of the SLOT the
 photo lands in, not of the photo: a social card wants 320 and a table row
-wants 96, and a `players` table holding one of those two could never answer
+wants 128, and a `players` table holding one of those two could never answer
 for the other. So the transform goes on at the point of serving, where the
 size is known, and `pipeline/sources.py` keeps writing down what nflverse
 published.
@@ -45,14 +45,16 @@ _PARAM = re.compile(r"^[a-z]{1,3}_[^,/]+$")
 # The parameters this helper owns and therefore replaces rather than
 # appends to. Two `w_` in one segment is undefined, and a crop mode left
 # over from another width would fight the one being asked for. Replacing
-# also makes the helper idempotent: thumb(thumb(u, 96), 320) is
+# also makes the helper idempotent: thumb(thumb(u, 128), 320) is
 # thumb(u, 320), which is what lets a caller hand a list avatar's URL to an
 # og:image tag without having to have kept the original around.
 _OWNED = ("w_", "h_", "c_", "g_", "ar_", "dpr_")
 
-# What a face is asked for at. Every avatar in the app is drawn at 44 CSS
-# pixels or less, so this is the 2x asset for the largest of them.
-DEFAULT_WIDTH = 96
+# What a face is asked for at. The biggest slot any of these lands in is 52
+# CSS pixels, which wants 104 on a 2x display, and the /adp player page draws
+# its one at 72. 128 is the round number above both -- still a few KB, and it
+# stops the largest avatars being the blurry ones.
+DEFAULT_WIDTH = 128
 
 
 def thumb(url, width: int = DEFAULT_WIDTH) -> str | None:
