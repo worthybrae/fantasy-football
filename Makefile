@@ -130,6 +130,12 @@ load-test: ## drive N fake live rooms against a local server
 	# Acceptance: p95 /api/live/state under 300ms, peak server RSS under 6GB.
 	# The target exits non-zero when the run misses either, so it can be read
 	# as a check rather than only as a report.
+	#
+	# The teardown kills the build pool's WORKERS first, while the server
+	# still owns them, and only then the server: a bare kill on the server
+	# leaves them reparented to init holding most of a gigabyte each, because
+	# the app's shutdown hook calls ProcessPoolExecutor.shutdown(wait=False)
+	# and that does not wait for a worker which is mid-build.
 	@test -f data/nfl.duckdb || { echo "data/nfl.duckdb is missing -- run make refresh"; exit 1; }
 	@mkdir -p $(LOAD_DIR)
 	@echo "copying data/nfl.duckdb -> $(LOAD_DIR)/load.duckdb ..."
@@ -138,7 +144,7 @@ load-test: ## drive N fake live rooms against a local server
 		--db $(LOAD_DIR)/load.duckdb --workers $(or $(WORKERS),3) \
 		> $(LOAD_DIR)/server.log 2>&1 & \
 	pid=$$!; \
-	trap 'kill $$pid 2>/dev/null; rm -rf $(LOAD_DIR)/load.duckdb $(LOAD_DIR)/load.duckdb.wal $(LOAD_DIR)/load.duckdb.live-sessions' EXIT INT TERM; \
+	trap 'pkill -P $$pid 2>/dev/null; kill $$pid 2>/dev/null; rm -rf $(LOAD_DIR)/load.duckdb $(LOAD_DIR)/load.duckdb.wal $(LOAD_DIR)/load.duckdb.live-sessions' EXIT INT TERM; \
 	echo "server pid $$pid -- log in $(LOAD_DIR)/server.log"; \
 	for i in $$(seq 1 90); do \
 		if curl -sf -o /dev/null http://127.0.0.1:$(LOAD_PORT)/api/live/state; then break; fi; \
