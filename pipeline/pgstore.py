@@ -85,6 +85,42 @@ def pool():
         return _pool
 
 
+def create_schema(statements, label: str) -> None:
+    """Run each DDL statement once, and once more if it lost a race.
+
+    `CREATE TABLE IF NOT EXISTS` IS NOT ATOMIC IN POSTGRES. Two workers
+    booting together both find the table missing and both create it; the
+    loser does not get the "already there, nothing to do" the statement
+    asks for, it gets a UniqueViolation on the system catalogue (two rows
+    for one type name) or a DuplicateTable. That was one 503 on a cold
+    deploy, healed by the next request -- a self-inflicted error page every
+    time the platform started two workers at once.
+
+    Retried once, per statement, because by the time the loser tries again
+    the winner has committed and IF NOT EXISTS is finally true. A second
+    failure is a real one. `label` names the store in the error a caller
+    would see, and the driver's message is left out for the reason every
+    other store here leaves it out: it carries the DSN.
+    """
+    import psycopg
+
+    raced = (psycopg.errors.UniqueViolation, psycopg.errors.DuplicateTable,
+             psycopg.errors.DuplicateObject)
+    for statement in statements:
+        for attempt in (1, 2):
+            try:
+                with pool().connection() as conn:
+                    conn.execute(statement)
+                break
+            except raced as exc:
+                if attempt == 2:
+                    raise StoreError(f"the {label} is not usable "
+                                     f"({type(exc).__name__})") from None
+            except psycopg.Error as exc:
+                raise StoreError(f"the {label} is not usable "
+                                 f"({type(exc).__name__})") from None
+
+
 def on_close(callback) -> None:
     """Run `callback` the next time (and every time) the pool is dropped.
 

@@ -740,8 +740,9 @@ class _PgBackend:
         with _PG_LOCK:
             if _PG_READY:
                 return
-            for statement in _PG_SCHEMA:
-                self._run(statement)
+            # Through pgstore rather than `self._run`, for the race two
+            # workers booting together run into. See pgstore.create_schema.
+            pgstore.create_schema(_PG_SCHEMA, "credential store")
             _PG_READY = True
 
 

@@ -29,6 +29,68 @@ def test_pool_refuses_when_disabled(monkeypatch):
         pgstore.pool()
 
 
+def test_schema_creation_survives_two_workers_creating_it_at_once(monkeypatch):
+    """`CREATE TABLE IF NOT EXISTS` is not atomic in Postgres: two workers
+    booting together both find the table missing, and the loser gets a
+    duplicate-key error out of the system catalogue rather than the "already
+    there" the statement asks for. That was one 503 per cold deploy, healed
+    by the next request. The loser tries once more, by which time the
+    winner has committed."""
+    import contextlib
+
+    import psycopg
+
+    class _Conn:
+        def __init__(self):
+            self.ran = []
+            self.raised = 0
+
+        def execute(self, sql):
+            self.ran.append(sql)
+            if len(self.ran) == 1:          # the first statement loses
+                self.raised += 1
+                raise psycopg.errors.UniqueViolation("duplicate key")
+
+    conn = _Conn()
+
+    class _Pool:
+        def connection(self):
+            return contextlib.nullcontext(conn)
+
+    monkeypatch.setattr(pgstore, "pool", _Pool)
+    pgstore.create_schema(("CREATE TABLE IF NOT EXISTS x (a INT)",), "test store")
+    assert conn.raised == 1
+    assert len(conn.ran) == 2, "the losing statement was not retried"
+
+
+def test_schema_creation_gives_up_after_one_retry(monkeypatch):
+    """A statement that fails the same way twice is not a race any more."""
+    import contextlib
+
+    import psycopg
+
+    class _Conn:
+        def __init__(self):
+            self.ran = []
+
+        def execute(self, sql):
+            self.ran.append(sql)
+            raise psycopg.errors.DuplicateTable("relation exists")
+
+    conn = _Conn()
+
+    class _Pool:
+        def connection(self):
+            return contextlib.nullcontext(conn)
+
+    monkeypatch.setattr(pgstore, "pool", _Pool)
+    with pytest.raises(pgstore.StoreError) as caught:
+        pgstore.create_schema(("CREATE TABLE IF NOT EXISTS x (a INT)",),
+                              "test store")
+    assert "test store" in str(caught.value)
+    assert len(conn.ran) == 2
+
+
 def test_closing_the_pool_tells_the_stores_that_cached_something_about_it():
     """Every store that creates its schema once per process keeps a flag
     saying it has. A flag that outlives the pool it was set against is a store
