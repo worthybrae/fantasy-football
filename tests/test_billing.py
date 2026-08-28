@@ -298,6 +298,11 @@ def test_every_mock_the_corpus_remembers_is_free(tmp_path, monkeypatch):
     billing.reset_for_tests(str(tmp_path / "seeded.duckdb"))
     monkeypatch.setattr("api.lobby.cached_rows", lambda: [])
 
+    # The seed runs on its own thread now (see `_db`), so the question this
+    # test asks only has an answer once it has finished.
+    billing._db()
+    assert billing._seed_done.wait(30)
+
     assert billing.is_free_draft("1802561235") is True
     # And a real league in the same corpus is still a real league.
     assert billing.is_free_draft("999") is False
@@ -322,16 +327,68 @@ def test_the_corpus_seed_writes_only_what_the_table_is_missing(
     monkeypatch.setattr("api.lobby.cached_rows", lambda: [])
     billing.reset_for_tests(str(tmp_path / "seeded-once.duckdb"))
 
-    store = billing._db()                   # the seed runs here, once
+    store = billing._db()                   # the seed is claimed here, once
+    assert billing._seed_done.wait(30)
     assert billing.is_free_draft("111") is True
     assert billing.is_free_draft("222") is True
 
-    wrote = []
-    real = store.executemany
-    monkeypatch.setattr(store, "executemany",
-                        lambda sql, rows: wrote.append(list(rows)) or real(sql, rows))
+    inserts = _record_inserts(store, monkeypatch)
     billing._seed_mocks_from_corpus(store)
-    assert wrote == [], "the seed re-inserted rows already in the table"
+    assert inserts == [], "the seed re-inserted rows already in the table"
+
+
+def _record_inserts(store, monkeypatch) -> list:
+    """Every INSERT the seed sends the store, in order. The SELECT it does
+    first goes through the same method, so this keeps only the writes."""
+    sent: list = []
+    real = store.execute
+
+    def watched(sql, params=()):
+        if sql.lstrip().upper().startswith("INSERT"):
+            sent.append(sql)
+        return real(sql, params)
+
+    monkeypatch.setattr(store, "execute", watched)
+    return sent
+
+
+def test_the_seed_writes_the_backlog_in_statements_not_in_rows(
+        tmp_path, monkeypatch):
+    """WHERE THE 24 SECONDS WENT. The seed used `executemany`, and both
+    adapters implement that the honest way -- one execution per row -- so a
+    corpus that had run 854 rooms ahead of the table was 854 statements, each
+    its own commit and so its own fsync on a network volume. That is minutes
+    of latency hiding behind a method name, and on 2026-08-27 the first
+    request of a fresh container wore 24,026 ms of it.
+
+    Nine hundred rooms rather than a handful, because a per-row write passes
+    any test small enough not to notice."""
+    import duckdb
+    from pipeline import draft_log as dl
+
+    corpus = tmp_path / "corpus.duckdb"
+    conn = duckdb.connect(str(corpus))
+    conn.execute("CREATE TABLE draft_log (draft_id VARCHAR, source VARCHAR, "
+                 "league_id VARCHAR)")
+    conn.executemany(
+        "INSERT INTO draft_log VALUES (?, ?, ?)",
+        [[f"d{i}", dl.SOURCE_MOCK, str(i)] for i in range(900)])
+    conn.close()
+    monkeypatch.setattr(dl, "CORPUS_PATH", str(corpus))
+    billing.reset_for_tests(str(tmp_path / "backlog.duckdb"))
+
+    store = billing._db()
+    assert billing._seed_done.wait(30)
+
+    # Every room landed...
+    assert store.execute("SELECT count(*) FROM mock_room")[0][0] == 900
+    # ...and a re-seed of the same 900 against an empty table takes a couple
+    # of statements, not nine hundred of them.
+    store.execute("DELETE FROM mock_room")
+    inserts = _record_inserts(store, monkeypatch)
+    billing._seed_mocks_from_corpus(store)
+    assert store.execute("SELECT count(*) FROM mock_room")[0][0] == 900
+    assert len(inserts) <= 3, f"{len(inserts)} statements for 900 rooms"
 
 
 def test_a_corpus_that_cannot_be_read_is_not_fatal(tmp_path, monkeypatch):

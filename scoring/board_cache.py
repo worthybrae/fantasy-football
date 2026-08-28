@@ -87,7 +87,9 @@ of cells) on every request, which defeats the point of caching at all. Call
 `board_cache.clear()` after any such direct write in a test or a script.
 """
 import hashlib
+import os
 import threading
+import time
 from collections import OrderedDict
 
 import pandas as pd
@@ -347,6 +349,96 @@ def cached_build_board(conn, weights: dict | None = None,
     return board
 
 
+# HOW MANY FINISHED PROFILES `warm` PRE-BUILDS, and the environment variable
+# that turns it down or off.
+#
+# The three caches below `warm` are all league-wide: one board, one set of
+# frames, one game-points table, and every player shares them. What none of
+# them covers is the per-player half of a profile, which is 239 ms a player
+# with all three warm (see scoring/profile_cache.cached_profile for the
+# section-by-section measurement). So the first person to open ANY card after
+# a deploy still paid that, and on a shared vCPU it is multiples of it --
+# which is exactly the "right after a deploy" window the edge log showed at
+# p50 1.5s.
+#
+# 40 is the read of what a room actually opens: the board is ~250 players and
+# a drafter looks at the top of it, ESPN's order being the one the room is
+# sorted by when it loads. 40 profiles is ~10s of background CPU on
+# data/nfl.duckdb and ~7 MB resident (a payload is ~165 KB), against a
+# `_PAYLOAD_MAX_ENTRIES` of 256 -- so this fills a sixth of that cache and
+# evicts nothing.
+#
+# `WARM_PROFILES=0` disables it, which is the escape hatch if a container
+# turns out to be too small to spend the CPU: nothing else changes, the first
+# click just pays what it paid before.
+WARM_PROFILES_ENV = "WARM_PROFILES"
+DEFAULT_WARM_PROFILES = 40
+
+
+def _warm_profile_count() -> int:
+    """`WARM_PROFILES` as a count, defaulting to DEFAULT_WARM_PROFILES.
+
+    Unset, empty and unparseable all mean the default rather than zero: this
+    runs on a boot thread nobody is watching, and a typo in a platform
+    variable silently turning a performance feature off is the failure that
+    takes months to notice. A negative is clamped to zero, which is the one
+    thing it can sensibly mean."""
+    raw = os.environ.get(WARM_PROFILES_ENV)
+    if raw is None or not raw.strip():
+        return DEFAULT_WARM_PROFILES
+    try:
+        return max(0, int(raw.strip()))
+    except ValueError:
+        print(f"warm: {WARM_PROFILES_ENV}={raw!r} is not a number; "
+              f"warming {DEFAULT_WARM_PROFILES} profiles", flush=True)
+        return DEFAULT_WARM_PROFILES
+
+
+def _warm_order(board: pd.DataFrame, n: int) -> list:
+    """The first `n` player_ids to pre-build, ESPN's ranking first.
+
+    ESPN's rank rather than the board's own: this is a guess at what somebody
+    will click, and the room's list arrives in the market's order, not in the
+    order this app has re-ranked it into. A player ESPN does not rank carries
+    NaN there and is skipped rather than sorted to one end -- he is by
+    definition not near the top of anybody's list. If the column is missing
+    (a fixture, an unrefreshed database) or every value is NaN, the board's
+    own order is a perfectly good second answer; the point is to warm
+    SOMETHING, not to warm the ideal set."""
+    order = board
+    if "espn_ppr_rank" in board.columns:
+        ranked = board[board["espn_ppr_rank"].notna()]
+        if not ranked.empty:
+            order = ranked.sort_values("espn_ppr_rank")
+    return [str(p) for p in order["player_id"].head(n)]
+
+
+def _warm_profiles(conn, settings, n: int) -> tuple:
+    """Pre-build up to `n` finished profiles. Returns (built, failed).
+
+    ONE AT A TIME, ON THIS THREAD. `get_or_build` holds one of the two
+    BUILD_SLOTS around each build, so a sequential loop here occupies at most
+    one of them and a request arriving mid-warm can always still build its
+    own. Fanning this out across threads would take both, and the thing it
+    would be starving is the person who is waiting.
+
+    A player that will not build does not stop the ones after him -- same
+    argument as `warm`'s own per-builder try -- but the failures are counted
+    rather than printed, because forty log lines about a boot-time
+    optimisation nobody asked for is not a report, it is noise.
+    """
+    from scoring.profile_cache import cached_profile
+
+    built = failed = 0
+    for player_id in _warm_order(cached_build_board(conn, None, settings), n):
+        try:
+            cached_profile(conn, player_id, None, settings)
+            built += 1
+        except Exception:  # noqa: BLE001 -- see the docstring
+            failed += 1
+    return built, failed
+
+
 def warm(conn) -> list:
     """Build every cached frame now, on a thread nobody is waiting on.
 
@@ -369,17 +461,25 @@ def warm(conn) -> list:
     from this module, so an import at the top of this file would be a cycle.
 
     Returns the names that warmed, which is what a caller would have to
-    assert on anyway.
+    assert on anyway -- including "profiles" for the per-player pass at the
+    bottom, so that a deployment which has turned it off, or a database that
+    could not give it a board to work from, is visible rather than merely
+    slow.
     """
     from scoring.game_points import cached_game_points
     from scoring.profile_cache import cached_profile_frames
 
     try:
-        rules = league.load(conn).scoring
+        # The whole settings object, not just its scoring rules: the board
+        # and the frames need the rules, and the profile pass at the bottom
+        # needs the same LEAGUE the board was built under or it would be
+        # priming a key nothing will ever ask for.
+        settings = league.load(conn)
+        rules = settings.scoring
     except Exception as exc:  # noqa: BLE001 -- see the docstring
         print(f"warm: league settings unreadable ({exc!r}); warming full PPR",
               flush=True)
-        rules = None
+        settings, rules = None, None
 
     warmed = []
     for name, build in (
@@ -391,6 +491,24 @@ def warm(conn) -> list:
             warmed.append(name)
         except Exception as exc:  # noqa: BLE001 -- see the docstring
             print(f"warm: {name} failed, leaving it cold: {exc!r}", flush=True)
+
+    # LAST, AND ONLY IF THE THREE ABOVE IT ARE IN HAND. Every profile this
+    # builds reads the board and the frames; if either is cold, each one
+    # would build its own (1.7s and 2.1s), and forty of those on a boot
+    # thread is exactly the stampede the rest of this module exists to
+    # prevent. `settings` being None means `league.load` raised, in which
+    # case there is no stored league to warm under and the board pass has
+    # already failed for the same reason.
+    #
+    # SILENT WHEN IT DOES NOT RUN. A skip is not an incident: it is a
+    # correctly cold cache, and the next request handles that.
+    n = _warm_profile_count()
+    if n and settings is not None and {"board", "profile_frames"} <= set(warmed):
+        started = time.perf_counter()
+        built, failed = _warm_profiles(conn, settings, n)
+        print(f"warm: {built} profiles in {time.perf_counter() - started:.1f}s"
+              + (f" ({failed} failed)" if failed else ""), flush=True)
+        warmed.append("profiles")
     return warmed
 
 
@@ -430,7 +548,17 @@ def clear() -> None:
     gap this cache accepts (see the module docstring): after a test or a
     script writes `weekly`/`adp`/etc. directly via `write_table` without
     also updating `meta`, call this so the next `cached_build_board` call
-    can't serve a board built from the old contents."""
+    can't serve a board built from the old contents.
+
+    Drops scoring/profile_cache.py's finished payloads too. A profile is
+    built out of a board, so a board that has to be thrown away takes every
+    payload assembled from one with it -- and that cache's own key carries
+    this module's `_identity_key`, so a test that gets past THIS escape
+    valve would get past that one by the same route. Imported inside the
+    function because profile_cache imports this module."""
+    from scoring import profile_cache
+
     with _lock:
         _cache.clear()
         _pool_cache.clear()
+    profile_cache.clear_payloads()

@@ -1,6 +1,7 @@
-import { Fragment, useEffect, useState, type CSSProperties, type FocusEvent, type MouseEvent, type ReactNode } from 'react'
+import { Fragment, useEffect, useRef, useState, type CSSProperties, type FocusEvent, type MouseEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import BoardPeek from './draft/BoardPeek'
+import { TIP_DELAY_MS } from './draft/AvailableList'
 import type { BoardCell, BoardPlayer, LiveBoard, PickMaker } from '../api'
 
 // duplicated from LiveDraft.tsx (unexported there): a four-line pure
@@ -101,6 +102,8 @@ interface DraftBoardGridProps {
 // reason.
 export default function DraftBoardGrid({ board, onOpenPlayer }: DraftBoardGridProps) {
   const [hover, setHover] = useState<HoverInfo | null>(null)
+  // Pending hover-intent timer -- see `showPopover`.
+  const hoverTimer = useRef<number | null>(null)
 
   // Any scroll -- the grid's own horizontal one, or the page's vertical one
   // -- invalidates the popover's captured `rect`, so drop it rather than
@@ -109,11 +112,24 @@ export default function DraftBoardGrid({ board, onOpenPlayer }: DraftBoardGridPr
   useEffect(() => {
     if (!hover) return
     function dismiss() {
+      // The timer too, not just the open peek: a scroll during the
+      // hover-intent delay means the rect the timer captured is already
+      // wrong, so the peek it is about to open would land over the wrong
+      // cell.
+      if (hoverTimer.current !== null) window.clearTimeout(hoverTimer.current)
+      hoverTimer.current = null
       setHover(null)
     }
     window.addEventListener('scroll', dismiss, true)
     return () => window.removeEventListener('scroll', dismiss, true)
   }, [hover])
+
+  // A pending timer must not outlive the grid: it would call setHover on an
+  // unmounted component and, worse, open a peek -- and start its profile
+  // request -- for a board nobody is looking at any more.
+  useEffect(() => () => {
+    if (hoverTimer.current !== null) window.clearTimeout(hoverTimer.current)
+  }, [])
 
   if (!board.active) return null
 
@@ -142,8 +158,42 @@ export default function DraftBoardGrid({ board, onOpenPlayer }: DraftBoardGridPr
     return colIndex < 0 || overallAt(c.round, colIndex) === c.overall
   })
 
-  function showPopover(cell: BoardCell, e: MouseEvent<HTMLButtonElement> | FocusEvent<HTMLButtonElement>) {
-    setHover({ cell, rect: e.currentTarget.getBoundingClientRect() })
+  function hidePopover() {
+    if (hoverTimer.current !== null) window.clearTimeout(hoverTimer.current)
+    hoverTimer.current = null
+    setHover(null)
+  }
+
+  // ON A DELAY, BECAUSE OPENING THE PEEK STARTS A NETWORK REQUEST.
+  // `BoardPeek` fetches the hovered player's profile as soon as it mounts,
+  // and this grid is a wall of cells -- a pointer crossing four rows to
+  // reach the scrollbar used to open, and fetch, every cell it passed over.
+  // `GET /api/players/{id}/profile` is the most expensive endpoint this app
+  // serves (239 ms of per-player work with every server-side cache warm, and
+  // multiples of that on a shared vCPU), so a sweep queued a dozen of them
+  // in front of the one the reader actually wanted.
+  //
+  // TIP_DELAY_MS is the room's existing hover-intent threshold, shared with
+  // the available list, the target cards and the pick ticker rather than
+  // invented here: one number to tune, one feel to learn.
+  //
+  // KEYBOARD FOCUS IS NOT DELAYED. A Tab landing on a cell is a deliberate
+  // arrival, not a pointer passing through, so there is nothing for a delay
+  // to prevent and it would only make the board slower to read by keyboard.
+  function showPopover(cell: BoardCell,
+                       e: MouseEvent<HTMLButtonElement> | FocusEvent<HTMLButtonElement>,
+                       immediate = false) {
+    if (hoverTimer.current !== null) window.clearTimeout(hoverTimer.current)
+    const next = { cell, rect: e.currentTarget.getBoundingClientRect() }
+    if (immediate) {
+      hoverTimer.current = null
+      setHover(next)
+      return
+    }
+    hoverTimer.current = window.setTimeout(() => {
+      hoverTimer.current = null
+      setHover(next)
+    }, TIP_DELAY_MS)
   }
 
   // A plain <button>, not a link -- there is nowhere left for a cell to
@@ -164,7 +214,7 @@ export default function DraftBoardGrid({ board, onOpenPlayer }: DraftBoardGridPr
     // so it would otherwise hang over the dimmed board with no way to
     // dismiss it (the pointer is about to leave without a mouseleave the
     // grid can see).
-    setHover(null)
+    hidePopover()
     onOpenPlayer(cell.player)
   }
 
@@ -257,9 +307,9 @@ export default function DraftBoardGrid({ board, onOpenPlayer }: DraftBoardGridPr
                   title={isLabelled(cell.made_by) ? MAKER_LABEL[cell.made_by] : undefined}
                   onClick={() => handleCellClick(cell)}
                   onMouseEnter={(e) => showPopover(cell, e)}
-                  onMouseLeave={() => setHover(null)}
-                  onFocus={(e) => showPopover(cell, e)}
-                  onBlur={() => setHover(null)}
+                  onMouseLeave={hidePopover}
+                  onFocus={(e) => showPopover(cell, e, true)}
+                  onBlur={hidePopover}
                 >
                   <div className="board-cell-top">
                     {posBadge(cell.player.position)}

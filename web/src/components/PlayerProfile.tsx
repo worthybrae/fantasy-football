@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { LiveSettings, Player } from '../api'
-import { forgetProfile, loadProfile as loadSharedProfile } from './draft/CellTip'
 import { Chart, type Col } from './draft/Chart'
 import { startersAt } from './draft/finish'
 import { SEASON_GAMES } from './draft/weeks'
@@ -11,6 +10,7 @@ import {
 } from './draft/panels'
 import DepthChartCard from './DepthChartCard'
 import PageSkeleton from './PageSkeleton'
+import { cachedProfile, forgetProfile, loadProfile as fetchSharedProfile } from './draft/CellTip'
 import ComparableSeasons from './profile/ComparableSeasons'
 import InjuryStatus, { injuryTone } from './profile/InjuryStatus'
 import NewsPanel from './profile/NewsPanel'
@@ -560,7 +560,15 @@ export default function PlayerProfile({
   playerId, onClose, onToggleDrafted, onSelectPlayer, seed = null, settings = null,
   onDraftPlayer, embedded = false,
 }: PlayerProfileProps) {
-  const [profile, setProfile] = useState<ProfilePayload | null>(null)
+  // Seeded from the room's shared profile cache, which is very often already
+  // holding this player: the hover tip, the board-grid peek and this card are
+  // three readers of ONE payload, and before this the card was the one that
+  // refused to use it -- hovering a cell and then clicking it fetched the
+  // same 48 KB twice, the second time behind a skeleton, for an endpoint that
+  // costs 239 ms warm on a fast machine and multiples of that in production.
+  // A hit paints the finished card on the frame it opens.
+  const [profile, setProfile] = useState<ProfilePayload | null>(
+    () => cachedProfile(playerId) as unknown as ProfilePayload | null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -587,24 +595,44 @@ export default function PlayerProfile({
     // below is itself guarded, setLoading(false) would never run for that
     // stale id, leaving the drawer stuck on "Loading profile..." forever.
     if (playerIdRef.current !== forPlayerId) return
-    setLoading(true)
-    setError(null)
+    // A HIT IS NOT A LOAD. Showing a spinner over an answer already in hand
+    // is the flicker this path exists to remove, and the hover that usually
+    // precedes this click means the answer is usually in hand: the tip, the
+    // board peek, the target cards and this card are four readers of ONE
+    // payload (draft/CellTip's `cachedProfile`).
+    //
+    // The read below still runs on a hit. Inside the shared window it is a
+    // lookup and nothing happens; past it, it is a real request and the card
+    // quietly catches up. What it never does is blank in between -- which is
+    // why the cache in front of it is a VIEW of the one store rather than a
+    // second store with a longer memory.
+    const hit = cachedProfile(forPlayerId) as unknown as ProfilePayload | null
+    if (hit) {
+      setProfile(hit)
+      setError(null)
+      setLoading(false)
+    } else {
+      setLoading(true)
+      setError(null)
+    }
     try {
-      // THE ROOM'S OWN PROFILE CACHE, not a second request. This drawer used
-      // to call `fetchProfile` directly, so opening a player the room had
-      // already fetched for a hover panel -- which is most of them, since the
-      // click that opens this drawer usually follows a hover over the same
-      // row -- paid for the same 3.5s payload twice. `loadProfile` is the
-      // cache every other reader of a profile already goes through.
-      //
-      // Typed against api.ts's PlayerProfileData, which describes the payload
-      // as it was before the card redesign; the seven keys the card actually
-      // reads are named in profile/payload.ts. See that file for why they
-      // live there and not in api.ts.
-      const data = await loadSharedProfile(forPlayerId) as unknown as ProfilePayload
+      // `fetchSharedProfile` (draft/CellTip's `loadProfile`) rather than
+      // api.ts's `fetchProfile` directly: it is the same request behind the
+      // app's one request cache and its in-flight table, so the card, the
+      // hover tip and the board peek asking for one player at once is ONE
+      // request rather than three -- this card used to be the reader that
+      // paid for the payload twice, once on hover and again on the click
+      // that followed it. It is typed against api.ts's PlayerProfileData,
+      // which describes the payload as it was before the card redesign; the
+      // seven keys the card actually reads are named in profile/payload.ts.
+      // See that file for why they live there and not in api.ts.
+      const data = await fetchSharedProfile(forPlayerId) as unknown as ProfilePayload
       if (playerIdRef.current === forPlayerId) setProfile(data)
     } catch (e) {
-      if (playerIdRef.current === forPlayerId) {
+      // A refresh that fails behind a card that is already drawn is not an
+      // error a reader can do anything with: the card is still true, it is
+      // just not newer. Only a card with nothing on it reports the failure.
+      if (playerIdRef.current === forPlayerId && !hit) {
         setError(e instanceof Error ? e.message : 'Failed to load player profile')
       }
     } finally {
@@ -616,7 +644,9 @@ export default function PlayerProfile({
   // open, or a comp/row click swapping the id while the drawer stays
   // mounted).
   useEffect(() => {
-    setProfile(null)
+    // Cleared only when there is nothing cached to show. Blanking a hit and
+    // setting it again one statement later is a frame of empty card.
+    if (!cachedProfile(playerId)) setProfile(null)
     loadProfile(playerId)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playerId])
@@ -644,8 +674,10 @@ export default function PlayerProfile({
     // still-current toggle isn't needlessly dropped too.
     const forPlayerId = profile.header.player_id
     await onToggleDrafted(profile.header)
-    // The one read that must not be shared: this click CHANGED the thing
-    // being read, so the copy from a moment ago is the state before it.
+    // The shared cache is holding a payload whose `header.drafted` this
+    // click has just made wrong, and every other reader of it (the hover
+    // tip, the board peek) would go on serving it. Drop it so the refetch
+    // below is a real request and everybody gets the new answer.
     forgetProfile(forPlayerId)
     await loadProfile(forPlayerId)
   }

@@ -25,6 +25,12 @@ Entirely offline: no ESPN call, no Stripe, no socket. The custody session is
 faked the way `tests/test_custody_api.py` fakes one -- at `custody_for` and the
 store behind it -- so the route runs its real `_account_ids` lookup.
 """
+import subprocess
+import sys
+import threading
+import time
+from contextlib import contextmanager
+
 import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
@@ -404,3 +410,120 @@ def test_a_store_that_cannot_answer_is_a_503(client, monkeypatch):
     assert client.get("/api/account/favorites").status_code == 503
     assert client.put("/api/account/favorites",
                       json={"players": SIX}).status_code == 503
+
+
+# -- boot work is not this request's work -------------------------------------
+#
+# WHAT HAPPENED. On 2026-08-27, minutes after a deploy, the Railway edge log
+# recorded one `/api/account/favorites` at 24,026 ms with the two either side
+# of it at 85 ms. It was the first thing in that container to ask the billing
+# store a question, and `billing._db()` answered by making it wait for the
+# corpus seed: every mock room the farm had recorded since the table was last
+# topped up, written one row per statement, one commit and one fsync each, on
+# a network volume. Boot work, sized by how far the corpus had run ahead --
+# and no request should ever be able to discover how big that is.
+
+FIRST_REQUEST_BUDGET_SECONDS = 1.0
+
+
+def _corpus_of_mocks(path, count):
+    """A draft corpus with `count` mock rooms in it, as `draft_log` writes."""
+    import duckdb
+    from pipeline import draft_log as dl
+
+    conn = duckdb.connect(str(path))
+    conn.execute("CREATE TABLE draft_log (draft_id VARCHAR, source VARCHAR, "
+                 "league_id VARCHAR)")
+    conn.executemany("INSERT INTO draft_log VALUES (?, ?, ?)",
+                     [[f"d{i}", dl.SOURCE_MOCK, str(i)] for i in range(count)])
+    conn.close()
+    return str(path)
+
+
+@contextmanager
+def _held_write_lock(path):
+    """Another process holding the corpus read-write, which is the farm.
+
+    A real subprocess rather than a second connection in this one: DuckDB's
+    single-writer lock is what the farm actually takes, and an in-process
+    second open fails for a different reason (a configuration clash) down a
+    different line of the driver.
+    """
+    code = ("import sys, time, duckdb\n"
+            "c = duckdb.connect(sys.argv[1])\n"
+            "c.execute('SELECT 1').fetchall()\n"
+            "print('held', flush=True)\n"
+            "time.sleep(120)\n")
+    holder = subprocess.Popen([sys.executable, "-c", code, str(path)],
+                              stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == "held", "no lock holder"
+        yield
+    finally:
+        holder.terminate()
+        holder.wait(timeout=30)
+
+
+def test_the_first_request_is_quick_with_the_corpus_locked(
+        client, monkeypatch, tmp_path):
+    """The farm holds the corpus most of the time, and the seed's answer to
+    that is to give up. Giving up must be immediate: a request that waited on
+    somebody else's write lock would be a stall nobody could reproduce,
+    because whether it happens at all depends on what the farm is doing."""
+    from pipeline import draft_log as dl
+
+    corpus = _corpus_of_mocks(tmp_path / "corpus.duckdb", 900)
+    monkeypatch.setattr(dl, "CORPUS_PATH", corpus)
+    billing.reset_for_tests(str(tmp_path / "locked-billing.duckdb"))
+    _sign_in(monkeypatch)
+
+    with _held_write_lock(corpus):
+        started = time.monotonic()
+        res = client.get("/api/account/favorites")
+        took = time.monotonic() - started
+
+    assert res.status_code == 200
+    assert took < FIRST_REQUEST_BUDGET_SECONDS, f"{took:.2f}s on the first read"
+
+
+def test_the_first_request_does_not_pay_for_the_corpus_backlog(
+        client, monkeypatch, tmp_path):
+    """The unlocked case, which is the one that actually cost 24 seconds.
+
+    A corpus the table has never seen is the ordinary state of a container
+    that has just booted onto a volume the farm has been writing to, and the
+    seed still has to happen. The claim being tested is only that it happens
+    SOMEWHERE ELSE, so the write is held open rather than merely made large:
+    a stopwatch against a real backlog measures how quick this laptop is, and
+    a gate measures the thing that broke.
+    """
+    from pipeline import draft_log as dl
+
+    corpus = _corpus_of_mocks(tmp_path / "corpus.duckdb", 20)
+    monkeypatch.setattr(dl, "CORPUS_PATH", corpus)
+    billing.reset_for_tests(str(tmp_path / "backlog-billing.duckdb"))
+    _sign_in(monkeypatch)
+
+    # The seed's write, stopped mid-flight. On a volume whose fsync costs
+    # milliseconds this is what 854 rooms one row at a time felt like.
+    released = threading.Event()
+    real_insert = billing._insert_mock_rooms
+
+    def held(store, league_ids):
+        assert released.wait(10), "the seed was never released"
+        return real_insert(store, league_ids)
+
+    monkeypatch.setattr(billing, "_insert_mock_rooms", held)
+
+    started = time.monotonic()
+    res = client.get("/api/account/favorites")
+    took = time.monotonic() - started
+
+    assert res.status_code == 200
+    assert took < FIRST_REQUEST_BUDGET_SECONDS, f"{took:.2f}s on the first read"
+
+    # And the work was not skipped, only moved: every room is in the table
+    # once the seed's own thread gets to finish.
+    released.set()
+    assert billing._seed_done.wait(30)
+    assert billing.is_free_draft("7") is True

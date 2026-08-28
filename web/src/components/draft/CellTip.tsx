@@ -44,22 +44,31 @@ export function loadProfile(playerId: string): Promise<PlayerProfileData> {
     .then((data) => { settled.set(playerId, data); return data })
 }
 
-// What has already arrived, readable without a promise. NOT a second cache --
-// it never asks for anything -- but the panel below opens on a pointer and a
-// value it can paint in the same frame is the difference between a panel and
-// a skeleton that flashes. A stale entry here is painted for exactly one
-// frame: the effect that follows calls `loadProfile`, which refetches if the
-// shared window has passed and replaces it.
+// ONE CACHE, AND A SYNCHRONOUS VIEW OF IT.
+//
+// The store is api.ts's `cachedGet` (above): one in-flight request per
+// player and one window, shared by every reader of a profile -- the hover
+// tip, the board-grid peek, the target cards and the profile card. This map
+// is not a second one; it never asks for anything and is never consulted
+// about freshness. It exists because those readers open on a POINTER, and a
+// payload they can paint in the frame they open is the difference between a
+// card and a skeleton that flashes over an answer we already hold.
+//
+// A stale entry here is painted and then replaced: every reader that paints
+// from it also calls `loadProfile`, which is a lookup inside the shared
+// window and a real request past it.
 const settled = new Map<string, PlayerProfileData>()
 
-/** Test seam, and the panel's own synchronous read. */
-export function peekProfile(playerId: string): PlayerProfileData | null {
+/** What has already arrived for this player, or null. Synchronous, for a
+ *  reader that would otherwise draw a spinner over an answer in hand. */
+export function cachedProfile(playerId: string): PlayerProfileData | null {
   return settled.get(playerId) ?? null
 }
 
-/** Drops one player, so the next read really asks. For the one case where
- *  something on screen has CHANGED the profile -- marking a player drafted --
- *  and a shared answer from a moment ago is the wrong one. */
+/** Drops one player from both the view and the store, so the next read
+ *  really asks. For the one case where something on screen has CHANGED what
+ *  the payload reports -- the card's own drafted toggle -- and every other
+ *  reader would otherwise go on serving the answer from before it. */
 export function forgetProfile(playerId: string): void {
   settled.delete(playerId)
   forgetRequest(`profile/${playerId}`)
@@ -225,7 +234,7 @@ export const CellTip = memo(function CellTip(
   },
 ): ReactNode {
   const [data, setData] = useState<PlayerProfileData | null>(
-    () => peekProfile(playerId))
+    () => cachedProfile(playerId))
   const [failed, setFailed] = useState(false)
   // Guards a resolve arriving after the pointer has moved to another row --
   // without it the panel would briefly show the previous player's seasons
@@ -234,7 +243,7 @@ export const CellTip = memo(function CellTip(
 
   useEffect(() => {
     wanted.current = playerId
-    const hit = peekProfile(playerId)
+    const hit = cachedProfile(playerId)
     if (hit) { setData(hit); setFailed(false) } else { setData(null); setFailed(false) }
     loadProfile(playerId)
       .then((d) => { if (wanted.current === playerId) setData(d) })
