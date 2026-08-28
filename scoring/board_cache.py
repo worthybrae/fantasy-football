@@ -392,17 +392,21 @@ _pool_cache: "OrderedDict[tuple, object]" = OrderedDict()
 _pool_inflight: dict = {}
 
 
-def cached_build_pool(conn, board: pd.DataFrame, settings):
+def cached_build_pool(conn, board: pd.DataFrame, settings,
+                      weights: dict | None = None):
     """Cached `scoring.draft_sim.build_pool`, keyed on what the pool is
     actually a function of: the universal data (`_identity_key`), the set
-    of players on `board` (`board_fingerprint`) and the league's settings.
+    of players on `board` (`board_fingerprint`), the league's settings, the
+    weights the board was built with (`build_pool` reads the board's own
+    composite columns) and the sim tables (`_sim_key`), the same two the
+    board's key carries. `build_session` passes no weights: the defaults.
 
     Returns the cached SimPool ITSELF, not a copy: its arrays are read by
     `survival` and `rank_available` and written by nothing, and a copy per
     connect would be the memory this cache exists to stop.
     """
     key = (_identity_key(conn), board_fingerprint(board),
-           league.to_json(settings))
+           league.to_json(settings), _weights_key(weights), _sim_key(conn))
     return get_or_build(_pool_cache, _pool_inflight, _lock, key,
                         lambda: build_pool(conn, board, settings),
                         _POOL_MAX_ENTRIES)
