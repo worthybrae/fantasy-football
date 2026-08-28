@@ -26,6 +26,7 @@ from scoring import league as league_mod
 from scoring.board_cache import (board_fingerprint,  # noqa: F401 -- re-exported
                                  cached_build_board, cached_build_pool)
 from scoring.draft_sim import build_pool
+from scoring.headshot import thumb
 
 # Pinned, not generated. See DraftSession.seed.
 DEFAULT_SEED = 20260811
@@ -1112,7 +1113,11 @@ def _identity_rows(conn, ids: list) -> dict:
         FULL OUTER JOIN players p ON p.gsis_id = l.player_id
         WHERE COALESCE(p.gsis_id, l.player_id) IN ({marks})
     """, list(ids) + list(ids)).fetchall()
-    return {str(r[0]): {"name": _str_or_none(r[1]), "headshot": _str_or_none(r[2]),
+    # `thumb` (scoring/headshot.py): straight off `players`, so unlike the
+    # board rows beside them these are the stored 3400x2450 originals, and
+    # the rail draws them at 24 pixels.
+    return {str(r[0]): {"name": _str_or_none(r[1]),
+                        "headshot": thumb(_str_or_none(r[2])),
                         "position": _str_or_none(r[3]), "team": _str_or_none(r[4])}
             for r in rows if _str_or_none(r[1]) is not None}
 

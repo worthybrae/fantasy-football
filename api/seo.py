@@ -37,6 +37,7 @@ from fastapi import HTTPException
 from api import http_cache
 from api import market
 from pipeline.db import read_table
+from scoring.headshot import thumb
 
 SITE = "https://espnfantasydraft.com"
 POSITIONS = ("QB", "RB", "WR", "TE", "K", "DST")
@@ -526,7 +527,14 @@ def register_seo_routes(app, conn=None):
             "adp_player.html", title=f"{p['name']} ADP – ESPN mock drafts {d['updated'].year if d['updated'] else ''} – ESPN Draft Assist",
             description=desc, path=f"/adp/{p['slug']}", p=p, drafts=d["drafts"],
             teams=d["teams"], rounds=d["rounds"], picks_total=d["teams"] * d["rounds"],
-            peak=max(p["hist"]) or 1, near=near, headshot=p["headshot"],
+            # base.html hangs `og:image` on this, and a card image has to
+            # be at least 200px square to be shown at all -- so the social
+            # tag asks for a bigger one than the 72-pixel `img` on the page,
+            # off the same url. `thumb` replaces a width it already set
+            # (scoring/headshot.py), which is what makes that possible here
+            # without carrying the original around.
+            peak=max(p["hist"]) or 1, near=near,
+            headshot=thumb(p["headshot"], 320),
             provenance=_provenance(d),
             breadcrumbs=_crumbs(("ADP", "/adp"), (p["position"], f"/adp/{p['position'].lower()}"),
                                 (p["name"], f"/adp/{p['slug']}"))))

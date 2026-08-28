@@ -49,6 +49,7 @@ from api import http_cache
 from pipeline.db import get_conn
 from scoring.board_cache import cached_build_board
 from scoring.draft_sim import snake_slots
+from scoring.headshot import thumb
 
 # Games a team plays. The same divisor the room's own Proj/G column uses, so
 # the landing page and the product cannot mean two things by "per game".
@@ -390,7 +391,10 @@ def _board_payload(record: dict, picks: list, board, slot: int | None) -> dict:
             "player": {
                 "player_id": pid,
                 "name": getattr(source, "name", None),
-                "headshot": _text(getattr(source, "headshot", None)),
+                # Already sized -- this is a board row and the board sizes
+                # its own column (scoring/board.py). `thumb` is idempotent, so
+                # a board that arrived from anywhere else is sized too.
+                "headshot": thumb(_text(getattr(source, "headshot", None))),
                 "position": getattr(source, "position", None),
                 "team": getattr(source, "team", None),
                 "bye": _num(getattr(source, "bye", None)),

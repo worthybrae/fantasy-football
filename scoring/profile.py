@@ -18,6 +18,7 @@ from pipeline.news import ATTR_EXACT
 from scoring import factors, league
 from scoring.board import _norm_name, _adapt_depth_charts
 from scoring.board_cache import cached_build_board
+from scoring.headshot import thumb
 from scoring.config import RECENCY_WEIGHTS
 from scoring.profile_cache import (RANK_MIN_GAMES, _table_columns,
                                    cached_profile_frames, season_rank_frame,
@@ -1888,7 +1889,10 @@ def build_profile(conn, player_id: str, weights: dict | None = None,
     if {"gsis_id", "headshot"}.issubset(people.columns):
         row = people[people["gsis_id"] == player_id]
         if not row.empty and pd.notna(row["headshot"].iloc[0]):
-            bio["headshot"] = row["headshot"].iloc[0]
+            # The card draws this at 44 pixels; the stored url is the
+            # 3400x2450 original. See scoring/headshot.py -- non-Cloudinary
+            # urls (every fixture in the suite) come back unchanged.
+            bio["headshot"] = thumb(row["headshot"].iloc[0])
     for s in seasons:
         s["age"] = (_age_in_season(bio["birth_date"], s["season"])
                     if bio["birth_date"] else None)

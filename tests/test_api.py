@@ -109,6 +109,34 @@ def test_players_endpoint(tmp_path):
     assert "adp" not in row
     assert "espn_ppr_rank" in row  # None here (empty espn_adp seed), but key must be present
 
+def test_players_serves_a_thumbnail_and_not_the_original_photograph(tmp_path):
+    """nflverse stores nfl.com's 3400x2450 original -- 250-870 KB -- and the
+    board draws a 30-pixel avatar out of it. A cold landing load measured
+    10.5 MB, 10.2 MB of it these files. Every headshot leaving this endpoint
+    carries the Cloudinary width that makes it a thumbnail; see
+    scoring/headshot.py, and scoring/board.py for where it goes on."""
+    from scoring import board_cache, profile_cache
+    path = str(tmp_path / "t.duckdb")
+    _seed(path)
+    conn = get_conn(path)
+    write_table(conn, "players", pd.DataFrame([
+        {"gsis_id": "p1", "display_name": "A Star",
+         "birth_date": "2000-01-01", "rookie_season": 2022,
+         "headshot": "https://static.www.nfl.com/image/private/f_auto,q_auto/league/abc"}]))
+    conn.close()
+    board_cache.clear(); profile_cache.clear()
+    c = TestClient(create_app(path))
+
+    row = next(p for p in c.get("/api/players").json()["players"]
+               if p["player_id"] == "p1")
+    assert row["headshot"] == ("https://static.www.nfl.com/image/private/"
+                               "f_auto,q_auto,w_96,c_fill,g_face/league/abc")
+    # The card's portrait is read straight off `players` rather than off the
+    # board, so it is sized somewhere else (scoring/profile.py) and has to be
+    # checked somewhere else.
+    assert "w_96" in c.get("/api/players/p1/profile").json()["bio"]["headshot"]
+
+
 def test_players_custom_weights(tmp_path):
     c = _client(tmp_path)
     r = c.get("/api/players", params={"w_production": 1.0, "w_role": 0.0,

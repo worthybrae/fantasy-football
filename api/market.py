@@ -50,6 +50,7 @@ from fastapi import HTTPException, Response
 
 from api import http_cache
 from pipeline import draft_log as dl
+from scoring.headshot import thumb
 
 # How long an answer stands. The corpus grows by one draft every few minutes
 # and no question here moves visibly in that time -- a tenth of a percent on
@@ -239,7 +240,10 @@ def _names(conn) -> dict:
     except Exception:      # noqa: BLE001 -- a board that cannot be read costs
         # names, not the page: every row still has a position and a market.
         return {}
-    return {str(pid): {"name": name, "headshot": shot}
+    # `thumb` (scoring/headshot.py): these are the faces on the archive's
+    # pick cards and on every /adp page, drawn no larger than 72 pixels,
+    # and the stored url is nflverse's 3400x2450 original.
+    return {str(pid): {"name": name, "headshot": thumb(shot)}
             for pid, name, shot in rows if pid}
 
 
@@ -263,6 +267,9 @@ def _board_names(conn, missing: set) -> dict:
         if pid in missing:
             name = getattr(row, "name", None)
             shot = getattr(row, "headshot", None)
+            # Already sized: `headshot` is a board column and the board
+            # sizes it at build (scoring/board.py). `thumb` is idempotent, so
+            # this stays correct either way.
             out[pid] = {"name": None if name is None else str(name),
                         "headshot": None if shot is None or shot != shot else str(shot)}
     return out

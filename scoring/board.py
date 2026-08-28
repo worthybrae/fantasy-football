@@ -54,6 +54,7 @@ from pipeline.db import read_table
 from scoring import factors, league
 from scoring.composite import compute_composite, apply_vor, assign_tiers
 from scoring.config import DEFAULT_WEIGHTS, RECENCY_WEIGHTS
+from scoring.headshot import thumb
 from scoring.market import add_market, select_format
 from scoring.ppr import (DEFAULT_RULES, compute_dst_points, compute_ppr_points,
                          normalize_rules, prices_defense, prices_kicking)
@@ -1432,6 +1433,16 @@ def build_board(conn, weights: dict | None = None,
         uni = uni.merge(faces, on="player_id", how="left")
     else:
         uni["headshot"] = None
+
+    # Sized here, not in the endpoints that serve this frame. Every board row
+    # is a table row with an avatar on it and nflverse's url is the 3400x2450
+    # original (scoring/headshot.py); doing it at the build means it happens
+    # once per CACHED board rather than once per request, and there is no way
+    # to take a board out of this module without the sized url on it -- the
+    # room's grid, the ticker, the plan panel and /api/players all read this
+    # one column. NaN (no photo, or no `players` row at all) maps to None,
+    # which is the null the frontend already renders as no picture.
+    uni["headshot"] = uni["headshot"].map(thumb)
 
     drafted_ids = set(drafted["player_id"]) if not drafted.empty else set()
     uni["drafted"] = uni["player_id"].isin(drafted_ids)
