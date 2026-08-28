@@ -19,6 +19,13 @@ import os
 
 import pytest
 
+# AT IMPORT, before any fixture: a `.env` the developer keeps beside the
+# repository, or a DSN exported in their shell, must not reach a single
+# test's collection -- `api/main.py` guards its own loader against pytest,
+# but the shell's variable needs no loader. `_no_shared_postgres` below
+# repeats this per test, for a test that sets it and forgets.
+os.environ.pop("SUPABASE_DB_URL", None)
+
 
 @pytest.fixture(autouse=True, scope="session")
 def _seo_warm_off():

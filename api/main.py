@@ -15,10 +15,16 @@ import uuid
 # repository. The tests that exercise this loader call it directly with their
 # own path.
 import os
+import sys
 
 from api.env import load_env_file
 
-if "PYTEST_CURRENT_TEST" not in os.environ:
+# Two guards, because the first is not enough on its own: PYTEST_CURRENT_TEST
+# is set per test, so a test module that imports this one at COLLECTION
+# time (tests/test_api.py does) saw no such variable and loaded the owner's
+# `.env` -- Stripe key, Supabase DSN -- into every test that followed.
+# `pytest` in sys.modules is true from the moment the runner starts.
+if "PYTEST_CURRENT_TEST" not in os.environ and "pytest" not in sys.modules:
     load_env_file()
 
 import pandas as pd
