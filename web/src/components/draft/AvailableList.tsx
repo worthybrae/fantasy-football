@@ -537,6 +537,23 @@ function pulseIntensity(lastsPct: number | null): number | null {
   return danger * danger
 }
 
+// AT MOST THREE ROWS BREATHE AT ONCE.
+//
+// The floor below is a threshold, not a budget: on a real board a whole
+// round's worth of rows clears it, and a QA pass counted seven animating
+// together. Seven simultaneous infinite background animations is both a
+// paint cost on the main thread (see the floor's own note on why
+// `background` cannot be composited) and, worse, a table where so much is
+// moving that nothing stands out -- which is the exact noise the pulse was
+// added to avoid. Three is the number of players a reader can hold as "these
+// are about to go", and it matches the three cards above the table.
+//
+// The three are the three most IN DANGER, not the first three rows on
+// screen: the list is in ESPN's order and can be re-sorted by any column, so
+// "the top rows" is a position, while the pulse is a claim about a
+// probability.
+const PULSE_ROWS = 3
+
 // Below this intensity a row gets NO animation, not a faint one.
 //
 // The keyframes scale `--fail` by `--pulse * 12%` and `--pulse * 38%`, so at
@@ -579,11 +596,15 @@ const PULSE_FLOOR = 0.02
 // and would defeat the comparison entirely.
 const AvailableRow = memo(function AvailableRow({
   c, player, isTaken, season, isMyTurn, onOpenPlayer, onDraft,
-  onCellEnter, onCellLeave, starters,
+  onCellEnter, onCellLeave, starters, pulse,
 }: {
   c: LiveCandidate
   player: Player | undefined
   isTaken: boolean
+  /** How hard this row should breathe, or null for the great majority of
+   *  rows that do not. Decided by the list (only the three most at risk get
+   *  one), not by the row: a row cannot see the others. */
+  pulse: number | null
   season: number | null
   isMyTurn: boolean
   onOpenPlayer: (c: LiveCandidate) => void
@@ -602,18 +623,14 @@ const AvailableRow = memo(function AvailableRow({
   // "is there a move at all" question are one answer, and calling for it
   // twice was two chances for them to be read apart.
   const projDelta = change === null ? null : signedChange(change)
-  // A taken row never pulses -- it is already fading out under
-  // `avail-row-taken`'s own animation, and stacking a second one on top
-  // would be two answers to "what happened to this row" at once. Computed
-  // even when taken (cheap, a couple of arithmetic ops) so the class/style
-  // logic just below reads as one rule rather than two branches that have
-  // to agree with each other.
-  const pulse = isTaken ? null : pulseIntensity(c.lasts_pct)
   // ONE derived answer for both the class and the custom property below.
   // They have to agree -- a `--pulse` with no class to read it is wasted
   // work, a class with no `--pulse` animates against an undefined value --
   // and two separate conditions are two things that can drift apart.
-  const animated = pulse !== null && pulse >= PULSE_FLOOR
+  // A taken row never pulses -- it is already fading out under
+  // `avail-row-taken`'s own animation, and stacking a second one on top
+  // would be two answers to "what happened to this row" at once.
+  const animated = !isTaken && pulse !== null && pulse >= PULSE_FLOOR
   return (
               <tr key={c.player_id} data-pid={c.player_id}
                   // THE WHOLE ROW OPENS THE PROFILE, not just the name. The
@@ -983,7 +1000,7 @@ export default function AvailableList({
   // legend for a signal that is not on screen is furniture. `.some` over a
   // few hundred rows on a list that is rebuilt every recompute is nothing
   // next to the sparklines below it.
-  const pulses = useMemo(
+  const anyLasts = useMemo(
     () => candidates.some((c) => c.lasts_pct !== null), [candidates])
 
   // A player leaving the board is the single most informative event in a
@@ -1077,6 +1094,19 @@ export default function AvailableList({
   })
   const withTaken = held.length === 0 ? visible : [...visible, ...held]
   const rows = withTaken.slice().sort((a, b) => compareRows(a, b, sort.key, sort.dir, players))
+
+  // The three rows in most danger, and only those -- see PULSE_ROWS. Taken
+  // rows are left out before the cut rather than dropped after it, so a pick
+  // landing does not silently spend one of the three on a row that is
+  // fading off the board.
+  const pulses = new Map<string, number>()
+  for (const c of rows) {
+    if (draftedIds.has(c.player_id)) continue
+    const intensity = pulseIntensity(c.lasts_pct)
+    if (intensity !== null && intensity >= PULSE_FLOOR) pulses.set(c.player_id, intensity)
+  }
+  const breathing = new Map(
+    [...pulses.entries()].sort((a, b) => b[1] - a[1]).slice(0, PULSE_ROWS))
 
   // FLIP, because a table row cannot be collapsed. Animating a `td` to height
   // zero does not shrink the row while its sparkline still has intrinsic
@@ -1362,7 +1392,7 @@ export default function AvailableList({
             reader watching rows glow under a pick clock never has to guess
             whether it means "gone", "injured" or "bad". The Lasts column
             explains itself through its own header tooltip (`lastsTitle`). */}
-        {pulses && (
+        {anyLasts && (
           <div className="avail-keys">
             <span
               className="avail-key"
@@ -1448,6 +1478,7 @@ export default function AvailableList({
               onCellEnter={showCellTip}
               onCellLeave={hideCellTip}
               starters={startersAt(c.position, settings)}
+              pulse={breathing.get(c.player_id) ?? null}
             />
           ))}
           {rows.length === 0 && (

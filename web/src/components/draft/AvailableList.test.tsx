@@ -52,6 +52,11 @@ const CANDIDATES = [
   candidate({ player_id: 'd', espn_rank: null, rank: 4 }),
 ]
 
+// Six rows that would all clear the pulse floor on their own.
+const AT_RISK = ['r1', 'r2', 'r3', 'r4', 'r5', 'r6'].map((id, i) => candidate({
+  player_id: id, espn_rank: i + 1, rank: i + 1, lasts_pct: 5 + i * 3,
+}))
+
 const PLAYERS: Record<string, Player> = {
   a: player('a', 'Ashton'), b: player('b', 'Bijan'),
   c: player('c', 'Chase'), d: player('d', 'Dell'),
@@ -78,6 +83,30 @@ test('opens in ESPN rank order, with the unranked last', () => {
   const names = Array.from(container.querySelectorAll('tbody .avail-name'))
     .map((el) => el.textContent)
   expect(names).toEqual(['Ashton', 'Bijan', 'Chase', 'Dell'])
+})
+
+// A QA pass counted seven rows breathing at once: seven infinite background
+// animations on the main thread, and a table where so much moves that nothing
+// stands out. Three is the cap, and they are the three in most danger rather
+// than the first three on screen.
+test('at most three rows pulse, and they are the three least likely to last', () => {
+  const players: Record<string, Player> = {}
+  for (const c of AT_RISK) players[c.player_id] = player(c.player_id, c.player_id)
+  const { container } = render(
+    <AvailableList
+      candidates={AT_RISK}
+      players={players}
+      onDraft={() => {}}
+      isMyTurn={false}
+      onOpenPlayer={() => {}}
+      draftedIds={new Set<string>()}
+      settings={null}
+    />,
+  )
+  const pulsing = Array.from(container.querySelectorAll('tr.avail-row-pulse'))
+    .map((row) => row.getAttribute('data-pid'))
+  expect(pulsing).toHaveLength(3)
+  expect(new Set(pulsing)).toEqual(new Set(['r1', 'r2', 'r3']))
 })
 
 test('stars the reader\'s own guys, and only them', () => {
