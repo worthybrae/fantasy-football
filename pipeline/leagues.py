@@ -51,7 +51,8 @@ def league_db_path(league_id: str, root: str = LEAGUES_ROOT) -> str:
     return str(Path(root) / f"{_safe_id(league_id)}.duckdb")
 
 
-from pipeline.db import UNIVERSAL_TABLES, get_conn, read_table, write_table
+from pipeline.db import (UNIVERSAL_TABLES, apply_worker_conn_limits, get_conn,
+                         read_table, write_table)
 
 
 # The read-only copy of the universal database that provisioning reads
@@ -97,8 +98,7 @@ def _provision_by_attach(path: str, snapshot: str) -> None:
     exists, no resident memory left behind in the caller."""
     dst = get_conn(path)
     try:
-        dst.execute("SET memory_limit='256MB'")
-        dst.execute("SET threads=2")
+        apply_worker_conn_limits(dst)
         dst.execute(f"ATTACH '{snapshot}' AS src (READ_ONLY)")
         try:
             have = {r[0] for r in dst.execute(

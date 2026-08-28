@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 
-from pipeline.db import get_conn, read_table
+from pipeline.db import apply_parent_conn_limits, get_conn, read_table
 from pipeline.espn_live import build_crosswalk
 from scoring import league as league_mod
 from scoring.board_cache import cached_build_board
@@ -2611,7 +2611,7 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
                     session = _build_off_process(league_path, league_id,
                                                  team_id, settings, progress)
                     league_conn = get_conn(league_path)
-                    live_build.apply_conn_limits(league_conn)
+                    apply_parent_conn_limits(league_conn)
                     if settings is None:
                         # build_session's own rule for what it fell back to
                         # (see its settings_source fact): a `league` row is a
@@ -2622,7 +2622,7 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
                     _publish_path(s, league_path)
                     return league_conn, league_conn, session
                 league_conn = get_conn(league_path)
-                live_build.apply_conn_limits(league_conn)
+                apply_parent_conn_limits(league_conn)
             except Exception:
                 # NEW-4: a failure after the parent opened its connection
                 # closes it, exactly as the inline handler below does.

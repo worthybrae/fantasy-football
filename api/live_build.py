@@ -38,21 +38,20 @@ import threading
 from concurrent.futures import Future, ProcessPoolExecutor, TimeoutError
 from concurrent.futures.process import BrokenProcessPool
 
+from pipeline.db import (WORKER_CONN_MEMORY_LIMIT, WORKER_CONN_THREADS,
+                         apply_worker_conn_limits)
+
 WORKERS_ENV = "LIVE_BUILD_WORKERS"
 
-# DuckDB's defaults are sized for one database per machine: a thread per
-# core and most of the RAM. A deployment holds one connection per live
-# room, so each gets a slice instead. Two threads is enough for the small
-# per-pick queries a room runs; 256 MB is well above what one league file's
-# working set needs and low enough that two hundred of them do not add up
-# to the container.
-CONN_THREADS = 2
-CONN_MEMORY_LIMIT = "256MB"
+# The worker's build connection gets the WORKER limits from pipeline/db.py;
+# the parent's own per-room connection gets the smaller PARENT ones there.
+# Kept as names here for the callers and tests that read them.
+CONN_THREADS = WORKER_CONN_THREADS
+CONN_MEMORY_LIMIT = WORKER_CONN_MEMORY_LIMIT
 
 # How long a connect waits for its worker. Well past the 35 s the slowest
 # measured build takes, and short enough that a worker that has hung does
-# not hold a request thread for the rest of the evening: on expiry the
-# future is cancelled and that one connect builds inline instead.
+# not hold a request thread for the rest of the evening.
 LIVE_BUILD_TIMEOUT = 120.0
 # How much longer a connect waits for a worker that would not cancel: a
 # running build cannot be cancelled, and while it runs the worker has the
@@ -79,9 +78,8 @@ def workers() -> int:
 
 
 def apply_conn_limits(conn) -> None:
-    """Cap one per-league DuckDB connection's threads and memory."""
-    conn.execute(f"SET threads={CONN_THREADS}")
-    conn.execute(f"SET memory_limit='{CONN_MEMORY_LIMIT}'")
+    """Cap a WORKER's build connection (see pipeline/db.py for the sizes)."""
+    apply_worker_conn_limits(conn)
 
 
 def _get_pool() -> ProcessPoolExecutor:

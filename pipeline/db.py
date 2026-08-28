@@ -55,6 +55,33 @@ UNIVERSAL_TABLES = frozenset({
     "player_news", "player_status",
 })
 
+# Per-connection DuckDB limits. DuckDB's defaults size one database for the
+# whole machine -- a thread per core, most of the RAM -- and the app holds
+# one connection per live room. Two sizes: a WORKER connection builds a
+# board and a pool (reads `weekly` whole, once) and is closed minutes later,
+# so it gets real headroom; the app's own long-lived per-room connection
+# only ever reads `drafted`, `league`, `draft_order` and the sim tables --
+# a few hundred rows -- and two hundred of them must not each be allowed
+# to grow to a quarter of a gigabyte.
+WORKER_CONN_THREADS = 2
+WORKER_CONN_MEMORY_LIMIT = "256MB"
+PARENT_CONN_THREADS = 1
+PARENT_CONN_MEMORY_LIMIT = "32MB"
+
+
+def apply_conn_limits(conn, threads: int, memory_limit: str) -> None:
+    conn.execute(f"SET threads={int(threads)}")
+    conn.execute(f"SET memory_limit='{memory_limit}'")
+
+
+def apply_worker_conn_limits(conn) -> None:
+    apply_conn_limits(conn, WORKER_CONN_THREADS, WORKER_CONN_MEMORY_LIMIT)
+
+
+def apply_parent_conn_limits(conn) -> None:
+    apply_conn_limits(conn, PARENT_CONN_THREADS, PARENT_CONN_MEMORY_LIMIT)
+
+
 def get_conn(path: str = DEFAULT_PATH) -> duckdb.DuckDBPyConnection:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     conn = duckdb.connect(path)
