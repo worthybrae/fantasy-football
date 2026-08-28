@@ -26,8 +26,8 @@ Below that is the bookmarklet, **🏈 Draft Assistant** — drag it to your
 bookmarks bar once and every draft after that is one click — and the three steps for using it.
 
 The last band is a readiness strip: when the data last refreshed, whether a
-league and its draft history are imported, whether manager models are fitted,
-whether a sim has ever run. Draft night is the one night this has to work,
+league and its draft history are imported, whether manager models are fitted
+(for the simulator; the room does not need them), whether a sim has ever run. Draft night is the one night this has to work,
 and every way it can fail is something that did or didn't happen days
 earlier, so each row that isn't ready names the command that fixes it.
 
@@ -241,6 +241,79 @@ cheapest way to check the whole path before it matters.
 Vite proxies `/api` to the backend. Re-run `make refresh` any time you want
 newer stats/ADP — the API reads straight from the DuckDB file, so a restart
 isn't required for the underlying data, only for picking up schema changes.
+
+## The draft room
+
+The board the bookmarklet opens is the room, and it is built around one
+question: who will still be there at your next turn. Everything else in it
+is arranged to answer that.
+
+**ESPN's order, because that is the order the room you are drafting in is
+reading.** Rows sort by ESPN's draft-lobby rank (`espn_adp.espn_ppr_rank`,
+pulled by `make refresh`); a player the lobby list misses takes his rank from
+the season's printable cheat sheet (`historic_espn_cs.cs_rank`), and a player
+in neither sorts after every ranked player, by consensus. Per row: **ESPN**
+(that rank), **Pos** (his order among his position by the same rank), **ADP**
+(ESPN's average draft position, blank until ESPN's number stops being the
+placeholder it serves before drafts start), **Consensus** (the five-source
+median the board already computed), **Lasts %**, **Edge**, **Proj/G** and
+the health, finish, reliable and growth meters. Every column sorts; ESPN
+rank is the default.
+
+**Lasts %** is counted, not simulated. The farm (see Farming from the
+server) has sat in hundreds of real ESPN mock drafts, and
+`data/draft_corpus.duckdb` holds every pick of every one of them. For a
+player who was in the pool of enough of those drafts, "still there at pick
+N given he is still there at pick K" is a ratio of counts:
+(drafts where he went after N) / (drafts where he went after K), with K the
+pick on the clock now and N your next turn. Overall pick number is the axis
+-- ADP is already in overall picks, and a 12-team league's third round is
+picks 25-36 on the same line as an 8-team league's. Past the depth the
+corpus can speak to (it is 8-team, 16-round, so about pick 128), or for a
+player it has too few drafts of, a parametric fallback takes over: from ESPN
+ADP buckets fitted on the same rows, a normal tail conditioned the same way,
+by position group. `scoring/availability.py` holds the table and the
+query; the table rebuilds itself when the corpus file changes.
+
+**Edge** is what taking him now is worth over waiting: his projected points
+minus the expected best player at his position you would get at your next
+turn, where "expected" weights every other player at the position by his
+own Lasts %. Positive means take him; negative means the position keeps.
+`scoring/plan.py` computes it, over the counted probabilities, for every row
+at once.
+
+**The plan** draws one target and two alternates for each of your remaining
+turns, greedily, in one pass: at each turn only players likely enough to be
+there are eligible (50%, or 35% for one of your guys), each is scored by how
+much the roster needs his position times his projection, less what waiting
+one more turn at that position would get, and the target's position counts
+against the roster before the next turn is drawn. A turn nobody clears says
+so ("no clear target") rather than inventing a name. On the clock, the three
+cards are the same score with everybody available at 100%, and their
+reasons are measured at the turn after this one. Each target carries up to
+four reasons for and up to four against, in a fixed order: ★ your guy; the
+Lasts % line; the edge as a pro or, negative, a con; the slot he fills;
+"ADP vs ESPN -- may go earlier" when the two disagree by more than six
+picks; a bye week that stacks with two of your starters; a health meter at
+two bars or under.
+
+**Your guys.** A signed-in account can star between 5 and 25 players; the
+dashboard asks for them once and then shows a compact "Your guys" card with
+Edit. The room marks them with a ★, weighs them by 1.15 in the plan and lets
+them in at 35% rather than 50%. They live in `favorite_player` beside
+`entitlement` in the billing store (DuckDB file or Postgres, the same choice
+`SUPABASE_DB_URL` makes for everything else), keyed by the custody account
+id, and are served by `GET /api/account/favorites` and replaced by
+`PUT /api/account/favorites` (`{"players": [...]}`, 422 outside 5-25 or for
+an id not on the board). A room reads them at connect and again every thirty
+seconds, so a star added mid-draft reaches the plan on the next poll.
+
+**What the room does not do any more** is simulate the rest of the round.
+The per-manager models fitted from imported history, the cold-start
+opponent and the rollouts are the simulator's, and they still run on the
+sim and report pages (below); the room's every refresh is a lookup and a
+rule, milliseconds a pick, which is what lets a hundred rooms share one
+process.
 
 ## Deploying it
 
@@ -506,8 +579,10 @@ in `scoring/config.py` — update them there if the league format changes.
 On top of the season-long scouting board, the tool can import your own
 league's ESPN draft history, learn how each manager in your league actually
 drafts, and simulate the upcoming draft from any slot. This is the study you
-run in the days before the draft; the live board is what you use during it.
-Neither covers auctions, keeper leagues, or in-draft trades.
+run in the days before the draft; the live room is what you use during it,
+and it does not use these models -- its Lasts % is counted from recorded
+mock drafts (see The draft room). Neither covers auctions, keeper leagues,
+or in-draft trades.
 
 ### Importing draft history
 
