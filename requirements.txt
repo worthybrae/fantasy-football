@@ -42,3 +42,9 @@ jinja2>=3.1,<4
 # code would otherwise re-implement and get subtly wrong. Capped at the major
 # version for the same reason stripe is.
 anthropic>=1.0,<2
+
+# psycopg 3, for pipeline/pgstore.py -- the Supabase Postgres backend the
+# custody, billing and live-session stores use when SUPABASE_DB_URL is set.
+# Without that variable it is never imported: every store keeps its DuckDB
+# file, and neither the test suite nor a laptop needs a database server.
+psycopg[binary,pool]>=3.2,<4
