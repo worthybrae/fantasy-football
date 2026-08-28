@@ -27,10 +27,21 @@ parametric curve fitted from the same rows (see `_fit_curve`):
   * A player the corpus has never seen. ESPN's board is longer than the pool
     the farm's mocks are drafted from.
   * A conditioned denominator under `MIN_DRAFTS`.
-  * ANY pick deeper than the deepest one ever recorded. The corpus is 8-team
-    16-round, so no pick past 128 exists in it and every player would count
-    as having lasted through pick 150 -- which on a 12-team board at a
-    round-13 turn printed 100% for well over half the list.
+  * A pick deeper than the deepest one ever recorded, FOR A PLAYER THE
+    CORPUS STOPPED WATCHING. The corpus is 8-team 16-round, so no pick past
+    128 exists in it and a player still on the board at the end of every
+    recorded draft would otherwise count as having lasted through pick 150 --
+    which on a 12-team board at a round-13 turn printed 100% for well over
+    half the list.
+
+    That is right-censoring, and it is not the same as having no evidence. A
+    player every one of his pooled drafts TOOK inside that depth has complete
+    evidence: "he is gone by 129" is a fact about him. Sending him to the
+    curve as well made the number jump upwards at the seam -- kickers at ESPN
+    rank 240 read 0.00 at pick 128 and 1.00 at pick 129, and six defenses
+    read 1% at pick 126 and 50% at 139 -- so only the censored go there, and
+    the counts carry them as far as the corpus goes before the curve takes
+    over (see `availability_at`).
 
 A fallback is not a nicety here: without it those cases return 0/0 and 1/1,
 i.e. "certainly gone" and "certainly there", which are the two most confident
@@ -360,12 +371,17 @@ def cached_table(corpus_path: str = dl.CORPUS_PATH) -> AvailabilityTable:
         return table
 
 
-def _survivor(value, k: int, n: int, mu, sigma):
+def _survivor(value, k, n: int, mu, sigma):
     """P(still there when pick n is made | still there after k picks).
 
     "Still there at pick n" means he survived every pick before it, so the
     numerator is the tail past `n - 1` -- the same off-by-one the counted
     path takes, so the two answers meet rather than differ by one pick.
+
+    `k` may be an array: a player the counts carry to the corpus's depth is
+    conditioned on THAT pick rather than on the current one, which is what
+    makes the two halves of his answer multiply into one curve instead of
+    stepping where they meet.
     """
     mu = np.where(np.isnan(mu), value, mu)
     sigma = np.where(np.isnan(sigma), FALLBACK_SIGMA, sigma)
@@ -404,7 +420,10 @@ def availability_at(table: AvailabilityTable, player_ids, k: int, n: int,
 
     `k` is the number of picks already made and `n` an overall pick number,
     so "still there at n" means he survived picks 1..n-1 and the counted
-    answer is `(pooled - taken_by[n-1]) / (pooled - taken_by[k])`.
+    answer is `(pooled - taken_by[n-1]) / (pooled - taken_by[k])`. Past the
+    corpus's own depth that is still the answer for a player it always saw
+    drafted, and the counts times the curve for one it never saw the end of
+    -- see the module docstring on censoring.
 
     `espn_adp`, `market_rank` and `positions` are aligned with `player_ids`;
     the first two may hold NaN. They are only read for the players the
@@ -438,20 +457,39 @@ def availability_at(table: AvailabilityTable, player_ids, k: int, n: int,
                       dtype=np.int64, count=size)
     have = idx >= 0
     counted = np.zeros(size, dtype=bool)
-    # Past the deepest pick the corpus has ever recorded, "nobody was taken
-    # there" is not evidence that everybody lasts -- see the module docstring.
-    if table.pooled.size and have.any() and n <= table.max_pick_observed:
-        rows = idx[have]
+    # What the counts contribute to a censored player's answer: the share of
+    # his drafts he was still there at the end of. 1.0 for everyone the
+    # counts do not speak for at all, so the curve stands alone for them.
+    carried = np.ones(size, dtype=float)
+    # Which pick the curve conditions on: now, or the corpus's own depth for
+    # a player the counts have already carried that far.
+    given = np.full(size, float(k))
+    if table.pooled.size and have.any():
+        where = np.flatnonzero(have)
+        rows = idx[where]
+        depth = table.max_pick_observed
         pooled = table.pooled[rows].astype(float)
         denominator = pooled - table.taken_by[rows, k]
-        numerator = pooled - table.taken_by[rows, n - 1]
         enough = denominator >= MIN_DRAFTS
-        answered = np.flatnonzero(have)[enough]
-        out[answered] = numerator[enough] / denominator[enough]
-        counted[answered] = True
+        # Every pooled draft took him inside the recorded depth. Nothing
+        # about him is censored, so the counts answer any pick, however deep.
+        complete = table.taken_by[rows, depth] >= pooled
+        direct = enough & ((n <= depth) | complete)
+        out[where[direct]] = ((pooled - table.taken_by[rows, n - 1])[direct]
+                              / denominator[direct])
+        counted[where[direct]] = True
+        # The rest of the counted players are asked about a pick past the
+        # corpus's reach: the counts take them to the end of it and the curve
+        # carries them from there, conditioned on that same pick so the two
+        # halves meet instead of stepping.
+        carry = enough & ~direct
+        carried[where[carry]] = ((pooled - table.taken_by[rows, depth])[carry]
+                                 / denominator[carry])
+        given[where[carry]] = float(depth)
 
     rest = ~counted
     if rest.any():
+        out[rest] = carried[rest]
         adp = _as_array(espn_adp, size)
         market = _as_array(market_rank, size)
         value = np.where(np.isfinite(adp), adp, market)
@@ -473,8 +511,8 @@ def availability_at(table: AvailabilityTable, player_ids, k: int, n: int,
                 inside = mine & (bucket >= 0) & (bucket < curve_mu.size)
                 mu[inside] = curve_mu[bucket[inside]]
                 sigma[inside] = curve_sigma[bucket[inside]]
-            out[ranked] = _survivor(value[ranked], k, n,
-                                    mu[ranked], sigma[ranked])
+            out[ranked] = carried[ranked] * _survivor(
+                value[ranked], given[ranked], n, mu[ranked], sigma[ranked])
     return np.clip(out, 0.0, 1.0)
 
 

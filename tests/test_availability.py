@@ -230,20 +230,57 @@ def test_every_id_is_answered_in_one_vectorised_call(corpus):
 
 # --- past the end of what the corpus has ever seen ---------------------------
 
-def test_past_the_deepest_recorded_pick_the_counts_are_not_evidence(corpus):
-    """An 8-team corpus stops at pick 128 (here, 40). Nobody has a recorded
-    pick past it, so EVERY player would count as having lasted -- 58% of a
-    12-team board reading 100% at a round-13 turn. Past that depth the curve
-    answers instead."""
+def test_past_the_deepest_recorded_pick_only_the_censored_go_to_the_curve(
+        corpus):
+    """An 8-team corpus stops at pick 128 (here, 40), and what that means is
+    different for two kinds of player.
+
+    A player every one of his pooled drafts took inside that depth has
+    COMPLETE evidence: "he is gone by 41" is a fact about him, not a gap in
+    the record. A player who was still there at the end is right-censored --
+    the corpus simply stopped watching -- and only he needs the curve.
+
+    Throwing both to the curve made the number jump UP at the seam: kickers
+    at rank 240 went 0.00 at pick 128 and 1.00 at pick 129, and six real
+    defenses read 1% at pick 126 and 50% at 139."""
     t = av.load_table(corpus)
     assert t.max_pick_observed == 40
-    counted = _at(t, ["n0"], 5, 39, np.array([100.0]))
-    assert counted[0] == pytest.approx(1.0), "inside the corpus, he lasts"
 
-    beyond = _at(t, ["n0"], 5, 150, np.array([100.0]))
-    assert beyond[0] == pytest.approx(
-        av.fallback_probability(100.0, 5, 150, t))
-    assert beyond[0] < 0.05, "ADP 100 does not last to pick 150"
+    # B goes at 10-30 in every draft he is pooled in. Nothing about him is
+    # censored, so pick 60 is answered by the counts: he is not there.
+    assert _at(t, ["B"], 10, 60, np.array([20.0]))[0] == pytest.approx(0.0)
+    # n0 was still on the board when every one of those drafts ended.
+    censored = _at(t, ["n0"], 10, 60, np.array([100.0]))[0]
+    assert censored > 0.5, "the corpus never saw him taken"
+    assert censored == pytest.approx(
+        ndtr((100.0 - 59) / av.FALLBACK_SIGMA)
+        / ndtr((100.0 - 40) / av.FALLBACK_SIGMA))
+
+
+def test_the_curve_takes_over_from_where_the_counts_left_him(corpus):
+    """The censored player's two halves are multiplied, not swapped: the
+    counts say how often he reached the end of the corpus and the curve
+    carries him from there. Anything else steps at the seam."""
+    t = av.load_table(corpus)
+    seam = _at(t, ["n0"], 5, t.max_pick_observed, np.array([100.0]))[0]
+    across = _at(t, ["n0"], 5, t.max_pick_observed + 1, np.array([100.0]))[0]
+    assert across <= seam + 1e-12
+
+
+def test_nothing_ever_gets_more_likely_to_last_as_the_pick_gets_later(corpus):
+    """The one property the whole number has to have. It is checked across
+    the seam for every player in the corpus, because the seam is exactly
+    where two different estimators meet."""
+    t = av.load_table(corpus)
+    ids = list(t.index)
+    ranks = np.array([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 20.0, 40.0,
+                      96.0, 97.0, 98.0, 99.0, 100.0, 101.0, 102.0, 103.0])
+    order = np.array([{pid: i for i, pid in enumerate(
+        EARLY + ["B", "D"] + NEVER)}[pid] for pid in ids])
+    adp = ranks[order]
+    walk = np.array([_at(t, ids, 5, n, adp) for n in range(6, 201)])
+    steps = np.diff(walk, axis=0)
+    assert (steps <= 1e-12).all(), ids[int(np.argmax(steps.max(axis=0)))]
 
 
 def test_past_the_deepest_pick_a_player_with_no_rank_still_reads_one(corpus):
@@ -400,3 +437,22 @@ def test_a_locked_corpus_with_nothing_cached_is_an_empty_table(
     # the answer for this file: the next poll has to try again.
     monkeypatch.undo()
     assert av.cached_table(path).player_ids.size == 18
+
+
+def test_a_kicker_the_corpus_always_drafts_does_not_come_back_to_life(
+        tmp_path):
+    """Every mock takes its kicker around pick 113 and the corpus is 128
+    picks deep. At a twelve-team round-11 turn -- pick 126, past the
+    deepest pick ever recorded -- he is gone, and the fitted curve has
+    nothing to say about him: K has no fitted bucket, so the curve would
+    have read his ESPN rank of 240 as "goes at pick 240" and printed 100%.
+    """
+    t = av.load_table(_write_mixed_corpus(tmp_path / "mixed.duckdb"))
+    assert t.max_pick_observed == 117
+    for pick in (126, 139):
+        got = _at(t, ["k0"], 100, pick, np.array([240.0]), positions=["K"])
+        assert got[0] < 0.01, pick
+    # And the receiver at the same rank, who the corpus has almost never
+    # seen taken, is still the curve's problem and still on the board.
+    receiver = _at(t, ["w0"], 100, 139, np.array([240.0]), positions=["WR"])
+    assert receiver[0] > 0.9
