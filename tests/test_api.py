@@ -1398,6 +1398,81 @@ def test_the_cache_middleware_is_wired_into_create_app(tmp_path):
         lobby.clear_cache()
 
 
+def test_a_repeat_load_of_the_board_is_answered_304(tmp_path):
+    """/api/players is 285 KB (55 KB compressed) and the page refetches all
+    of it on every load, mostly to be told the board has not moved.
+
+    It stays PRIVATE -- with a room connected the board is priced under the
+    league ESPN says the reader is in, and no shared cache may hold that --
+    but private is not the same as unrepeatable. `no-cache` (keep it, ask
+    first) rather than `no-store` (keep nothing) is what makes a 304
+    possible at all."""
+    c = _client(tmp_path)
+    first = c.get("/api/players")
+    assert first.status_code == 200
+    assert first.headers["Cache-Control"] == "private, no-cache"
+    assert first.headers["Vary"] == "Cookie"
+    tag = first.headers["ETag"]
+
+    again = c.get("/api/players", headers={"If-None-Match": tag})
+    assert again.status_code == 304
+    assert again.content == b""
+    # The validator comes back on the 304 too, or the browser has nothing
+    # to ask with next time.
+    assert again.headers["ETag"] == tag
+    assert again.headers["Cache-Control"] == "private, no-cache"
+
+
+def test_a_pick_retires_the_boards_validator(tmp_path):
+    """THE ONE THAT WOULD BE UNFORGIVABLE. The drafted set is deliberately
+    not in the board cache's key (one boolean column, and keying on it threw
+    a good board away on every pick), so it has to be in the ETag by itself
+    -- otherwise a draft room revalidates all evening and is told nothing
+    has changed while the picks land."""
+    c = _client(tmp_path)
+    before = c.get("/api/players")
+    tag = before.headers["ETag"]
+    pid = before.json()["players"][0]["player_id"]
+
+    assert c.post(f"/api/drafted/{pid}").json()["drafted"] is True
+
+    after = c.get("/api/players", headers={"If-None-Match": tag})
+    assert after.status_code == 200
+    assert after.headers["ETag"] != tag
+    assert any(p["drafted"] for p in after.json()["players"])
+
+
+def test_different_weights_are_different_answers_to_the_validator(tmp_path):
+    """A slider is a different board at the same URL, so it has to be a
+    different tag -- the sliders are query parameters and a browser caches
+    per full URL, but the tag is the thing that decides what is served."""
+    c = _client(tmp_path)
+    tag = c.get("/api/players").headers["ETag"]
+    other = c.get("/api/players", params={"w_role": 0.9},
+                  headers={"If-None-Match": tag})
+    assert other.status_code == 200
+    assert other.headers["ETag"] != tag
+
+
+def test_the_validator_costs_no_board_build(tmp_path):
+    """The whole saving. A 304 that still built the board would spare the
+    network and none of the 1.6s, which is the expensive half."""
+    from scoring import board_cache
+    c = _client(tmp_path)
+    tag = c.get("/api/players").headers["ETag"]
+    board_cache.clear()
+
+    built = []
+    real = board_cache.build_board
+    board_cache.build_board = lambda *a, **k: built.append(1) or real(*a, **k)
+    try:
+        assert c.get("/api/players",
+                     headers={"If-None-Match": tag}).status_code == 304
+        assert built == []
+    finally:
+        board_cache.build_board = real
+
+
 def test_head_is_answered_wherever_get_is(tmp_path):
     """AN UPTIME MONITOR'S FIRST REQUEST. `HEAD /` and `HEAD /api/...` were
     405 Method Not Allowed on every route in this app, because `@app.get`

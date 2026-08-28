@@ -308,6 +308,44 @@ def _sim_key(conn) -> tuple:
     return (avail_fp, results_fp)
 
 
+def board_key(conn, weights: dict | None = None,
+              settings: "league.LeagueSettings | None" = None) -> tuple:
+    """The key `cached_build_board` looks a board up under.
+
+    Lifted out of that function so a second caller can ask what a board
+    WOULD be without building one. `api/main.py` uses it for the ETag on
+    /api/players: two requests whose keys agree get the identical frame out
+    of this cache, so they get identical bytes, so the second one can be
+    answered 304 without building anything at all. Keeping the two in one
+    function is the point -- an ETag derived from a key that had drifted
+    from the cache's own would serve one board's bytes under another's
+    name.
+    """
+    settings = settings or league.load(conn)
+    weights = weights or DEFAULT_WEIGHTS
+    return (
+        _identity_key(conn),
+        _weights_key(weights),
+        league.to_json(settings),
+        _sim_key(conn),
+    )
+
+
+def board_answer_key(conn, weights: dict | None = None,
+                     settings: "league.LeagueSettings | None" = None) -> tuple:
+    """Everything a served board is a function of, in one tuple.
+
+    `board_key` plus the drafted set. The drafted set is deliberately NOT in
+    the cache key -- see `_drafted_ids` for why, it is one boolean column and
+    keying on it threw away a good board on every pick -- but it IS in the
+    answer, so anything validating a response has to carry it. Read fresh
+    here, exactly as `cached_build_board` reads it, so a pick made a moment
+    ago cannot be revalidated away.
+    """
+    return (board_key(conn, weights, settings),
+            tuple(sorted(str(pid) for pid in _drafted_ids(conn))))
+
+
 def cached_build_board(conn, weights: dict | None = None,
                        settings: "league.LeagueSettings | None" = None) -> pd.DataFrame:
     """Drop-in cached replacement for `scoring.board.build_board`.
@@ -328,12 +366,7 @@ def cached_build_board(conn, weights: dict | None = None,
     """
     settings = settings or league.load(conn)
     weights = weights or DEFAULT_WEIGHTS
-    key = (
-        _identity_key(conn),
-        _weights_key(weights),
-        league.to_json(settings),
-        _sim_key(conn),
-    )
+    key = board_key(conn, weights, settings)
 
     # Miss: build outside the lock, but once per key -- a second request
     # arriving during the build waits for it instead of duplicating it. That
