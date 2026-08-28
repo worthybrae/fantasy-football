@@ -1061,6 +1061,7 @@ export async function connectEspnAccount(
     body: JSON.stringify({ swid, espn_s2: espnS2 }),
   })
   if (!res.ok) throw new Error(await detailText(res))
+  forgetRequest('espn/custody')
   return res.json()
 }
 
@@ -1076,6 +1077,9 @@ export async function connectEspnAccount(
  *  server clears the cookie on both paths. */
 export async function disconnectEspn(): Promise<void> {
   await fetch('/api/espn/custody/disconnect', { method: 'POST' })
+  // Whether this browser holds a session is exactly what just changed, so
+  // the shared answer from a moment ago is the answer from before.
+  forgetRequest('espn/custody')
 }
 
 /** Whether THIS browser holds a stored ESPN session.
