@@ -62,6 +62,9 @@ import os
 import threading
 import time
 
+from fastapi import Response
+
+from api import http_cache
 from pipeline.espn_mock_lobby import lobby_url, room_url
 from scoring.config import CURRENT_SEASON
 
@@ -602,7 +605,13 @@ def register_lobby_routes(app):
     """Mount `GET /api/lobby`."""
 
     @app.get("/api/lobby")
-    def lobby():
+    def lobby(response: Response):
+        # ESPN's own directory, proxied, with nobody's name on it -- the same
+        # answer for every reader. Fifteen seconds matches what the module
+        # already keeps in memory: a shared cache holding it for that long
+        # costs nothing in freshness and takes the whole landing page's
+        # traffic off this process.
+        http_cache.public(response, 15)
         _note_demand()
         return _lobby_summary()
 

@@ -34,6 +34,7 @@ from statistics import mean, median
 
 from fastapi import HTTPException
 
+from api import http_cache
 from api import market
 from pipeline.db import read_table
 
@@ -419,6 +420,25 @@ def register_seo_routes(app, conn=None):
     mostly use GET, but link previewers and uptime checks use HEAD."""
     from fastapi.responses import HTMLResponse, Response
 
+    # Five minutes. These pages are rendered from the same ADP aggregate the
+    # archive is, they carry nobody's name, and a crawler working through a
+    # 232-URL sitemap does it in a burst -- which should be reading one build
+    # of that aggregate rather than asking this process for it 232 times.
+    SHARED_CACHE_SECONDS = 300
+
+    def page(html: str) -> HTMLResponse:
+        """A crawlable page, cacheable by anybody for five minutes.
+
+        `_missing` deliberately does not go through here: a 404 falls back to
+        whatever the CDN does with an unmarked one, which is a shorter window
+        than this, and a page that appears in the corpus an hour from now
+        should not be denied for five minutes because it did not exist when
+        the first crawler asked.
+        """
+        res = HTMLResponse(html)
+        http_cache.public(res, SHARED_CACHE_SECONDS)
+        return res
+
     def data():
         return adp_data(conn)
 
@@ -460,7 +480,7 @@ def register_seo_routes(app, conn=None):
                 "column is the 10th to the 90th percentile of his picks."
                 if d["drafts"] else None)
             faq = None
-        return HTMLResponse(render(
+        return page(render(
             "adp_index.html", title=f"{heading} – ESPN Draft Assist", description=desc,
             path=path, heading=heading, provenance=_provenance(d), players=players,
             rounds=d["rounds"], position=position, positions=present, breadcrumbs=crumbs,
@@ -482,7 +502,7 @@ def register_seo_routes(app, conn=None):
         desc = (f"Who goes in round {n} (picks {first}–{last}) of an ESPN mock draft, "
                 f"from {d['drafts']} recorded drafts"
                 + (f": {', '.join(usual)}." if usual else "."))
-        return HTMLResponse(render(
+        return page(render(
             "adp_round.html", title=f"Round {n} of an ESPN mock draft – who goes there – ESPN Draft Assist",
             description=desc, path=f"/adp/round/{n}", n=n, first=first, last=last,
             players=players, rounds=d["rounds"], provenance=_provenance(d),
@@ -502,7 +522,7 @@ def register_seo_routes(app, conn=None):
         desc = (f"{p['name']} ADP {p['adp']:.1f} in {d['drafts']} real ESPN mock drafts: "
                 f"usually picks {p['p10']}–{p['p90']}, round {p['round_mode']}, "
                 f"taken in {pct}% of drafts, {p['position']}{p['pos_rank']}.")
-        return HTMLResponse(render(
+        return page(render(
             "adp_player.html", title=f"{p['name']} ADP – ESPN mock drafts {d['updated'].year if d['updated'] else ''} – ESPN Draft Assist",
             description=desc, path=f"/adp/{p['slug']}", p=p, drafts=d["drafts"],
             teams=d["teams"], rounds=d["rounds"], picks_total=d["teams"] * d["rounds"],
@@ -527,7 +547,9 @@ def register_seo_routes(app, conn=None):
             body.append("<url><loc>%s%s</loc>%s</url>" % (
                 SITE, path, f"<lastmod>{stamp}</lastmod>" if stamp else ""))
         body.append("</urlset>")
-        return Response(content="\n".join(body), media_type="application/xml")
+        res = Response(content="\n".join(body), media_type="application/xml")
+        http_cache.public(res, SHARED_CACHE_SECONDS)
+        return res
 
     # A sitemap of 232 URLs does not get crawled one at a time -- it gets
     # crawled in a burst, and a cold `build_adp` (~2s, and it can trigger a

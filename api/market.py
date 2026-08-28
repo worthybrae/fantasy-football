@@ -48,6 +48,7 @@ import zipfile
 import numpy as np
 from fastapi import HTTPException, Response
 
+from api import http_cache
 from pipeline import draft_log as dl
 
 # How long an answer stands. The corpus grows by one draft every few minutes
@@ -55,6 +56,12 @@ from pipeline import draft_log as dl
 # one share -- so this is about not opening the database on every keystroke of
 # a page that is mostly reading and filtering.
 CACHE_SECONDS = 600.0
+
+# How long a shared cache in front of this process may hold one. Shorter than
+# the process's own window on purpose: this one is not invalidated by a
+# restart, so a deploy that changes what these answers say cannot clear it,
+# and five minutes is how long the wrong answer would stand.
+SHARED_CACHE_SECONDS = 300
 
 # How long a THIN answer stands. The board is built on demand and can be cold,
 # mid-rebuild or momentarily unreadable when a request lands, and every helper
@@ -722,8 +729,16 @@ def register_market_routes(app, conn=None):
     them.
     """
 
+    # Five minutes on all of them (SHARED_CACHE_SECONDS). These are
+    # aggregates over hundreds of recorded drafts and they move only when the
+    # farm finishes another one, which is a handful of times an hour at most
+    # -- so a reader is never shown anything meaningfully old, and the
+    # process-local cache above stops being asked at all for the pages people
+    # actually open.
+
     @app.get("/api/market/overview")
-    def market_overview():
+    def market_overview(response: Response):
+        http_cache.public(response, SHARED_CACHE_SECONDS)
         return _cached("overview", _overview_payload)
 
     @app.get("/api/market/export.zip")
@@ -733,27 +748,32 @@ def register_market_routes(app, conn=None):
         of JSON per click would be the cheapest denial of service on the
         page."""
         body = _cached("export", lambda: _export_zip(_names(conn)))
-        return Response(
+        res = Response(
             content=body,
             media_type="application/zip",
             headers={"Content-Disposition":
                      'attachment; filename="draft-archive.zip"'})
+        http_cache.public(res, SHARED_CACHE_SECONDS)
+        return res
 
     @app.get("/api/market/slot/{slot}")
-    def market_slot(slot: int):
+    def market_slot(slot: int, response: Response):
+        http_cache.public(response, SHARED_CACHE_SECONDS)
         return _cached(
             ("slot", slot), lambda: _slot_payload(slot, conn),
             lambda v: _board_answered(p for t in v["turns"] for p in t["players"]))
 
     @app.get("/api/market/at-picks")
-    def market_at_picks(picks: str = ""):
+    def market_at_picks(response: Response, picks: str = ""):
         """Who usually goes at each of these overall picks -- the waiting
         room's question, asked of every recorded mock at once."""
+        http_cache.public(response, SHARED_CACHE_SECONDS)
         wanted = _parse_picks(picks)
         return _cached(
             ("at-picks", wanted), lambda: _at_picks_payload(wanted, conn),
             lambda v: _board_answered(p for r in v["picks"] for p in r["top"]))
 
     @app.get("/api/market/players")
-    def market_players(slot: int = 1):
+    def market_players(response: Response, slot: int = 1):
+        http_cache.public(response, SHARED_CACHE_SECONDS)
         return _cached(("players", slot), lambda: _players_payload(slot, conn))

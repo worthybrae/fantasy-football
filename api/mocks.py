@@ -43,8 +43,9 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 
+from api import http_cache
 from api.live import (_board_cell, _board_index, _attach_espn_proj,
                       identify_players)
 from pipeline import draft_log as dl
@@ -332,8 +333,15 @@ def register_mock_routes(app, conn):
     the farm needs to write.
     """
 
+    # Five seconds, on both routes below. It is the page's own poll interval
+    # (web/src/pages/MockDrafts.tsx) and about how often a mock room picks,
+    # so a shared cache holding an answer for one window can never show a
+    # board more than one pick behind -- and a completed draft, which is most
+    # of what this serves, cannot change at all.
+    SHARED_CACHE_SECONDS = 5
+
     @app.get("/api/mocks")
-    def list_mocks():
+    def list_mocks(response: Response):
         """Every mock draft, live ones first, then completed newest first.
 
         Live drafts are read first and their ids remembered, so the two-second
@@ -341,6 +349,7 @@ def register_mock_routes(app, conn):
         shows one row (live, 128 picks) rather than two of the same draft. The
         row flips to "complete" on the next poll.
         """
+        http_cache.public(response, SHARED_CACHE_SECONDS)
         live = [_live_summary(p) for p in farm.live_drafts()]
         live.sort(key=lambda row: (row["started_at"] or ""), reverse=True)
         seen = {row["id"] for row in live}
@@ -381,7 +390,7 @@ def register_mock_routes(app, conn):
         return {"drafts": live + done}
 
     @app.get("/api/mocks/{draft_id}/board")
-    def mock_board(draft_id: str):
+    def mock_board(draft_id: str, response: Response):
         """The snake board for one draft, live or completed.
 
         Live is checked first for the same reason the listing prefers it: for
@@ -391,6 +400,7 @@ def register_mock_routes(app, conn):
         read -- so a crashed draft falls through to its corpus row if it was
         recorded before the crash, and 404s if it was not.
         """
+        http_cache.public(response, SHARED_CACHE_SECONDS)
         for payload in farm.live_drafts():
             if payload.get("draft_id") == draft_id:
                 return _live_board(conn, payload)

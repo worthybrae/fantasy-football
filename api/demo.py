@@ -41,9 +41,10 @@ import time
 
 import numpy as np
 
-from fastapi import Request
+from fastapi import Request, Response
 from fastapi.responses import StreamingResponse
 
+from api import http_cache
 from pipeline.db import get_conn
 from scoring.board_cache import cached_build_board
 from scoring.draft_sim import snake_slots
@@ -1424,7 +1425,13 @@ def register_demo_routes(app, conn=None):
         threading.Thread(target=run, name="demo-refresh", daemon=True).start()
 
     @app.get("/api/demo/live")
-    def demo_live():
+    def demo_live(response: Response):
+        # The landing page's hero, anonymous and the same for everybody. Five
+        # seconds is roughly how often a mock room picks, so a shared cache
+        # holding it that long never shows a pick late by more than one tick
+        # -- and the event stream beside it is what actually tells a reader
+        # to come back for the next one.
+        http_cache.public(response, 5)
         now = time.monotonic()
         with _LOCK:
             hit = _CACHE.get("live")
@@ -1541,7 +1548,9 @@ def register_demo_routes(app, conn=None):
             stream(),
             media_type="text/event-stream",
             headers={
-                "Cache-Control": "no-cache",
+                # A stream has nothing for a cache to hold, and a proxy that
+                # tried would buffer it instead of passing it through.
+                "Cache-Control": http_cache.NO_STORE,
                 "Connection": "keep-alive",
                 # nginx buffers a response body by default, which for a
                 # stream means the reader gets an hour of events at once.

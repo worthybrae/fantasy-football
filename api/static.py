@@ -23,12 +23,38 @@ from fastapi import HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from api import http_cache
+
 # Where `npm run build` leaves its output, relative to the repository root.
 # Overridable because the Docker image lays the tree out its own way and a
 # path that only works from a checkout would make the image depend on being
 # one.
 DIST_ENV = "WEB_DIST_PATH"
 DEFAULT_DIST = "web/dist"
+
+# `favicon.svg`, `robots.txt`, the demo video and its poster: Vite copies
+# these out of `public/` under their own names, so the next build reuses
+# every one of those names and `immutable` would be a lie. An hour is long
+# enough that a reader who scrolls the landing page twice does not refetch
+# two megabytes of video, and short enough that a deploy is visible to a
+# returning visitor within one.
+PUBLIC_FILE_CACHE = "public, max-age=3600"
+
+
+class _HashedAssets(StaticFiles):
+    """`/assets`, served with the year-long promise its file names earn.
+
+    Every name under here is content-hashed by Vite, so the bytes behind a
+    given URL cannot change: a new build writes new names and rewrites the
+    document that asks for them. That is exactly the case `immutable` is
+    for -- a browser that has the file does not even send a conditional
+    request, and the CDN in front of us holds one copy for everybody.
+    """
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = http_cache.IMMUTABLE
+        return response
 
 
 def dist_path() -> Path:
@@ -57,7 +83,7 @@ def register_spa(app, dist: Path | None = None) -> bool:
     # this prefix is not a choice.
     assets = root / "assets"
     if assets.is_dir():
-        app.mount("/assets", StaticFiles(directory=assets), name="assets")
+        app.mount("/assets", _HashedAssets(directory=assets), name="assets")
 
     @app.get("/{path:path}")
     def spa(path: str):
@@ -82,10 +108,18 @@ def register_spa(app, dist: Path | None = None) -> bool:
         if path:
             candidate = (root / path).resolve()
             if candidate.is_file() and candidate.is_relative_to(root.resolve()):
-                return FileResponse(candidate)
+                return FileResponse(
+                    candidate,
+                    headers={"Cache-Control": PUBLIC_FILE_CACHE})
         # `/archive`, `/draft`, `/mocks` -- routes in the browser's router,
         # not files here. A reload or a pasted link has to be answered with
         # the document that boots the router.
-        return FileResponse(index)
+        # NEVER CACHED FURTHER THAN A REVALIDATION. This document names the
+        # hashed bundle, and those names are cached for a year. A CDN or a
+        # browser holding yesterday's copy of it would keep booting
+        # yesterday's build -- whose assets are all still there, still
+        # served, and still valid -- so a deploy would reach nobody who had
+        # visited before.
+        return FileResponse(index, headers={"Cache-Control": http_cache.NO_CACHE})
 
     return True

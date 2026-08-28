@@ -103,3 +103,22 @@ def test_no_build_is_not_a_broken_server():
         client = TestClient(app)
         assert client.get("/api/ping").json() == {"ok": True}
         assert client.get("/archive").status_code == 404
+
+
+def test_the_document_and_its_assets_disagree_on_purpose():
+    """A YEAR AND NO SECONDS, IN THE SAME BUILD. Vite hashes the names under
+    `/assets`, so those bytes can never change and a browser holding one
+    need never ask again. The document that NAMES them keeps its own name
+    across every build, so a cached copy of it goes on booting the build it
+    was written for -- whose assets are all still there, still valid, still
+    served. Cache the document and a deploy reaches nobody who has visited
+    before; revalidate the assets and every load pays for round trips to be
+    told nothing changed. The pair only works as a pair."""
+    import tempfile
+    import pathlib
+    with tempfile.TemporaryDirectory() as tmp:
+        client = _app(_built(pathlib.Path(tmp)))
+        asset = client.get("/assets/index-abc123.js")
+        document = client.get("/archive")
+        assert asset.headers["Cache-Control"] == "public, max-age=31536000, immutable"
+        assert document.headers["Cache-Control"] == "no-cache"

@@ -22,7 +22,8 @@ if "PYTEST_CURRENT_TEST" not in os.environ:
     load_env_file()
 
 import pandas as pd
-from fastapi import Body, FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query, Request, Response
+from api import http_cache
 from pipeline.db import get_conn, read_table, write_table, DEFAULT_PATH
 from scoring import league
 from scoring.board import build_board  # noqa: F401 -- kept importable so
@@ -148,6 +149,10 @@ def _history_round_bucket(round_no: int) -> str:
 
 def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
     app = FastAPI(title="Draft Board API")
+    # Compression, and `private, no-store` on every /api answer that does not
+    # say otherwise. First, before a single route exists, so no endpoint can
+    # ever be registered outside it -- see api/http_cache.py.
+    http_cache.install(app)
     conn = get_conn(db_path)
     # In-process only: run status lives here, not in the database, so a
     # status poll survives only as long as this app instance does (the same
@@ -188,9 +193,9 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
     # is transient by design -- it dies with the process unless the small
     # session record is restored -- and a database row is not, so persisting
     # would outlive the fact it describes.
-    app.state.live_settings = lambda: None
+    app.state.live_settings = lambda request=None: None
 
-    def _league_settings(cur):
+    def _league_settings(cur, request=None):
         """The league every price on the board and the profile is computed in.
 
         The live session's real ESPN settings while a draft is connected,
@@ -210,11 +215,12 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
         only ever replaced by dataclasses.replace on unrelated fields), so
         every request during one draft produces the identical key.
         """
-        live = app.state.live_settings()
+        live = app.state.live_settings(request)
         return live if live is not None else league.load(cur)
 
     @app.get("/api/players")
-    def players(w_production: float = Query(DEFAULT_WEIGHTS["production"], ge=0),
+    def players(request: Request,
+                w_production: float = Query(DEFAULT_WEIGHTS["production"], ge=0),
                 w_role: float = Query(DEFAULT_WEIGHTS["role"], ge=0),
                 w_environment: float = Query(DEFAULT_WEIGHTS["environment"], ge=0),
                 w_schedule: float = Query(DEFAULT_WEIGHTS["schedule"], ge=0),
@@ -224,7 +230,7 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
             weights = {"production": w_production, "role": w_role,
                        "environment": w_environment, "schedule": w_schedule,
                        "durability": w_durability}
-            settings = _league_settings(cur)
+            settings = _league_settings(cur, request)
             try:
                 # cached_build_board (scoring/board_cache.py): this endpoint
                 # alone cost ~1.6-1.9s per request rebuilding the same board
@@ -311,7 +317,7 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
             cur.close()
 
     @app.get("/api/landing/status")
-    def landing_status():
+    def landing_status(response: Response):
         """Is this machine ready for draft night?
 
         Raw table reads only -- deliberately never build_board, which costs
@@ -321,6 +327,11 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
         pins the no-board-build property, since it is the kind of thing a
         later "simplification" would merge away.
         """
+        # The same answer for every visitor, and the first request the
+        # landing page makes. Fifteen seconds is short enough that a refresh
+        # after `make refresh` shows the new counts almost at once, and long
+        # enough that a burst of arrivals reads one set of table reads.
+        http_cache.public(response, 15)
         cur = conn.cursor()
         try:
             settings = league.load(cur)
@@ -365,7 +376,7 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
             cur.close()
 
     @app.get("/api/landing/preview")
-    def landing_preview(limit: int = 12):
+    def landing_preview(request: Request, response: Response, limit: int = 12):
         """The top of the board, for the landing page's preview panel.
 
         `limit` is clamped, not validated: this feeds a panel whose job is to
@@ -373,6 +384,10 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
         ?limit=0 would defeat the point. Fifty is the ceiling because nothing
         on that page scrolls past it.
         """
+        # A minute, because the board underneath this costs seconds to build
+        # and the top twelve of it do not move between builds. Anonymous and
+        # identical for everybody, so one build can answer the whole window.
+        http_cache.public(response, 60)
         cur = conn.cursor()
         try:
             # Same board GET /api/players just built (same weights, same
@@ -381,7 +396,7 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
             # connected draft would put two boards in the cache and pay the
             # 1.6-1.9s build twice to show the same twelve rows.
             board = cached_build_board(cur, DEFAULT_WEIGHTS,
-                                       _league_settings(cur))
+                                       _league_settings(cur, request))
             n = max(1, min(int(limit), 50))
             top = board.sort_values("rank").head(n)[list(PREVIEW_COLUMNS)]
             top = top.astype(object).where(top.notna(), None)
@@ -391,7 +406,7 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
             cur.close()
 
     @app.get("/api/players/{player_id}/profile")
-    def player_profile(player_id: str,
+    def player_profile(player_id: str, request: Request,
                         w_production: float = Query(DEFAULT_WEIGHTS["production"], ge=0),
                         w_role: float = Query(DEFAULT_WEIGHTS["role"], ge=0),
                         w_environment: float = Query(DEFAULT_WEIGHTS["environment"], ge=0),
@@ -413,7 +428,7 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
                 # empty history while the room next to it, built on the live
                 # settings, was ranking him on real points.
                 payload = build_profile(cur, player_id, weights,
-                                        _league_settings(cur))
+                                        _league_settings(cur, request))
             except ValueError as e:
                 # Same as /api/players -- compute_composite raises when
                 # weights sum <= 0, reachable if every slider is at 0.
