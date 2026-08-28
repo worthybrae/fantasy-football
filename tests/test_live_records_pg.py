@@ -1,9 +1,10 @@
 """Live-draft session records against a real Postgres.
 
 Skipped unless SUPABASE_TEST_DB_URL is set. tests/test_live_records.py covers
-the file backend and is the one that has to pass with no network; this file
-covers the two things only the Postgres backend does -- a JSONB round trip,
-and keeping the ESPN token out of a shared database in plaintext.
+the file backend, and the Postgres backend's ENCODING against a fake `_run`,
+and is the one that has to pass with no network; this file covers what only a
+real database can answer -- that a JSONB round trip really round trips, and
+that what lands in the column is one ciphertext.
 
 Run it against a database you are willing to write to:
 
@@ -75,21 +76,49 @@ def test_a_record_round_trips_through_postgres(store):
     assert store.load(sid) is None
 
 
-def test_the_token_is_not_in_the_shared_database_in_plaintext(store):
+def test_the_record_is_not_in_the_shared_database_in_plaintext(store):
     """A 0600 file on one box and a table every worker can read are not the
-    same exposure, and this token is enough to rejoin somebody's draft. With a
-    custody key configured it goes in encrypted under that key -- the same one
-    pipeline/credentials.py holds ESPN sessions under."""
+    same exposure. The token is enough to rejoin somebody's draft, and the
+    rest of the record says who is drafting for which team in which league
+    -- a list this project keeps nowhere else. With a custody key configured
+    the whole document goes in as one ciphertext under that key, the same
+    one pipeline/credentials.py holds ESPN sessions under."""
     sid = "test-" + uuid.uuid4().hex
     try:
         store.save(sid, _record(token="a-real-looking-token"))
         stored = store._run("SELECT record FROM live_session WHERE sid = ?",
                             [sid])[0][0]
 
-        assert "token" not in stored
-        assert "a-real-looking-token" not in str(stored)
+        assert set(stored) == {"blob"}
+        for secret in ("a-real-looking-token", "{SOME-SWID}", "777"):
+            assert secret not in str(stored)
         # And it is still readable by the deployment that wrote it.
-        assert store.load(sid)["token"] == "a-real-looking-token"
+        got = store.load(sid)
+        assert got["token"] == "a-real-looking-token"
+        assert got["swid"] == "{SOME-SWID}" and got["team_id"] == "3"
+    finally:
+        store.delete(sid)
+
+
+def test_a_row_in_the_earlier_shape_is_still_read(store):
+    """What is in the table on the day this ships: the token alone under
+    `token_blob`, the rest of the document beside it in the clear. A deploy
+    must not lose the drafts that are running."""
+    from psycopg.types.json import Jsonb
+
+    sid = "test-" + uuid.uuid4().hex
+    body = _record()
+    body.pop("token")
+    body["token_blob"] = live_records._write_key().encrypt(
+        b"tok-abc").decode("ascii")
+    try:
+        store._run(
+            "INSERT INTO live_session (sid, record, saved_at) "
+            "VALUES (?, ?, ?)",
+            [sid, Jsonb(body), datetime.now(timezone.utc)])
+        got = store.load(sid)
+        assert got["token"] == "tok-abc"
+        assert got["league_id"] == "777"
     finally:
         store.delete(sid)
 

@@ -316,8 +316,9 @@ listener, its own per-league database connection and its own ranking thread;
 a second browser is a second room, and two leaguemates are two rooms on one
 league file. What a restart needs to reopen a room -- the league, the team,
 the draft token -- is one row per room in the `live_session` table when
-`SUPABASE_DB_URL` is set (the token encrypted under the custody key), a JSON
-file per room beside the database otherwise; every row younger than twelve
+`SUPABASE_DB_URL` is set (the whole record encrypted under the custody key,
+so the row is a session id, one ciphertext and a timestamp), a JSON file per
+room beside the database otherwise; every row younger than twelve
 hours is rebuilt at boot, one after another. A room nobody has touched for
 three hours is stopped and dropped.
 

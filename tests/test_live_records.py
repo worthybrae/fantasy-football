@@ -82,6 +82,57 @@ def keys(monkeypatch):
     cred.reset_default_store()
 
 
+def test_a_stored_record_says_nothing_about_who_is_drafting(keys):
+    """The token is what rejoins a draft, and it was the only field
+    encrypted. The rest of the row is a SWID, a league id and a team id --
+    who drafts here, for whom, in which league -- and a shared table listing
+    that for every reader is the thing this project keeps nowhere else. The
+    whole document goes in as one ciphertext."""
+    keys(f"1:{cred.generate_key()}")
+    store = _FakePgRecords()
+    store.save("draft-a", _record(token="a-real-looking-token"))
+
+    stored = store.rows["draft-a"]
+    assert set(stored) == {"blob"}
+    for secret in ("a-real-looking-token", "{SOME-SWID}", "777"):
+        assert secret not in str(stored)
+    # And the deployment that wrote it reads it back whole.
+    got = store.load("draft-a")
+    assert got["token"] == "a-real-looking-token"
+    assert got["swid"] == "{SOME-SWID}" and got["league_id"] == "777"
+    assert got["my_slot"] == 4
+
+
+def test_the_earlier_row_shape_is_still_read(keys):
+    """A deploy must not lose the drafts that are running. Rows written
+    before the whole document was encrypted carry the token alone under
+    `token_blob`, with the rest beside it in the clear."""
+    key = cred.generate_key()
+    keys(f"1:{key}")
+    store = _FakePgRecords()
+    fernet = live_records._write_key()
+    old = _record()
+    old.pop("token")
+    old["token_blob"] = fernet.encrypt(b"tok-abc").decode("ascii")
+    store.rows["draft-old"] = old
+
+    got = store.load("draft-old")
+    assert got["token"] == "tok-abc"
+    assert got["league_id"] == "777"
+    assert store.load_all()["draft-old"]["token"] == "tok-abc"
+
+
+def test_without_a_custody_key_the_document_is_stored_as_it_came_in(keys):
+    """The honest floor, and the same one the file backend has: a
+    deployment with no custody key is not holding anybody else's ESPN
+    sessions either. It must still work."""
+    keys("")
+    store = _FakePgRecords()
+    store.save("draft-a", _record(token="tok-plain"))
+    assert store.rows["draft-a"]["token"] == "tok-plain"
+    assert store.load("draft-a")["token"] == "tok-plain"
+
+
 def test_a_record_written_before_a_key_rotation_still_opens_after_one(keys):
     """Adding a key version is not a migration anywhere else in this project
     (see pipeline/credentials.py), and it must not be one here. Read under

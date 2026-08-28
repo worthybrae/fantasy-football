@@ -25,12 +25,22 @@ os.replace. The twelve-hour rule is the same rule, and it still DELETES
 rather than merely ignoring -- it is the only automatic bound on how long a
 dead token stays anywhere.
 
-WHAT IMPROVES ON POSTGRES. A shared database is a worse place for a plaintext
-token than a 0600 file is, so the token does not go in as plaintext: it rides
-under the custody key, the same Fernet key `pipeline/credentials.py` encrypts
-ESPN sessions with. Without a configured key it is stored as-is, which is the
+WHAT IMPROVES ON POSTGRES. A shared database is a worse place for a record
+than a 0600 file is, so the record does not go in as plaintext: the WHOLE
+document rides under the custody key, the same Fernet key
+`pipeline/credentials.py` encrypts ESPN sessions with. The token is the part
+that rejoins a draft, but the rest of the row is a SWID, a league id and a
+team id -- who drafts here, for whom, in which league -- and a table listing
+that for every reader is exactly the thing this project does not keep
+anywhere else. So the row is a session id, one ciphertext, and a timestamp
+the age rule can read without a key.
+
+Without a configured key the document is stored as it is, which is the
 exposure today's file already has -- but a deployment holding other people's
-sessions has that key by definition.
+sessions has that key by definition. Rows written under the earlier shape
+(the token alone encrypted, the rest in the clear) are still read, and every
+configured key version is tried, so neither a deploy nor a key rotation
+loses a draft that is running.
 """
 from __future__ import annotations
 
@@ -237,10 +247,16 @@ _PG_SCHEMA = (
         saved_at TIMESTAMPTZ NOT NULL)""",
 )
 
-# `token` is lifted out of the document and stored under this key instead,
-# encrypted. Named differently so that a record written with a key and read
-# without one is obviously missing its token rather than silently carrying
-# ciphertext where the socket expects a nonce.
+# THE WHOLE DOCUMENT, encrypted, as the only key in the stored object. A row
+# is then `{"blob": "<fernet>"}` and says nothing else about who is drafting.
+_BLOB = "blob"
+
+# The earlier shape: `token` lifted out of the document and stored encrypted
+# under this key, with league id, team id and swid beside it in the clear.
+# Still READ -- a deploy must not lose the drafts that are running -- and
+# never written. Named differently from `token` so that a record written with
+# a key and read without one is obviously missing its token rather than
+# silently carrying ciphertext where the socket expects a nonce.
 _TOKEN_BLOB = "token_blob"
 
 _PG_READY = False
@@ -354,8 +370,11 @@ class _PgRecords(SessionRecordStore):
         body = dict(record)
         key = _write_key()
         if key is not None:
-            body[_TOKEN_BLOB] = key.encrypt(
-                str(body.pop("token", "")).encode("utf-8")).decode("ascii")
+            # One ciphertext, not a document with one encrypted field: see
+            # the module docstring for what the other fields are worth to
+            # somebody reading this table.
+            body = {_BLOB: key.encrypt(
+                json.dumps(body).encode("utf-8")).decode("ascii")}
         saved_at = datetime.now(timezone.utc)
         self._run(
             "INSERT INTO live_session (sid, record, saved_at) VALUES (?, ?, ?) "
@@ -373,11 +392,24 @@ class _PgRecords(SessionRecordStore):
         worse than any outage.
 
         Every configured key version is tried (see `_read_keys`), so a
-        record written before a rotation still opens after one.
+        record written before a rotation still opens after one -- and both
+        stored shapes are read: the whole-document blob this writes now, and
+        the token-only blob rows written before it did.
         """
-        if not isinstance(body, dict) or _TOKEN_BLOB not in body:
+        if not isinstance(body, dict):
             return body
-        body = dict(body)
+        if _BLOB in body:
+            raw = _decrypt(body[_BLOB])
+            if raw is None:
+                return None
+            try:
+                record = json.loads(raw.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                return None
+            return record if isinstance(record, dict) else None
+        if _TOKEN_BLOB not in body:
+            return body                 # no key was configured when it was
+        body = dict(body)               # written; stored as it came in
         token = _decrypt(body.pop(_TOKEN_BLOB))
         if token is None:
             return None
