@@ -218,13 +218,11 @@ def build_session(conn, my_slot: int | None, seed: int = DEFAULT_SEED,
 
     `progress` (a ConnectProgress, or None for the no-op) is how the connect
     screen learns what this function is doing WHILE it does it. Three of its
-    stages live in here because all three of the expensive steps do:
-    measured against data/nfl.duckdb, build_board 1.5-1.9s, build_pool
-    2.2-3.6s, and fit_all either 6-13ms (a league with no history: cold
-    start) or 27.5-30.7s (the owner's own league: 696 picks over six
-    seasons, eight per-manager fits). That last number is why fit_all is
-    reported per manager rather than as one opaque wait -- it is 79-88% of
-    the whole connect, and it is the one stage with a real fraction to show.
+    stages live in here because the expensive steps do: measured against
+    data/nfl.duckdb, build_board 1.5-1.9s and build_pool 2.2-3.6s (both
+    behind process-wide caches now, so a second league of the same shape
+    pays neither), and the history stage, which is one small table read --
+    the room no longer fits managers (see the module docstring).
 
     The docstring's old figure ("roughly 17s") was the module docstring's
     make-sim measurement and predated the board and pool getting slower; the
@@ -354,7 +352,7 @@ from scoring.config import CURRENT_SEASON
 from scoring.availability import availability_at, cached_table
 from scoring.draft_sim import _drafted_state, _seed_rosters, snake_slots
 from scoring.gain import need_kind
-from scoring.plan import build_plan, edge_at, health_level, target_now  # noqa: F401 -- target_now is the demo's, imported here so one module owns the seam
+from scoring.plan import build_plan, edge_at, health_level, target_now
 
 
 def _ordinal(n: int) -> str:
@@ -421,11 +419,14 @@ class ConnectProgress:
 
     Exists because the work is genuinely slow and genuinely interesting, and
     until now all of it happened behind a spinner. Measured against the real
-    database (data/nfl.duckdb, 249 players, 8 teams, six seasons of history):
-    a connect to the owner's own league blocks for 32-35s, of which fit_all is
-    27.5-30.7s; a connect to a fresh mock league blocks for 8.6s, of which
-    provisioning the league file is 2.9s and build_pool 2.2-3.6s. "Several
-    seconds on a dead screen" was an understatement by an order of magnitude.
+    database (data/nfl.duckdb, 249 players, 8 teams) when this screen was
+    written: a connect to the owner's own league blocked for 32-35s, most of
+    it the manager fits the room has since stopped running; a connect to a
+    fresh mock league blocked for 8.6s, of which provisioning the league file
+    was 2.9s and build_pool 2.2-3.6s. Today a connect is provisioning (1.9s
+    from the snapshot) plus a cached board and pool -- but a first connect
+    still pays them, and "several seconds on a dead screen" is still what it
+    would look like without this.
 
     EVERY value on it is a real discovered value. There is no timer, no
     minimum display time and no synthetic step anywhere in this class: a stage
@@ -491,16 +492,6 @@ class ConnectProgress:
                 return
             stage["status"] = "running"
             self._stage_started[key] = time.monotonic()
-        self._apply(run)
-
-    def value(self, key, value):
-        """A live value on a stage still running -- the manager-fit counter,
-        which is the only place a real fraction exists to show (fit_all
-        genuinely fits N of M managers). Never a percentage of elapsed time."""
-        def run():
-            stage = self._open(key)
-            if stage is not None:
-                stage["value"] = value
         self._apply(run)
 
     def _finish(self, key, status, value):
@@ -2291,7 +2282,10 @@ def rank_and_plan(board, pool, taken, taken_order, counts, my_indices, my_slot,
             "lasts_pct": None if lasts is None else round(float(lasts[i]) * 100, 1),
             "lasts_at_pick": next_turn,
             "edge_pts": None if edge is None else round(float(edge[i]), 1),
-            "need": need_kind(settings, counts, positions[i], turns_left),
+            # What this position would do for MY roster -- which needs a
+            # roster, so it is null until the socket names our team.
+            "need": (need_kind(settings, counts, positions[i], turns_left)
+                     if my_slot is not None else None),
             "favourite": pid in favourites,
             "rank": rank,
         })
@@ -3502,12 +3496,9 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
                 with lock:
                     if state["listener"] is not listener:
                         continue
-                # A slot, or not this time. RECOMPUTE_SLOTS is shared by
-                # every room; waited for in short steps so the stop event
-                # is seen within half a second, and given up after
-                # RECOMPUTE_WAIT_SECONDS with the last ranking left in place
-                # and the room told why, rather than blocking a thread the
-                # stop path has to join.
+                # One last look at the stop event before the work: a stop
+                # that landed while this request was waiting in the slot
+                # must not be answered with a ranking of a room that is over.
                 if stop_event.is_set():
                     return
                 # Guarded, because this loop IS the thread's whole body: an
@@ -3843,20 +3834,10 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
         # ranking is ESPN's order with no "lasts" and no plan, which is a
         # room rather than an empty one; on_activity's _resolve_slot path
         # still fires a full recompute the moment the socket names our team.
-        if True:
-            with lock:
-                state["picks_seen"] = made_at_launch
-            request_recompute(session, made_at_launch)
-            progress.begin("ranking")
-        else:
-            # Terminal, and honestly so: with no slot there is nothing to rank
-            # FOR, and this connect will never request one (see the note
-            # above). The room still fills -- live_state's vor fallback serves
-            # the pool ranked by value over replacement -- and the slot-aware
-            # ranking arrives on its own the moment the socket names our team.
-            # Left `pending` instead, the screen would wait for a stage that
-            # is never coming.
-            progress.warn("ranking", "waiting on your slot")
+        with lock:
+            state["picks_seen"] = made_at_launch
+        request_recompute(session, made_at_launch)
+        progress.begin("ranking")
         progress.begin("socket")
         thread.start()
         # my_slot is echoed back deliberately: None means genuinely undetected
@@ -4177,8 +4158,8 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
 
         A separate endpoint from /api/live/state, and a deliberately tiny
         one: it touches no database at all (state's own handler runs a
-        COUNT(*), a _drafted_state replay and a vor fallback ranking on every
-        call), because the connect screen polls this several times a second
+        COUNT(*) and a _drafted_state replay for the roster on every call),
+        because the connect screen polls this several times a second
         while the connect thread is busy building a board. It also has to
         answer BEFORE there is a session, which is precisely the window
         /api/live/state reports as `active: false` and nothing else.
@@ -4918,8 +4899,8 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
         the first request that needs a session. All three were weighed and
         the reasons are worth keeping.
 
-          * Inline at startup. build_session is 4.1-34.8s against the real
-            database (see its own docstring), 27.5-30.7s of that fit_all.
+          * Inline at startup. build_session is seconds against the real
+            database (a cold board and pool; see its own docstring).
             The API would answer nothing for that whole window -- not
             /api/live/state, not the connect screen, and not
             /api/live/connect-token, which is the manual way out of a

@@ -1303,9 +1303,9 @@ export interface ConnectFacts {
   flex_slots?: number
   bench?: number
   players?: number
-  /** Managers fitted from this league's imported draft history; 0 means the
-   *  cold start (the market prior), which is a different model, not a worse
-   *  count. */
+  /** Managers this league's imported draft history names (and `seasons`
+   *  the seasons it covers); 0 means no history has been imported. The room
+   *  ranks from counted availability either way -- nothing is fitted. */
   managers?: number
   seasons?: number
   my_slot?: number

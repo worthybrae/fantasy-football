@@ -205,9 +205,9 @@ function Ready({ progress, live, onEnter }: ConnectScreenProps) {
       label: 'History',
       value: facts.managers ? `${facts.managers} mgrs` : 'none',
       hint: facts.managers
-        ? `${facts.managers} manager models fitted from ${facts.seasons ?? 0} `
-          + 'seasons of this league’s own drafts'
-        : 'no imported draft history — opponents follow the market prior',
+        ? `${facts.managers} managers · ${facts.seasons ?? 0} seasons of this `
+          + 'league’s drafts on record'
+        : 'no imported draft history',
     })
   }
   if (clock) cells.push({ label: 'Clock', value: clock })

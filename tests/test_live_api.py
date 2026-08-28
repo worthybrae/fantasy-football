@@ -1052,7 +1052,8 @@ def test_state_is_never_empty_once_connect_has_resolved_my_slot(
                 f"{label}: empty board at pick 0 with no slot")
             body = client.get("/api/live/state").json()
             assert all(c["lasts_pct"] is None and c["lasts_at_pick"] is None
-                       and c["edge_pts"] is None for c in body["candidates"])
+                       and c["edge_pts"] is None and c["need"] is None
+                       for c in body["candidates"])
             assert body["plan"] == []
             assert [c["rank"] for c in body["candidates"]] == list(range(1, len(body["candidates"]) + 1))
         client.post("/api/live/stop")

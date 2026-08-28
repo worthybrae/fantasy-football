@@ -611,7 +611,11 @@ def _ranked(conn, board, picks: list, slot: int | None, limit: int,
     settings = league.load(conn)
     if teams or rounds:
         # `rounds` is not a field but the roster's size (starters + flex +
-        # bench), so the room's round count is set through its bench.
+        # bench), so the room's round count is set through its bench. The
+        # reshaped settings are what `_cached_pool` keys on too, so a room
+        # whose shape differs from the stored league's gets its own pool
+        # entry (one per distinct teams/rounds seen, not one per room --
+        # the cache is small and the shapes are few).
         import dataclasses
         lineup = sum(int(v) for v in (settings.starters or {}).values()) \
             + int(settings.flex_slots or 0)
