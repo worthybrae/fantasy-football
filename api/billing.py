@@ -99,9 +99,19 @@ StoreError = pgstore.StoreError
 
 _lock = threading.Lock()
 _store = None
-# Whether the corpus seed has run in this process. Separate from `_store`
-# because the seed happens OUTSIDE `_lock` -- see `_db`.
+# Whether the corpus seed has been CLAIMED in this process. Separate from
+# `_store` because the seed happens OUTSIDE `_lock` -- see `_db`.
 _seeded = False
+# Set when the claimed seed has finished (or given up). `_db` does not wait on
+# it -- that is the whole point -- but `reset_for_tests` does, so a suite that
+# swaps the store out from under a running seed does not race it, and so does
+# any test that wants to assert on what the seed wrote.
+_seed_done = threading.Event()
+_seed_done.set()
+# How long `reset_for_tests` gives an in-flight seed to finish. Generous
+# enough that it is never the reason a suite fails, short enough that a seed
+# wedged on a store that has gone away does not hang the run.
+_SEED_WAIT_SECONDS = 30
 
 # Mock league ids already known to the table, so the hot path (a connect
 # asking "is this free") is a set lookup rather than a query.
@@ -381,13 +391,26 @@ def _db():
         seed = not _seeded
         _seeded = True
     if seed:
-        # NOT UNDER `_lock`. The seed reads the corpus and writes up to a
-        # few hundred rows to a database in another region; holding the
-        # lock across that put every other caller -- which on a draft
-        # evening is every connect, through `is_free_draft` -- in a queue
-        # behind one round trip per row. Only the caller that claimed the
-        # seed waits for it, and it claims it once per process.
-        _seed_mocks_from_corpus(store)
+        # ON A THREAD, AND NOT ON THE CALLER. This used to run inline on
+        # whichever request happened to be the first in the process to ask the
+        # store anything, and on 2026-08-27 that request was a
+        # `GET /api/account/favorites` on a freshly deployed container: the
+        # Railway edge log has it at 24,026 ms, against 85 ms for the two
+        # either side of it. The seed is boot work whose size is set by how
+        # far the corpus has run ahead of the table -- it is not this request's
+        # work in any sense, and no request should ever be able to discover
+        # how big it is.
+        #
+        # Nothing is lost by not waiting. The seed was ALREADY racing every
+        # other caller: `_seeded` is claimed under `_lock` and the work runs
+        # outside it, so every concurrent `is_free_draft` already ran against
+        # a table the seed had not finished filling. This only stops the one
+        # caller that drew the short straw from paying for it too, and that
+        # caller's fallback is the same one all the others have -- the lobby
+        # directory, and a tie that goes to the drafter.
+        _seed_done.clear()
+        threading.Thread(target=_seed_mocks_from_corpus, args=(store,),
+                         name="billing-seed-mocks", daemon=True).start()
     return store
 
 
@@ -404,8 +427,9 @@ def _seed_mocks_from_corpus(store) -> None:
 
     `draft_log` has the answer and has had it all along: every row with
     source `mock` is a mock, with its league id, going back to the first
-    draft ever recorded. Read once per process, the first time anything
-    asks the store a question.
+    draft ever recorded. Read once per process, on a thread `_db` starts the
+    first time anything asks the store a question -- see there for why it is
+    not the asking caller that pays for it.
 
     Best-effort and read-only. The farm writes that file as drafts finish,
     and a lock held by it is not a reason to fail a request -- the seed is an
@@ -415,30 +439,73 @@ def _seed_mocks_from_corpus(store) -> None:
     this process wrote on a previous boot, and re-inserting all 854 of them
     on every restart is 854 round trips to say nothing. One SELECT names
     what is there, and the insert carries the difference -- usually none.
+    When it is not none, it goes in a handful of statements rather than one
+    per row: see `_insert_mock_rooms`.
     """
     try:
-        from pipeline import draft_log as dl
-        corpus = duckdb.connect(dl.CORPUS_PATH, read_only=True)
-    except Exception:      # noqa: BLE001 -- no corpus yet, or the farm has it
-        return
-    try:
-        rows = corpus.execute(
-            "SELECT DISTINCT league_id FROM draft_log "
-            "WHERE source = ? AND league_id IS NOT NULL",
-            [dl.SOURCE_MOCK]).fetchall()
-        if rows:
-            have = {str(r[0]) for r in store.execute(
-                "SELECT league_id FROM mock_room")}
-            missing = [[i, _now()] for i in
-                       {str(r[0]) for r in rows} - have]
-            if missing:
-                store.executemany(
-                    "INSERT INTO mock_room VALUES (?, ?) ON CONFLICT DO NOTHING",
-                    missing)
-    except Exception:      # noqa: BLE001 -- an older corpus without the
-        pass               # column, a partial write: the live tests remain
+        try:
+            from pipeline import draft_log as dl
+            corpus = duckdb.connect(dl.CORPUS_PATH, read_only=True)
+        except Exception:  # noqa: BLE001 -- no corpus yet, or the farm has it
+            return
+        try:
+            rows = corpus.execute(
+                "SELECT DISTINCT league_id FROM draft_log "
+                "WHERE source = ? AND league_id IS NOT NULL",
+                [dl.SOURCE_MOCK]).fetchall()
+            if rows:
+                have = {str(r[0]) for r in store.execute(
+                    "SELECT league_id FROM mock_room")}
+                missing = sorted({str(r[0]) for r in rows} - have)
+                _insert_mock_rooms(store, missing)
+        except Exception:  # noqa: BLE001 -- an older corpus without the
+            pass           # column, a partial write: the live tests remain
+        finally:
+            corpus.close()
     finally:
-        corpus.close()
+        _seed_done.set()
+
+
+# How many rooms go into one INSERT. The bound is Postgres's 65535 bind
+# parameters and two per row; 500 leaves three orders of magnitude of headroom
+# and still turns the whole backlog into a handful of statements.
+_SEED_CHUNK = 500
+
+
+def _insert_mock_rooms(store, league_ids) -> None:
+    """The missing rooms, in as few statements as the backend will take.
+
+    NOT `executemany`, WHICH IS WHERE THE 24 SECONDS WENT. Both adapters
+    implement it the honest way -- one execution per row -- so 854 missing
+    rooms was 854 statements, each its own auto-committed transaction and so
+    its own fsync on Railway's network volume (or its own round trip to a
+    Postgres in another region). Measured on this machine's local NVMe, where
+    an fsync is at its cheapest: 854 rows cost 1.100 s row-at-a-time and
+    0.008 s as one statement, and the same seed inside a booting app took
+    4.3 s. A volume whose fsync is the ~28 ms a network disk charges puts
+    that same 854 rows at ~24 s, which is what the edge log recorded.
+
+    `set_favorites` already writes its list this way and says why in the same
+    words: one statement with every row's values in it, so the cost is a
+    property of the backend's latency and not of the length of the list.
+
+    DEDUPLICATED FIRST, which `executemany` did not have to be. ESPN's mock
+    directory can list the same room twice in one read, and one statement
+    holding a key twice is a conflict with its own row rather than with a
+    stored one -- `ON CONFLICT DO NOTHING` covers that on both backends, but
+    only the version of the rule that stays true is worth relying on.
+    """
+    rooms = list(dict.fromkeys(str(i) for i in league_ids))
+    now = _now()
+    for start in range(0, len(rooms), _SEED_CHUNK):
+        chunk = rooms[start:start + _SEED_CHUNK]
+        params: list = []
+        for league_id in chunk:
+            params.extend([league_id, now])
+        values = ", ".join("(?, ?)" for _ in chunk)
+        store.execute(
+            f"INSERT INTO mock_room VALUES {values} ON CONFLICT DO NOTHING",
+            params)
 
 
 def _now() -> datetime:
@@ -446,13 +513,21 @@ def _now() -> datetime:
 
 
 def reset_for_tests(path: str | None = None) -> None:
-    """Drop the cached store so a test can point at its own file."""
+    """Drop the cached store so a test can point at its own file.
+
+    Waits for any seed still running first. `_db` starts that on a thread now,
+    so without this a test that finished while the seed was mid-insert would
+    close the connection under it -- swallowed, but as a write that silently
+    did not happen and as a test whose neighbour's rows depend on timing.
+    """
     global _store, _seeded
+    _seed_done.wait(_SEED_WAIT_SECONDS)
     with _lock:
         if _store is not None:
             _store.close()
         _store = None
         _seeded = False
+        _seed_done.set()
         _known_mocks.clear()
     if path is not None:
         os.environ[DB_PATH_ENV] = path
@@ -529,10 +604,11 @@ def note_mock_rooms(league_ids) -> None:
     if not unseen:
         return
     try:
-        now = _now()
-        _db().executemany(
-            "INSERT INTO mock_room VALUES (?, ?) ON CONFLICT DO NOTHING",
-            [[i, now] for i in unseen])
+        # One statement, not one per room, for the reason `_insert_mock_rooms`
+        # gives: this is reachable from a connect (`is_free_draft` reads the
+        # directory when the lobby cache has gone cold), and a full directory
+        # is enough rooms for a row-at-a-time write to be felt there.
+        _insert_mock_rooms(_db(), unseen)
     except Exception:      # noqa: BLE001 -- see note_mock_room
         pass
 
