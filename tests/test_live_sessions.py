@@ -504,7 +504,7 @@ def test_two_leaguemates_connecting_at_once_share_one_file_safely(tmp_path, monk
     runner = ThreadPoolExecutor(max_workers=2)
 
     def recorder(fn, *args):
-        submits.append(args[1])                  # league_id
+        submits.append(args[2])                  # league_id (after path, snapshot)
         return runner.submit(fn, *args)
     monkeypatch.setattr("api.live_build.submit", recorder)
 
@@ -621,7 +621,7 @@ def test_a_file_stays_inline_while_any_room_still_holds_it(tmp_path, monkeypatch
             real_build(cur, my_slot, league_id=league_id, settings=settings))
 
     def recorder(fn, *args):
-        submits.append(args[1])
+        submits.append(args[2])              # league_id (after path, snapshot)
         return runner.submit(fn, *args)
     monkeypatch.setattr("api.live_build.submit", recorder)
     league_file = str(tmp_path / "leagues_root" / "1.duckdb")

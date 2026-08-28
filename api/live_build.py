@@ -140,10 +140,11 @@ def build_session(*args, **kwargs):
     return live.build_session(*args, **kwargs)
 
 
-def _build_job(league_path: str, league_id: str, settings_json: str | None,
-               team_id: int | None, season) -> object:
-    """The worker's whole job: open the league file, work out the slot,
-    build the session, close the file, hand the session back.
+def _build_job(league_path: str, snapshot_path: str, league_id: str,
+               settings_json: str | None, team_id: int | None, season) -> object:
+    """The worker's whole job: provision the league file from the snapshot
+    if it does not exist yet, open it, work out the slot, build the
+    session, close the file, hand the session back.
 
     Runs in a worker process when there is a pool, and in the caller's
     thread otherwise. No progress object: one cannot be pickled across a
@@ -154,9 +155,12 @@ def _build_job(league_path: str, league_id: str, settings_json: str | None,
     """
     from api import live
     from pipeline.db import get_conn
+    from pipeline.leagues import provision_league
     from scoring import league as league_mod
 
     settings = league_mod.from_json(settings_json) if settings_json else None
+    provision_league(league_id, universal_path=snapshot_path,
+                     root=os.path.dirname(league_path), snapshot=snapshot_path)
     conn = get_conn(league_path)
     try:
         apply_conn_limits(conn)
@@ -179,20 +183,20 @@ def build_in_worker(league_path: str, universal_path: str, league_id: str,
                     season) -> object:
     """Build one league's session and return it (a DraftSession).
 
-    The league file at `league_path` must already be provisioned from
-    `universal_path` by the caller, and the caller must not hold a
-    connection to it while this runs -- see the module docstring for why
-    the worker, not the caller, does the opening. `universal_path` is the
-    shared database the league file was seeded from; the worker never
-    opens it (the parent holds it for its whole life) and it is carried
-    here only so the provisioning contract is visible at the call.
+    `universal_path` is the READ-ONLY SNAPSHOT of the universal database
+    (pipeline/leagues.snapshot_universal), not the live file: the worker
+    provisions the league file from it when the file does not exist yet,
+    and it never opens the live file, which the parent holds. The caller
+    must not hold a connection to `league_path` while this runs -- see the
+    module docstring for why the worker, not the caller, does the opening.
 
     In a worker process when `workers() > 0`, inline otherwise -- and
     inline for THIS call, with a line in the log, when the pool is broken
     twice over or the worker does not answer within LIVE_BUILD_TIMEOUT.
     A connect that falls back is slower, not failed.
     """
-    args = (league_path, league_id, settings_json, team_id, season)
+    args = (league_path, universal_path, league_id, settings_json, team_id,
+            season)
     if workers() <= 0:
         return _build_job(*args)
     try:

@@ -147,3 +147,67 @@ def test_two_leagues_have_independent_drafted_tables(tmp_path):
     assert read_table(b, "drafted").empty       # league B never saw it
     a.close()
     b.close()
+
+
+def _shared(tmp_path):
+    """A small universal database with a league table beside it."""
+    from pipeline.db import get_conn, write_table
+    import pandas as pd
+    shared = str(tmp_path / "universal.duckdb")
+    conn = get_conn(shared)
+    write_table(conn, "weekly", pd.DataFrame(
+        [{"player_id": f"p{i}", "season": 2025, "week": i % 17 + 1} for i in range(500)]))
+    write_table(conn, "players", pd.DataFrame([{"player_id": "p1", "name": "A"}]))
+    write_table(conn, "draft_picks", pd.DataFrame([{"season": 2025, "overall_pick": 1}]))
+    return shared, conn
+
+
+def test_the_snapshot_is_a_checkpointed_copy_beside_the_database(tmp_path):
+    from pipeline.db import get_conn, read_table
+    from pipeline.leagues import snapshot_path_for, snapshot_universal
+    shared, conn = _shared(tmp_path)
+    target = snapshot_universal(conn, shared)
+    assert target == snapshot_path_for(shared) == str(tmp_path / "universal-snapshot.duckdb")
+    # Readable by a second connection while the writer stays open.
+    import duckdb
+    snap = duckdb.connect(target, read_only=True)
+    assert snap.execute("SELECT count(*) FROM weekly").fetchone()[0] == 500
+    snap.close()
+    conn.close()
+    # No file, no snapshot -- an in-memory database in a test.
+    assert snapshot_universal(get_conn(":memory:"), "") is None
+
+
+def test_provisioning_from_the_snapshot_matches_the_pandas_copy(tmp_path):
+    from pipeline.db import get_conn, read_table
+    from pipeline.leagues import provision_league, snapshot_universal
+    shared, conn = _shared(tmp_path)
+    snapshot = snapshot_universal(conn, shared)
+    conn.close()
+    via_pandas = provision_league("1", universal_path=shared, root=str(tmp_path / "lg"))
+    via_attach = provision_league("2", universal_path=shared, root=str(tmp_path / "lg"),
+                                  snapshot=snapshot)
+    a, b = get_conn(via_pandas), get_conn(via_attach)
+    for table in ("weekly", "players"):
+        assert (read_table(a, table).sort_values("player_id").reset_index(drop=True)
+                .equals(read_table(b, table).sort_values("player_id").reset_index(drop=True))), table
+    assert read_table(b, "draft_picks").empty, "league tables are not copied"
+    a.close(); b.close()
+
+
+def test_a_missing_or_unreadable_snapshot_falls_back_to_the_pandas_copy(tmp_path, capsys):
+    from pipeline.db import get_conn, read_table
+    from pipeline.leagues import provision_league
+    shared, conn = _shared(tmp_path)
+    conn.close()
+    # Missing: silently the pandas copy.
+    path = provision_league("3", universal_path=shared, root=str(tmp_path / "lg"),
+                            snapshot=str(tmp_path / "nowhere.duckdb"))
+    lg = get_conn(path); assert not read_table(lg, "weekly").empty; lg.close()
+    # Present but not a database: the attach fails, the half-made file is
+    # removed, and the pandas copy lands with a line saying so.
+    bad = tmp_path / "bad-snapshot.duckdb"; bad.write_bytes(b"not a duckdb file")
+    path = provision_league("4", universal_path=shared, root=str(tmp_path / "lg"),
+                            snapshot=str(bad))
+    lg = get_conn(path); assert not read_table(lg, "weekly").empty; lg.close()
+    assert "copying through pandas" in capsys.readouterr().out

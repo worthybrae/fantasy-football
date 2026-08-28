@@ -203,8 +203,12 @@ def _run_refresh() -> None:
     # an un-checkpointed database is merely one whose recent history is in
     # the sidecar.
     try:
-        from pipeline.db import get_conn
-        get_conn().execute("CHECKPOINT")
+        from pipeline.db import DEFAULT_PATH, get_conn
+        from pipeline.leagues import snapshot_universal
+        # The snapshot CHECKPOINTs first, then copies the file: the
+        # read-only copy league provisioning reads from now carries this
+        # refresh (see pipeline/leagues.snapshot_universal).
+        snapshot_universal(get_conn(), DEFAULT_PATH)
     except Exception as exc:      # noqa: BLE001 -- see above
         print(f"refresh: could not checkpoint ({exc!r}) -- "
               f"data is committed, the file just lags its WAL", flush=True)

@@ -2054,6 +2054,15 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
     before Task 5.
     """
     registry = LiveRegistry()
+    # The read-only copy provisioning reads from (pipeline/leagues), written
+    # here once and again by the refresh loop (api/jobs.py) after every
+    # refresh. None when the database is not a file.
+    snapshot_path = None
+    try:
+        snapshot_path = leagues_mod.snapshot_universal(conn, db_path)
+    except Exception as exc:      # noqa: BLE001 -- provisioning falls back
+        # to the pandas copy without one; the API still comes up.
+        print(f"live: could not write the universal snapshot: {exc}")
     # The session requests with no cookie resolve to. Created eagerly so
     # `(state, _recompute)` -- what this function returns, and what a dozen
     # tests unpack -- always names a real dict. See DEFAULT_SID.
@@ -2536,8 +2545,19 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
             # first connect that pauses here is doing something real, and
             # every later one flashes past.
             existed = os.path.exists(league_path)
-            league_path = provision_league(
-                league_id, universal_path=db_path, root=leagues_mod.LEAGUES_ROOT)
+            # From the read-only snapshot, inside DuckDB (see
+            # pipeline/leagues.snapshot_universal): the pandas copy left
+            # most of a gigabyte resident in this process per evening. A
+            # worker provisions for itself, from the same snapshot, so the
+            # parent's part here is only the inline case -- and with no
+            # snapshot at all (a test database that was never snapshotted)
+            # the worker cannot provision, so the build stays inline too.
+            snapshot = snapshot_path
+            have_snapshot = snapshot is not None and os.path.exists(snapshot)
+            if not (live_build.workers() > 0 and have_snapshot):
+                league_path = provision_league(
+                    league_id, universal_path=db_path,
+                    root=leagues_mod.LEAGUES_ROOT, snapshot=snapshot)
             progress.ok("league", "already provisioned" if existed
                         else "new file · seeded from the shared database")
             # OFF THIS PROCESS'S CPU when there is a worker pool (see
@@ -2558,7 +2578,7 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
             # either way, and released with the connection.
             sole = registry.claim_path(league_path, s.sid)
             try:
-                if live_build.workers() > 0 and sole:
+                if live_build.workers() > 0 and sole and have_snapshot:
                     session = _build_off_process(league_path, league_id,
                                                  team_id, settings, progress)
                     league_conn = get_conn(league_path)
@@ -2666,7 +2686,7 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
         progress.begin("slot")
         try:
             session = live_build.build_in_worker(
-                league_path, db_path, league_id,
+                league_path, snapshot_path, league_id,
                 league_mod.to_json(settings) if settings is not None else None,
                 team_id, None)
         except live_build.BuildTimedOut as exc:
