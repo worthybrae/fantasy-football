@@ -367,13 +367,6 @@ def test_sid_activity_is_stamped_by_routes_and_frames(tmp_path, monkeypatch):
         _stop_all([a])
 
 
-def test_the_load_budget_for_rollouts():
-    assert live.rollouts_for_load(10) == 400
-    assert live.rollouts_for_load(50) == 400
-    assert live.rollouts_for_load(51) == 150
-    assert live.RECOMPUTE_SLOTS._value >= 2
-
-
 def test_the_reaper_drops_idle_rooms_and_keeps_fresh_ones(tmp_path, monkeypatch):
     """Four hours of silence retires a room -- listener stopped, record
     gone, dropped from the registry -- while a room touched a minute ago
@@ -542,37 +535,6 @@ def test_two_leaguemates_connecting_at_once_share_one_file_safely(tmp_path, monk
         runner.shutdown(wait=False)
 
 
-def test_a_stop_is_not_held_behind_the_ranking_queue(tmp_path, monkeypatch):
-    """With every ranking slot taken, a room's recompute worker waits in
-    short steps and gives up with a note; a stop still completes inside
-    LISTENER_STOP_TIMEOUT."""
-    monkeypatch.setattr("api.live.RECOMPUTE_WAIT_SECONDS", 0.6)
-    app, seen, stops = _app(tmp_path, monkeypatch)
-    # A known slot, or nothing ever asks for a ranking (see _launch_listener).
-    _seed_league_one_with_slot_seven(str(tmp_path / "live.duckdb"),
-                                     str(tmp_path / "leagues_root"))
-    permits = 0
-    while live.RECOMPUTE_SLOTS.acquire(blocking=False):
-        permits += 1
-    a = _client(app)
-    try:
-        _connect(a, "1", team_id="2")
-        deadline = time.monotonic() + 5
-        while True:
-            err = a.get("/api/live/state").json()["recompute_error"]
-            if err and "busy" in err:
-                break
-            assert time.monotonic() < deadline, "no busy note appeared"
-            time.sleep(0.05)
-        started = time.monotonic()
-        assert a.post("/api/live/stop").json()["listener_stopped"] is True
-        assert time.monotonic() - started < live.LISTENER_STOP_TIMEOUT
-    finally:
-        for _ in range(permits):
-            live.RECOMPUTE_SLOTS.release()
-        _stop_all([a])
-
-
 def test_the_reaper_starts_lazily_and_spares_the_default_room(tmp_path, monkeypatch):
     app, seen, stops = _app(tmp_path, monkeypatch)
     registry = app.state.live_registry
@@ -654,7 +616,12 @@ def test_a_file_stays_inline_while_any_room_still_holds_it(tmp_path, monkeypatch
         assert submits == ["1"], "c's build went to a worker"
         assert registry.active_count() == 2
         _stop_all([b, c])
-        assert registry.holders_of(league_file) == set()
+        # A stop with a ranking in flight hands the file to a closer, which
+        # releases it once that ranking exits; give it its moment.
+        deadline = time.monotonic() + 10
+        while registry.holders_of(league_file):
+            assert time.monotonic() < deadline, registry.holders_of(league_file)
+            time.sleep(0.05)
     finally:
         _stop_all([a, b, c])
         runner.shutdown(wait=False)
@@ -765,13 +732,13 @@ def test_a_stop_does_not_wait_for_a_ranking_in_flight(tmp_path, monkeypatch):
     _seed_league_one_with_slot_seven(str(tmp_path / "live.duckdb"),
                                      str(tmp_path / "leagues_root"))
     entered, release = threading.Event(), threading.Event()
-    real_survival = live.survival
+    real_plan = live.build_plan
 
-    def slow_survival(*a, **k):
+    def slow_plan(**k):
         entered.set()
         release.wait(timeout=20)
-        return real_survival(*a, **k)
-    monkeypatch.setattr("api.live.survival", slow_survival)
+        return real_plan(**k)
+    monkeypatch.setattr("api.live.build_plan", slow_plan)
     a = _client(app)
     league_file = str(tmp_path / "leagues_root" / "1.duckdb")
     try:
@@ -827,13 +794,13 @@ def test_a_reconnect_while_the_closer_still_holds_the_file_builds_inline(tmp_pat
         return runner.submit(fn, *args)
     monkeypatch.setattr("api.live_build.submit", recorder)
     entered, release = threading.Event(), threading.Event()
-    real_survival = live.survival
+    real_plan = live.build_plan
 
-    def slow_survival(*a, **k):
+    def slow_plan(**k):
         entered.set()
         release.wait(timeout=20)
-        return real_survival(*a, **k)
-    monkeypatch.setattr("api.live.survival", slow_survival)
+        return real_plan(**k)
+    monkeypatch.setattr("api.live.build_plan", slow_plan)
     league_file = str(tmp_path / "leagues_root" / "1.duckdb")
     a = _client(app)
     try:
@@ -1246,14 +1213,6 @@ def test_a_refusal_at_capacity_mints_no_room_and_keeps_the_cookie(
 
 
 def test_the_knobs_read_the_environment(monkeypatch):
-    monkeypatch.delenv(live.RECOMPUTE_SLOTS_ENV, raising=False)
-    assert 2 <= live.recompute_slots_from_env() <= 8
-    monkeypatch.setenv(live.RECOMPUTE_SLOTS_ENV, "1")
-    assert live.recompute_slots_from_env() == 2
-    monkeypatch.setenv(live.RECOMPUTE_SLOTS_ENV, "12")
-    assert live.recompute_slots_from_env() == 12
-    monkeypatch.setenv(live.RECOMPUTE_SLOTS_ENV, "lots")
-    assert 2 <= live.recompute_slots_from_env() <= 8
     monkeypatch.delenv(live.MAX_ROOMS_ENV, raising=False)
     assert live.max_rooms_from_env() == 150
     monkeypatch.setenv(live.MAX_ROOMS_ENV, "0")

@@ -272,26 +272,7 @@ def test_build_session_default_seed_is_pinned(tmp_path):
     assert session.seed == DEFAULT_SEED
 
 
-from api.live import STALE_AFTER_SECONDS, picks_until_turn, rollouts_for
-
-
-def test_rollouts_scale_with_how_close_my_turn_is():
-    """One code path, N as a parameter. Budgets were cut (~0.19s/rollout) so a
-    recompute lands in ~2-8s instead of up to ~35s -- a fast mock blew several
-    picks past our turn before the old on-the-clock search (200 -> ~35s)
-    finished. FAR is smallest (runs on every opponent pick, coarse is fine),
-    NOW largest (our actual decision) but still inside a real clock."""
-    assert rollouts_for(7) == 12
-    assert rollouts_for(3) == 12
-    assert rollouts_for(2) == 25
-    assert rollouts_for(1) == 25
-    assert rollouts_for(0) == 40
-
-
-def test_rollouts_never_returns_zero_or_negative():
-    """A negative distance means the pick count ran past my turn -- a desync.
-    It must still produce a usable budget rather than an empty search."""
-    assert rollouts_for(-1) == 40
+from api.live import STALE_AFTER_SECONDS, picks_until_turn
 
 
 def test_picks_until_turn_counts_the_snake_correctly():
@@ -353,49 +334,75 @@ def _live_routes_with_conn(tmp_path):
     return register_live_routes(FastAPI(), conn, path)
 
 
-def _live_session(seed=DEFAULT_SEED):
-    """A DraftSession usable with the real _recompute -- unlike
-    _fake_session, `settings` must carry real teams/rounds because
-    _recompute calls picks_until_turn(session.settings, ...), which calls
-    snake_slots(settings.teams, settings.rounds)."""
-    settings = type("S", (), {"teams": 8, "rounds": 15})()
-    return dataclasses.replace(_fake_session(seed=seed), settings=settings)
+def _settings(teams=8, rounds=15):
+    from scoring.league import LeagueSettings
+    return LeagueSettings(season=2026, teams=teams,
+                          starters={"QB": 1, "RB": 2, "WR": 2, "TE": 1, "K": 1, "DST": 1},
+                          flex_slots=2, bench=rounds - 10, scoring={}, draft_type="SNAKE")
 
 
-def _fake_candidates_frame(player_id):
-    """A stand-in for rank_available's return shape -- gain_now, not EV."""
-    return pd.DataFrame({"player_id": [player_id], "position": ["WR"],
-                          "proj_points": [200.0], "vor_points": [50.0],
-                          "gain_now": [12.5], "survive_pct": [80.0],
-                          "fills": ["WR1"], "rank": [1]})
+def _live_session(seed=DEFAULT_SEED, my_slot=4):
+    """A DraftSession usable with the real _recompute: real settings (the
+    plan needs teams, rounds and the roster shape), a small board and a
+    pool aligned with it. Nothing else is expensive."""
+    import types
+    board = pd.DataFrame([
+        {"player_id": "gibbs", "name": "J Gibbs", "position": "RB", "proj_points": 300.0,
+         "espn_rank": 5.0, "espn_pos_rank": 1.0, "espn_adp": 5.5, "market_rank": 4.0,
+         "bye": 5, "career_games_pg": 16.0},
+        {"player_id": "rb2", "name": "B Back", "position": "RB", "proj_points": 250.0,
+         "espn_rank": 8.0, "espn_pos_rank": 2.0, "espn_adp": 9.0, "market_rank": 9.0,
+         "bye": 7, "career_games_pg": 15.0},
+        {"player_id": "wr1", "name": "W Out", "position": "WR", "proj_points": 280.0,
+         "espn_rank": 6.0, "espn_pos_rank": 1.0, "espn_adp": 6.5, "market_rank": 6.0,
+         "bye": 5, "career_games_pg": 16.5},
+        {"player_id": "wr2", "name": "S Lot", "position": "WR", "proj_points": 240.0,
+         "espn_rank": 9.0, "espn_pos_rank": 2.0, "espn_adp": 10.0, "market_rank": 10.0,
+         "bye": 9, "career_games_pg": 12.0},
+        {"player_id": "te1", "name": "T End", "position": "TE", "proj_points": 200.0,
+         "espn_rank": np.nan, "espn_pos_rank": np.nan, "espn_adp": np.nan, "market_rank": 30.0,
+         "bye": 11, "career_games_pg": 14.0},
+    ])
+    pool = types.SimpleNamespace(
+        player_id=board["player_id"].to_numpy(dtype=object),
+        position=board["position"].to_numpy(dtype=object),
+        points=board["proj_points"].to_numpy(dtype=float))
+    return dataclasses.replace(_fake_session(seed=seed), my_slot=my_slot,
+                               settings=_settings(), board=board, pool=pool)
 
 
-def _fake_survival_frame(*a, **k):
-    """A stand-in for survival()'s return shape, for tests that mock the
-    ranking step entirely (its own contents never reach a mocked
-    rank_available)."""
-    return pd.DataFrame({"player_id": [], "avail_pct": []})
+def _fake_candidate_rows(player_id):
+    """A stand-in for the ranked rows the recompute stores: exactly the
+    room's candidate contract, one row."""
+    return [{"player_id": player_id, "position": "WR", "proj_points": 200.0,
+             "espn_rank": 1, "espn_pos_rank": 1, "espn_adp": 1.5,
+             "market_rank": 2, "lasts_pct": 80.0, "lasts_at_pick": 9,
+             "edge_pts": 12.5, "need": "starter", "favourite": False,
+             "rank": 1}]
 
 
-def test_state_candidates_carry_gain_now(tmp_path):
-    """The recommendation is gain_now, not simulated end-of-draft EV.
+def _fake_rank_and_plan(player_id):
+    """A `rank_and_plan` double: the one row, no plan, no turns."""
+    return lambda *a, **k: (_fake_candidate_rows(player_id), [], [])
 
-    EV's standard error was larger than the spread between good candidates,
-    so the top slot moved with the sampling seed. gain_now is deterministic
-    given the survival estimate -- and that determinism is exactly what
-    ought to be under test, so this drives the real engine (real pool, real
-    settings, real survival() and rank_available()) through a real
-    /api/live/state GET rather than mocking the ranking step, the way the
-    recompute-guard tests below do.
 
-    `register_live_routes` gives `(state, _recompute)` for exercising
-    _recompute directly (see `_live_routes_with_conn`), but never hands back
-    the FastAPI app it mounted routes on, so there is no existing fixture
-    that also lets a test hit the HTTP layer. Building the app and its
-    TestClient inline here, the same two lines `_live_routes_with_conn`
-    already uses plus wrapping them in a TestClient, isn't a new fixture
-    style -- it's the same pieces already used to reach state/_recompute.
-    """
+def _fake_availability(table, player_ids, k, n, espn_adp=None, market_rank=None,
+                       positions=None, **_):
+    """Everybody is still there: what a corpus with nothing in it answers."""
+    return np.ones(len(list(player_ids)), dtype=float)
+
+
+CANDIDATE_KEYS = {"player_id", "position", "proj_points", "espn_rank",
+                  "espn_pos_rank", "espn_adp", "market_rank", "lasts_pct",
+                  "lasts_at_pick", "edge_pts", "need", "favourite", "rank"}
+
+
+def test_state_candidates_carry_the_rooms_contract_in_espn_order(tmp_path):
+    """Real engine end to end: a seeded database, a real build_session, a
+    real _recompute (the availability table falls back to its ADP curve for
+    players the corpus has never seen) and a real GET. Every row carries
+    exactly the keys the room reads, in ESPN order with the unranked last,
+    and the plan the same recompute drew rides beside them."""
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
@@ -416,72 +423,59 @@ def test_state_candidates_carry_gain_now(tmp_path):
     _recompute(session, picks_made=0)
 
     body = client.get("/api/live/state").json()
-    assert body["candidates"], "no recommendation produced"
-    row = body["candidates"][0]
-    assert set(row) >= {"player_id", "position", "proj_points", "vor_points",
-                        "gain_now", "survive_pct", "fills", "rank"}
-    assert "ev" not in row
-    gains = [c["gain_now"] for c in body["candidates"]]
-    assert gains == sorted(gains, reverse=True)
+    assert body["candidates"], "no ranking produced"
+    for row in body["candidates"]:
+        assert set(row) == CANDIDATE_KEYS
+        assert row["lasts_pct"] is None or 0.0 <= row["lasts_pct"] <= 100.0
+        assert row["need"] in {"starter", "flex", "deferred", "bench", "capped"}
+        assert row["favourite"] is False
+    assert [c["rank"] for c in body["candidates"]] == list(range(1, len(body["candidates"]) + 1))
+    ranked = [c["espn_rank"] for c in body["candidates"] if c["espn_rank"] is not None]
+    assert ranked == sorted(ranked)
+    unranked_at = [i for i, c in enumerate(body["candidates"]) if c["espn_rank"] is None]
+    assert unranked_at == list(range(len(body["candidates"]) - len(unranked_at), len(body["candidates"])))
+    assert "horizon_pick" not in body and "horizon_is_end_of_draft" not in body
+    assert isinstance(body["plan"], list)
+    for turn in body["plan"]:
+        assert set(turn) == {"pick_no", "round", "target", "alternates"}
+    assert body["candidates_as_of_pick"] == 0
 
 
-def test_state_names_the_pick_the_ranking_was_actually_measured_against(tmp_path):
-    """`gain_now` is measured to the HORIZON, and the room has to say so.
-
-    8 teams, my_slot 2, nothing drafted: the pick on the clock is 1 and it
-    is not mine, so the list is a preview of my pick 2. My immediately-next
-    turn after that is 15, twelve opponent picks out -- past the ceiling
-    (`horizon_ceiling`: a round and a half, 10 here), so the measurement
-    stops at pick 13 instead, and 13 is the number that must reach the
-    payload. Serving 2 would caption the list with a pick nobody measured;
-    serving 15 would caption it with a pick nothing was measured to either.
-
-    Real engine end to end (real pool, real settings, real survival() and
-    rank_available() through a real GET), the same discipline
-    test_state_candidates_carry_gain_now holds.
-    """
+def test_state_measures_lasts_against_my_next_turn(tmp_path, monkeypatch):
+    """Slot 2 of an 8-team snake with nothing drafted: my next turn is pick
+    2, and that is the pick every row's `lasts_at_pick` names. The
+    availability answer is what `availability_at` said, as a percentage."""
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
-    from scoring.draft_sim import _next_pick_for, horizon_picks, horizon_target
 
     path = str(tmp_path / "live.duckdb")
-    _seed_minimal_live_db(path, extra_players=[
-        {"player_id": "p2", "name": "B Runner", "position": "RB",
-         "team": "DET", "espn_id": 4430807},
-    ])
+    _seed_minimal_live_db(path)
     conn = get_conn(path)
     app = FastAPI()
     state, _recompute = register_live_routes(app, conn, path)
     client = TestClient(app)
+    asked = []
 
+    def availability(table, ids, k, n, espn_adp=None, market_rank=None,
+                     positions=None, **_):
+        asked.append((k, n))
+        return np.full(len(list(ids)), 0.4)
+    monkeypatch.setattr("api.live.availability_at", availability)
+    monkeypatch.setattr("api.live.build_plan", lambda **k: [])
     session = build_session(conn, my_slot=2)
     state["session"] = session
     _recompute(session, picks_made=0)
-
     body = client.get("/api/live/state").json()
-    settings = session.settings
-    expected = horizon_target(settings, 2, 0, False, horizon_picks(settings))
-    assert expected == 13
-    assert body["horizon_pick"] == expected
-    assert body["horizon_is_end_of_draft"] is False
-    # ... and it is genuinely NOT the pick the room used to name, at either
-    # end: not my next pick (2), and not my next turn after it (15) either.
-    assert _next_pick_for(settings, 2, 0) == 2
-    assert body["horizon_pick"] != _next_pick_for(settings, 2, 0)
-    assert body["horizon_pick"] != _next_pick_for(settings, 2, 2)
+    assert asked[0] == (0, 2)
+    assert all(c["lasts_at_pick"] == 2 and c["lasts_pct"] == 40.0 for c in body["candidates"])
 
 
-def test_state_says_end_of_draft_rather_than_a_pick_that_does_not_exist(tmp_path):
-    """At my last turn there is no later turn to measure against, so
-    `_horizon_pick_for` returns its off-the-end sentinel (len(slots) + 1)
-    and survival runs to the end of the draft. That sentinel is not a pick:
-    printing it would put "vs. waiting until pick 129" on a 128-pick draft.
-
-    The seeded league is 8 teams x 16 rounds, so slot 2's last turn is pick
-    127. The ghost rows carry player ids that are not in the pool, which
-    `_drafted_state` deliberately keeps as None entries -- they still
-    consume their turns, which is all this test needs them to do.
-    """
+def test_after_my_last_turn_there_is_nothing_to_last_to(tmp_path):
+    """The seeded league is 8 teams x 16 rounds, so slot 2's last turn is
+    pick 127. With 127 picks made there is no turn of mine left: no
+    `lasts_pct`, no `lasts_at_pick`, no edge, and an empty plan. The ghost
+    rows carry ids not in the pool, which `_drafted_state` keeps as None
+    entries -- they still consume their turns, which is all this needs."""
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     from scoring.draft_sim import snake_slots
@@ -492,26 +486,23 @@ def test_state_says_end_of_draft_rather_than_a_pick_that_does_not_exist(tmp_path
     app = FastAPI()
     state, _recompute = register_live_routes(app, conn, path)
     client = TestClient(app)
-
     session = build_session(conn, my_slot=2)
     slots = snake_slots(session.settings.teams, session.settings.rounds)
     assert len(slots) == 128 and slots[126] == 2, "fixture drifted"
     write_table(conn, "drafted", pd.DataFrame(
-        [{"player_id": f"ghost{i}", "pick_no": i} for i in range(1, 127)]))
+        [{"player_id": f"ghost{i}", "pick_no": i} for i in range(1, 128)]))
     state["session"] = session
-    _recompute(session, picks_made=126)
-
+    _recompute(session, picks_made=127)
     body = client.get("/api/live/state").json()
-    assert state["horizon_pick"] == len(slots) + 1      # the sentinel, stored
-    assert body["horizon_is_end_of_draft"] is True      # named, not printed
-    assert body["horizon_pick"] is None
+    assert body["candidates"], "the pool is still on the board"
+    assert all(c["lasts_pct"] is None and c["lasts_at_pick"] is None
+               and c["edge_pts"] is None for c in body["candidates"])
+    assert body["plan"] == []
 
 
-def test_state_carries_the_horizon_keys_even_with_no_session(tmp_path):
-    """Same "present with a null/false value, never omitted" convention
-    listener_alive and socket_alive already follow on the inactive branch --
-    the room reads these two on every poll and an absent key would read as
-    undefined, falsy by luck rather than by contract."""
+def test_state_carries_the_plan_key_even_with_no_session(tmp_path):
+    """Same "present with a null/empty value, never omitted" convention
+    listener_alive and socket_alive already follow on the inactive branch."""
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
@@ -521,94 +512,15 @@ def test_state_carries_the_horizon_keys_even_with_no_session(tmp_path):
     register_live_routes(app, conn, path)
     body = TestClient(app).get("/api/live/state").json()
     assert body["active"] is False
-    assert body["horizon_pick"] is None
-    assert body["horizon_is_end_of_draft"] is False
+    assert body["plan"] == []
+    assert body["candidates"] == []
+    assert "horizon_pick" not in body
 
 
-def test_state_serves_the_full_pool_by_vor_when_my_slot_is_unknown(tmp_path):
-    """Defect 2 (post-merge fix): the owner's actual complaint -- "available
-    should show all the players, no one has been drafted yet" -- with
-    my_slot never resolved and _recompute (which needs a slot, see its own
-    docstring) never even called. Before this fix `/api/live/state` served
-    whatever `state["candidates"]` happened to hold, which stays the []
-    _launch_listener initializes it to for as long as my_slot is None --
-    an empty pool on screen even though 249 real players were sitting
-    right there in `session.pool`.
-
-    Drives the real engine (real pool, real board) through a real GET, the
-    same discipline test_state_candidates_carry_gain_now already holds for
-    the my_slot-known path, so this is a real regression test rather than a
-    mock of the new code path.
-    """
-    from fastapi import FastAPI
-    from fastapi.testclient import TestClient
-
-    path = str(tmp_path / "live.duckdb")
-    _seed_minimal_live_db(path, extra_players=[
-        {"player_id": "p2", "name": "B Runner", "position": "RB",
-         "team": "DET", "espn_id": 4430807},
-        {"player_id": "p3", "name": "C Slot", "position": "WR",
-         "team": "GB", "espn_id": 4426515},
-    ])
-    conn = get_conn(path)
-    app = FastAPI()
-    state, _recompute = register_live_routes(app, conn, path)
-    client = TestClient(app)
-
-    session = build_session(conn, my_slot=None)
-    state["session"] = session
-    # p2 drafted; must not appear among the candidates below -- proves this
-    # path reads the real `drafted` table, not a stale/empty mask.
-    write_table(conn, "drafted", pd.DataFrame([{"player_id": "p2", "pick_no": 1}]))
-
-    body = client.get("/api/live/state").json()
-
-    assert body["my_slot"] is None
-    # _recompute was never called (no request_recompute fires before
-    # my_slot resolves or a pick lands -- see _launch_listener) and yet the
-    # pool is fully served, not empty.
-    ids = [c["player_id"] for c in body["candidates"]]
-    assert set(ids) == set(session.pool.player_id) - {"p2"}
-    assert len(ids) == len(session.pool.player_id) - 1
-    # Ranked by vor_points descending -- never zero, never fabricated.
-    vors = [c["vor_points"] for c in body["candidates"]]
-    assert vors == sorted(vors, reverse=True)
-    for c in body["candidates"]:
-        assert c["gain_now"] is None
-        assert c["survive_pct"] is None
-        assert c["fills"] is None
-        assert c["rank"] >= 1
-    # Fresh every poll (recomputed against the current `taken` mask, not an
-    # async result that can go stale) -- so this never trips DraftRoom's
-    # "recomputing for pick N" banner (candidates_as_of_pick < picks_made).
-    assert body["candidates_as_of_pick"] == body["picks_made"] == 1
-
-
-def test_the_vor_fallback_fires_on_an_empty_list_not_on_an_unknown_slot(tmp_path):
-    """The gate is "is the ranked list empty", NOT "is my_slot unknown".
-
-    This test used to be called
-    `test_state_my_slot_known_behavior_is_unchanged_by_the_vor_fallback` and
-    asserted `candidates == []` / `candidates_as_of_pick is None` for exactly
-    the state set up below. That was pinning the defect, and it is why the
-    suite stayed green over it: gating the fallback on `my_slot is None`
-    made the two halves of the original repair cancel out. Connect resolves
-    my_slot from ESPN's own pickOrder before a single frame arrives
-    (_slot_from_pick_order), so the unknown-slot branch could no longer run,
-    while nothing requested a recompute at launch -- so the owner's original
-    complaint (an empty Available tab at pick 1, 30-second clock, no undo)
-    was reachable again with the board's own tests passing over it.
-
-    Both halves are asserted here, because the second is the real content of
-    the old test and still has to hold:
-
-      1. my_slot KNOWN and the ranked list empty -- exactly what
-         _launch_listener initialises it to, and what it stays as for the
-         0.97-1.49s a real recompute takes -- must serve the vor-ranked pool,
-         with gain_now/survive_pct/fills honestly None.
-      2. A ranked list that actually exists must be served verbatim, never
-         swapped for the fallback just because the fallback now exists.
-    """
+def test_candidates_are_empty_until_a_ranking_lands_and_then_served_verbatim(tmp_path):
+    """No stand-in list. Before the first recompute the room gets [] (and
+    draws its ranking state); a ranking that exists is served exactly as
+    stored, with the pick it was measured at, never swapped for anything."""
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
@@ -621,31 +533,18 @@ def test_the_vor_fallback_fires_on_an_empty_list_not_on_an_unknown_slot(tmp_path
 
     session = build_session(conn, my_slot=1)
     state["session"] = session
-    # No _recompute call at all -- candidates/as_of_pick stay at their
-    # _launch_listener-style defaults, exactly as they would before any
-    # activity/pick landed.
-    state["candidates"] = []
-    state["as_of_pick"] = None
-
     body = client.get("/api/live/state").json()
     assert body["my_slot"] == 1
-    assert body["candidates"], "an empty board with my_slot known is the defect"
-    assert [c["player_id"] for c in body["candidates"]] == ["p1"]
-    assert body["candidates"][0]["gain_now"] is None
-    assert body["candidates"][0]["survive_pct"] is None
-    assert body["candidates"][0]["fills"] is None
-    assert body["candidates_as_of_pick"] == 0
-    # Never captioned with a horizon: this list was measured against nothing.
-    assert body["horizon_pick"] is None
+    assert body["candidates"] == [] and body["candidates_as_of_pick"] is None
+    assert body["plan"] == []
 
-    # 2. A real ranked list is served as-is.
-    state["candidates"] = _fake_candidates_frame("p1").to_dict(orient="records")
+    state["candidates"] = _fake_candidate_rows("p1")
     state["as_of_pick"] = 7
-    state["horizon_pick"] = 16
+    state["plan"] = [{"pick_no": 9, "round": 2, "target": None, "alternates": []}]
     body = client.get("/api/live/state").json()
-    assert body["candidates"][0]["gain_now"] == 12.5
+    assert body["candidates"] == _fake_candidate_rows("p1")
     assert body["candidates_as_of_pick"] == 7
-    assert body["horizon_pick"] == 16
+    assert body["plan"][0]["pick_no"] == 9
 
 
 def test_state_carries_the_pick_clock_league_settings_and_my_roster(tmp_path):
@@ -704,7 +603,8 @@ def test_state_carries_the_pick_clock_league_settings_and_my_roster(tmp_path):
         # What the rail actually prints: ESPN's week-1 projection, already in
         # this league's scoring. None on a board built without one -- a dash
         # on the rail, never a zero.
-        "wk1_points": session.board_by_id["p1"].get("proj_wk1"),
+        "wk1_points": (None if pd.isna(session.board_by_id["p1"].get("proj_wk1"))
+                       else float(session.board_by_id["p1"].get("proj_wk1"))),
     }]
 
 
@@ -766,173 +666,126 @@ def test_my_roster_is_empty_when_my_slot_is_not_known_yet(tmp_path):
     assert _my_roster(session, [0]) == []
 
 
+def _no_roster(*a, **k):
+    return ({slot: {"counts": {}, "indices": []} for slot in range(1, 9)}, [])
+
+
 def test_recompute_discards_a_result_the_pick_count_has_moved_past(tmp_path, monkeypatch):
-    """The pick-count guard: a search captured at picks_made=3 must not
+    """The pick-count guard: a ranking captured at picks_made=3 must not
     overwrite a poll that already recorded picks_made=5 by the time the
-    search finishes -- a stale recommendation is worse than none."""
+    ranking finishes -- a stale recommendation is worse than none."""
     state, _recompute = _live_routes_with_conn(tmp_path)
     session = _live_session()
-    monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
-    monkeypatch.setattr("api.live.survival", _fake_survival_frame)
-    monkeypatch.setattr("api.live.rank_available",
-                         lambda *a, **k: _fake_candidates_frame("stale"))
-
-    # A newer poll landed and recorded picks_made=5 while this computation,
-    # captured at picks_made=3, was still running.
+    monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (np.zeros(5, bool), []))
+    monkeypatch.setattr("api.live._seed_rosters", _no_roster)
+    monkeypatch.setattr("api.live.availability_at", _fake_availability)
+    monkeypatch.setattr("api.live.build_plan", lambda **k: [])
     state["as_of_pick"] = 5
     state["candidates"] = [{"player_id": "fresh"}]
-
     _recompute(session, picks_made=3)
-
     assert state["as_of_pick"] == 5
     assert state["candidates"] == [{"player_id": "fresh"}]
 
 
-def test_recompute_tells_the_ranking_how_many_picks_i_have_left(tmp_path, monkeypatch):
-    """`gain.need_kind` cannot tell an open kicker slot in round 3 from the
-    same slot in round 14 without it, and that is the whole of the deferral
-    rule -- so the number has to reach it, and it has to be MY remaining
-    picks counted the way `must_fill_positions` expects: including the pick
-    on the clock when that pick is mine.
-
-    Slot 4 of an 8-team, 15-round snake picks at 4, 13, 20, ... . With 3
-    picks made the next one is mine at pick 4, so all 15 remain; with 4 made
-    it has been used and 14 do.
-    """
+def test_recompute_plans_exactly_my_remaining_turns(tmp_path, monkeypatch):
+    """`build_plan` is handed my turns as overall pick numbers, conditioned
+    on the picks made. Slot 4 of an 8-team, 15-round snake picks at 4, 13,
+    20, ... . With 3 picks made the next one is mine at pick 4, so all 15
+    remain; with 4 made it has been used and 14 do -- and `need_kind` gets
+    that same count, which is the whole of the deferral rule."""
     state, _recompute = _live_routes_with_conn(tmp_path)
     session = _live_session()
     seen = {}
     monkeypatch.setattr("api.live._drafted_state",
-                        lambda cur, pool: (set(), list(range(state["_made"]))))
-    monkeypatch.setattr("api.live._seed_rosters",
-                        lambda *a, **k: ({4: {"counts": {}}}, []))
-    monkeypatch.setattr("api.live.survival", _fake_survival_frame)
+                        lambda cur, pool: (np.zeros(5, bool), [None] * state["_made"]))
+    monkeypatch.setattr("api.live._seed_rosters", _no_roster)
+    monkeypatch.setattr("api.live.availability_at", _fake_availability)
 
-    def capture(pool, settings, taken, counts, survive, turns_left=None):
-        seen["turns_left"] = turns_left
-        return _fake_candidates_frame("x")
-
-    monkeypatch.setattr("api.live.rank_available", capture)
-
+    def capture(**kwargs):
+        seen.update(kwargs)
+        return []
+    monkeypatch.setattr("api.live.build_plan", capture)
     state["_made"] = 3          # pick 4 is on the clock and it is mine
     _recompute(session, picks_made=3)
-    assert seen["turns_left"] == 15
+    assert seen["turns"][0] == 4 and len(seen["turns"]) == 15
+    assert seen["picks_made"] == 3
     state["_made"] = 4          # my pick 4 has been made
     _recompute(session, picks_made=4)
-    assert seen["turns_left"] == 14
+    assert seen["turns"][0] == 13 and len(seen["turns"]) == 14
 
 
-def test_recompute_stores_its_result_when_nothing_superseded_it(tmp_path, monkeypatch):
+def test_recompute_stores_its_rows_and_plan_when_nothing_superseded_it(tmp_path, monkeypatch):
     """The guard's other branch: an un-superseded result is served, not
-    swallowed by an overzealous check."""
+    swallowed by an overzealous check -- rows in ESPN order with the
+    unranked tight end last, and the plan `build_plan` returned."""
     state, _recompute = _live_routes_with_conn(tmp_path)
     session = _live_session()
-    monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
-    monkeypatch.setattr("api.live.survival", _fake_survival_frame)
-    monkeypatch.setattr("api.live.rank_available",
-                         lambda *a, **k: _fake_candidates_frame("winner"))
-
+    monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (np.zeros(5, bool), [None] * 3))
+    monkeypatch.setattr("api.live._seed_rosters", _no_roster)
+    monkeypatch.setattr("api.live.availability_at", _fake_availability)
+    plan = [{"pick_no": 4, "round": 1, "target": {"player_id": "gibbs", "lasts_pct": 100.0,
+                                                   "edge_pts": 50.0, "pros": [], "cons": []},
+             "alternates": []}]
+    monkeypatch.setattr("api.live.build_plan", lambda **k: plan)
     _recompute(session, picks_made=3)
-
     assert state["as_of_pick"] == 3
-    assert state["candidates"] == [{"player_id": "winner", "position": "WR",
-                                     "proj_points": 200.0, "vor_points": 50.0,
-                                     "gain_now": 12.5, "survive_pct": 80.0,
-                                     "fills": "WR1", "rank": 1}]
+    assert state["plan"] == plan
+    rows = state["candidates"]
+    assert [r["player_id"] for r in rows] == ["gibbs", "wr1", "rb2", "wr2", "te1"]
+    assert [r["rank"] for r in rows] == [1, 2, 3, 4, 5]
+    assert set(rows[0]) == CANDIDATE_KEYS
+    # Pick 4 is mine and on the clock, so "lasts" is measured to my turn
+    # after it -- pick 13 -- which is what waiting would mean.
+    assert rows[0]["lasts_pct"] == 100.0 and rows[0]["lasts_at_pick"] == 13
+    assert rows[-1]["espn_rank"] is None and rows[-1]["market_rank"] == 30
 
 
 def test_recompute_discards_a_result_from_a_stopped_and_restarted_session(tmp_path, monkeypatch):
     """The generation guard. live_stop then live_start resets as_of_pick to
-    None, which blinds the pick-count guard alone (`state["as_of_pick"] is
-    not None` is False right after a restart). A _recompute launched under
-    the session that got stopped must still be discarded, not silently
-    overwrite the new session's state with results computed against a
-    different my_slot/pool."""
+    None, which blinds the pick-count guard alone. A _recompute launched
+    under the session that got stopped must still be discarded, not
+    silently overwrite the new session's state."""
     state, _recompute = _live_routes_with_conn(tmp_path)
     old_session = _live_session()
-    monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
-    monkeypatch.setattr("api.live.survival", _fake_survival_frame)
+    monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (np.zeros(5, bool), []))
+    monkeypatch.setattr("api.live._seed_rosters", _no_roster)
+    monkeypatch.setattr("api.live.availability_at", _fake_availability)
 
-    def fake_rank_available(*a, **k):
-        # Simulate live_stop() followed by live_start() landing while this
-        # ranking is in flight -- exactly what those handlers do to `state`
-        # under the lock: bump the generation and reset as_of_pick.
+    def restart_underneath(**kwargs):
         state["generation"] += 1
         state["as_of_pick"] = None
         state["candidates"] = [{"player_id": "fresh-session"}]
-        return _fake_candidates_frame("stale-session")
-
-    monkeypatch.setattr("api.live.rank_available", fake_rank_available)
-
+        return []
+    monkeypatch.setattr("api.live.build_plan", restart_underneath)
     _recompute(old_session, picks_made=0)
-
     assert state["candidates"] == [{"player_id": "fresh-session"}]
     assert state["as_of_pick"] is None
 
 
-def test_recompute_passes_the_session_seed_to_survival(tmp_path, monkeypatch):
-    """The seed is pinned for the session's lifetime -- _recompute must hand
-    survival session.seed, never a freshly generated value."""
+def test_a_player_who_will_not_last_is_not_the_target_at_my_next_turn(tmp_path, monkeypatch):
+    """The Gibbs case. Pick 6 of an 8-team snake is slot 6's; four picks
+    are in and somebody else is on the clock at 5. Gibbs lasts to my turn
+    2% of the time, everybody else 90%: the real plan neither targets him
+    nor lists him as an alternate at that turn (eligibility is P >= 0.50),
+    and his row says 2.0% at pick 6."""
     state, _recompute = _live_routes_with_conn(tmp_path)
-    session = _live_session(seed=773311)
-    monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
-    monkeypatch.setattr("api.live.rank_available",
-                         lambda *a, **k: _fake_candidates_frame("p1"))
-    captured = {}
+    session = _live_session(my_slot=6)
+    monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (np.zeros(5, bool), [None] * 4))
+    monkeypatch.setattr("api.live._seed_rosters", _no_roster)
 
-    def fake_survival(*a, **k):
-        captured.update(k)
-        return pd.DataFrame({"player_id": [], "avail_pct": []})
-
-    monkeypatch.setattr("api.live.survival", fake_survival)
-
-    _recompute(session, picks_made=0)
-
-    assert captured["seed"] == 773311
-
-
-def test_recompute_tells_survival_when_the_pick_on_the_clock_is_mine(
-        tmp_path, monkeypatch):
-    """The whole-branch Critical, at the seam it actually lived in.
-
-    `survival` cannot tell "my pick is now" from "my pick is next" on its
-    own (`_next_pick_for` scans inclusively), and this is the caller that
-    is invoked at exactly the moment the distinction matters: `made` is
-    `count(*) FROM drafted`, i.e. picks_made, so the last recompute before
-    the user's turn is the one served while they pick. Left to infer, it
-    returned 1.0 for every available player and `gain_now` came back
-    identically zero for the leader at every position.
-
-    Both directions asserted: three picks made in an 8-team snake puts slot
-    4 on the clock (snake_slots(8, 15)[3] == 4) and must set
-    `on_the_clock=True`; nothing drafted puts slot 1 on the clock, not slot
-    4, and must leave it False. `taken_order` is all None -- `_seed_rosters`
-    counts a None pick as a turn consumed without touching the pool (which
-    is None in this fixture), which is exactly the "advance the snake"
-    behaviour needed here.
-    """
-    state, _recompute = _live_routes_with_conn(tmp_path)
-    session = _live_session()
-    assert session.my_slot == 4
-    monkeypatch.setattr("api.live.rank_available",
-                         lambda *a, **k: _fake_candidates_frame("p1"))
-    captured = {}
-
-    def fake_survival(*a, **k):
-        captured.update(k)
-        return pd.DataFrame({"player_id": [], "avail_pct": []})
-
-    monkeypatch.setattr("api.live.survival", fake_survival)
-
-    monkeypatch.setattr("api.live._drafted_state",
-                        lambda cur, pool: (set(), [None, None, None]))
-    _recompute(session, picks_made=3)
-    assert captured["on_the_clock"] is True
-
-    captured.clear()
-    monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
-    _recompute(session, picks_made=0)
-    assert captured["on_the_clock"] is False
+    def availability(table, ids, k, n, espn_adp=None, market_rank=None,
+                     positions=None, **_):
+        return np.array([0.02 if pid == "gibbs" else 0.9 for pid in ids])
+    # Both seams: the rows read api.live's name, the plan reads its own.
+    monkeypatch.setattr("api.live.availability_at", availability)
+    monkeypatch.setattr("scoring.plan.availability_at", availability)
+    _recompute(session, picks_made=4)
+    gibbs = next(r for r in state["candidates"] if r["player_id"] == "gibbs")
+    assert gibbs["lasts_pct"] == 2.0 and gibbs["lasts_at_pick"] == 6
+    first = state["plan"][0]
+    assert first["pick_no"] == 6
+    assert first["target"] is not None and first["target"]["player_id"] != "gibbs"
+    assert all(a["player_id"] != "gibbs" for a in first["alternates"])
 
 
 def test_live_start_success_path_builds_and_stores_a_session(tmp_path):
@@ -1184,9 +1037,16 @@ def test_state_is_never_empty_once_connect_has_resolved_my_slot(
         body = client.get("/api/live/state").json()
         assert body["my_slot"] == expect_slot
         assert body["picks_made"] == 0
-        assert body["candidates"], (
-            f"{label}: empty board at pick 0 -- this is the defect")
-        assert body["candidates_as_of_pick"] == 0
+        if expect_slot is not None:
+            # A ranking is requested at launch the moment the slot is known.
+            assert _wait_until(
+                lambda: client.get("/api/live/state").json()["candidates"]), (
+                f"{label}: empty board at pick 0 -- this is the defect")
+            assert client.get("/api/live/state").json()["candidates_as_of_pick"] == 0
+        else:
+            # No slot, no turns, no ranking: the list is honestly empty until
+            # the socket names our team (see _resolve_slot), never a stand-in.
+            assert body["candidates"] == [] and body["candidates_as_of_pick"] is None
         client.post("/api/live/stop")
 
 
@@ -1197,16 +1057,16 @@ def test_connect_ranks_once_at_launch_instead_of_waiting_for_a_pick(
 
     Nothing used to request one until a pick landed, so connecting at pick 0
     -- or reconnecting mid-draft while already on the clock -- served the
-    pool with gain_now/survive_pct/fills all None for the whole of that turn.
+    pool with no ranking at all for the whole of that turn.
     A full recompute measures 0.97-1.49s against the real 249-player pool at
     400 rollouts, so it cannot be done inline on the connect; it is requested
     on the worker, once, before the listener thread starts.
 
-    The signal asserted is a non-None gain_now, which only rank_available
-    produces: available_by_vor's rows carry None there by construction (see
-    scoring/gain.py). Real survival() and rank_available() run here -- the
-    seeded pool is one player, so the "expensive" part is trivial -- because
-    a mocked ranking could not tell the two payloads apart.
+    The signal asserted is a non-None lasts_pct, which only a recompute
+    produces (the list is [] until one lands). The real availability table
+    and plan run here -- the seeded pool is one player, so the "expensive"
+    part is trivial -- because a mocked ranking could not tell the two
+    payloads apart.
     """
     monkeypatch.setattr("api.live.run_listener", lambda *a, **k: None)
     monkeypatch.setattr("api.live.fetch_league_settings",
@@ -1224,12 +1084,11 @@ def test_connect_ranks_once_at_launch_instead_of_waiting_for_a_pick(
                      "&teamId=2&memberId={X}"}).json()["my_slot"] == 4
 
     assert _wait_until(
-        lambda: any(c["gain_now"] is not None for c in
+        lambda: any(c["lasts_pct"] is not None for c in
                     client.get("/api/live/state").json()["candidates"])), \
         "no ranking was ever requested -- the board waits for the first pick"
     body = client.get("/api/live/state").json()
-    # Measured against a real horizon pick, which only _recompute writes.
-    assert body["horizon_pick"] is not None
+    assert body["candidates_as_of_pick"] == 0
     assert body["recompute_error"] is None
     client.post("/api/live/stop")
 
@@ -1504,7 +1363,7 @@ def test_connect_wires_the_listener_to_apply_picks_and_recompute(
     through the exact same DraftListener/on_change shape run_listener uses
     (see pipeline/draft_listener.py). Everything downstream is the real
     code: build_session against a real (tiny) database, apply_picks writing
-    real rows to `drafted`, and _recompute. survival/rank_available are
+    real rows to `drafted`, and _recompute. The ranking step is
     stubbed only for speed/determinism, the same way the other _recompute
     tests in this file already do it -- the thing under test is the wiring,
     not the ranking.
@@ -1550,10 +1409,7 @@ def test_connect_wires_the_listener_to_apply_picks_and_recompute(
 
     recompute_calls = []
     monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
-    monkeypatch.setattr("api.live.survival", _fake_survival_frame)
-    monkeypatch.setattr(
-        "api.live.rank_available",
-        lambda *a, **k: recompute_calls.append(k) or _fake_candidates_frame("winner"))
+    monkeypatch.setattr("api.live.rank_and_plan", lambda *a, **k: recompute_calls.append(k) or (_fake_candidate_rows("winner"), [], []))
 
     done = threading.Event()
 
@@ -1614,10 +1470,7 @@ def test_connect_wires_the_listener_to_apply_picks_and_recompute(
         "recompute worker never produced candidates for pick 3"
     assert len(recompute_calls) >= 1
     state = client.get("/api/live/state").json()
-    assert state["candidates"] == [{"player_id": "winner", "position": "WR",
-                                    "proj_points": 200.0, "vor_points": 50.0,
-                                    "gain_now": 12.5, "survive_pct": 80.0,
-                                    "fills": "WR1", "rank": 1}]
+    assert state["candidates"] == _fake_candidate_rows("winner")
 
 
 # --- Listener lifecycle: at most one running, stop really stops it, a dead
@@ -1836,9 +1689,7 @@ def test_a_failing_recompute_is_reported_and_does_not_kill_the_worker(
         return (np.zeros(len(pool.player_id), dtype=bool), [])
 
     monkeypatch.setattr("api.live._drafted_state", flaky_drafted_state)
-    monkeypatch.setattr("api.live.survival", _fake_survival_frame)
-    monkeypatch.setattr("api.live.rank_available",
-                        lambda *a, **k: _fake_candidates_frame("p1"))
+    monkeypatch.setattr("api.live.rank_and_plan", _fake_rank_and_plan("p1"))
 
     tick = threading.Event()
 
@@ -1878,13 +1729,13 @@ def test_a_failing_recompute_is_reported_and_does_not_kill_the_worker(
     # at "No candidates yet." -- so as_of_pick no longer distinguishes "a
     # ranking landed" from "a ranking never happened". The horizon does:
     # only _recompute writes it, and the fallback explicitly nulls it.)
-    assert body["horizon_pick"] is None
-    assert all(c["gain_now"] is None for c in body["candidates"])
+    assert body["plan"] == []
+    assert body["candidates"] == []
 
     failing["on"] = False
     tick.set()
     assert _wait_until(
-        lambda: any(c["gain_now"] is not None for c in
+        lambda: any(c["lasts_pct"] is not None for c in
                     client.get("/api/live/state").json()["candidates"])), \
         "the worker died on the first failure instead of surviving it"
     assert client.get("/api/live/state").json()["recompute_error"] is None
@@ -2262,9 +2113,7 @@ def _connect_token_setup(tmp_path, monkeypatch, *, league_id="1", team_id="2",
 
     monkeypatch.setattr("api.live.billing.is_free_draft", lambda lid: False)
     monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
-    monkeypatch.setattr("api.live.survival", _fake_survival_frame)
-    monkeypatch.setattr("api.live.rank_available",
-                        lambda *a, **k: _fake_candidates_frame("winner"))
+    monkeypatch.setattr("api.live.rank_and_plan", _fake_rank_and_plan("winner"))
 
     def fake_run_socket_listener(listener, league_id, team_id, swid, token,
                                  on_change=None, stop_event=None,
@@ -2337,9 +2186,7 @@ def _connect_token_with_picks(tmp_path, monkeypatch, *, teams=2, rounds=1,
 
     monkeypatch.setattr("api.live.billing.is_free_draft", lambda lid: False)
     monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
-    monkeypatch.setattr("api.live.survival", _fake_survival_frame)
-    monkeypatch.setattr("api.live.rank_available",
-                        lambda *a, **k: _fake_candidates_frame("winner"))
+    monkeypatch.setattr("api.live.rank_and_plan", _fake_rank_and_plan("winner"))
 
     holder = {}
     ready = threading.Event()
@@ -2404,8 +2251,6 @@ def test_state_carries_the_rooms_report_url(tmp_path, monkeypatch):
     # These fixtures stub `_drafted_state` with a shape the state endpoint's
     # empty-list fallback cannot mask off; stub the fallback itself, which
     # this test says nothing about either way.
-    monkeypatch.setattr("api.live.available_by_vor",
-                        lambda *a, **k: _fake_candidates_frame("winner"))
     mid = client.get("/api/live/state").json()
     assert mid["report_url"] == "/leagues/1/report/2026"
     assert mid["on_the_clock"] is not None
@@ -2422,8 +2267,6 @@ def test_a_mock_rooms_state_carries_no_report_url(tmp_path, monkeypatch):
     one), so its room offers no link to a page that would only say so."""
     client, body = _connect_token_setup(tmp_path, monkeypatch)
     monkeypatch.setattr("api.live.billing.is_free_draft", lambda lid: True)
-    monkeypatch.setattr("api.live.available_by_vor",
-                        lambda *a, **k: _fake_candidates_frame("winner"))
     assert client.post("/api/live/connect-token", json=body).status_code == 200
     assert client.get("/api/live/state").json()["report_url"] is None
 
@@ -2494,10 +2337,7 @@ def test_connect_token_resolves_slot_and_wires_socket_picks(
 
     recompute_calls = []
     monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (set(), []))
-    monkeypatch.setattr("api.live.survival", _fake_survival_frame)
-    monkeypatch.setattr(
-        "api.live.rank_available",
-        lambda *a, **k: recompute_calls.append(k) or _fake_candidates_frame("winner"))
+    monkeypatch.setattr("api.live.rank_and_plan", lambda *a, **k: recompute_calls.append(k) or (_fake_candidate_rows("winner"), [], []))
 
     done = threading.Event()
     seen_args = {}
@@ -2795,9 +2635,7 @@ def test_unmapped_picks_surface_in_state(tmp_path, monkeypatch, _isolated_league
     monkeypatch.setattr(
         "api.live._drafted_state",
         lambda cur, pool: (np.zeros(len(pool.player_id), dtype=bool), []))
-    monkeypatch.setattr("api.live.survival", _fake_survival_frame)
-    monkeypatch.setattr("api.live.rank_available",
-                        lambda *a, **k: _fake_candidates_frame("x"))
+    monkeypatch.setattr("api.live.rank_and_plan", _fake_rank_and_plan("x"))
 
     def fake_socket(listener, league_id, team_id, swid, token,
                     on_change=None, stop_event=None, on_activity=None,
@@ -2904,7 +2742,7 @@ def _select_session(my_slot):
 def _live_app(tmp_path):
     """A (client, state) pair wired to a throwaway DuckDB file -- the same
     register_live_routes plumbing _live_routes_with_conn uses, plus the
-    TestClient test_state_candidates_carry_gain_now already established is
+    TestClient test_state_candidates_carry_the_rooms_contract_in_espn_order already established is
     fine to build inline. `state["league_conn"]` is pinned to this test's own
     connection so _drafted_count/_mark_drafted (which only ever see `state`,
     matching the brief's helper signatures) can reach the same `drafted`
@@ -3594,9 +3432,7 @@ def _join_mid_draft(monkeypatch, tmp_path, root, n_picks, hole_at=None,
                         lambda url, cookie: make_socket(frames))
     # The ranking is not what these assert; keep it cheap and deterministic so
     # the recompute worker cannot outrun the listener's own writes.
-    monkeypatch.setattr("api.live.survival", _fake_survival_frame)
-    monkeypatch.setattr("api.live.rank_available",
-                        lambda *a, **k: _fake_candidates_frame("x0"))
+    monkeypatch.setattr("api.live.rank_and_plan", _fake_rank_and_plan("x0"))
 
     from fastapi.testclient import TestClient
     from api.main import create_app

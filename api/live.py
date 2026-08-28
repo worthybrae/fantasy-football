@@ -3,8 +3,9 @@
 `make sim` pays 0.9s building the board, 1.1s building the pool and 14.9s in
 `fit_all` on every invocation. During a draft none of that changes -- the
 coefficients come from history, the board and pool are static -- so the
-session builds them once and every refresh costs only `survival` plus
-`rank_available` (see SURVIVAL_ROLLOUTS below for why that is cheap).
+session builds them once and every refresh is a lookup: who is still there
+at my next turn (`scoring/availability.py`, counted from recorded drafts),
+what waiting would cost (`scoring/plan.py`), and a plan for the turns left.
 """
 import dataclasses
 import hashlib
@@ -103,6 +104,12 @@ class DraftSession:
     # question actually being asked, which is "did this list come off ESPN
     # just now". This states that fact outright and cannot drift from it.
     settings_from_espn: bool = False
+    # The account's starred players, resolved once at connect from the
+    # billing store (api/billing.favorites) and replaced by
+    # dataclasses.replace when a PUT while the room is live changes them.
+    # A frozenset because the session is frozen and the plan only asks
+    # "is he one of mine".
+    favourites: frozenset = frozenset()
     # The cold-start opponent model, or None. A HybridModel (flat early, nested
     # mid/late -- the measured best predictor) when this league has NO
     # per-manager history to fit, so its mock/first-connect opponents are
@@ -111,6 +118,65 @@ class DraftSession:
     # `nested=` to every survival/rank call. default None so test fixtures and
     # any direct DraftSession construction need not supply it.
     nested: object = None
+
+
+def _attach_espn_rank(conn, board):
+    """ESPN's own order, on the board: `espn_rank`, `espn_pos_rank`, `espn_adp`.
+
+    `espn_rank` is ESPN's draft-lobby PPR rank (`espn_ppr_rank`, already on
+    the board from `pipeline.refresh`'s `espn_adp` pull), with the season's
+    printable cheat sheet (`historic_espn_cs.cs_rank`, matched by
+    `adp_match_key` because the sheet carries names, not ids) filling in
+    anyone the lobby list missed. NaN for a player in neither: the room
+    sorts him after every ranked player, by consensus. `espn_pos_rank` is
+    the order of `espn_rank` within his position. `espn_adp` is the lobby's
+    average draft position, and NaN for everybody when the season's column
+    is the reset value ESPN serves before drafts start
+    (`sources.espn_adp_is_usable`).
+    """
+    from pipeline.sources import espn_adp_is_usable
+    from scoring.board import adp_match_key
+    if not isinstance(board, pd.DataFrame) or "player_id" not in board.columns:
+        return board
+    board = board.copy()
+    rank = pd.to_numeric(board.get("espn_ppr_rank"), errors="coerce") \
+        if "espn_ppr_rank" in board.columns else pd.Series(np.nan, index=board.index)
+    try:
+        sheet = read_table(conn, "historic_espn_cs")
+    except Exception:      # noqa: BLE001 -- no sheet is no fallback, not a failure
+        sheet = pd.DataFrame()
+    if not sheet.empty and "cs_rank" in sheet.columns:
+        if "season" in sheet.columns:
+            sheet = sheet[pd.to_numeric(sheet["season"], errors="coerce") == CURRENT_SEASON]
+        by_key = {}
+        for row in sheet.itertuples(index=False):
+            key = adp_match_key(getattr(row, "cs_name", None),
+                                getattr(row, "position", None),
+                                getattr(row, "team", None))
+            if key is not None and key not in by_key:
+                by_key[key] = float(row.cs_rank)
+        if by_key:
+            fallback = [by_key.get(adp_match_key(r.get("name"), r.get("position"),
+                                                 r.get("team")))
+                        for _, r in board.iterrows()]
+            rank = rank.where(rank.notna(), pd.Series(fallback, index=board.index,
+                                                       dtype=float))
+    board["espn_rank"] = rank.astype(float)
+    board["espn_pos_rank"] = (board.groupby("position")["espn_rank"]
+                              .rank(method="first")
+                              .where(board["espn_rank"].notna()))
+    adp = pd.Series(np.nan, index=board.index, dtype=float)
+    try:
+        espn = read_table(conn, "espn_adp")
+    except Exception:      # noqa: BLE001 -- same: no table, no ADP
+        espn = pd.DataFrame()
+    if (not espn.empty and "espn_adp" in espn.columns and "espn_id" in espn.columns
+            and "espn_id" in board.columns and espn_adp_is_usable(espn)):
+        lookup = (espn[["espn_id", "espn_adp"]].dropna()
+                  .drop_duplicates("espn_id").set_index("espn_id")["espn_adp"])
+        adp = pd.to_numeric(board["espn_id"], errors="coerce").map(lookup).astype(float)
+    board["espn_adp"] = adp
+    return board
 
 
 def _attach_espn_proj(conn, board):
@@ -195,6 +261,7 @@ def build_session(conn, my_slot: int | None, seed: int = DEFAULT_SEED,
     # every later connect is a cache hit rather than another gigabyte.
     board = cached_build_board(conn, settings=settings)
     board = _attach_espn_proj(conn, board)
+    board = _attach_espn_rank(conn, board)
     progress.ok("board", f"{len(board)} players")
     progress.fact(players=int(len(board)))
 
@@ -293,9 +360,10 @@ from pipeline.espn_teams import http_fetch as _team_view_fetch
 from pipeline import leagues as leagues_mod
 from pipeline.leagues import DEFAULT_LEAGUE, provision_league
 from scoring.config import CURRENT_SEASON
-from scoring.draft_sim import (_drafted_state, _seed_rosters, horizon_picks,
-                               horizon_target, snake_slots, survival)
-from scoring.gain import available_by_vor, rank_available
+from scoring.availability import availability_at, cached_table
+from scoring.draft_sim import _drafted_state, _seed_rosters, snake_slots
+from scoring.gain import need_kind
+from scoring.plan import build_plan, edge_at, health_level, target_now  # noqa: F401 -- target_now is the demo's, imported here so one module owns the seam
 
 
 def _ordinal(n: int) -> str:
@@ -1392,11 +1460,6 @@ STALE_AFTER_SECONDS = 10
 # opponents pick) is smallest because it runs on every single pick and a
 # slightly coarse estimate there is harmless; NOW is largest because it is our
 # actual decision, but still inside a real 30-90s clock with room to spare.
-# The seed is pinned, so these coarser passes still converge on the same
-# scenario set -- fewer rollouts is a noisier estimate, not a different one,
-# and a current top-3 beats a precise answer for a pick already gone.
-ROLLOUTS_FAR, ROLLOUTS_NEAR, ROLLOUTS_NOW = 12, 25, 40
-
 # How long _stop_listener waits for the previous listener thread to notice
 # stop_event and exit (browser close included) before refusing a reconnect
 # rather than risking two sockets for the same team. A module constant, not
@@ -1404,52 +1467,6 @@ ROLLOUTS_FAR, ROLLOUTS_NEAR, ROLLOUTS_NOW = 12, 25, 40
 # without a real ten-second wait.
 LISTENER_STOP_TIMEOUT = 10.0
 
-# survival() runs ONE set of rollouts that stop at the turn being measured,
-# not one full draft per candidate, so the old clock-rationed budget
-# (12/25/40, see rollouts_for below) is no longer the constraint it was
-# priced against. This is the whole recompute cost now, and it buys a
-# materially tighter survival estimate for a fraction of what search_pick
-# cost: measured against the real production pool (data/nfl.duckdb, 249
-# players, 8 teams), survival(n_rollouts=400) plus rank_available together
-# ran in 0.1-0.8s across picks_made 0/8/50/100 -- an order of magnitude
-# under even the cheapest old ROLLOUTS_FAR budget's ~2.3s (12 rollouts *
-# ~0.19s), let alone the 30-90s pick clock this has to fit inside.
-#
-# Re-measured on the same pool once the horizon landed (see
-# draft_sim.horizon_picks): 0.97-1.49s across the same four pick counts,
-# worst case at pick 1. It costs more because it simulates more -- each
-# rollout now runs to a turn a full round of opponent picks away instead of
-# stopping at whatever turn came next, which at pick 1 of an 8-team draft is
-# 13 simulated picks instead of 1. Still an order of magnitude under the
-# pick clock, and it is the only reason the ranking has any signal in it at
-# a short gap, so the trade is not close.
-SURVIVAL_ROLLOUTS = 400
-
-# How many rankings may run at once across every room in the process. A
-# ranking is a second of numpy per pick; two hundred rooms each hearing a
-# pick every thirty seconds is seven a second, which is more cores than a
-# box has, and unbounded they would all run at once and all finish late.
-# Bounded to the core count they queue instead, and the coalescing slot
-# in each room's worker (see _launch_listener) means a room that waited
-# ranks the LATEST pick, never a stale one.
-RECOMPUTE_SLOTS_ENV = "LIVE_RECOMPUTE_SLOTS"
-
-
-def recompute_slots_from_env() -> int:
-    """How many rankings may run at once: the variable, else the core count
-    capped at eight, never fewer than two. Capped because past eight the
-    rankings are fighting the request threads for the GIL rather than
-    using cores; two so a single-core box still overlaps one ranking with
-    the next room's wait."""
-    raw = (os.environ.get(RECOMPUTE_SLOTS_ENV) or "").strip()
-    try:
-        n = int(raw) if raw else min(os.cpu_count() or 2, 8)
-    except ValueError:
-        n = min(os.cpu_count() or 2, 8)
-    return max(2, n)
-
-
-RECOMPUTE_SLOTS = threading.Semaphore(recompute_slots_from_env())
 
 # How many rooms may be drafting at once in this process. A connect past
 # it answers 503 "at capacity" rather than degrading every room already
@@ -1467,11 +1484,6 @@ def max_rooms_from_env() -> int:
         return max(1, int(raw)) if raw else DEFAULT_MAX_ROOMS
     except ValueError:
         return DEFAULT_MAX_ROOMS
-# How long one room waits for a ranking slot before skipping that ranking.
-# Waited for in half-second steps against the room's own stop event, so a
-# stop never sits behind the queue -- which is what would otherwise turn a
-# busy evening into a 503 on every reconnect (see _stop_listener's timeout).
-RECOMPUTE_WAIT_SECONDS = 20.0
 # How long a stop waits for the recompute worker before leaving it to
 # finish on its own (see _stop_listener). A worker that is not mid-numpy
 # is in a half-second timed wait on its condition or on a ranking slot and
@@ -1486,27 +1498,16 @@ _CLOSER_SEQ = itertools.count(1)
 # own name for the side effects it owns. See LiveSession.token.
 _ROOM_SEQ = itertools.count(1)
 
-# The point past which every room's ranking gets fewer rollouts. Under it
-# the full SURVIVAL_ROLLOUTS; over it 150, which is still a usable survival
-# estimate (the room prints whole percentages) and keeps a busy evening's
-# rankings inside the pick clock rather than behind it.
-ROLLOUTS_FULL_UNTIL = 50
-ROLLOUTS_REDUCED = 150
-
-
-def rollouts_for_load(active_sessions: int) -> int:
-    """How many survival rollouts one ranking gets, given how many rooms
-    are drafting at once. (`rollouts_for` below is the older budget by
-    picks-until-my-turn, which the manual refresh path still uses.)"""
-    return (SURVIVAL_ROLLOUTS if active_sessions <= ROLLOUTS_FULL_UNTIL
-            else ROLLOUTS_REDUCED)
-
-
 # Replace ESPN's draft socket with a replay (api/live_fake_socket.py), for
 # load tests against a local server. Never set in production: a connect
 # would follow a recording instead of the draft. Same "1/true/yes/on"
 # reading as the other switches.
 FAKE_SOCKET_ENV = "LIVE_FAKE_SOCKET"
+
+# Print one line per ranking with how long it took. For load runs
+# (scripts/load_server.py switches it on); off in production, where a
+# hundred rooms would write three lines a second for nothing.
+LOG_RANKINGS_ENV = "LIVE_LOG_RANKINGS"
 
 
 class FakeSocketMissing(RuntimeError):
@@ -1525,22 +1526,6 @@ SNAPSHOT_IN_TESTS_ENV = "LIVE_SNAPSHOT_IN_TESTS"
 
 def _switch_on(name: str) -> bool:
     return (os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def rollouts_for(picks_until: int) -> int:
-    """Budget by the time actually available.
-
-    Because the seed is pinned, raising N between refreshes refines the same
-    scenario set rather than resampling a different one -- the estimate
-    converges instead of jumping. A negative distance means a desync ran the
-    pick count past my turn; treat that as "now" rather than searching
-    nothing.
-    """
-    if picks_until <= 0:
-        return ROLLOUTS_NOW
-    if picks_until <= 2:
-        return ROLLOUTS_NEAR
-    return ROLLOUTS_FAR
 
 
 def picks_until_turn(settings, my_slot: int, picks_made: int) -> int:
@@ -1672,11 +1657,16 @@ def _initial_state() -> dict:
     """
     return {"session": None, "last_poll_at": None, "unmapped": [],
             "candidates": [], "as_of_pick": None, "computing_for": None,
-            # The pick `candidates` was ranked against (see _recompute).
-            # Written and cleared with `candidates` everywhere, never on
-            # its own: a horizon left over from a previous session would
-            # caption the new one's list with the old one's pick number.
-            "horizon_pick": None,
+            # The plan for my remaining turns (see _recompute and
+            # scoring/plan.py), written and cleared with `candidates`.
+            "plan": [],
+            # The account's starred players as the room last read them, the
+            # monotonic time of that read, and the account ids to read them
+            # under (empty for a room with no account). live_state re-reads
+            # at most every FAVOURITES_REFRESH_SECONDS so a PUT while the
+            # room is live reaches the plan on the next poll after that.
+            "favourites": frozenset(), "favourites_at": 0.0, "account_ids": [],
+            "request_recompute": None,
             # Pick count as the SOCKET has seen it, which is ahead of
             # everything derived from it: `as_of_pick` trails it by a
             # ranking. The event stream watches this so a pick reaches the
@@ -1716,6 +1706,9 @@ def _initial_state() -> dict:
             # every other write, so a superseded listener's worker cannot
             # clobber its replacement's status.
             "recompute_error": None,
+            # How long the last ranking took, in milliseconds; None before
+            # the first. Served on /api/live/state as `recompute_ms`.
+            "recompute_ms": None,
             # The live socket's send path, published by run_socket_listener
             # via its on_socket callback (see pipeline.draft_socket.
             # SocketHandle) exactly once, right after the first successful
@@ -2193,6 +2186,171 @@ def _records(db_path):
     return record_store(db_path)
 
 
+# How often a live room re-reads the account's starred players, so a PUT
+# on the dashboard while a draft is running reaches the plan without a
+# reconnect. Thirty seconds: a poll is every 2.5 s, the read is one small
+# query, and nobody stars a player and needs him in the plan within the
+# same pick clock.
+FAVOURITES_REFRESH_SECONDS = 30.0
+
+
+def _account_ids_for(swid) -> list:
+    """Every custody account id for a SWID, newest first, or [] when there
+    is no SWID, no custody key, or the store is unavailable. What the
+    favourites are read under."""
+    if not swid:
+        return []
+    try:
+        return list(custody.default_store().account_ids(str(swid)))
+    except Exception:      # noqa: BLE001 -- no key, no store: no account
+        return []
+
+
+def _favourites_for(account_ids) -> frozenset:
+    """The account's starred players, as the billing store has them right
+    now. `billing.favorites` is reached by name so a deployment whose
+    billing module predates it simply has no favourites."""
+    if not account_ids:
+        return frozenset()
+    read = getattr(billing, "favorites", None)
+    if read is None:
+        return frozenset()
+    try:
+        return frozenset(str(p) for p in read(list(account_ids)))
+    except Exception:      # noqa: BLE001 -- a store that is down costs the
+        # stars, not the room
+        return frozenset()
+
+
+def _board_column(board, name, index, default=np.nan):
+    """One board column aligned to `index` (player ids), NaN/default where
+    the board lacks it -- a test's stand-in board carries few columns."""
+    if isinstance(board, pd.DataFrame) and name in board.columns and "player_id" in board.columns:
+        col = board.drop_duplicates("player_id").set_index(board.drop_duplicates("player_id")["player_id"].astype(str))[name]
+        return col.reindex(index)
+    return pd.Series(default, index=index)
+
+
+def rank_and_plan(board, pool, taken, taken_order, counts, my_indices, my_slot,
+                  settings, favourites, table, picks_made=None):
+    """The room's candidate rows and its plan, from what is on the board now.
+
+    `taken` is the pool's drafted mask and `taken_order` the drafted pool
+    indices in pick order (`draft_sim._drafted_state`); `counts` the roster
+    the seat holds by position and `my_indices` its drafted pool indices
+    (`_seed_rosters`); `table` the availability table. Returns
+    `(candidates, plan, turns)`: the candidate rows in ESPN order with
+    exactly the keys the room reads, the plan for every remaining turn, and
+    those turns as overall pick numbers.
+
+    ESPN order: `espn_rank` ascending, the unranked after every ranked
+    player by consensus (`market_rank`), then by name. `lasts_pct` and
+    `edge_pts` are measured against my NEXT turn -- the first of mine after
+    the pick on the clock, so on the clock they still say what waiting one
+    round would cost -- and are None when there is none. The plan is drawn
+    over every turn of mine including the one on the clock (where
+    `availability_at` answers 1.0 for everybody still here, so its first
+    target is `target_now`'s). `need` is `gain.need_kind`'s word for what
+    this position would do for the roster, as of now.
+    """
+    teams, rounds = int(settings.teams), int(settings.rounds)
+    snake = snake_slots(teams, rounds)
+    made = len(taken_order) if picks_made is None else int(picks_made)
+    turns = [i + 1 for i in range(min(made, len(snake)), len(snake))
+             if snake[i] == my_slot]
+    pool_ids = np.asarray([str(p) for p in pool.player_id], dtype=object)
+    avail_mask = ~np.asarray(taken, dtype=bool)
+    ids = pool_ids[avail_mask]
+    positions = np.asarray([str(p) for p in np.asarray(pool.position)[avail_mask]], dtype=object)
+    index = pd.Index(ids)
+    proj = pd.to_numeric(_board_column(board, "proj_points", index), errors="coerce")
+    if proj.isna().all() and hasattr(pool, "points"):
+        proj = pd.Series(np.asarray(pool.points, dtype=float)[avail_mask], index=index)
+    proj = proj.fillna(0.0).to_numpy(dtype=float)
+    espn_rank = pd.to_numeric(_board_column(board, "espn_rank", index), errors="coerce").to_numpy(dtype=float)
+    espn_pos_rank = pd.to_numeric(_board_column(board, "espn_pos_rank", index), errors="coerce").to_numpy(dtype=float)
+    espn_adp = pd.to_numeric(_board_column(board, "espn_adp", index), errors="coerce").to_numpy(dtype=float)
+    market_rank = pd.to_numeric(_board_column(board, "market_rank", index), errors="coerce").to_numpy(dtype=float)
+    byes = pd.to_numeric(_board_column(board, "bye", index), errors="coerce").to_numpy(dtype=float)
+    games_pg = pd.to_numeric(_board_column(board, "career_games_pg", index), errors="coerce").to_numpy(dtype=float)
+    names_col = _board_column(board, "name", index, default=None)
+    names = {pid: (str(n) if n is not None and not (isinstance(n, float) and np.isnan(n)) else pid)
+             for pid, n in zip(ids, names_col)}
+    favourites = frozenset(str(f) for f in (favourites or ()))
+
+    # My next turn AFTER the pick on the clock: turns[0] when that pick is
+    # somebody else's, turns[1] when it is mine (turns[0] == made + 1).
+    next_turn = next((t for t in turns if t > made + 1), None)
+    if next_turn is not None and len(ids):
+        lasts = np.asarray(availability_at(table, ids, made, next_turn,
+                                           espn_adp, market_rank,
+                                           positions=positions), dtype=float)
+        edge = np.asarray(edge_at(proj, positions, lasts), dtype=float)
+    else:
+        lasts = edge = None
+
+    turns_left = len(turns)
+    # ESPN order, unranked last by consensus, then by name, so the order is
+    # total and the same on every poll.
+    order = sorted(range(len(ids)), key=lambda i: (
+        np.inf if np.isnan(espn_rank[i]) else espn_rank[i],
+        np.inf if np.isnan(market_rank[i]) else market_rank[i],
+        names.get(ids[i], "")))
+    rows = []
+    for rank, i in enumerate(order, start=1):
+        pid = ids[i]
+        rows.append({
+            "player_id": pid,
+            "position": positions[i],
+            "proj_points": _float_or_none(proj[i]),
+            "espn_rank": _int_or_none(espn_rank[i]),
+            "espn_pos_rank": _int_or_none(espn_pos_rank[i]),
+            "espn_adp": _float_or_none(espn_adp[i]),
+            "market_rank": _int_or_none(market_rank[i]),
+            "lasts_pct": None if lasts is None else round(float(lasts[i]) * 100, 1),
+            "lasts_at_pick": next_turn,
+            "edge_pts": None if edge is None else round(float(edge[i]), 1),
+            "need": need_kind(settings, counts, positions[i], turns_left),
+            "favourite": pid in favourites,
+            "rank": rank,
+        })
+
+    # STARTERS only, for the bye-stack reason: the con is two starters idle
+    # the same week, and a bench body's bye stacks with nobody. Filled the
+    # way a lineup is, in draft order: each position's starter slots first,
+    # then the flex from what is left of RB/WR/TE.
+    roster_byes = {}
+    starters = dict(getattr(settings, "starters", {}) or {})
+    flex_left = int(getattr(settings, "flex_slots", 0) or 0)
+    by_pos = {}
+    for idx in (my_indices or []):
+        pid = pool_ids[int(idx)]
+        pos = str(np.asarray(pool.position)[int(idx)])
+        by_pos.setdefault(pos, []).append(pid)
+    starting = []
+    for pos, pids in by_pos.items():
+        n = int(starters.get(pos, 0) or 0)
+        starting.extend(pids[:n])
+        for pid in pids[n:]:
+            if pos in ("RB", "WR", "TE") and flex_left > 0:
+                starting.append(pid)
+                flex_left -= 1
+    for pid in starting:
+        bye = pd.to_numeric(_board_column(board, "bye", pd.Index([pid])), errors="coerce").iloc[0]
+        if not np.isnan(bye):
+            roster_byes[pid] = int(bye)
+    plan = []
+    if turns and len(ids):
+        plan = build_plan(proj=proj, positions=positions, player_ids=list(ids),
+                          espn_rank=espn_rank, espn_adp=espn_adp,
+                          market_rank=market_rank, byes=byes,
+                          health=health_level(games_pg), roster_counts=dict(counts),
+                          settings=settings, turns=turns, picks_made=made,
+                          favourites=set(favourites), table=table, names=names,
+                          roster_byes=roster_byes)
+    return rows, plan, turns
+
+
 def register_live_routes(app, conn, db_path, reaper: bool = True):
     """Mount live-draft endpoints.
 
@@ -2250,6 +2408,41 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
                 return None
             s.touch()
         return s
+
+    def _with_favourites(s, session, swid):
+        """The session with the account's stars on it, and the room told
+        which account to re-read them under. `swid` is the drafting
+        account's; None (a browser-observer connect with no saved login)
+        means no account and no stars."""
+        ids = _account_ids_for(swid)
+        favourites = _favourites_for(ids)
+        with s.lock:
+            s.state["account_ids"] = ids
+            s.state["favourites"] = favourites
+            s.state["favourites_at"] = time.monotonic()
+        return dataclasses.replace(session, favourites=favourites)
+
+    def _refresh_favourites(s, state) -> None:
+        """Re-read the account's stars every FAVOURITES_REFRESH_SECONDS and,
+        when they changed, put them on the session and ask for a ranking.
+        Called with `s.lock` HELD (from live_state's snapshot), which is why
+        the read itself is done only when it is due and the recompute is
+        requested through the state's own hook rather than called."""
+        now = time.monotonic()
+        if now - state.get("favourites_at", 0.0) < FAVOURITES_REFRESH_SECONDS:
+            return
+        state["favourites_at"] = now
+        ids = state.get("account_ids") or []
+        if not ids or state["session"] is None:
+            return
+        fresh = _favourites_for(ids)
+        if fresh == state.get("favourites"):
+            return
+        state["favourites"] = fresh
+        state["session"] = dataclasses.replace(state["session"], favourites=fresh)
+        ask = state.get("request_recompute")
+        if ask is not None:
+            ask(state["session"], int(state.get("picks_seen") or 0))
 
     def _room_sid(request, response) -> str:
         """The sid a request that is about to START something lands in.
@@ -2331,7 +2524,7 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
         after its listener has been asked to stop. Under the room's lock."""
         s.state["generation"] += 1
         s.state.update({"session": None, "candidates": [],
-                        "as_of_pick": None, "horizon_pick": None,
+                        "as_of_pick": None, "plan": [],
                         "unmapped": [], "last_poll_at": None,
                         "listener": None, "listener_thread": None,
                         "listener_stop": None, "recompute_thread": None,
@@ -2621,6 +2814,7 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
             state["listener_thread"] = None
             state["listener_stop"] = None
             state["recompute_thread"] = None
+            state["request_recompute"] = None
             state["socket"] = None
             old_league_conn = state["league_conn"]
             state["league_conn"] = None
@@ -2673,20 +2867,22 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
         return True
 
     def _recompute(s, session, picks_made):
-        """Run one ranking and store it, unless superseded meanwhile.
+        """Rank what is on the board and draw the plan, unless superseded.
 
         A result computed against a board that has since changed is worse
         than no result -- it recommends a player who may already be gone. So
         the pick count and the session generation are both captured before
-        the ranking and re-checked after: if either moved, this result is
+        the work and re-checked after: if either moved, this result is
         discarded rather than served.
 
         `session.my_slot` can still be None here -- the socket hasn't named
-        our team yet -- and `survival` needs a real slot to index into
-        (rosters, snake order, ...), not something to guess at. Skip the
-        ranking rather than pass it a fabricated one; candidates stay empty
-        until my_slot resolves, which /api/live/state already reports
-        honestly via session.my_slot being null.
+        our team yet -- and a plan needs a real slot (whose turns are they?).
+        Skip rather than guess; candidates stay empty until my_slot resolves,
+        which /api/live/state already reports honestly via my_slot being null.
+
+        The work itself is milliseconds: `_drafted_state` on the league
+        connection, then `rank_and_plan`, which is one gather out of the
+        availability table per remaining turn (scoring/availability.py).
         """
         if session.my_slot is None:
             return
@@ -2698,120 +2894,33 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
             # live_connect opened and recorded in state. Read together with
             # `generation` under the same lock so the two describe the same
             # session -- a torn read (this session's generation, some other
-            # session's connection) would search against the wrong league's
+            # session's connection) would rank against the wrong league's
             # `drafted` table.
             active_conn = state["league_conn"] or conn
+            favourites = state.get("favourites") or session.favourites
         cur = active_conn.cursor()
         try:
             taken, taken_order = _drafted_state(cur, session.pool)
-            # My own roster so far, so need_weight can see which slots are
-            # still open. _seed_rosters replays every pick to the slot that
-            # was on the clock for it, which is the same attribution the
-            # simulator resumes from.
-            rosters, _ = _seed_rosters(session.pool, session.settings, taken_order)
-            counts = rosters[session.my_slot]["counts"]
-            # Is the pick on the clock RIGHT NOW our own? survival() cannot
-            # work this out from the pick count alone -- `_next_pick_for`
-            # scans inclusively, so "my pick is now" and "my pick is next"
-            # look identical to it and it answers "now", which pins every
-            # available player's survival at 1.0 and makes gain_now
-            # identically zero for the leader at every position (see
-            # survival's own docstring). This is the only caller that is
-            # ever asked WHILE the user is on the clock, and it is the one
-            # whose answer is read at exactly that moment, so it is the one
-            # that has to say which turn it means.
-            #
-            # Derived from `len(taken_order)`, not the `picks_made`
-            # argument: `taken_order` is what survival() itself counts
-            # `already` from, and picks_made was read on the listener
-            # thread before this ranking was queued, so a pick landing in
-            # between would leave the two disagreeing by one -- exactly the
-            # off-by-one this is here to close.
-            snake = snake_slots(session.settings.teams, session.settings.rounds)
-            on_the_clock = (len(taken_order) < len(snake)
-                            and snake[len(taken_order)] == session.my_slot)
-            # WHICH pick this ranking is measured against. Not my
-            # immediately-next turn: at a 1-3 opponent-pick gap that step is
-            # ~zero for everybody and the ranking has no signal left (a
-            # defense 5th and a kicker 6th at pick 1 of the owner's mock --
-            # see horizon_picks for the measurements). Not an arbitrarily
-            # distant one either: past about a round and a half the survival
-            # column the room prints reads 0% for every row it shows, which
-            # is the same loss of signal from the other side (see
-            # horizon_ceiling for that sweep). `horizon_target` is the whole
-            # rule -- floor, ceiling and the anchor they are measured from
-            # -- and it is the SAME call survival() makes below, so the
-            # number served and the number measured cannot differ.
-            #
-            # The result is a pick that exists, and usually one of mine; at
-            # the wheel, where my own turns offer only 2 opponent picks or
-            # 14, it is the pick a round and a half out instead, which is
-            # somebody else's turn and is still exactly the pick survival
-            # was counted to. At my last pick of the draft it is the
-            # off-the-end sentinel and `horizon_is_end_of_draft` below is
-            # what the room renders instead.
-            #
-            # Computed from the same `len(taken_order)`/`on_the_clock` pair
-            # survival() is called with, in the same critical section, so
-            # the number served can never describe a different pick than
-            # the one the ranking actually used.
-            h = horizon_picks(session.settings)
-            horizon = horizon_target(session.settings, session.my_slot,
-                                     len(taken_order), on_the_clock, h)
-            # How many picks I have left, INCLUDING the one on the clock if
-            # it is mine -- `snake[len(taken_order):]` starts at the pick
-            # about to be made, which is exactly that reading. It is what
-            # lets need_kind tell an open kicker slot in round 3 (thirteen
-            # picks left, fill it whenever) from the same slot in round 14
-            # (two picks left, two empty slots, fill it now).
-            my_turns_left = sum(1 for s in snake[len(taken_order):]
-                                if s == session.my_slot)
-            # survival()'s avail_pct is already a 0-1 probability (see its
-            # docstring and the "counts / max(n_rollouts, 1)" line it
-            # returns) -- rank_available wants exactly that, no rescaling.
-            # Bounded across every room (see RECOMPUTE_SLOTS), and with
-            # fewer rollouts when the evening is busy (rollouts_for_load). Only
-            # the numpy is inside the slot: the drafted read above and the
-            # store below are milliseconds and must not queue behind a
-            # ranking somewhere else.
-            # RECOMPUTE_SLOTS is held by the recompute worker across this
-            # whole call (acquired in its wait loop, released in its
-            # finally), so the bound covers the drafted read and the store
-            # as well as the numpy; a direct call from a test holds no slot
-            # and runs unbounded, as it always did.
-            rollouts = survival(
-                session.pool, session.settings, session.slot_managers,
-                session.my_slot, taken, session.betas,
-                n_rollouts=rollouts_for_load(registry.active_count()),
-                seed=session.seed,
-                taken_order=taken_order, on_the_clock=on_the_clock,
-                horizon=h, nested=session.nested)
-            avail = rollouts["avail_pct"].to_numpy()
-            # Two questions out of one set of rollouts. `avail` is the turn
-            # this list is PRICED against and is what `gain_now` steps to;
-            # `avail_next_pct` is my very next turn and is the only one shown
-            # as a percentage beside a player's name, because that is the
-            # question a reader is asking of it. See `rank_available`.
-            frame = rank_available(
-                session.pool, session.settings, taken, counts, avail,
-                my_turns_left,
-                survive_display=rollouts["avail_next_pct"].to_numpy())
         finally:
             cur.close()
+        # My own roster so far, so need_kind can see which slots are still
+        # open. _seed_rosters replays every pick to the slot that was on the
+        # clock for it, which is the same attribution the simulator resumes
+        # from.
+        rosters, _ = _seed_rosters(session.pool, session.settings, taken_order)
+        mine = rosters[session.my_slot]
+        candidates, plan, _turns = rank_and_plan(
+            session.board, session.pool, taken, taken_order, mine["counts"],
+            mine["indices"], session.my_slot, session.settings, favourites,
+            cached_table())
         with lock:
             if state["generation"] != generation:
                 return          # session stopped/restarted while computing
             if state["as_of_pick"] is not None and state["as_of_pick"] > picks_made:
                 return          # superseded while we were computing
-            state["candidates"] = frame.to_dict(orient="records")
+            state["candidates"] = candidates
+            state["plan"] = plan
             state["as_of_pick"] = picks_made
-            # Stored WITH the candidates it belongs to, under the same lock
-            # and behind the same two staleness guards, rather than
-            # recomputed in live_state from that request's own pick count:
-            # a list ranked against pick 18 must never be captioned "vs.
-            # waiting until pick 31" because a pick landed in between. The
-            # pair is written together or not at all.
-            state["horizon_pick"] = int(horizon)
 
     def _provision_and_build(s, league_id, team_id, settings=None, progress=None):
         """Open (provisioning if needed) the connection this league's session
@@ -3392,35 +3501,8 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
                 # RECOMPUTE_WAIT_SECONDS with the last ranking left in place
                 # and the room told why, rather than blocking a thread the
                 # stop path has to join.
-                deadline = time.monotonic() + RECOMPUTE_WAIT_SECONDS
-                got_slot = False
-                while not stop_event.is_set():
-                    if RECOMPUTE_SLOTS.acquire(timeout=0.5):
-                        got_slot = True
-                        break
-                    if time.monotonic() >= deadline:
-                        break
                 if stop_event.is_set():
-                    if got_slot:
-                        RECOMPUTE_SLOTS.release()
                     return
-                if not got_slot:
-                    with lock:
-                        if state["listener"] is listener:
-                            state["recompute_error"] = (
-                                "busy: no ranking slot within "
-                                f"{RECOMPUTE_WAIT_SECONDS:.0f}s; showing the "
-                                "previous ranking")
-                    # Back into the slot, not dropped: the launch ranking is
-                    # the only one a quiet room will ever ask for, and a
-                    # dropped one leaves the list empty and the `ranking`
-                    # stage spinning. Only when nothing newer has arrived
-                    # meanwhile (latest wins, as always), and paced by the
-                    # wait above, so this cannot spin hot.
-                    with recompute_cv:
-                        if pending["made"] is None:
-                            pending["session"], pending["made"] = sess, made
-                    continue
                 # Guarded, because this loop IS the thread's whole body: an
                 # exception propagating out of _recompute returns from
                 # recompute_worker and nothing ever ranks again for the rest
@@ -3446,6 +3528,7 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
                 # the ranking that pick, not the rest of the draft, so the
                 # loop stays alive and the next request self-heals (the
                 # success branch clears the error).
+                started = time.monotonic()
                 try:
                     _recompute(s, sess, made)
                 except Exception as exc:      # noqa: BLE001 -- see above
@@ -3464,13 +3547,16 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
                                   hint="The board is still live; the ranked "
                                        "list will retry on the next pick.")
                 else:
+                    elapsed_ms = (time.monotonic() - started) * 1000
                     with lock:
                         if state["listener"] is listener:
                             state["recompute_error"] = None
+                            state["recompute_ms"] = elapsed_ms
                         ranked = len(state["candidates"])
                     progress.ok("ranking", f"{ranked} ranked")
-                finally:
-                    RECOMPUTE_SLOTS.release()
+                    if _switch_on(LOG_RANKINGS_ENV):
+                        print(f"live: room {s.sid[:8]} ranked {ranked} at pick "
+                              f"{made} in {elapsed_ms:.0f} ms", flush=True)
 
         def _resolve_slot(c2) -> bool:
             """Resolve my_slot from ESPN's pick order, history, or the
@@ -3676,6 +3762,11 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
 
         thread = threading.Thread(target=pump, daemon=True)
         recompute_thread = threading.Thread(target=recompute_worker, daemon=True)
+        # Published so live_state's favourites refresh can ask for a ranking
+        # without holding a reference to this closure; cleared with the
+        # listener in _stop_listener's update below.
+        with lock:
+            state["request_recompute"] = request_recompute
         # Pick count as of launch, for the one recompute this function
         # requests below. Read HERE -- on the connect handler's own thread,
         # on the connection it just built this session with, and BEFORE that
@@ -3706,7 +3797,7 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
                               "listener_error": None, "recompute_error": None,
                               "league_conn": league_conn,
                               "candidates": [], "as_of_pick": None,
-                              "horizon_pick": None,
+                              "plan": [],
                               "unmapped": [], "last_poll_at": None})
                 state["generation"] = state.get("generation", 0) + 1
         if superseded:
@@ -3814,7 +3905,7 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
         with lock:
             state["generation"] += 1
             state.update({"session": session, "candidates": [],
-                          "as_of_pick": None, "horizon_pick": None,
+                          "as_of_pick": None, "plan": [],
                           "unmapped": [], "last_poll_at": None,
                           "recompute_error": None})
         return {"active": True, "reused": False,
@@ -3847,8 +3938,7 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
                         # omitted" convention the rest of this branch
                         # follows: no session means no ranking and so no
                         # pick it was measured against.
-                        "horizon_pick": None,
-                        "horizon_is_end_of_draft": False,
+                        "plan": [],
                         "last_poll_at": None, "stale": True,
                         "unmapped_picks": [], "listener_error": None,
                         "listener_alive": False, "recompute_error": None,
@@ -3896,6 +3986,7 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
                         "my_roster": []}
             snapshot = dict(state)
             listener = snapshot["listener"]
+            _refresh_favourites(s, state)
             # Straight off the listener, read here rather than after `lock`
             # releases: not because a single int attribute read is unsafe
             # (pipeline/draft_listener.py sets it with a plain assignment,
@@ -3991,90 +4082,26 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
                 # runs on every poll rather than being cached against the
                 # pick count.
                 my_roster = []
-                # Defect 2: "who is available" (the pool minus `drafted`) is
-                # always knowable and must render even before "how they rank
-                # for YOUR roster" is -- that part is what genuinely needs a
-                # slot. `_drafted_state` is called ONCE here and both halves
-                # read off it: `taken_order` attributes the picks (my_roster),
-                # `taken` is the mask the fallback ranking needs. One call,
-                # not one per branch, because both are wanted on the same
-                # request now and they must describe the same instant.
-                #
-                # THE FALLBACK IS GATED ON THE RANKED LIST BEING EMPTY, NOT
-                # ON my_slot BEING UNKNOWN, and that is the whole fix for
-                # this defect. Gated on `my_slot is None` the two halves of
-                # the original repair cancelled out and the owner's original
-                # complaint came straight back: connect resolves my_slot from
-                # ESPN's pickOrder before a single frame arrives
-                # (_slot_from_pick_order), so the `else` branch could no
-                # longer run -- while nothing requested a recompute at launch,
-                # leaving `state["candidates"]` at the [] _launch_listener
-                # initialises it to until the FIRST PICK LANDED. Reproduced
-                # end to end against a real TestClient (pickOrder
-                # [3,7,1,2,4,5,6,8], url carrying teamId=2, run_listener
-                # stubbed to a no-op): connect returned my_slot=4 and
-                # /api/live/state then served picks_made=0,
-                # len(candidates)=0, as_of_pick=None -- and stayed empty at
-                # 3s. The same seed with the teamId stripped out of the url
-                # served my_slot=None and len(candidates)=1. An empty list
-                # renders as the literal string "No candidates yet.", so the
-                # worst case was the owner in slot 1, on the clock for pick 1,
-                # 30-second timer, empty board.
-                #
-                # `not candidates` covers BOTH branches with one condition
-                # and keeps the single-payload-shape property: whatever the
-                # reason the ranked list is empty -- my_slot unknown, the
-                # launch recompute still running (0.97-1.49s measured on the
-                # real 249-player pool, see _launch_listener), a dead
-                # recompute worker -- the room gets the pool instead of
-                # nothing. It cannot mask a real result: `rank_available` and
-                # `available_by_vor` build off the same `~taken` mask, so the
-                # ranked list is empty only when the fallback would be too.
-                #
-                # available_by_vor needs only `taken` (cheap: see the timing
-                # note just above) -- ranked by the board's own vor_points,
-                # with gain_now/survive_pct/fills honestly None rather than a
-                # fabricated 0.0/"" (scoring/gain.py's own docstring).
-                # candidates_as_of_pick is simply `picks_made` here: unlike
-                # the async-computed slot-ranked list, this is never stale --
-                # it is recomputed against the current `taken` mask on every
-                # single poll -- so DraftRoom's "recomputing for pick N"
-                # banner (candidates_as_of_pick < picks_made) correctly never
-                # fires for it.
+                # The ranked list is whatever the last recompute stored --
+                # [] until the first one lands (a poll then shows the
+                # empty state, which the room draws as "ranking...") and
+                # never a stand-in ranked by some other rule. `_drafted_state`
+                # is called once here for my_roster; the plan and the rows
+                # come from the recompute, not from this poll.
                 candidates = snapshot["candidates"]
                 candidates_as_of_pick = snapshot["as_of_pick"]
-                horizon_pick = snapshot["horizon_pick"]
+                plan = snapshot["plan"]
                 try:
-                    taken, taken_order = _drafted_state(cur, session.pool)
+                    _taken, taken_order = _drafted_state(cur, session.pool)
                 except ValueError:
-                    taken = taken_order = None
+                    taken_order = None
                 if taken_order is not None and session.my_slot is not None:
                     my_roster = _my_roster(session, taken_order)
-                if not candidates and taken is not None:
-                    candidates = available_by_vor(
-                        session.pool, taken).to_dict(orient="records")
-                    candidates_as_of_pick = int(picks_made)
-                    # This fallback list is ranked by vor_points alone,
-                    # against nothing -- gain_now/survive_pct are None on
-                    # every row of it. Naming a horizon pick here would
-                    # caption a list that was never measured against one.
-                    horizon_pick = None
             finally:
                 cur.close()
         slots = snake_slots(session.settings.teams, session.settings.rounds)
         on_clock = slots[picks_made] if picks_made < len(slots) else None
         thread = snapshot["listener_thread"]
-        # The horizon _recompute actually measured this list against, split
-        # into the two things the room has to be able to say. A horizon past
-        # the last pick of the draft is `_horizon_pick_for`'s off-the-end
-        # sentinel -- I hold no turn after this one, so survival ran to the
-        # end of the draft. That is a real state (my final pick, every
-        # round-15 wheel) and it must read as "the end of the draft", never
-        # as pick 121 of a 120-pick draft. `horizon_pick` is None both then
-        # and before any ranking exists, which the room already handles by
-        # dropping the clause; the flag is what tells the two apart.
-        horizon_is_end_of_draft = (horizon_pick is not None
-                                   and horizon_pick > len(slots))
         return {
             "active": True,
             # Which draft this room follows. With one room per cookie the
@@ -4090,9 +4117,9 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
             "billing": _billing_state(request, session),
             "picks_made": int(picks_made),
             "on_the_clock": on_clock,
-            "horizon_pick": (None if horizon_pick is None
-                             or horizon_is_end_of_draft else int(horizon_pick)),
-            "horizon_is_end_of_draft": horizon_is_end_of_draft,
+            # The plan for my remaining turns (scoring/plan.py), drawn by
+            # the same recompute that ranked `candidates`, so the two agree.
+            "plan": plan,
             "my_slot": session.my_slot,
             "draft_started": draft_started,
             "candidates": candidates,
@@ -4115,6 +4142,7 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
             # keeps filling, and only the ranking stops. Reported separately
             # for that reason -- see the state key's own comment.
             "recompute_error": snapshot["recompute_error"],
+            "recompute_ms": snapshot.get("recompute_ms"),
             "socket_alive": socket_alive,
             "autodraft": autodraft,
             "token_received": snapshot.get("token") is not None,
@@ -4630,7 +4658,7 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
             # the identity guard, it does not touch anything the thread
             # itself might still hold open.
             state.update({"session": None, "candidates": [],
-                          "as_of_pick": None, "horizon_pick": None,
+                          "as_of_pick": None, "plan": [],
                           "unmapped": [], "last_poll_at": None,
                           "listener": None,
                           "listener_thread": None, "listener_stop": None,
@@ -4681,6 +4709,7 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
         if local is not None and not billing.is_free_draft(league_id):
             league_history.spawn_import_if_stale(
                 league_id, espn_drafts.cookies_for(local[0], local[1]))
+        session = _with_favourites(s, session, local[0] if local else None)
 
         def run_fn(listener, on_change, on_activity, stop_event):
             # The browser observer: watches the socket a real ESPN tab holds.
@@ -4850,6 +4879,7 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
         if body.espn_s2:
             minted = establish_custody(request, response, body.swid,
                                        body.espn_s2)
+        session = _with_favourites(s, session, body.swid)
         try:
             launched = _launch_listener(s, work_conn, league_conn, body.leagueId,
                                         session, run_fn, progress=progress)
@@ -5002,6 +5032,7 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
                 "report_url": (_report_url(league_id, record["season"])
                                if real_league else None),
             }
+        session = _with_favourites(s, session, record.get("swid"))
         _launch_listener(s, work_conn, league_conn, league_id, session,
                          _socket_run_fn(s, league_id, record["team_id"],
                                         record["swid"], record["token"],
