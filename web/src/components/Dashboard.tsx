@@ -272,7 +272,7 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
             account session to read favourites from (`favorites === null`):
             this page cannot offer to save something it cannot load. */}
         {favorites !== null && (
-          <YourGuys count={favorites.length} onOpen={openPicker} />
+          <YourGuys players={favorites} onOpen={openPicker} />
         )}
 
         <MockLobby

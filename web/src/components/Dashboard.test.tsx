@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import type { Player } from '../api'
 import Dashboard from './Dashboard'
 import { forgetBoard } from '../lib/board'
+import { forgetNames, rememberNames } from '../lib/playerNames'
 
 // WHAT THIS FILE IS FOR. Two properties, and the first is the whole reason
 // this page was rebuilt: the dashboard must not fetch the board. It is 250
@@ -45,6 +46,10 @@ function player(i: number): Player {
 const BOARD = Array.from({ length: 30 }, (_, i) => player(i + 1))
 
 beforeEach(() => {
+  // Call counts, not implementations: several tests here assert that the
+  // board was never asked for, and one test earlier in the file opens the
+  // dialog, which asks for it.
+  vi.clearAllMocks()
   // The board cache is module-level and outlives a test's mocks, which is the
   // point of it in a browser and a trap in a file like this one.
   forgetBoard()
@@ -54,7 +59,13 @@ beforeEach(() => {
   fetchPlayers.mockResolvedValue(BOARD)
 })
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  // Both caches are module-level and one of them lives in sessionStorage:
+  // without this, one test's board names the next test's ids.
+  forgetBoard()
+  forgetNames()
+})
 
 function draw() {
   return render(
@@ -101,4 +112,26 @@ test('the board is fetched when the picker is opened, and not before', async () 
   expect(dialog.getAttribute('aria-modal')).toBe('true')
   await waitFor(() => expect(fetchPlayers).toHaveBeenCalledTimes(1))
   expect(await screen.findByText('Player 1')).toBeTruthy()
+})
+
+// THE CARD IS A LIST OF PEOPLE, NOT OF IDENTIFIERS. The owner asked to see
+// the players they picked; the ids are storage. This page never fetches the
+// board -- that is the point of the dialog -- so the names come from whatever
+// the last board fetch left behind in this tab, which in practice is the
+// first time somebody opened the picker.
+test('the saved list is named from the tab\'s own cache, with no board fetch', async () => {
+  rememberNames([player(1), player(2)])
+  fetchFavorites.mockResolvedValue(['p1', 'p2'])
+  draw()
+  expect(await screen.findByText('Player 1')).toBeTruthy()
+  expect(screen.getByText('Player 2')).toBeTruthy()
+  expect(fetchPlayers).not.toHaveBeenCalled()
+})
+
+test('with nobody named, it says how many rather than printing ids', async () => {
+  fetchFavorites.mockResolvedValue(['zz1', 'zz2', 'zz3'])
+  draw()
+  expect(await screen.findByText('3 players saved.')).toBeTruthy()
+  expect(screen.queryByText('zz1')).toBeNull()
+  expect(fetchPlayers).not.toHaveBeenCalled()
 })

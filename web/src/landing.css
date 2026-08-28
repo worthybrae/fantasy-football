@@ -1422,19 +1422,65 @@
 }
 
 /* -- your guys: the dashboard card, and the dialog it opens ---------------
-   The card holds a sentence and a button, nothing else -- the list of names
-   lives in the dialog, because names would mean fetching the whole board on
-   every visit to this page (see YourGuys.tsx). The picker inside the dialog
-   is the same component it always was; everything from `.fav-modal` down is
-   the room it now sits in. */
+   The card names the players it can and opens the dialog to change them, and
+   it never fetches the board to do either: the names come from whatever the
+   last board fetch left behind in this tab (lib/playerNames.ts), and a card
+   that recognises none of the saved ids says how many there are instead of
+   printing a column of identifiers. The picker inside the dialog is the same
+   component it always was; everything from `.fav-modal` down is the room it
+   now sits in. */
 
 .db-fav-card {
-  /* A row, not the column `.db-card` gives everything else here: it is one
-     sentence and one control, and stacking them wasted a card's height on a
-     paragraph nobody reads twice. */
-  flex-direction: row;
+  gap: var(--space-3);
+}
+
+/* Names in columns rather than one long list: twenty-five of them down a
+   single column is a card taller than the leagues above it. */
+.db-fav-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 5px var(--space-3);
+}
+
+.db-fav-row {
+  display: flex;
   align-items: center;
-  gap: var(--space-4);
+  gap: 7px;
+  min-width: 0;
+  font-size: var(--text-sm);
+}
+
+.db-fav-ord {
+  width: 16px;
+  flex-shrink: 0;
+  text-align: right;
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+.db-fav-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-1);
+}
+
+/* The fallback when nothing in this tab knows who the ids are: a count, not
+   a column of identifiers. */
+.db-fav-count {
+  margin: 0;
+  font-size: var(--text-md);
+  color: var(--text-2);
+}
+
+.db-fav-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
 }
 
 .db-fav-note {
@@ -1445,7 +1491,7 @@
   color: var(--text-3);
 }
 
-.db-fav-card > .db-go {
+.db-fav-foot > .db-go {
   margin-left: auto;
   flex-shrink: 0;
 }

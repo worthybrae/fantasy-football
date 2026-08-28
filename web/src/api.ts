@@ -1,3 +1,5 @@
+import { rememberNames } from './lib/playerNames'
+
 export interface MarketSources {
   ffc: number | null; espn: number | null; fp: number | null;
   mfl: number | null; cbs: number | null; fp_tier: number | null;
@@ -169,7 +171,13 @@ export async function fetchPlayers(): Promise<Player[]> {
   if (!res.ok) {
     throw new Error(`Failed to load players (${res.status}): ${await detailText(res)}`)
   }
-  return (await res.json()).players
+  const players = (await res.json()).players as Player[]
+  // Leave the names behind on the way past. Somewhere else on this page
+  // there is a list of player ids that needs nothing but a name, and this is
+  // what stops it fetching all of this again to print one -- see
+  // lib/playerNames.ts.
+  rememberNames(players)
+  return players
 }
 
 export async function setDrafted(playerId: string, drafted: boolean): Promise<void> {
