@@ -1361,15 +1361,30 @@ export interface MockDraft {
   recorded_at: string | null
 }
 
-// Live rooms first, then finished ones, newest first -- the server's own
-// order, kept as it arrives.
-export async function fetchMockDrafts(): Promise<MockDraft[]> {
+// The listing, and the board of its first row.
+//
+// `first_board` is the page's first paint arriving in one request instead of
+// two: /mocks opens whichever draft the server put first, so the second
+// fetch it used to make was entirely predictable. Null when the list is
+// empty or the server could not build that board, in which case the page
+// fetches it the ordinary way -- see api/mocks.py.
+export interface MockDraftList {
+  // Live rooms first, then finished ones, newest first -- the server's own
+  // order, kept as it arrives.
+  drafts: MockDraft[]
+  first_board: LiveBoard | null
+}
+
+export async function fetchMockDrafts(): Promise<MockDraftList> {
   const res = await fetch('/api/mocks')
   if (!res.ok) {
     throw new Error(`Failed to load the mock drafts (${res.status}): ${await detailText(res)}`)
   }
   const body = await res.json()
-  return Array.isArray(body.drafts) ? body.drafts : []
+  return {
+    drafts: Array.isArray(body.drafts) ? body.drafts : [],
+    first_board: body.first_board ?? null,
+  }
 }
 
 // The same shape the live room's board comes in, so one grid draws both --

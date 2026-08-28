@@ -198,7 +198,7 @@ def _publish(n=3, league_id="222", my_slot=MY_SLOT, owners=...):
 def test_the_listing_is_empty_before_anything_has_been_farmed(client):
     """No corpus file at all is the ordinary state of a fresh install, not an
     error -- `_open_corpus` returns None rather than raising."""
-    assert client.get("/api/mocks").json() == {"drafts": []}
+    assert client.get("/api/mocks").json() == {"drafts": [], "first_board": None}
 
 
 def test_a_completed_draft_lists_its_real_shape(client):
@@ -440,7 +440,7 @@ def test_a_live_file_whose_farm_is_dead_is_not_a_live_draft(client, tmp_path):
                               ROUNDS, MY_SLOT, None, owners=None)
     path = _write_stale(payload, tmp_path)
 
-    assert client.get("/api/mocks").json() == {"drafts": []}
+    assert client.get("/api/mocks").json() == {"drafts": [], "first_board": None}
     board = client.get(f"/api/mocks/{payload['draft_id']}/board")
     assert board.status_code == 404
     # Swept on the read, so it cannot come back on the next one.
@@ -483,7 +483,7 @@ def test_a_draft_from_another_source_is_not_a_mock(client):
             picks=_picks_frame(["p1", "p2"] * 4, None, None)))
     finally:
         corpus.close()
-    assert client.get("/api/mocks").json() == {"drafts": []}
+    assert client.get("/api/mocks").json() == {"drafts": [], "first_board": None}
     assert client.get(f"/api/mocks/{draft_id}/board").status_code == 404
 
 
@@ -547,3 +547,44 @@ def test_a_pick_nothing_can_name_still_falls_back_to_its_id(client, monkeypatch)
 
     assert board["cells"][1]["player"]["name"] == "who-is-this"
     assert board["unresolved"] == 1
+
+
+# ---------------------------------------------------------------------------
+# The first row's board, sent with the listing
+# ---------------------------------------------------------------------------
+
+
+def test_the_listing_carries_the_board_of_the_row_the_page_will_open(client):
+    """ONE REQUEST FOR THE FIRST PAINT. /mocks opens whichever draft this
+    endpoint puts first, so the board it asked for next was always
+    predictable. Inlined, it has to be the same document the board endpoint
+    serves -- one grid draws both, and a `first_board` that differed would
+    make the page redraw itself for no reason a reader could see."""
+    _record(pd.Timestamp("2026-08-18 09:00:00"), league_id="111")
+    _publish(n=3, league_id="222")
+
+    listing = client.get("/api/mocks").json()
+    first = listing["drafts"][0]
+    fetched = client.get(f"/api/mocks/{first['id']}/board").json()
+
+    assert first["status"] == "live"
+    assert listing["first_board"] == fetched
+
+
+def test_a_board_that_cannot_be_built_leaves_the_listing_standing(client,
+                                                                  monkeypatch):
+    """BEST EFFORT, ALWAYS. This endpoint's job is the listing. A board that
+    raises has to become a null and a fetch the page makes for itself --
+    which is what it did before any of this -- rather than a 500 that takes
+    the whole page down to save it one request."""
+    _record(pd.Timestamp("2026-08-18 09:00:00"), league_id="111")
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("no board today")
+
+    monkeypatch.setattr("api.mocks._board_frame", boom)
+
+    listing = client.get("/api/mocks").json()
+
+    assert len(listing["drafts"]) == 1
+    assert listing["first_board"] is None

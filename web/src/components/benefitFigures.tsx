@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 import type { LiveCandidate, LiveMock, LiveSettings, MarketSlot, Player } from '../api'
-import { TurnBar } from '../pages/Market'
+import { TurnBar } from './TurnBar'
 import { CellTip, loadProfile } from './draft/CellTip'
 import TopThree from './draft/TopThree'
 import ScheduleRanks from './profile/ScheduleRanks'

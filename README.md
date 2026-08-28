@@ -284,6 +284,8 @@ means moving the mutable tables to Postgres first.
 | `STRIPE_PRICE_ID` | `price_…` | The $9.99 price, made in the Stripe Dashboard |
 | `STRIPE_WEBHOOK_SECRET` | `whsec_…` | Required with the key. Without it the webhook refuses everything |
 | `PUBLIC_BASE_URL` | `https://…` | Where Stripe sends a buyer back to. Behind a proxy the app cannot work this out itself |
+| `SUPABASE_DB_URL` | `postgresql://…` | **Off by default.** A Supabase Postgres DSN, via the session pooler. Absent, custody, billing and the live session record stay in DuckDB files on the volume |
+| `LIVE_BUILD_WORKERS` | `3` | Process-pool size for draft-session builds. Set by the image. `0` runs them inline in the request thread, which is what a checkout and the test suite do |
 
 `ESPN_CUSTODY_TRUST_FORWARDED_PROTO` is the one that will waste an evening if
 it is missed. Railway terminates TLS at its edge and forwards plain HTTP to
@@ -292,6 +294,16 @@ connect as insecure transport — a 400 with a message about plaintext, on a
 site that is plainly served over HTTPS. The switch is off by default because
 `X-Forwarded-Proto` is forgeable when nothing overwrites it; a proxy that does
 overwrite it is exactly the case it exists for.
+
+### Putting a CDN in front
+
+Not set up yet, and it is a nameserver switch rather than a code change. The
+app already labels every response with what a cache may do with it — the
+hashed bundle is immutable, the document is never cached, the public reads
+carry an `s-maxage`, and everything else under `/api` is `private, no-store`
+(see `api/http_cache.py`). Cloudflare Free in front of Railway turns those
+labels into traffic the container never sees. The steps, and what each one
+is for, are in `docs/superpowers/reference/cloudflare-runbook.md`.
 
 ### Charging for it
 

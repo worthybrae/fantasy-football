@@ -264,46 +264,58 @@ export default function DraftRoom() {
   }, [])
 
   // 2.5s poll of /api/live/state, lifted from the deleted LiveDraft.tsx --
-  // now joined by that same file's /api/live/board poll, in the one loop
-  // (own try/catch per fetch, own state/error slot per fetch, see LiveDraft
-  // git history) so a hiccup in either endpoint can't blank the other's
-  // tab.
+  // now joined by that same file's /api/live/board poll, in the one loop and
+  // in flight at the same time (own state/error slot per fetch, see
+  // LiveDraft git history) so a hiccup in either endpoint can't blank the
+  // other's tab.
   useEffect(() => {
     let cancelled = false
 
     async function poll() {
-      try {
-        const data = await fetchLiveState()
-        if (!cancelled) {
-          setState(data)
-          setError(null)
-          if (!data.active) {
-            // No session: whatever slot was on the clock belonged to a
-            // *previous* draft, if any -- must not be compared against next
-            // session's own on_the_clock as though it were a real edge.
-            prevOnClockRef.current = undefined
-          } else {
-            const prevOnClock = prevOnClockRef.current
-            prevOnClockRef.current = data.on_the_clock
-            if (prevOnClock !== undefined && data.my_slot !== null &&
-                data.on_the_clock === data.my_slot && prevOnClock !== data.my_slot) {
-              setTab((t) => (t === 'board' ? 'available' : t))
-            }
+      // BOTH AT ONCE, NOT ONE AFTER THE OTHER. These two endpoints do not
+      // read from each other and never did, but the board was being asked
+      // for only once the state had come back -- so every tick of the poll
+      // cost the sum of the two round trips instead of the longer of them,
+      // and a slow board build delayed the clock as well as itself.
+      //
+      // `allSettled` rather than `all`, because `all` rejects on the first
+      // failure and would drop the OTHER result on the floor. Each half
+      // still lands in its own state slot with its own error slot, which is
+      // the property that lets one tab keep working while the other is
+      // showing a message (see the git history of the deleted LiveDraft).
+      const [stateResult, boardResult] = await Promise.allSettled([
+        fetchLiveState(), fetchBoard(),
+      ])
+      if (cancelled) return
+
+      if (stateResult.status === 'fulfilled') {
+        const data = stateResult.value
+        setState(data)
+        setError(null)
+        if (!data.active) {
+          // No session: whatever slot was on the clock belonged to a
+          // *previous* draft, if any -- must not be compared against next
+          // session's own on_the_clock as though it were a real edge.
+          prevOnClockRef.current = undefined
+        } else {
+          const prevOnClock = prevOnClockRef.current
+          prevOnClockRef.current = data.on_the_clock
+          if (prevOnClock !== undefined && data.my_slot !== null &&
+              data.on_the_clock === data.my_slot && prevOnClock !== data.my_slot) {
+            setTab((t) => (t === 'board' ? 'available' : t))
           }
         }
-      } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load live state')
+      } else {
+        const e = stateResult.reason
+        setError(e instanceof Error ? e.message : 'Failed to load live state')
       }
-      try {
-        const data = await fetchBoard()
-        if (!cancelled) {
-          setBoard(data)
-          setBoardError(null)
-        }
-      } catch (e) {
-        if (!cancelled) {
-          setBoardError(e instanceof Error ? e.message : 'Failed to load the draft board')
-        }
+
+      if (boardResult.status === 'fulfilled') {
+        setBoard(boardResult.value)
+        setBoardError(null)
+      } else {
+        const e = boardResult.reason
+        setBoardError(e instanceof Error ? e.message : 'Failed to load the draft board')
       }
     }
 

@@ -387,20 +387,44 @@ def register_mock_routes(app, conn):
                     "recorded_at": farm.iso_utc(recorded_at),
                 })
 
-        return {"drafts": live + done}
+        drafts = live + done
+        return {"drafts": drafts, "first_board": _first_board(drafts)}
 
-    @app.get("/api/mocks/{draft_id}/board")
-    def mock_board(draft_id: str, response: Response):
-        """The snake board for one draft, live or completed.
+    def _first_board(drafts: list):
+        """The board of the row the page is about to open, sent with the row.
+
+        The page lands on the first draft in the list -- the server sorts live
+        first, then newest -- so the second request it made was always
+        predictable, and always for this. Sending it inline turns the first
+        paint from two round trips into one.
+
+        BEST EFFORT, ALWAYS. This endpoint's job is the listing; a board that
+        cannot be built is a null here and a fetch the page makes for itself,
+        exactly as before. Failing the listing over it would take the whole
+        page down to save it a request.
+        """
+        if not drafts:
+            return None
+        try:
+            return _board(drafts[0]["id"])
+        except Exception:      # noqa: BLE001 -- see above.
+            return None
+
+    def _board(draft_id: str):
+        """The snake board for one draft, live or completed, or None.
 
         Live is checked first for the same reason the listing prefers it: for
         the moment a draft exists in both places, the live file is the one
         with the pick that just landed. A live file that has gone stale (its
         farm process is dead) never reaches this -- `live_drafts` sweeps it on
         read -- so a crashed draft falls through to its corpus row if it was
-        recorded before the crash, and 404s if it was not.
+        recorded before the crash, and is None if it was not.
+
+        None rather than a 404 raised from in here, because two callers want
+        two different things from "no such draft": the route below turns it
+        into the 404 it has always been, and the listing above simply leaves
+        `first_board` null.
         """
-        http_cache.public(response, SHARED_CACHE_SECONDS)
         for payload in farm.live_drafts():
             if payload.get("draft_id") == draft_id:
                 return _live_board(conn, payload)
@@ -428,8 +452,7 @@ def register_mock_routes(app, conn):
             finally:
                 corpus.close()
         if head is None:
-            raise HTTPException(status_code=404,
-                                detail=f"no mock draft {draft_id}")
+            return None
 
         teams, rounds, my_slot = head
         # `had_owner` is stored per PICK (see `draft_log.ensure_schema` for
@@ -445,3 +468,13 @@ def register_mock_routes(app, conn):
         return _board_response(
             conn, teams, rounds, my_slot, had_owner,
             [(p[0], p[1], p[2], p[3]) for p in picks])
+
+    @app.get("/api/mocks/{draft_id}/board")
+    def mock_board(draft_id: str, response: Response):
+        """The snake board for one draft, live or completed."""
+        http_cache.public(response, SHARED_CACHE_SECONDS)
+        board = _board(draft_id)
+        if board is None:
+            raise HTTPException(status_code=404,
+                                detail=f"no mock draft {draft_id}")
+        return board

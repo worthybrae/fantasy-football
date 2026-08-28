@@ -56,7 +56,9 @@ export default function ArchiveData() {
   useEffect(() => {
     let cancelled = false
     fetchMockDrafts()
-      .then((rows) => { if (!cancelled) setDrafts(rows) })
+      // The listing only. This page draws the rows; `first_board` is for
+      // /mocks, which opens one of them.
+      .then((list) => { if (!cancelled) setDrafts(list.drafts) })
       .catch((err) => { if (!cancelled) setError(String(err.message || err)) })
     return () => { cancelled = true }
   }, [])

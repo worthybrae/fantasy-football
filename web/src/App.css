@@ -6989,3 +6989,13 @@ button.pp-pop-comp:focus-visible {
   outline: 2px solid var(--accent-border);
   outline-offset: 2px;
 }
+
+/* The Suspense fallback in App.tsx, while a route's chunk is on the wire.
+   Empty on purpose: it holds the viewport at full height so the top bar
+   does not jump up and back down, and shows nothing else. A page's real
+   loading state belongs to the page, which paints it as soon as its chunk
+   arrives and its own fetch is in flight. */
+.page-loading {
+  min-height: 100vh;
+  background: var(--bg-0);
+}

@@ -229,12 +229,35 @@ export default function MockDrafts() {
   const [board, setBoard] = useState<LiveBoard | null>(null)
   const [boardError, setBoardError] = useState<string | null>(null)
 
+  // ONE REQUEST FOR THE FIRST PAINT, NOT TWO. The listing carries the board
+  // of its own first row (`first_board`, see api/mocks.py), which is the
+  // board this page was always going to ask for next. These two refs are how
+  // that arrives without the fetch below racing it:
+  //
+  //   `seededIdRef` names the draft whose board is ALREADY in state. The
+  //   board effect consumes it once and clears it, so a later re-run of that
+  //   effect -- a live draft finishing, say -- still refetches.
+  //
+  //   `selectedIdRef` is the current selection read from inside `loadDrafts`,
+  //   which is memoised with no dependencies (its identity gates the polling
+  //   effect) and would otherwise close over the selection as it was on
+  //   mount. Seeding only when nothing is selected keeps a poll from throwing
+  //   the first room's board over one somebody chose, and keeps `?draft=<id>`
+  //   -- a link straight to a particular room -- pointing where it says.
+  const seededIdRef = useRef<string | null>(null)
+  const selectedIdRef = useRef(selectedId)
+  useEffect(() => { selectedIdRef.current = selectedId }, [selectedId])
+
   const loadDrafts = useCallback(async (signal: { cancelled: boolean }) => {
     try {
       const list = await fetchMockDrafts()
       if (signal.cancelled) return
-      setDrafts(list)
+      setDrafts(list.drafts)
       setListError(null)
+      if (selectedIdRef.current === null && list.first_board && list.drafts.length > 0) {
+        seededIdRef.current = list.drafts[0].id
+        setBoard(list.first_board)
+      }
     } catch (e) {
       if (signal.cancelled) return
       // `drafts` is deliberately left as it was: a list already on screen is
@@ -310,7 +333,13 @@ export default function MockDrafts() {
       }
     }
 
-    load(selectedId)
+    if (seededIdRef.current === selectedId) {
+      // Already on screen, inlined with the listing. Fetching it again on
+      // the same tick is the request this whole arrangement exists to avoid.
+      seededIdRef.current = null
+    } else {
+      load(selectedId)
+    }
     // A finished draft is fetched exactly once. Nothing about it can change
     // again, so polling it would be five seconds of noise a minute for a
     // board that is already final.

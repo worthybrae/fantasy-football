@@ -13,6 +13,12 @@ import PickOption from '../components/PickOption'
 import type { ProfileSeed } from '../components/PlayerProfile'
 import PlayerOverlay, { type OverlayTarget } from '../components/draft/PlayerOverlay'
 import { SEASON_GAMES } from '../components/draft/weeks'
+// TurnBar lives in components/ and not here BECAUSE the landing page draws
+// one. A page that another page imports from is a page that cannot be code
+// split -- `lazy(() => import('./pages/Market'))` in App.tsx would have gone
+// on shipping this whole file in the first chunk, silently, because the
+// static import wins. See components/TurnBar.tsx.
+import { pct, posVar } from '../components/TurnBar'
 import '../market.css'
 
 // THE ARCHIVE, READ FROM ONE SEAT.
@@ -32,8 +38,6 @@ import '../market.css'
 // 0-100 "certainty index" that would need its own explanation and could only
 // ever be a restatement of the widths already on screen.
 
-const POSITIONS = ['QB', 'RB', 'WR', 'TE', 'K', 'DST']
-
 /** The seat is the page. Remembered so somebody researching their own draft
  *  does not re-pick it on every visit; falls back to seat 1 rather than
  *  guessing from anything else. */
@@ -47,14 +51,6 @@ function readSeat(): number {
     return 1
   }
 }
-
-function posVar(position: string): string {
-  const key = position.toLowerCase()
-  return POSITIONS.some((p) => p.toLowerCase() === key)
-    ? `var(--pos-${key})` : 'var(--text-3)'
-}
-
-const pct = (share: number) => `${Math.round(share * 100)}%`
 
 /** Per game, the way every other projection in this app is printed -- the
  *  board holds a season total, and quoting 238.5 here beside a 14.0 in the
@@ -109,31 +105,6 @@ function verdict(topShare: number): string {
   if (topShare >= 0.2) return 'leans one way'
   if (topShare >= 0.1) return 'open'
   return 'wide open'
-}
-
-/** One turn: who goes here, as proportional ink. The tail -- everyone outside
- *  the named few -- is kept as a striped block rather than dropped, because a
- *  bar that only showed the top six would make every turn look decided. */
-export function TurnBar({ turn }: { turn: MarketTurn }) {
-  const named = turn.players.reduce((sum, p) => sum + p.share, 0)
-  const rest = Math.max(0, 1 - named)
-  return (
-    <div className="mk-bar" role="img"
-         aria-label={`${turn.players.length} named picks covering ${pct(named)} of this turn`}>
-      {turn.players.map((p) => (
-        <span
-          key={p.player_id}
-          className="mk-bar-seg"
-          style={{ width: `${p.share * 100}%`, background: posVar(p.position) }}
-          title={`${p.name ?? p.player_id}: ${pct(p.share)} of drafts (${p.count})`}
-        />
-      ))}
-      {rest > 0.001 && (
-        <span className="mk-bar-rest" style={{ width: `${rest * 100}%` }}
-              title={`${pct(rest)} went to somebody else entirely`} />
-      )}
-    </div>
-  )
 }
 
 /** How many of a turn's names the panel shows. Four rather than three since
