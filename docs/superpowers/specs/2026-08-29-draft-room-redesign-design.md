@@ -60,14 +60,21 @@ changes (`AvailabilityTable`):
   drafts in which he was taken at overall pick ≤ p. Monotone in p.
 - A parametric fallback fitted from the same rows: for ADP buckets of width
   8, the mean and standard deviation of the pick a player actually went at,
-  as a function of ESPN ADP. Stored as a small table (`adp_bucket → (mu, sigma)`).
+  as a function of ESPN ADP. Fitted per position group ({K}, {DST},
+  everything else), a bucket needs at least 8 distinct players, and mu is
+  made non-decreasing along the bucket axis (running max). Stored as a small
+  table (`(group, adp_bucket) → (mu, sigma)`).
 
 Query, vectorised over the available players of one room:
 
 ```
-P(still there at pick N | still there at pick K)
-  = (pooled - taken_by[N]) / (pooled - taken_by[K])
+P(still there when I make pick N | K picks have been made)
+  = (pooled - taken_by[N - 1]) / (pooled - taken_by[K])
 ```
+
+`N <= K + 1` (the pick on the clock) is 1.0 for everyone available. The
+empirical path is used only when N is within the corpus's depth (the last
+recorded pick); beyond it everyone uses the parametric fallback.
 
 where K = the current pick (picks made) and N = the user's next turn. When
 the denominator is below `MIN_DRAFTS = 25`, or the player is not in the
@@ -117,11 +124,13 @@ Greedy, one pass:
 roster = counts so far
 for each turn Tₜ:
     P_t = availability at Tₜ conditioned on now
-    eligible = players with P_t ≥ 0.50, or favourites with P_t ≥ 0.35
+    eligible = players with P_t ≥ 0.50, or favourites with P_t ≥ 0.35,
+               excluding need_kind == "capped" and players already planned
     for each eligible i:
-        score_i = weight(need_kind(position_i, roster)) * proj_i
+        score_i = weight(need_kind(position_i, roster))
+                  * (proj_i − E[best other at position_i at T_{t+1}])
                   * (1.15 if favourite else 1.0)
-                  − E[best other at position_i at T_{t+1}]   (0 for the last turn)
+        (E over players not already planned; 0 for the last turn)
     target = argmax score; alternates = next two by score at other or same position
     roster[position(target)] += 1
     mark target and alternates as planned (a planned target is not eligible
@@ -131,7 +140,7 @@ for each turn Tₜ:
 Output per turn: `{pick_no, round, target: {player_id, lasts_pct, edge_pts,
 reasons: [...]}, alternates: [{player_id, lasts_pct, edge_pts}, ...]}`.
 
-Reasons are rule-derived strings, at most four, in this order:
+Reasons are rule-derived strings, at most four pros and four cons, in this order:
 
 - `"★ favourite"` when in the favourites set.
 - `"{lasts_pct}% still there at pick {T}"`.
