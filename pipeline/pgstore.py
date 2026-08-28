@@ -132,4 +132,10 @@ def close() -> None:
     # Outside the lock: a callback is another module's teardown and may well
     # ask this one whether it is enabled.
     for callback in callbacks:
-        callback()
+        try:
+            callback()
+        except Exception:      # noqa: BLE001 -- these are schema flags being
+            # reset. One store failing to forget its own is not a reason for
+            # the next store never to hear that the pool went away, and this
+            # runs on a shutdown path where there is nobody left to tell.
+            pass

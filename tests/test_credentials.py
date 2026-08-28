@@ -19,6 +19,7 @@ import base64
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from time import monotonic
 
 import pytest
 
@@ -404,6 +405,62 @@ def test_an_expired_credential_cannot_be_resolved_even_if_nobody_reaped(store):
     later = start + timedelta(days=cred.DEFAULT_TTL_DAYS + 1)
     assert store.resolve(minted.cookie, now=later) is None
     assert store.counts() == {"credentials": 0, "sessions": 0}
+
+
+def test_an_expired_credential_is_refused_even_when_the_reaper_was_throttled(store):
+    """The read path enforces the expiry itself, rather than trusting that
+    housekeeping ran recently enough.
+
+    `resolve` reaps at most once a minute (see `_due_to_reap`), so for up to a
+    minute at a time the reaper has NOT swept an expiry that has just passed.
+    Leaning on it would not merely return a stale row: `resolve` slides both
+    clocks a full TTL forward on its way out, so the request that should have
+    refused an expired credential would instead REVIVE it for another thirty
+    days -- and every request after it would do the same, forever.
+
+    Written on the real clock rather than an injected `now`, because passing
+    one is what tells `_due_to_reap` this caller is not on the clock it
+    throttles. This is the production path: `api/custody.custody_for` passes
+    no `now` at all.
+    """
+    long_ago = (datetime.now(timezone.utc)
+                - timedelta(days=cred.DEFAULT_TTL_DAYS + 5))
+    minted = store.connect(FAKE_SWID, FAKE_S2, now=long_ago)
+    # As far as this store knows the reaper has just run, so `resolve` skips it.
+    store._last_reap = monotonic()
+
+    assert store.resolve(minted.cookie) is None
+    # And the refusal left the clocks alone. A slid row would resolve happily
+    # on the next call, which is the shape of the bug rather than a detail of
+    # it -- so it is asserted rather than inferred.
+    assert store.resolve(minted.cookie) is None
+    conn = cred._connect(store.path)
+    row = conn.execute("SELECT expires_at FROM espn_credential WHERE id = ?",
+                       [minted.credential_id]).fetchone()
+    assert row is not None, "the reaper was throttled, so the row is still there"
+    assert row[0] < datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def test_a_live_browser_cannot_revive_an_expired_credential(store):
+    """The other half of the same rule, on the row `resolve` actually decrypts.
+
+    `connect` writes both clocks together and `resolve` slides both together,
+    so a live session over an expired credential should not arise on its own.
+    "Should not arise" is exactly the assumption that made the reaper throttle
+    a revival bug, so the credential row is checked on its own account.
+    """
+    minted = store.connect(FAKE_SWID, FAKE_S2)
+    store._last_reap = monotonic()
+    stale = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1)
+    cred._connect(store.path).execute(
+        "UPDATE espn_credential SET expires_at = ? WHERE id = ?",
+        [stale, minted.credential_id])
+
+    assert store.resolve(minted.cookie) is None
+    row = cred._connect(store.path).execute(
+        "SELECT expires_at FROM espn_credential WHERE id = ?",
+        [minted.credential_id]).fetchone()
+    assert row[0] == stale
 
 
 def test_an_active_credential_is_never_reaped(store):

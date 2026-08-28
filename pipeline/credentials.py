@@ -1153,11 +1153,20 @@ class CredentialStore:
                 # is dead -- which is why nothing here holds one and every
                 # statement goes back to the backend for its connection.
                 self.backend.after_delete()
+            # `expires_at > ?` IN THE QUERY, not left to the reaper above.
+            # The reaper runs at most once a minute now (see `_due_to_reap`),
+            # so anything that leans on it for correctness is wrong for up to
+            # a minute at a time -- and the failure is not "a stale row is
+            # returned", it is worse: the rows below get their clocks slid a
+            # full TTL forward, so an expired session would be REVIVED for
+            # another thirty days by the request that should have refused it.
+            # The predicate makes the expiry a property of the read rather
+            # than a property of how recently housekeeping ran.
             found = None
             for _key, session_id in self._candidate_ids(cookie):
                 rows = self.backend.execute(
-                    "SELECT id, credential_id FROM espn_session WHERE id = ?",
-                    [session_id])
+                    "SELECT id, credential_id FROM espn_session "
+                    "WHERE id = ? AND expires_at > ?", [session_id, now])
                 if rows:
                     found = rows[0]
                     break
@@ -1187,6 +1196,20 @@ class CredentialStore:
                 self.backend.after_write()
                 return None
             blob, key_version, expires_at = rows[0]
+            if expires_at <= now:
+                # The same rule again, on the row this is actually about to
+                # decrypt. Belt and braces: the two clocks are written and slid
+                # together, so a live session over an expired credential should
+                # not arise -- but "should not arise" is exactly the assumption
+                # that made the throttle above a revival bug, and this check
+                # costs a comparison on a row already in hand.
+                #
+                # NOT DELETED HERE. The reaper owns removal, and doing it on
+                # the read path would mean a full file rebuild (`_compact`) on
+                # a request that only wanted to look something up. The row is
+                # unreachable from this moment either way, and the reaper is
+                # along within the minute.
+                return None
             key = self.keys.get(int(key_version))
             if key is None:
                 # The key this row was written under has been retired. Not an
