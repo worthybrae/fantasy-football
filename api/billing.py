@@ -49,6 +49,7 @@ from fastapi import HTTPException, Request
 from pydantic import BaseModel
 
 from api.custody import custody_for, _store as _custody_store
+from pipeline import pgstore
 from scoring.config import CURRENT_SEASON
 
 # -- configuration -----------------------------------------------------------
@@ -91,7 +92,7 @@ API_VERSION = "2026-07-29.dahlia"
 INTEGRATION_ID = "draftassist-hnwqkzrb"
 
 _lock = threading.Lock()
-_conn = None
+_store = None
 
 # Mock league ids already known to the table, so the hot path (a connect
 # asking "is this free") is a set lookup rather than a query.
@@ -121,53 +122,121 @@ def _price_id() -> str:
 # -- the store ---------------------------------------------------------------
 
 
-def _db():
-    """The entitlement database, opened once for the process.
+_SCHEMA = (
+    """CREATE TABLE IF NOT EXISTS entitlement (
+        account_id VARCHAR NOT NULL,
+        league_id VARCHAR NOT NULL,
+        season INTEGER NOT NULL,
+        granted_at TIMESTAMP NOT NULL,
+        revoked_at TIMESTAMP,
+        checkout_session VARCHAR,
+        payment_intent VARCHAR,
+        PRIMARY KEY (account_id, league_id, season))""",
+    # WEBHOOK IDEMPOTENCY. Stripe retries on any non-2xx and can deliver the
+    # same event twice on its own; every handler below is gated on this table
+    # so a replay is a no-op rather than a second grant (or, for a refund, a
+    # second revoke over a fresh purchase).
+    """CREATE TABLE IF NOT EXISTS billing_event (
+        event_id VARCHAR PRIMARY KEY,
+        type VARCHAR,
+        seen_at TIMESTAMP NOT NULL)""",
+    # Rooms we seated somebody in ourselves (see `note_mock_room`). Here
+    # rather than anywhere else because its only job is to answer a billing
+    # question: is this draft one of the free ones.
+    """CREATE TABLE IF NOT EXISTS mock_room (
+        league_id VARCHAR PRIMARY KEY,
+        seen_at TIMESTAMP NOT NULL)""",
+)
 
-    One connection, guarded by a lock, for the same reason everything else in
-    this project holds one: DuckDB takes a single-writer lock per file, and
-    two connections from two threads are two chances to meet it.
+# The same three tables in Postgres spellings, derived rather than written out
+# again so that adding a column cannot leave the two backends holding
+# different tables. TIMESTAMPTZ for the same reason pipeline/pgstore.to_pg
+# exists: these are audit columns, and one that is silently wrong by a session
+# offset is worse than no column at all.
+_PG_SCHEMA = tuple(
+    statement.replace(" VARCHAR", " TEXT").replace(" TIMESTAMP", " TIMESTAMPTZ")
+    for statement in _SCHEMA)
+
+
+class _Duck:
+    """The billing file. One connection for the process, as DuckDB requires:
+    it takes a single-writer lock per file, and two connections from two
+    threads are two chances to meet it."""
+
+    def __init__(self, path: str):
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        self._conn = duckdb.connect(path)
+        for statement in _SCHEMA:
+            self._conn.execute(statement)
+
+    def execute(self, sql: str, params=()) -> list:
+        return self._conn.execute(sql, list(params)).fetchall()
+
+    def executemany(self, sql: str, rows) -> None:
+        self._conn.executemany(sql, [list(row) for row in rows])
+
+    def close(self) -> None:
+        self._conn.close()
+
+
+class _Pg:
+    """The same three tables in Postgres, shared by every process with the DSN.
+
+    Which is the entire point of this backend: the file above is correct for
+    one process and unusable for two, and an entitlement that only one worker
+    can read is a customer who paid and still gets a 402.
     """
-    global _conn
+
+    def __init__(self):
+        # Imported here rather than at module scope so a checkout with no DSN
+        # never needs the driver at all.
+        import psycopg
+
+        self._error = psycopg.Error
+        for statement in _PG_SCHEMA:
+            self.execute(statement)
+
+    def execute(self, sql: str, params=()) -> list:
+        # `?` becomes `%s`. The SQL below is written once for both backends,
+        # and no statement in this module contains a literal question mark.
+        with pgstore.pool().connection() as conn:
+            cursor = conn.execute(sql.replace("?", "%s"),
+                                  [pgstore.to_pg(p) for p in params] or None)
+            if cursor.description is None:
+                return []
+            return [tuple(pgstore.from_pg(value) for value in row)
+                    for row in cursor.fetchall()]
+
+    def executemany(self, sql: str, rows) -> None:
+        with pgstore.pool().connection() as conn:
+            conn.cursor().executemany(
+                sql.replace("?", "%s"),
+                [[pgstore.to_pg(p) for p in row] for row in rows])
+
+    def close(self) -> None:
+        """The pool outlives any one store. See pipeline/pgstore.close()."""
+
+
+def _db():
+    """The entitlement store, built once for the process.
+
+    Two backends behind the same two methods, chosen by SUPABASE_DB_URL like
+    every other store in this project. Nothing below this function knows which
+    one it got: both take `?` placeholders and naive UTC datetimes, and both
+    answer with a list of tuples.
+    """
+    global _store
     with _lock:
-        if _conn is None:
-            path = os.environ.get(DB_PATH_ENV) or DEFAULT_DB_PATH
-            parent = os.path.dirname(path)
-            if parent:
-                os.makedirs(parent, exist_ok=True)
-            conn = duckdb.connect(path)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS entitlement (
-                    account_id VARCHAR NOT NULL,
-                    league_id VARCHAR NOT NULL,
-                    season INTEGER NOT NULL,
-                    granted_at TIMESTAMP NOT NULL,
-                    revoked_at TIMESTAMP,
-                    checkout_session VARCHAR,
-                    payment_intent VARCHAR,
-                    PRIMARY KEY (account_id, league_id, season))""")
-            # WEBHOOK IDEMPOTENCY. Stripe retries on any non-2xx and can
-            # deliver the same event twice on its own; every handler below is
-            # gated on this table so a replay is a no-op rather than a second
-            # grant (or, for a refund, a second revoke over a fresh purchase).
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS billing_event (
-                    event_id VARCHAR PRIMARY KEY,
-                    type VARCHAR,
-                    seen_at TIMESTAMP NOT NULL)""")
-            # Rooms we seated somebody in ourselves (see `note_mock_room`).
-            # Here rather than anywhere else because its only job is to answer
-            # a billing question: is this draft one of the free ones.
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS mock_room (
-                    league_id VARCHAR PRIMARY KEY,
-                    seen_at TIMESTAMP NOT NULL)""")
-            _conn = conn
-            _seed_mocks_from_corpus(conn)
-    return _conn
+        if _store is None:
+            _store = (_Pg() if pgstore.enabled()
+                      else _Duck(os.environ.get(DB_PATH_ENV) or DEFAULT_DB_PATH))
+            _seed_mocks_from_corpus(_store)
+    return _store
 
 
-def _seed_mocks_from_corpus(conn) -> None:
+def _seed_mocks_from_corpus(store) -> None:
     """Every mock draft ever recorded is a mock room, and the corpus knows.
 
     THE GAP THIS CLOSES. The two live tests -- rooms we seated somebody in,
@@ -198,7 +267,7 @@ def _seed_mocks_from_corpus(conn) -> None:
             "WHERE source = ? AND league_id IS NOT NULL",
             [dl.SOURCE_MOCK]).fetchall()
         if rows:
-            conn.executemany(
+            store.executemany(
                 "INSERT INTO mock_room VALUES (?, ?) ON CONFLICT DO NOTHING",
                 [[str(r[0]), _now()] for r in rows])
     except Exception:      # noqa: BLE001 -- an older corpus without the
@@ -212,12 +281,12 @@ def _now() -> datetime:
 
 
 def reset_for_tests(path: str | None = None) -> None:
-    """Drop the cached connection so a test can point at its own file."""
-    global _conn
+    """Drop the cached store so a test can point at its own file."""
+    global _store
     with _lock:
-        if _conn is not None:
-            _conn.close()
-        _conn = None
+        if _store is not None:
+            _store.close()
+        _store = None
         _known_mocks.clear()
     if path is not None:
         os.environ[DB_PATH_ENV] = path
@@ -315,9 +384,9 @@ def is_free_draft(league_id) -> bool:
         if league_id in _known_mocks:
             return True
     try:
-        row = _db().execute(
-            "SELECT 1 FROM mock_room WHERE league_id = ?", [league_id]).fetchone()
-        if row is not None:
+        rows = _db().execute(
+            "SELECT 1 FROM mock_room WHERE league_id = ?", [league_id])
+        if rows:
             with _lock:
                 _known_mocks.add(league_id)
             return True
@@ -420,12 +489,12 @@ def entitled(account_ids: list, league_id, season: int) -> bool:
     if not account_ids:
         return False
     marks = ", ".join("?" for _ in account_ids)
-    row = _db().execute(
+    rows = _db().execute(
         f"""SELECT 1 FROM entitlement
              WHERE account_id IN ({marks})
                AND league_id = ? AND season = ? AND revoked_at IS NULL""",
-        [*account_ids, str(league_id), int(season)]).fetchone()
-    return row is not None
+        [*account_ids, str(league_id), int(season)])
+    return len(rows) > 0
 
 
 def grant(account_id: str, league_id, season: int, checkout_session=None,
@@ -457,7 +526,7 @@ def revoke(payment_intent: str) -> int:
     before = _db().execute(
         "SELECT count(*) FROM entitlement "
         "WHERE payment_intent = ? AND revoked_at IS NULL",
-        [payment_intent]).fetchone()[0]
+        [payment_intent])[0][0]
     _db().execute(
         "UPDATE entitlement SET revoked_at = ? "
         "WHERE payment_intent = ? AND revoked_at IS NULL",
@@ -473,13 +542,16 @@ def _first_time(event_id: str, kind: str) -> bool:
     SELECT-then-INSERT would allow.
     """
     inserted = _db().execute(
-        "INSERT INTO billing_event VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
-        [event_id, kind, _now()]).fetchall()
-    # DuckDB answers an INSERT with the number of rows it actually wrote, so
-    # zero IS the duplicate. Counting the table afterwards instead would
-    # always find the row -- this call just put it there -- and report every
-    # event as new, which is the bug this shape exists to avoid.
-    return bool(inserted and inserted[0][0])
+        "INSERT INTO billing_event (event_id, type, seen_at) VALUES (?, ?, ?) "
+        "ON CONFLICT (event_id) DO NOTHING RETURNING event_id",
+        [event_id, kind, _now()])
+    # RETURNING, rather than the row count an INSERT answers with, because the
+    # two backends count differently and only one of them can be asked that
+    # way. A row comes back only when this statement actually wrote one, so an
+    # empty result IS the duplicate. Counting the table afterwards instead
+    # would always find the row -- this call just put it there -- and report
+    # every event as new, which is the bug this shape exists to avoid.
+    return len(inserted) == 1
 
 
 # -- the gate ----------------------------------------------------------------

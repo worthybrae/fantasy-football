@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import os
 import threading
+from datetime import datetime, timezone
 
 DSN_ENV = "SUPABASE_DB_URL"
 
@@ -70,6 +71,31 @@ def pool():
             _pool = ConnectionPool(value, min_size=1, max_size=8, open=True,
                                    timeout=10, kwargs={"autocommit": True})
         return _pool
+
+
+# -- the timestamp contract --------------------------------------------------
+#
+# Every store here is written in naive UTC, because that is what a DuckDB
+# TIMESTAMP column holds and what the reaper's arithmetic assumes. Postgres
+# has a real TIMESTAMPTZ and should use it -- a naive value sent to one is
+# read in whatever the session's TimeZone happens to be, which is an expiry
+# that is wrong by an offset nobody wrote down. So the zone is attached on the
+# way in and taken off again on the way out, in one place, and no caller can
+# tell which store answered.
+
+
+def to_pg(value):
+    """Naive UTC becomes aware UTC, on its way into a TIMESTAMPTZ column."""
+    if isinstance(value, datetime) and value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def from_pg(value):
+    """And back to naive UTC, which is what every caller here expects."""
+    if isinstance(value, datetime) and value.tzinfo is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
 
 
 def close() -> None:

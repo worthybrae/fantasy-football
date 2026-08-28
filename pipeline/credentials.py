@@ -657,9 +657,9 @@ class _DuckBackend:
 # than copied beside it so that adding a column cannot leave the two backends
 # holding different tables. TIMESTAMPTZ because Postgres has a real one, and a
 # naive column would leave every deployment guessing at a session offset;
-# `_from_pg` turns the values back into the naive UTC the rest of this module
-# is written in. Still no foreign key on `credential_id`, deliberately: the
-# cascade stays in code (see `_delete_credential`) so that both backends
+# `pgstore.from_pg` turns the values back into the naive UTC the rest of this
+# module is written in. Still no foreign key on `credential_id`, deliberately:
+# the cascade stays in code (see `_delete_credential`) so that both backends
 # delete in the same order and neither can refuse a "disconnect everywhere".
 _PG_SCHEMA = tuple(
     statement.replace(" VARCHAR", " TEXT").replace(" TIMESTAMP ", " TIMESTAMPTZ ")
@@ -667,25 +667,6 @@ _PG_SCHEMA = tuple(
 
 _PG_READY = False
 _PG_LOCK = threading.Lock()
-
-
-def _to_pg(value):
-    """Naive UTC becomes aware UTC on the way into a TIMESTAMPTZ column.
-
-    Without this the value is sent with no zone at all and Postgres reads it
-    in whatever the session's TimeZone happens to be -- the same off-by-an-
-    offset that `_utc` exists to keep out of the reaper's arithmetic.
-    """
-    if isinstance(value, datetime) and value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value
-
-
-def _from_pg(value):
-    """And back to naive UTC, so a caller cannot tell which store answered."""
-    if isinstance(value, datetime) and value.tzinfo is not None:
-        return value.astimezone(timezone.utc).replace(tzinfo=None)
-    return value
 
 
 class _PgBackend:
@@ -724,11 +705,12 @@ class _PgBackend:
         # statement with no placeholders is never put through interpolation.
         try:
             with pgstore.pool().connection() as conn:
-                cursor = conn.execute(sql.replace("?", "%s"),
-                                      [_to_pg(p) for p in params] or None)
+                cursor = conn.execute(
+                    sql.replace("?", "%s"),
+                    [pgstore.to_pg(p) for p in params] or None)
                 if cursor.description is None:
                     return []
-                return [tuple(_from_pg(value) for value in row)
+                return [tuple(pgstore.from_pg(value) for value in row)
                         for row in cursor.fetchall()]
         except self._error as exc:
             raise StoreError(
