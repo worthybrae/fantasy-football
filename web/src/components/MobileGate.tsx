@@ -56,9 +56,26 @@ function corpusLine(o: MarketOverview): string | null {
   return `${picks.toLocaleString()}+ picks watched across ${o.drafts.toLocaleString()} real ESPN drafts`
 }
 
+// THE CLIP IS 2.56 MB AND IT IS NOT WHY ANYBODY IS HERE.
+//
+// `preload="metadata"` is a promise browsers keep loosely: on the phones this
+// page exists for, it fetched the whole file, on every visit, to every route
+// -- this gate renders for any path on a small screen. The poster is a 30 KB
+// still of the same room and says the same thing at a glance, so the video
+// now arrives only when somebody asks for it by tapping.
+//
+// A tap rather than an IntersectionObserver, deliberately: the figure is
+// above the fold on this page, so an observer would fire on arrival and
+// download the file anyway -- an intersection test that is always true is a
+// preload with extra steps.
+const CLIP = '/demo.webm'
+
 function GatePage() {
   const url = `${window.location.origin}/`
   const [sent, setSent] = useState<'idle' | 'copied' | 'shown'>('idle')
+  // Null until asked for. React omits an undefined `src` entirely, which is
+  // what keeps the element from fetching anything at all.
+  const [clip, setClip] = useState<string | null>(null)
   const [overview, setOverview] = useState<MarketOverview | null>(null)
   useEffect(() => {
     let live = true
@@ -103,16 +120,32 @@ function GatePage() {
       {corpus && <p className="mg-corpus">{corpus}</p>}
 
       <figure className="mg-figure">
-        <video
-          className="mg-video"
-          src="/demo.webm"
-          poster="/demo-poster.jpg"
-          autoPlay
-          muted
-          loop
-          playsInline
-          preload="metadata"
-        />
+        <div className="mg-frame">
+          <video
+            className="mg-video"
+            src={clip ?? undefined}
+            poster="/demo-poster.jpg"
+            // Autoplay only matters once there is something to play, and by
+            // then the tap that set it is the user gesture every mobile
+            // browser wants before it will play anything anyway.
+            autoPlay={clip !== null}
+            muted
+            loop
+            playsInline
+            preload="none"
+          />
+          {clip === null && (
+            <button
+              type="button"
+              className="mg-play"
+              onClick={() => setClip(CLIP)}
+              aria-label="Play the draft room clip"
+            >
+              <span className="mg-play-mark" aria-hidden="true">▶</span>
+              <span className="mg-play-size">Play · 2.5 MB</span>
+            </button>
+          )}
+        </div>
         <figcaption className="mg-caption">
           A real ESPN mock draft, in ESPN&rsquo;s own order, with the room&rsquo;s
           pick priced against the drafts on record.

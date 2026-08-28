@@ -63,6 +63,51 @@
   gap: 8px;
 }
 
+/* The poster stands alone until somebody taps: the play control sits over
+   the still rather than beside it, so the figure is one thing to aim at. */
+.mg-frame {
+  position: relative;
+  display: block;
+}
+
+.mg-play {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  border: 0;
+  border-radius: 6px;
+  background: rgba(10, 11, 14, 0.35);
+  color: var(--text-1);
+  cursor: pointer;
+}
+
+.mg-play-mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 46px;
+  padding-left: 3px;
+  border: 1px solid var(--accent-border);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--accent) 22%, rgba(10, 11, 14, 0.7));
+  font-size: 17px;
+  color: var(--accent);
+}
+
+/* The size is stated because the reader is on a phone, probably on mobile
+   data, and 2.5 MB is a real thing to spend. */
+.mg-play-size {
+  font-size: var(--text-xs);
+  letter-spacing: 0.04em;
+  color: var(--text-2);
+}
+
 .mg-video {
   display: block;
   width: 100%;
