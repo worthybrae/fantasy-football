@@ -1481,6 +1481,9 @@ RECOMPUTE_JOIN_SECONDS = 0.5
 # Numbers the closer tokens (see _stop_listener), so two stops of one room
 # in flight at once hold two distinct claims.
 _CLOSER_SEQ = itertools.count(1)
+# Numbers the ROOMS, so every LiveSession object -- not every sid -- has its
+# own name for the side effects it owns. See LiveSession.token.
+_ROOM_SEQ = itertools.count(1)
 
 # The point past which every room's ranking gets fewer rollouts. Under it
 # the full SURVIVAL_ROLLOUTS; over it 150, which is still a usable survival
@@ -1806,6 +1809,16 @@ class LiveSession:
 
     def __init__(self, sid: str):
         self.sid = sid
+        # WHAT THIS ROOM OBJECT IS CALLED, as opposed to what its browser is
+        # called. One sid can name two room objects in sequence: a connect
+        # that lands while the reaper is retiring the old one gets a fresh
+        # room under the same sid (see registry.replace), and the retiring
+        # room then finishes its stop with side effects to undo -- a league
+        # file claim to release, a saved record to delete. Keyed on the sid
+        # those would land on the FRESH room: un-claim the file it is
+        # drafting against, delete the record it just saved. Keyed on this
+        # token they can only ever touch what this object itself claimed.
+        self.token = f"{sid}:{next(_ROOM_SEQ)}"
         self.state = _initial_state()
         self.lock = threading.Lock()
         self.last_activity = time.monotonic()
@@ -1826,8 +1839,11 @@ class LiveRegistry:
         # each restored session also carries it in state["restore_thread"].
         self.restore_thread = None
         # WHICH LEAGUE FILES THIS PROCESS HOLDS, and for whom: realpath ->
-        # the sids of every room that has, or is about to have, the file
-        # open. Registered by a connect BEFORE it decides whether a worker
+        # a token per room that has, or is about to have, the file open --
+        # the room's own `token`, never its sid, so a retiring room cannot
+        # release the claim of the fresh room that replaced it under the
+        # same sid (plus a closer's token, see _stop_listener).
+        # Registered by a connect BEFORE it decides whether a worker
         # process may open the file (DuckDB's lock is per process, so a
         # file any room here holds is not one a worker can open), and a
         # worker is allowed only while this room is the file's sole holder.
@@ -1859,25 +1875,29 @@ class LiveRegistry:
             self.start_reaper()
         return s
 
-    def claim_path(self, path: str, sid: str) -> bool:
-        """Register `sid` as a holder of a league file. True when it is the
+    def claim_path(self, path: str, token: str) -> bool:
+        """Register `token` as a holder of a league file. True when it is the
         file's ONLY holder -- a worker process may open the file; False
         when another room holds it too -- the caller builds inline, in
         this process, where a second connection to an open file is fine.
-        Either way the room is registered and must release_path later."""
+        Either way the holder is registered and must release_path later.
+
+        `token` is a ROOM's token (LiveSession.token), a closer's, or an
+        abandoned worker's -- never a bare sid. See path_holders.
+        """
         key = os.path.realpath(path)
         with self._lock:
             holders = self.path_holders.setdefault(key, set())
-            holders.add(sid)
-            return holders == {sid}
+            holders.add(token)
+            return holders == {token}
 
-    def release_path(self, path: str, sid: str) -> None:
-        """Drop `sid` from a league file's holders."""
+    def release_path(self, path: str, token: str) -> None:
+        """Drop `token` from a league file's holders."""
         key = os.path.realpath(path)
         with self._lock:
             holders = self.path_holders.get(key)
             if holders is not None:
-                holders.discard(sid)
+                holders.discard(token)
                 if not holders:
                     del self.path_holders[key]
 
@@ -1885,9 +1905,28 @@ class LiveRegistry:
         with self._lock:
             return set(self.path_holders.get(os.path.realpath(path), ()))
 
-    def drop(self, sid: str) -> None:
+    def drop(self, sid: str, only=None) -> None:
+        """Forget the room under `sid`. With `only`, forget it ONLY if that
+        is still the object registered there -- a connect that landed
+        meanwhile has put a fresh room under the sid, and that one stays."""
         with self._lock:
+            if only is not None and self._sessions.get(sid) is not only:
+                return
             self._sessions.pop(sid, None)
+
+    def superseded(self, s) -> bool:
+        """Whether a DIFFERENT room object now holds this room's sid.
+
+        What every side effect keyed on the sid rather than on the room --
+        the saved session record, above all -- has to ask before it fires:
+        a room the reaper is retiring must not delete the record the
+        connect that replaced it has just written. A room that is simply
+        no longer registered (already dropped) is not superseded: its own
+        record is still its own to remove.
+        """
+        with self._lock:
+            current = self._sessions.get(s.sid)
+        return current is not None and current is not s
 
     def sids(self) -> list[str]:
         with self._lock:
@@ -1955,6 +1994,28 @@ class LiveRegistry:
             s = LiveSession(sid)
             self._sessions[sid] = s
             return s
+
+    def readopt(self, s) -> str:
+        """Put a room that could not be retired back where things can find
+        it, and answer the key it is under.
+
+        A retirement that fails leaves the room running: its listener is
+        alive, it holds a league connection and a file claim, and something
+        has to be able to reach it again -- the next reaper pass, and
+        `_evict_seat` when the seat it holds comes back. Ordinarily it is
+        still registered under its own sid and this is a no-op. It is not
+        when a connect landed mid-retirement: that connect replaced it, so
+        the room is re-registered under a key of its own instead. `~` is
+        not in the sid pattern (see _SID_PATTERN), so no browser can
+        present that key as a cookie and land in an orphan's room.
+        """
+        with self._lock:
+            current = self._sessions.get(s.sid)
+            if current is s:
+                return s.sid
+            key = s.sid if current is None else f"{s.sid}~{s.token}"
+            self._sessions[key] = s
+            return key
 
     def start_reaper(self, interval: float = 300.0,
                      idle: float = 3 * 3600.0) -> threading.Thread:
@@ -2265,7 +2326,7 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
                 # whether or not the record could be removed; the reaper's
                 # age rule covers a record left behind.
                 pass
-            registry.drop(sid)
+            registry.drop(sid, only=other)
             evicted.append(sid)
         return evicted
 
@@ -2316,6 +2377,8 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
     # working; every other sid goes through the per-session store.
 
     def _save_record(s, league_id, team_id, season, swid, token, my_slot):
+        if registry.superseded(s):
+            return                  # not this room's record any more
         if s.sid == DEFAULT_SID:
             save_session_record(db_path, league_id=league_id, team_id=team_id,
                                 season=season, swid=swid, token=token,
@@ -2330,6 +2393,13 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
         return _records(db_path).load(s.sid) is not None
 
     def _delete_record(s) -> None:
+        # THE RECORD BELONGS TO WHICHEVER ROOM HOLDS THE SID NOW. A room the
+        # reaper is retiring finishes its stop after a connect may already
+        # have replaced it and saved a record of its own under that sid;
+        # deleting on the way out would take the live draft's record with
+        # it, and the next restart would not bring that draft back.
+        if registry.superseded(s):
+            return
         if s.sid == DEFAULT_SID:
             clear_session_record(db_path)
             return
@@ -2473,7 +2543,7 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
             token = f"{s.sid}:closing:{next(_CLOSER_SEQ)}"
             if old_path is not None:
                 registry.claim_path(old_path, token)
-                registry.release_path(old_path, s.sid)
+                registry.release_path(old_path, s.token)
 
             def close_later():
                 recompute_thread.join(timeout=LISTENER_STOP_TIMEOUT)
@@ -2505,7 +2575,7 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
             if old_league_conn is not None:
                 old_league_conn.close()
             if old_path is not None:
-                registry.release_path(old_path, s.sid)
+                registry.release_path(old_path, s.token)
         return True
 
     def _recompute(s, session, picks_made):
@@ -2725,7 +2795,7 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
             # holding the file means it is, or is about to be, open in this
             # process, and a worker must not be handed it. Registered
             # either way, and released with the connection.
-            sole = registry.claim_path(league_path, s.sid)
+            sole = registry.claim_path(league_path, s.token)
             try:
                 session = None
                 if worker_path and sole:
@@ -2773,7 +2843,7 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
                 # closes it, exactly as the inline handler below does.
                 if league_conn is not None:
                     league_conn.close()
-                registry.release_path(league_path, s.sid)
+                registry.release_path(league_path, s.token)
                 raise
         else:
             progress.ok("league", "the shared database")
@@ -2836,7 +2906,7 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
         except Exception:
             if league_conn is not None:
                 league_conn.close()
-                registry.release_path(league_path, s.sid)
+                registry.release_path(league_path, s.token)
             raise
         if league_conn is not None:
             _publish_path(s, league_path)
@@ -3534,7 +3604,7 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
                 with lock:
                     old_path, state["league_path"] = state["league_path"], None
                 if old_path is not None:
-                    registry.release_path(old_path, s.sid)
+                    registry.release_path(old_path, s.token)
             return None
         recompute_thread.start()
         # ONE recompute at launch, when the slot is already known. Without it
@@ -4861,7 +4931,15 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
     def _retire(s, now, idle) -> bool:
         """The reaper's hook: stop the room's listener, forget its record.
         False when the room was touched after the reaper looked, or when
-        the listener would not stop -- the room stays either way."""
+        the listener would not stop -- the room stays either way.
+
+        "Stays" has to be made true rather than assumed: a connect that
+        landed between the decision and here has already put a fresh room
+        under this sid, so a room that will not stop is no longer in the
+        registry at all -- a live listener and an open league connection
+        with nothing that can reach them. `readopt` puts it back under a
+        key of its own, where the next pass and `_evict_seat` can find it.
+        """
         with s.lock:
             if now - s.last_activity <= idle:
                 return False        # touched since the decision
@@ -4869,6 +4947,10 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
         if not _stop_listener(s):
             with s.lock:
                 s.state["retiring"] = False
+            key = registry.readopt(s)
+            if key != s.sid:
+                print(f"live: room {s.sid[:8]} would not stop and its sid "
+                      f"has been taken by a reconnect; kept as {key[:24]}")
             return False
         with s.lock:
             _clear_room(s)

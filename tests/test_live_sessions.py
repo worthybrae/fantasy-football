@@ -634,10 +634,14 @@ def test_a_file_stays_inline_while_any_room_still_holds_it(tmp_path, monkeypatch
         _connect(b, "1", team_id="3")            # a holds it: inline
         assert submits == ["1"]
         registry = app.state.live_registry
-        assert registry.holders_of(league_file) == {a.cookies.get(SID_COOKIE),
-                                                    b.cookies.get(SID_COOKIE)}
+        # A claim is keyed on the ROOM object's token, not on its sid: see
+        # LiveSession.token for the retirement race that decides.
+        assert registry.holders_of(league_file) == {
+            registry.get(a.cookies.get(SID_COOKIE)).token,
+            registry.get(b.cookies.get(SID_COOKIE)).token}
         assert a.post("/api/live/stop").json()["active"] is False
-        assert registry.holders_of(league_file) == {b.cookies.get(SID_COOKIE)}
+        assert registry.holders_of(league_file) == {
+            registry.get(b.cookies.get(SID_COOKIE)).token}
         _connect(c, "1", team_id="4")            # b still holds it: inline
         assert submits == ["1"], "c's build went to a worker"
         assert registry.active_count() == 2
@@ -768,13 +772,13 @@ def test_a_reconnect_while_the_closer_still_holds_the_file_builds_inline(tmp_pat
         _connect(a, "1", team_id="2")           # the closer still holds it
         assert len(submits) == submits_before, "the reconnect went to a worker"
         assert a.get("/api/live/state").json()["active"] is True
-        assert sid in registry.holders_of(league_file)
+        assert registry.get(sid).token in registry.holders_of(league_file)
         release.set()
         deadline = time.monotonic() + 10
         while any(h.startswith(f"{sid}:closing:") for h in registry.holders_of(league_file)):
             assert time.monotonic() < deadline, "the closer never released its token"
             time.sleep(0.05)
-        assert registry.holders_of(league_file) == {sid}
+        assert registry.holders_of(league_file) == {registry.get(sid).token}
     finally:
         release.set()
         _stop_all([a])
@@ -881,11 +885,125 @@ def test_a_connect_landing_mid_retirement_keeps_its_room(tmp_path, monkeypatch):
         assert fresh.state["listener"] is not None
         assert registry.active_count() == 1
         assert a.get("/api/live/state").json()["active"] is True
-        assert registry.holders_of(league_file) == {sid}
+        assert registry.holders_of(league_file) == {fresh.token}
         assert stops[0].is_set() and not stops[1].is_set()
         # And a request against the retiring old object sees nothing.
         assert old.state["retiring"] is True
     finally:
+        registry.set_retire(real_retire)
+        _stop_all([a])
+
+
+def test_a_late_retirement_leaves_the_new_rooms_claim_and_record_alone(
+        tmp_path, monkeypatch):
+    """The mid-retirement race in full, not just at its edges.
+
+    The reaper has marked the room retiring; the browser reconnects and
+    gets a FRESH room under the same sid, which claims the league file and
+    saves its own record; only then does the old room's stop finish. Both
+    of those side effects used to be keyed on the sid, so the old room's
+    tidy-up released the file the new room was drafting against and deleted
+    the record a restart would have brought it back from. They are keyed on
+    the room object now (LiveSession.token, LiveRegistry.superseded)."""
+    app, seen, stops = _app(tmp_path, monkeypatch)
+    registry = app.state.live_registry
+    from api.live_records import record_store
+    records = record_store(str(tmp_path / "live.duckdb"))
+    league_file = str(tmp_path / "leagues_root" / "1.duckdb")
+    a = _client(app)
+    try:
+        _connect(a, "1", team_id="2")
+        sid = a.cookies.get(SID_COOKIE)
+        old = registry.get(sid)
+        assert records.load(sid) is not None
+        now = time.monotonic()
+        old.last_activity = now - 4 * 3600
+        real_retire = registry._retire
+
+        def reconnect_inside_the_retirement(s, now_, idle):
+            # Exactly the window the reaper opens: `retiring` is set, the
+            # room's stop has not run yet, and a connect lands.
+            with s.lock:
+                s.state["retiring"] = True
+            _connect(a, "1", team_id="2")
+            return real_retire(s, now_, idle)
+        registry.set_retire(reconnect_inside_the_retirement)
+
+        registry.run_once(idle=3 * 3600, now=now)
+        fresh = registry.get(sid)
+        assert fresh is not None and fresh is not old
+        assert fresh.state["listener"] is not None
+        assert registry.active_count() == 1
+        assert stops[0].is_set() and not stops[1].is_set()
+        # What the retiring room must not have taken with it.
+        assert registry.holders_of(league_file) == {fresh.token}
+        assert records.load(sid) is not None, \
+            "the retiring room deleted the live room's record"
+        assert a.get("/api/live/state").json()["active"] is True
+    finally:
+        registry.set_retire(real_retire)
+        _stop_all([a])
+
+
+def test_a_room_that_will_not_stop_stays_in_the_registry_when_its_sid_is_taken(
+        tmp_path, monkeypatch):
+    """The same race on the path where the listener refuses to stop.
+
+    The reaper leaves such a room alone -- but "leaves it alone" was not
+    true once a connect had replaced it under its sid: the room was in no
+    registry at all, with a live listener thread, a league connection and a
+    file claim nothing could ever reach again. It is re-registered under a
+    key of its own instead, so the next pass can try it again and
+    `_evict_seat` can find the seat it is holding."""
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    release = threading.Event()
+
+    def stubborn(listener, league_id, team_id, swid, token, on_change=None,
+                 stop_event=None, on_activity=None, on_socket=None):
+        release.wait(timeout=30)
+    monkeypatch.setattr("api.live.run_socket_listener", stubborn)
+    monkeypatch.setattr("api.live.LISTENER_STOP_TIMEOUT", 0.2)
+    from api.main import create_app
+    app = create_app(path)
+    registry = app.state.live_registry
+    a = _client(app)
+    try:
+        _connect(a, "1", team_id="2")
+        sid = a.cookies.get(SID_COOKIE)
+        old = registry.get(sid)
+        now = time.monotonic()
+        old.last_activity = now - 4 * 3600
+        real_retire = registry._retire
+        fresh = []
+
+        def take_the_sid_first(s, now_, idle):
+            # What a connect landing mid-retirement does to the registry.
+            fresh.append(registry.replace(sid))
+            return real_retire(s, now_, idle)
+        registry.set_retire(take_the_sid_first)
+
+        assert registry.run_once(idle=3 * 3600, now=now) == []
+        assert registry.get(sid) is fresh[0]
+        # DEFAULT_SID is always registered and is nobody's room here.
+        keys = [k for k in registry.sids() if k != DEFAULT_SID]
+        rooms = [registry.get(k) for k in keys]
+        assert len(rooms) == 2 and old in rooms and fresh[0] in rooms
+        holding = [r for r in rooms if r.state["listener"] is not None]
+        assert holding == [old], "the orphaned listener is unreachable"
+        assert old.state["retiring"] is False
+        orphan_key = [k for k in keys if registry.get(k) is old][0]
+        assert orphan_key != sid
+
+        # And the next pass can retire it, which is the whole point of
+        # keeping it reachable.
+        registry.set_retire(real_retire)
+        release.set()
+        assert registry.run_once(idle=3 * 3600, now=now) == [orphan_key]
+        assert [registry.get(k) for k in registry.sids()
+                if k != DEFAULT_SID] == [fresh[0]]
+    finally:
+        release.set()
         registry.set_retire(real_retire)
         _stop_all([a])
 
