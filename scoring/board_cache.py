@@ -86,6 +86,7 @@ completely would mean fingerprinting the full contents of `weekly` (millions
 of cells) on every request, which defeats the point of caching at all. Call
 `board_cache.clear()` after any such direct write in a test or a script.
 """
+import contextlib
 import hashlib
 import os
 import threading
@@ -143,6 +144,51 @@ _inflight: "dict[tuple, threading.Event]" = {}
 # and observe the ordering.
 BUILD_SLOTS = threading.Semaphore(2)
 
+# THE PERMIT IS PER THREAD, NOT PER BUILD, AND THAT IS LOAD-BEARING.
+#
+# A build can start another build. `scoring/profile_cache.cached_profile`
+# goes through `get_or_build` and the `build_profile` inside it calls
+# `cached_build_board` and `cached_profile_frames`, each of which goes
+# through `get_or_build` again. With one permit taken per ENTRY, two cold
+# profile requests for different players -- two rooms under live settings
+# right after a refresh, which is exactly when everything is cold -- took
+# both permits, then each waited for a third that could never be released.
+# Both threads stuck, `BUILD_SLOTS._value` pinned at 0, and the semaphore
+# written to protect the container instead killed the process. Reproduced in
+# tests/test_board_cache.py.
+#
+# So a thread that already holds the permit re-enters free. THE MEMORY BOUND
+# IS UNCHANGED, which is the only reason this is safe: `build_profile` calls
+# the board and the frames one after the other, never concurrently, so a
+# thread inside a nested build still has exactly one build's worth of frames
+# in flight. Two permits still means at most two builds running at once; it
+# now means two THREADS building rather than two ENTRIES into this function,
+# which is what the bound was always trying to say.
+_permit_depth = threading.local()
+
+
+@contextlib.contextmanager
+def _build_permit():
+    """One BUILD_SLOTS permit per thread, however deep the builds nest.
+
+    The semaphore object is captured on the way in and released on the way
+    out, so a test that swaps `BUILD_SLOTS` mid-build cannot release a permit
+    into a semaphore it never took one from. Depth is only counted after a
+    successful acquire, so an interrupted acquire cannot leave a thread
+    believing it holds a permit it does not.
+    """
+    depth = getattr(_permit_depth, "n", 0)
+    slots = BUILD_SLOTS if depth == 0 else None
+    if slots is not None:
+        slots.acquire()
+    _permit_depth.n = depth + 1
+    try:
+        yield
+    finally:
+        _permit_depth.n = depth
+        if slots is not None:
+            slots.release()
+
 
 def get_or_build(cache, inflight, lock, key, build, max_entries):
     """LRU lookup with single-flight: one build per key at a time.
@@ -175,6 +221,10 @@ def get_or_build(cache, inflight, lock, key, build, max_entries):
     above it. A thread waiting on somebody else's build is holding no memory
     of its own and must not hold a slot either; if it did, two waiters could
     fill both slots and nobody could build the thing they are waiting for.
+
+    And it is held ONCE PER THREAD however deep the builds nest -- a build
+    that starts another build (a profile needs a board and a set of frames)
+    would otherwise deadlock against itself. See `_build_permit`.
     """
     while True:
         with lock:
@@ -187,17 +237,14 @@ def get_or_build(cache, inflight, lock, key, build, max_entries):
                 pending = inflight[key] = threading.Event()
                 break
         pending.wait()
-    slots = BUILD_SLOTS
-    slots.acquire()
     try:
-        built = build()
+        with _build_permit():
+            built = build()
     except BaseException:
         with lock:
             inflight.pop(key, None)
         pending.set()
         raise
-    finally:
-        slots.release()
     with lock:
         cache[key] = built
         cache.move_to_end(key)
@@ -401,7 +448,12 @@ def cached_build_board(conn, weights: dict | None = None,
 # `_PAYLOAD_MAX_ENTRIES` of 256 -- so this fills a sixth of that cache and
 # evicts nothing.
 #
-# `WARM_PROFILES=0` disables it, which is the escape hatch if a container
+# THIS WARMS THE STORED LEAGUE, AND ONLY THAT. At boot there is no other --
+# a live room's settings arrive with a connect, minutes or hours later, and
+# are a different cache key. `warm_profiles_for` below is the same pass for
+# one of those, which api/live.py fires once a room's first ranking lands.
+#
+# `WARM_PROFILES=0` disables both, which is the escape hatch if a container
 # turns out to be too small to spend the CPU: nothing else changes, the first
 # click just pays what it paid before.
 WARM_PROFILES_ENV = "WARM_PROFILES"
@@ -446,7 +498,7 @@ def _warm_order(board: pd.DataFrame, n: int) -> list:
     return [str(p) for p in order["player_id"].head(n)]
 
 
-def _warm_profiles(conn, settings, n: int) -> tuple:
+def _warm_profiles(conn, settings, n: int, weights: dict | None = None) -> tuple:
     """Pre-build up to `n` finished profiles. Returns (built, failed).
 
     ONE AT A TIME, ON THIS THREAD. `get_or_build` holds one of the two
@@ -463,13 +515,52 @@ def _warm_profiles(conn, settings, n: int) -> tuple:
     from scoring.profile_cache import cached_profile
 
     built = failed = 0
-    for player_id in _warm_order(cached_build_board(conn, None, settings), n):
+    for player_id in _warm_order(cached_build_board(conn, weights, settings), n):
         try:
-            cached_profile(conn, player_id, None, settings)
+            cached_profile(conn, player_id, weights, settings)
             built += 1
         except Exception:  # noqa: BLE001 -- see the docstring
             failed += 1
     return built, failed
+
+
+def warm_profiles_for(conn, settings, weights: dict | None = None,
+                      n: int | None = None) -> int:
+    """The same pass as `warm`'s fourth, under whatever league a caller has.
+
+    WHY THIS IS SEPARATE FROM `warm`. That function warms the STORED league
+    -- the `league` table row -- because at boot that is the only league
+    there is. A connected draft is priced under the settings ESPN reports
+    live (see `_league_settings` in api/main.py), which is a different cache
+    key, so every one of the forty payloads `warm` built is a miss for the
+    one person in the building who is actually drafting. api/live.py calls
+    this with the room's own settings once its first ranking lands, which is
+    the moment the board under those settings exists and the reader is about
+    to start opening cards.
+
+    `n` defaults to the environment at CALL time rather than at import, so
+    `WARM_PROFILES=0` turns this off along with the boot pass and a
+    deployment has one switch, not two.
+
+    NEVER RAISES. It runs on a daemon thread beside a live draft; the only
+    reasonable answer to "the profiles would not build" is a line in the log
+    and a cache that stays cold, which is the state the next request already
+    knows how to handle. Returns how many it built, which is what a caller
+    or a test would have to assert on anyway.
+    """
+    n = _warm_profile_count() if n is None else max(0, int(n))
+    if not n:
+        return 0
+    started = time.perf_counter()
+    try:
+        built, failed = _warm_profiles(conn, settings, n, weights)
+    except Exception as exc:  # noqa: BLE001 -- see the docstring
+        print(f"warm: room profiles failed, leaving them cold: {exc!r}",
+              flush=True)
+        return 0
+    print(f"warm: {built} room profiles in {time.perf_counter() - started:.1f}s"
+          + (f" ({failed} failed)" if failed else ""), flush=True)
+    return built
 
 
 def warm(conn) -> list:

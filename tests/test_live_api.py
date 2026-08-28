@@ -1102,6 +1102,61 @@ def test_connect_ranks_once_at_launch_instead_of_waiting_for_a_pick(
     client.post("/api/live/stop")
 
 
+def test_a_connect_warms_the_rooms_own_profiles_not_the_stored_leagues(
+        tmp_path, monkeypatch, _isolated_leagues_root):
+    """`scoring.board_cache.warm` pre-builds forty player profiles at boot,
+    under the STORED league -- the `league` table row -- because at boot that
+    is the only league there is. A connected room is priced under the
+    settings this endpoint fetched live from ESPN, which is a different key
+    in scoring/profile_cache.py, so not one of those forty is a hit for the
+    person actually drafting. The room the warm was FOR is the room it
+    missed.
+
+    The two leagues here are deliberately different in both directions the
+    key cares about: the seeded `league` row prices receptions at 0.5 and
+    carries no pick order, while the ESPN fetch prices them at 1.0 and names
+    one. Asserting on the fetched values is asserting that the warm was
+    handed the ROOM's league and not the database's.
+
+    Fired on the first ranking rather than on the connect, because until a
+    recompute has landed there is no board under these settings to take a
+    top forty off.
+    """
+    warmed = []
+    monkeypatch.setattr("api.live.warm_profiles_for",
+                        lambda conn, settings, *a, **k: (warmed.append(settings), 0)[1])
+    monkeypatch.setattr("api.live.run_listener", lambda *a, **k: None)
+    monkeypatch.setattr("api.live.fetch_league_settings",
+                        lambda *a, **k: _espn_settings_with_pick_order())
+
+    from fastapi.testclient import TestClient
+    from api.main import create_app
+
+    path = str(tmp_path / "live.duckdb")
+    _seed_minimal_live_db(path)
+    client = TestClient(create_app(path))
+    assert client.post(
+        "/api/live/connect",
+        json={"url": "https://fantasy.espn.com/football/draft?leagueId=1"
+                     "&teamId=2&memberId={X}"}).status_code == 200
+
+    assert _wait_until(lambda: warmed), \
+        "the room's profiles were never warmed"
+    settings = warmed[0]
+    assert settings.pick_order == (3, 7, 1, 2, 4, 5, 6, 8)
+    assert settings.scoring.get("receptions") == 1.0
+    # The stored row, which is what `warm` would have used and what this
+    # must NOT have been handed.
+    assert league_mod.load(get_conn(path)).scoring.get("receptions") == 0.5
+
+    # ONCE PER ROOM. Every later pick requests another recompute, and none of
+    # them may start another forty builds.
+    client.get("/api/live/state")
+    assert not _wait_until(lambda: len(warmed) > 1, timeout=0.5), \
+        "the profile warm fired more than once for one room"
+    client.post("/api/live/stop")
+
+
 def test_resolve_slot_never_trusts_the_databases_own_pick_order(
         tmp_path, monkeypatch):
     """A stale pick order is a CONFIDENT wrong answer, and nothing

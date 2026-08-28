@@ -222,6 +222,133 @@ def test_a_failed_build_gives_its_slot_back(tmp_path, monkeypatch):
     slots.release()
 
 
+# A build that starts another build must not deadlock against the bound.
+# Bounded at 15s: the fixture's builds are under a second each, so a pass is
+# instant and a REGRESSION fails in fifteen seconds rather than hanging a CI
+# run. Daemon threads for the same reason -- a regression leaves them stuck
+# for good, and non-daemon threads would keep the interpreter from exiting
+# after the assertion had already said what was wrong.
+_DEADLOCK_TIMEOUT_S = 15
+
+
+def test_two_concurrent_cold_profile_builds_do_not_deadlock(tmp_path):
+    """THE BUG THIS EXISTS FOR, which took the whole process down.
+
+    `cached_profile` builds inside a BUILD_SLOTS permit, and the
+    `build_profile` inside it calls `cached_build_board` and
+    `cached_profile_frames`, each of which wanted a permit of its own. Two
+    cold profile requests for different players -- two rooms under live
+    settings right after a refresh, when everything is cold by definition --
+    took both permits and then each waited for a third that could never be
+    released. Both threads stuck, `BUILD_SLOTS._value` pinned at 0, and
+    nothing in the process could ever build anything again.
+
+    Two connections, as two request threads would have; two different
+    players, so single-flight cannot quietly turn this into one build and
+    one waiter."""
+    from tests.test_profile import _seed_two_players
+
+    conn = _seed_two_players(tmp_path)
+    bc.clear()
+    from scoring import profile_cache
+    profile_cache.clear()
+
+    done, errors = [], []
+    conns = [conn.cursor(), conn.cursor()]
+
+    def run(i, pid):
+        try:
+            profile_cache.cached_profile(conns[i], pid)
+            done.append(pid)
+        except BaseException as e:  # noqa: BLE001
+            errors.append(repr(e))
+
+    threads = [threading.Thread(target=run, args=(0, "p1"), daemon=True),
+               threading.Thread(target=run, args=(1, "p2"), daemon=True)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=_DEADLOCK_TIMEOUT_S)
+
+    alive = [t for t in threads if t.is_alive()]
+    assert not alive, (
+        f"{len(alive)} thread(s) still stuck after {_DEADLOCK_TIMEOUT_S}s; "
+        f"finished={done} errors={errors}; "
+        f"BUILD_SLOTS._value={bc.BUILD_SLOTS._value}")
+    assert not errors, errors
+    assert sorted(done) == ["p1", "p2"]
+
+
+def test_a_nested_build_takes_no_second_permit(tmp_path, monkeypatch):
+    """The same property stated directly, and the one a single permit makes
+    unmistakable: with BUILD_SLOTS at 1, a build that starts another build
+    still finishes. Before the permit was made re-entrant this hung on the
+    first nested call."""
+    from scoring import profile_cache
+
+    conn = _seed_full(tmp_path)
+    bc.clear()
+    profile_cache.clear()
+    monkeypatch.setattr(bc, "BUILD_SLOTS", threading.Semaphore(1))
+
+    done = []
+    t = threading.Thread(
+        target=lambda: done.append(profile_cache.cached_profile(conn, "p1")),
+        daemon=True)
+    t.start()
+    t.join(timeout=_DEADLOCK_TIMEOUT_S)
+
+    assert not t.is_alive(), "a nested build waited for a permit it held"
+    assert done and done[0]["header"]["player_id"] == "p1"
+
+
+def test_the_permit_is_given_back_after_a_nested_build(tmp_path, monkeypatch):
+    """Re-entrancy must not leak. The outermost frame releases exactly one
+    permit however many times the thread re-entered, and a thread that has
+    finished holds none."""
+    from scoring import profile_cache
+
+    conn = _seed_full(tmp_path)
+    bc.clear()
+    profile_cache.clear()
+    # BOUNDED, which is the whole assertion: it raises the moment a permit is
+    # released more times than it was taken, so a re-entrant frame that gave
+    # one back on the way out fails the build it was in rather than silently
+    # growing the bound this semaphore exists to enforce.
+    slots = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(bc, "BUILD_SLOTS", slots)
+
+    profile_cache.cached_profile(conn, "p1")
+
+    assert slots.acquire(blocking=False), "the permit was never given back"
+    slots.release()
+    assert slots._value == 1
+
+
+def test_a_failed_nested_build_gives_the_permit_back(tmp_path, monkeypatch):
+    """Same as `test_a_failed_build_gives_its_slot_back`, one level down: an
+    exception out of the innermost build must unwind every frame's
+    bookkeeping, not just the one that raised."""
+    from scoring import profile_cache
+
+    conn = _seed_full(tmp_path)
+    bc.clear()
+    profile_cache.clear()
+    slots = threading.Semaphore(1)
+    monkeypatch.setattr(bc, "BUILD_SLOTS", slots)
+
+    def boom(*a, **k):
+        raise RuntimeError("nflverse is having a day")
+
+    monkeypatch.setattr(bc, "build_board", boom)
+    for _ in range(3):
+        with pytest.raises(RuntimeError):
+            profile_cache.cached_profile(conn, "p1")
+
+    assert slots.acquire(blocking=False), "the permit was never given back"
+    slots.release()
+
+
 # ---------------------------------------------------------------------------
 # Warming
 # ---------------------------------------------------------------------------

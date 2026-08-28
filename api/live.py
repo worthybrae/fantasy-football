@@ -24,7 +24,8 @@ from pipeline.db import apply_parent_conn_limits, get_conn, read_table
 from pipeline.espn_live import build_crosswalk
 from scoring import league as league_mod
 from scoring.board_cache import (board_fingerprint,  # noqa: F401 -- re-exported
-                                 cached_build_board, cached_build_pool)
+                                 cached_build_board, cached_build_pool,
+                                 warm_profiles_for)
 from scoring.draft_sim import build_pool
 from scoring.headshot import thumb
 
@@ -2931,6 +2932,57 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
             state["plan"] = plan
             state["as_of_pick"] = picks_made
 
+    def _warm_room_profiles(s, session):
+        """Pre-build this room's top player profiles, on a thread of its own.
+
+        WHAT THIS FIXES. `scoring.board_cache.warm` pre-builds forty profiles
+        at boot and after every refresh, and it builds them under the STORED
+        league -- the `league` table row -- because at boot that is the only
+        league there is. A connected room is priced under the settings this
+        endpoint fetched live from ESPN (see `_league_settings` in
+        api/main.py), which is a different cache key in
+        `scoring/profile_cache.py`, so not one of those forty payloads is a
+        hit for the person actually drafting. The room the warm was FOR is
+        the room it misses.
+
+        FIRED ONCE, ON THE FIRST RANKING. Not at connect: until the first
+        recompute has landed there is no board under these settings to take
+        the top forty off, and building one here would race the connect that
+        is already building it. By the time a ranking exists the reader is
+        looking at a list of players and is about to start opening them.
+
+        `state["league_conn"] or conn` is the same connection `_recompute`
+        ranks on, read under the same lock and for the same reason: a torn
+        read would warm one league's profiles into another league's cache
+        key. A cursor, not the connection, because this runs beside a
+        listener that is writing.
+
+        NOTHING HERE MAY RAISE. It is a daemon thread nobody is waiting on
+        and it produces nothing anybody is owed -- `warm_profiles_for`
+        catches what the builds throw, and the lines around it can throw too
+        (`cursor()` on a connection a stop has already closed is the one that
+        actually happens). A cold cache is the state the next request already
+        handles.
+        """
+        state, lock = s.state, s.lock
+
+        def run():
+            try:
+                with lock:
+                    active_conn = state["league_conn"] or conn
+                cur = active_conn.cursor()
+                try:
+                    warm_profiles_for(cur, session.settings)
+                finally:
+                    cur.close()
+            except Exception as exc:  # noqa: BLE001 -- see the docstring
+                print(f"live: room {s.sid[:8]} profile warm gave up: {exc!r}",
+                      flush=True)
+
+        threading.Thread(target=run, name=f"warm-profiles-{s.sid[:8]}",
+                         daemon=True).start()
+
+
     def _provision_and_build(s, league_id, team_id, settings=None, progress=None):
         """Open (provisioning if needed) the connection this league's session
         lives on, and build the session against it.
@@ -3474,6 +3526,13 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
         # guard drops any result a newer pick has already outrun.
         recompute_cv = threading.Condition()
         pending = {"session": None, "made": None}
+        # ONE PROFILE WARM PER ROOM, fired on the first ranking that lands.
+        # Per LISTENER, not per session id: a reconnect builds a new listener
+        # and may well have new settings (a commissioner changing scoring
+        # mid-draft is rare, a reconnect after a settings fetch that failed
+        # the first time is not), and the payloads it wants are keyed on
+        # those. See `_warm_room_profiles`.
+        warmed = {"done": False}
 
         def request_recompute(sess, made):
             with recompute_cv:
@@ -3557,6 +3616,13 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
                             state["recompute_ms"] = elapsed_ms
                         ranked = len(state["candidates"])
                     progress.ok("ranking", f"{ranked} ranked")
+                    # The board under this room's settings now exists, which
+                    # is the thing the warm needs and the reason this is not
+                    # fired at connect. Latched before the launch, not after,
+                    # so a launch that throws is still only tried once.
+                    if not warmed["done"]:
+                        warmed["done"] = True
+                        _warm_room_profiles(s, sess)
                     if _switch_on(LOG_RANKINGS_ENV):
                         print(f"live: room {s.sid[:8]} ranked {ranked} at pick "
                               f"{made} in {elapsed_ms:.0f} ms", flush=True)
