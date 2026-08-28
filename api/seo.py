@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import re
 import threading
+import time
 import unicodedata
 from collections import Counter
 from datetime import datetime
@@ -56,6 +57,28 @@ TEMPLATES = Path(__file__).resolve().parent / "templates"
 # a daemon thread opening a corpus behind every one of them. See
 # `api/demo.py`'s `DEMO_WARM` for the same switch on the same principle.
 WARM_ON_REGISTER = os.environ.get("SEO_WARM", "1") != "0"
+
+# How often the warm thread rebuilds the ADP aggregate.
+#
+# THE NUMBER THAT MATTERS IS `market.CACHE_SECONDS`, WHICH THIS IS UNDER.
+# `build_adp` costs 0.9-2.8s against the real corpus and `adp_data` holds
+# its answer for ten minutes; warming it once at boot therefore fixed the
+# first ten minutes and nothing after that. The measured symptom was a 1.9s
+# TTFB on `/adp` roughly every other five-minute edge window -- whichever
+# crawler or reader happened to arrive after the entry lapsed paid to
+# rebuild it. Rebuilding on a timer that is comfortably inside the entry's
+# life means the entry never lapses while anyone is looking, and the couple
+# of seconds is spent on a thread nobody is waiting on.
+WARM_SECONDS = 240.0
+
+# The `market._cached` key the aggregate lives under. Named because the warm
+# thread has to be able to retire it (`market.evict`) rather than be handed
+# the copy it is trying to replace.
+ADP_KEY = "seo-adp"
+
+# How many rendered pages to keep. The sitemap is 232 URLs and a crawler
+# works through it in a burst, so this holds a whole crawl and then some.
+PAGE_CACHE_MAX = 400
 
 
 def slug(name: str) -> str:
@@ -169,7 +192,36 @@ def _team_fallback_from_espn(conn, ids: dict | None = None) -> dict:
 
 
 def _empty() -> dict:
-    return {"players": [], "by_slug": {}, "drafts": 0, "teams": 0, "rounds": 0, "updated": None}
+    return {"players": [], "by_slug": {}, "drafts": 0, "teams": 0, "rounds": 0,
+            "updated": None, "stamp": ("empty",)}
+
+
+def _stamp(conn, drafts: int, teams: int, rounds: int, updated) -> tuple:
+    """What this snapshot of the ADP aggregate IS, for the page cache.
+
+    Two halves, because these pages are built out of two databases. The
+    CORPUS half is the draft count, the shape, and the newest recorded
+    draft: nothing in `build_adp` can move without one of those moving,
+    since every figure on every page is a statistic over exactly those
+    drafts. The UNIVERSAL half is `board_cache`'s own identity key -- the
+    `meta` fingerprint -- because names, teams and ESPN's published ADP come
+    off `conn` and change when the instance refreshes itself.
+
+    The point of a stamp rather than a timer is that the warm thread rebuilds
+    the aggregate every few minutes and usually finds the same drafts in it.
+    An identical stamp means the 232 rendered pages hanging off the last one
+    are still correct, and none of them has to be built again.
+
+    Unreadable identity is its own answer, not a raised exception: the pages
+    are already written to lose the board rather than the page, and a stamp
+    that cannot be computed simply means nothing is cached under it.
+    """
+    try:
+        from scoring.board_cache import _identity_key
+        universal = _identity_key(conn) if conn is not None else ()
+    except Exception:      # noqa: BLE001 -- see the docstring
+        universal = ()
+    return (int(drafts), int(teams), int(rounds), str(updated), universal)
 
 
 def build_adp(conn) -> dict:
@@ -278,7 +330,8 @@ def build_adp(conn) -> dict:
 
     updated = latest.date() if isinstance(latest, datetime) else None
     return {"players": players, "by_slug": by_slug, "drafts": total,
-            "teams": teams, "rounds": rounds, "updated": updated}
+            "teams": teams, "rounds": rounds, "updated": updated,
+            "stamp": _stamp(conn, total, teams, rounds, updated)}
 
 
 _adp_lock = threading.Lock()
@@ -296,7 +349,21 @@ def adp_data(conn) -> dict:
     caller waits and gets the first caller's answer from cache instead.
     """
     with _adp_lock:
-        return market._cached("seo-adp", lambda: build_adp(conn))
+        return market._cached(ADP_KEY, lambda: build_adp(conn))
+
+
+def rebuild_adp(conn) -> dict:
+    """`build_adp` whether or not the cached answer has expired yet.
+
+    What the warm thread calls. `adp_data` would hand back the entry it is
+    trying to replace for as long as that entry is alive, which is exactly
+    the window this is meant to be renewing -- so the key is retired first,
+    under the same lock, and the rebuild happens while the old answer is
+    still what a request racing it would have been given.
+    """
+    with _adp_lock:
+        market.evict(ADP_KEY)
+        return market._cached(ADP_KEY, lambda: build_adp(conn))
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +388,53 @@ def render(name: str, **ctx) -> str:
     ctx.setdefault("site", SITE)
     ctx.setdefault("positions", POSITIONS)
     return _templates().get_template(name).render(**ctx)
+
+
+_pages: dict = {}
+_pages_stamp = None
+_pages_lock = threading.Lock()
+
+
+def rendered(stamp, key, build) -> str:
+    """`build()`, at most once per page per snapshot of the corpus.
+
+    These pages are pure functions of the ADP aggregate: same aggregate,
+    same bytes, every time. The aggregate is rebuilt on a timer by the warm
+    thread and mostly comes back identical (`_stamp` says when it does), so
+    holding the finished HTML costs one dict and saves rendering the same
+    232 pages for every crawl that walks the sitemap.
+
+    A stamp that does not match the one in hand empties the whole cache
+    rather than ageing entries out one at a time: the pages are a set, they
+    all describe the same snapshot, and half a crawl reading the old
+    snapshot beside half reading the new one is a worse answer than either.
+    """
+    global _pages_stamp
+    with _pages_lock:
+        if _pages_stamp != stamp:
+            _pages.clear()
+            _pages_stamp = stamp
+        hit = _pages.get(key)
+    if hit is not None:
+        return hit
+    html = build()
+    with _pages_lock:
+        # Only if the snapshot is still the one this was built from -- a warm
+        # thread may have swapped it while this render was running, and the
+        # entry would then be one page describing yesterday among 231
+        # describing today.
+        if _pages_stamp == stamp and len(_pages) < PAGE_CACHE_MAX:
+            _pages[key] = html
+    return html
+
+
+def clear_pages() -> None:
+    """Drop every rendered page. For tests, and for anything that changes
+    what these pages say without changing the corpus under them."""
+    global _pages_stamp
+    with _pages_lock:
+        _pages.clear()
+        _pages_stamp = None
 
 
 def _provenance(data: dict) -> str:
@@ -481,11 +595,11 @@ def register_seo_routes(app, conn=None):
                 "column is the 10th to the 90th percentile of his picks."
                 if d["drafts"] else None)
             faq = None
-        return page(render(
+        return page(rendered(d["stamp"], ("index", position), lambda: render(
             "adp_index.html", title=f"{heading} – ESPN Draft Assist", description=desc,
             path=path, heading=heading, provenance=_provenance(d), players=players,
             rounds=d["rounds"], position=position, positions=present, breadcrumbs=crumbs,
-            intro=intro, faq=faq, faq_schema=_faq_schema(faq) if faq else None))
+            intro=intro, faq=faq, faq_schema=_faq_schema(faq) if faq else None)))
 
     @app.api_route("/adp", methods=["GET", "HEAD"], response_class=HTMLResponse)
     def adp_index():
@@ -503,11 +617,11 @@ def register_seo_routes(app, conn=None):
         desc = (f"Who goes in round {n} (picks {first}–{last}) of an ESPN mock draft, "
                 f"from {d['drafts']} recorded drafts"
                 + (f": {', '.join(usual)}." if usual else "."))
-        return page(render(
+        return page(rendered(d["stamp"], ("round", n), lambda: render(
             "adp_round.html", title=f"Round {n} of an ESPN mock draft – who goes there – ESPN Draft Assist",
             description=desc, path=f"/adp/round/{n}", n=n, first=first, last=last,
             players=players, rounds=d["rounds"], provenance=_provenance(d),
-            breadcrumbs=_crumbs(("ADP", "/adp"), (f"Round {n}", f"/adp/round/{n}"))))
+            breadcrumbs=_crumbs(("ADP", "/adp"), (f"Round {n}", f"/adp/round/{n}")))))
 
     @app.api_route("/adp/{key}", methods=["GET", "HEAD"], response_class=HTMLResponse)
     def adp_player(key: str):
@@ -523,7 +637,7 @@ def register_seo_routes(app, conn=None):
         desc = (f"{p['name']} ADP {p['adp']:.1f} in {d['drafts']} real ESPN mock drafts: "
                 f"usually picks {p['p10']}–{p['p90']}, round {p['round_mode']}, "
                 f"taken in {pct}% of drafts, {p['position']}{p['pos_rank']}.")
-        return page(render(
+        return page(rendered(d["stamp"], ("player", p["slug"]), lambda: render(
             "adp_player.html", title=f"{p['name']} ADP – ESPN mock drafts {d['updated'].year if d['updated'] else ''} – ESPN Draft Assist",
             description=desc, path=f"/adp/{p['slug']}", p=p, drafts=d["drafts"],
             teams=d["teams"], rounds=d["rounds"], picks_total=d["teams"] * d["rounds"],
@@ -537,34 +651,47 @@ def register_seo_routes(app, conn=None):
             headshot=thumb(p["headshot"], 320),
             provenance=_provenance(d),
             breadcrumbs=_crumbs(("ADP", "/adp"), (p["position"], f"/adp/{p['position'].lower()}"),
-                                (p["name"], f"/adp/{p['slug']}"))))
+                                (p["name"], f"/adp/{p['slug']}")))))
 
     @app.api_route("/sitemap.xml", methods=["GET", "HEAD"])
     def sitemap():
         d = data()
-        stamp = d["updated"].isoformat() if d["updated"] else None
-        urls = ["/", "/mocks", "/adp"]
-        if d["drafts"]:
-            present = [pos for pos in POSITIONS if pos in {p["position"] for p in d["players"]}]
-            urls += [f"/adp/{pos.lower()}" for pos in present]
-            urls += [f"/adp/round/{n}" for n in range(1, d["rounds"] + 1)]
-            urls += [f"/adp/{p['slug']}" for p in d["players"]]
-        body = ['<?xml version="1.0" encoding="UTF-8"?>',
-                '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
-        for path in urls:
-            body.append("<url><loc>%s%s</loc>%s</url>" % (
-                SITE, path, f"<lastmod>{stamp}</lastmod>" if stamp else ""))
-        body.append("</urlset>")
-        res = Response(content="\n".join(body), media_type="application/xml")
+
+        def build() -> str:
+            lastmod = d["updated"].isoformat() if d["updated"] else None
+            urls = ["/", "/mocks", "/adp"]
+            if d["drafts"]:
+                present = [pos for pos in POSITIONS
+                           if pos in {p["position"] for p in d["players"]}]
+                urls += [f"/adp/{pos.lower()}" for pos in present]
+                urls += [f"/adp/round/{n}" for n in range(1, d["rounds"] + 1)]
+                urls += [f"/adp/{p['slug']}" for p in d["players"]]
+            body = ['<?xml version="1.0" encoding="UTF-8"?>',
+                    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
+            for path in urls:
+                body.append("<url><loc>%s%s</loc>%s</url>" % (
+                    SITE, path, f"<lastmod>{lastmod}</lastmod>" if lastmod else ""))
+            body.append("</urlset>")
+            return "\n".join(body)
+
+        res = Response(content=rendered(d["stamp"], ("sitemap",), build),
+                       media_type="application/xml")
         http_cache.public(res, SHARED_CACHE_SECONDS)
         return res
 
     # A sitemap of 232 URLs does not get crawled one at a time -- it gets
-    # crawled in a burst, and a cold `build_adp` (~2s, and it can trigger a
-    # board build besides) must not be the price whichever request in that
-    # burst happens to land first. Warm it once, off the request thread, at
-    # registration time; `adp_data`'s own lock means a real request racing
-    # this thread waits for the same answer rather than building its own.
+    # crawled in a burst, and a cold `build_adp` (0.9-2.8s, and it can
+    # trigger a board build besides) must not be the price whichever request
+    # in that burst happens to land first. Warm it off the request thread;
+    # `adp_data`'s own lock means a real request racing this thread waits for
+    # the same answer rather than building its own.
+    #
+    # AND THEN KEEP WARMING IT. Warming once at registration fixed the first
+    # ten minutes and nothing after: `adp_data`'s entry lives for
+    # `market.CACHE_SECONDS`, and the reader who arrived after it lapsed paid
+    # the rebuild. Measured, that was a 1.9s TTFB on `/adp` about every other
+    # five-minute edge window. The loop below renews the entry from inside
+    # its own lifetime, so nobody is ever the one who finds it cold.
     #
     # LAST, so a failure to warm can never cost the routes above it.
     if not WARM_ON_REGISTER:
@@ -583,10 +710,18 @@ def register_seo_routes(app, conn=None):
     cur = conn.cursor() if conn is not None else None
 
     def _warm():
-        try:
-            adp_data(cur)
-        except Exception:      # noqa: BLE001 -- a failed warm just means the
-            # first request pays for `build_adp` itself, same as before.
-            pass
+        while True:
+            try:
+                # `rebuild_adp` on every pass including the first, so the
+                # boot warm cannot be a no-op against an entry some other
+                # app object in this process left behind.
+                rebuild_adp(cur)
+            except Exception:      # noqa: BLE001 -- a failed warm just means
+                # the next request pays for `build_adp` itself, same as
+                # before this loop existed. Never fatal to the thread: a
+                # corpus mid-write is a 503 from `market._corpus`, and it
+                # will be writable again long before the next pass.
+                pass
+            time.sleep(WARM_SECONDS)
 
     threading.Thread(target=_warm, name="seo-adp-warm", daemon=True).start()

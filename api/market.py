@@ -121,6 +121,19 @@ def _cached(key, build, complete=None):
     return value
 
 
+def evict(key) -> None:
+    """Retire one cached answer, so the next `_cached` for it rebuilds.
+
+    For a caller that wants a REBUILD rather than the cached answer -- the
+    background thread in `api/seo.py`, which exists to pay `build_adp`'s
+    couple of seconds before a reader has to. Reaching into `_CACHE` from
+    another module would work and would make this dict part of the informal
+    interface; one named function is the smaller promise.
+    """
+    with _LOCK:
+        _CACHE.pop(key, None)
+
+
 def _board_answered(rows) -> bool:
     """Whether the board contributed to these rows at all.
 
