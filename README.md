@@ -46,7 +46,7 @@ beside it — your board rank, consensus ADP, tier, VOR. Then a status line for
 the two facts that can make everything under them irrelevant, the injury
 designation and where he actually stands on his own depth chart, with the gap
 to consensus on its right end. Then four season panels — Health, Finish,
-Steady, Per game — and last season by week with that season's game log under
+Reliable, Per game — and last season by week with that season's game log under
 it. Then six cards: schedule softness, his room on the depth chart, the
 market's sources, his per-game usage, the line blocking for him, and the
 board's picks around his own, with comparable seasons and his news closing it

@@ -149,10 +149,10 @@ function SteadyBody({ data }: BodyProps): ReactNode {
   return (
     <>
       <div className="ctip-head">
-        <span>Steadiness rank</span>
+        <span>Reliability rank</span>
         {/* Which end is good is the one thing a rank cannot say for itself,
             and it is the exact thing the old panel left a reader guessing. */}
-        <span className="ctip-head-note">{`1 = steadiest of ${pool} ${pos}s`}</span>
+        <span className="ctip-head-note">{`1 = most reliable of ${pool} ${pos}s`}</span>
       </div>
       <Chart cols={cols} />
     </>

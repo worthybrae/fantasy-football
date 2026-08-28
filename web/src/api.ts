@@ -699,6 +699,18 @@ export async function connectWithToken(
       Number(detail.season ?? params.season),
       detail.message ?? 'This draft has not been paid for.')
   }
+  // 503 with `error: "at capacity"` is the room cap (api/live.py,
+  // LIVE_MAX_ROOMS): the server is following as many drafts as it can. It
+  // carries a sentence for the reader, and the gate shows it as the error
+  // rather than the bare status text `detailText` would give a dict.
+  if (res.status === 503) {
+    const body = await res.json().catch(() => null)
+    const detail = body?.detail
+    if (detail && typeof detail === 'object' && detail.error === 'at capacity') {
+      throw new Error(String(detail.message ?? 'This server is at capacity. Try again in a few minutes.'))
+    }
+    throw new Error(typeof detail === 'string' ? detail : (res.statusText || 'request failed'))
+  }
   if (!res.ok) {
     throw new Error(await detailText(res))
   }

@@ -927,6 +927,8 @@ def test_the_room_cap_refuses_new_rooms_but_not_reconnects(tmp_path, monkeypatch
         assert resp.status_code == 503, resp.text
         detail = resp.json()["detail"]
         assert detail["error"] == "at capacity" and detail["cap"] == 1 and detail["active"] == 1
+        assert isinstance(detail.get("message"), str) and detail["message"], \
+            "the page shows this sentence; a cap with no words is a blank error"
         assert app.state.live_registry.active_count() == 1
         # The room already drafting may reconnect past the cap.
         assert _connect(a, "1", team_id="2").status_code == 200

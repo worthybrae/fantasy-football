@@ -272,7 +272,7 @@ export function benefits(data: ShowcaseData): Benefit[] {
     },
     {
       key: 'meters',
-      eyebrow: 'Health & steady',
+      eyebrow: 'Health & reliable',
       title: 'Two different ways to lose',
       body: veteran
         ? `Every season he has played, not just the last one: ${
