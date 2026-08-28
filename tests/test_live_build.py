@@ -143,14 +143,81 @@ def test_a_pool_broken_twice_falls_back_to_inline(tmp_path, monkeypatch):
     assert live_build.build_in_worker(league_path, universal, "77", None, None, None) == "inline"
 
 
-def test_a_worker_that_never_answers_is_cancelled_and_the_build_runs_inline(tmp_path, monkeypatch):
+def test_a_build_still_queued_after_the_timeout_is_cancelled_and_runs_inline(tmp_path, monkeypatch):
+    """A future the pool never started can be cancelled, and nothing holds
+    the file -- so inline is safe."""
     from concurrent.futures import Future
     monkeypatch.setenv(live_build.WORKERS_ENV, "1")
     monkeypatch.setattr("api.live_build.LIVE_BUILD_TIMEOUT", 0.2)
     universal, league_path = _league_file(tmp_path, monkeypatch)
     monkeypatch.setattr("api.live_build.build_session",
                         lambda cur, my_slot, league_id="", settings=None, progress=None: "inline")
-    hung = Future()
-    monkeypatch.setattr("api.live_build.submit", lambda fn, *args: hung)
+    queued = Future()
+    monkeypatch.setattr("api.live_build.submit", lambda fn, *args: queued)
     assert live_build.build_in_worker(league_path, universal, "77", None, None, None) == "inline"
-    assert hung.cancelled()
+    assert queued.cancelled()
+
+
+def test_a_running_worker_that_finishes_in_the_grace_is_used(tmp_path, monkeypatch):
+    """Past the timeout but running: no inline race. The worker's own
+    result, landing inside the grace, is what the connect gets."""
+    import threading
+    from concurrent.futures import Future
+    monkeypatch.setenv(live_build.WORKERS_ENV, "1")
+    monkeypatch.setattr("api.live_build.LIVE_BUILD_TIMEOUT", 0.2)
+    monkeypatch.setattr("api.live_build.LIVE_BUILD_GRACE", 5.0)
+    universal, league_path = _league_file(tmp_path, monkeypatch)
+    inline = []
+    monkeypatch.setattr("api.live_build.build_session",
+                        lambda *a, **k: inline.append(1) or "inline")
+    running = Future()
+    running.set_running_or_notify_cancel()
+    threading.Timer(0.5, running.set_result, args=("from the worker",)).start()
+    monkeypatch.setattr("api.live_build.submit", lambda fn, *args: running)
+    assert live_build.build_in_worker(league_path, universal, "77", None, None, None) == "from the worker"
+    assert inline == []
+
+
+def test_a_running_worker_that_never_finishes_is_a_refusal_not_a_race(tmp_path, monkeypatch):
+    from concurrent.futures import Future
+    monkeypatch.setenv(live_build.WORKERS_ENV, "1")
+    monkeypatch.setattr("api.live_build.LIVE_BUILD_TIMEOUT", 0.2)
+    monkeypatch.setattr("api.live_build.LIVE_BUILD_GRACE", 0.2)
+    universal, league_path = _league_file(tmp_path, monkeypatch)
+    inline = []
+    monkeypatch.setattr("api.live_build.build_session",
+                        lambda *a, **k: inline.append(1) or "inline")
+    running = Future()
+    running.set_running_or_notify_cancel()
+    monkeypatch.setattr("api.live_build.submit", lambda fn, *args: running)
+    with pytest.raises(live_build.BuildTimedOut):
+        live_build.build_in_worker(league_path, universal, "77", None, None, None)
+    assert inline == []
+
+
+def test_a_worker_that_dies_mid_build_drops_the_pool_and_builds_inline(tmp_path, monkeypatch):
+    """BrokenProcessPool out of result(): the worker was killed with the
+    build in flight. The pool is dropped so the next connect gets a fresh
+    one, and this connect builds inline (the worker is gone, the file is
+    free)."""
+    from concurrent.futures import Future
+    from concurrent.futures.process import BrokenProcessPool
+    monkeypatch.setenv(live_build.WORKERS_ENV, "1")
+    universal, league_path = _league_file(tmp_path, monkeypatch)
+    monkeypatch.setattr("api.live_build.build_session",
+                        lambda cur, my_slot, league_id="", settings=None, progress=None: "inline")
+    dead = Future()
+    dead.set_exception(BrokenProcessPool("worker killed"))
+    pools = []
+
+    class _Pool:
+        def submit(self, fn, *args):
+            return dead
+
+        def shutdown(self, wait=True, cancel_futures=False):
+            pools.append("shut down")
+    monkeypatch.setattr("api.live_build._pool", _Pool())
+    monkeypatch.setattr("api.live_build._get_pool", lambda: live_build._pool or pools.append("fresh"))
+    assert live_build.build_in_worker(league_path, universal, "77", None, None, None) == "inline"
+    assert live_build._pool is None, "the broken pool was dropped"
+    assert pools == ["shut down"]

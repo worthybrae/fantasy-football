@@ -1612,14 +1612,6 @@ SID_MAX_AGE = 12 * 3600
 DEFAULT_SID = "__default__"
 
 
-def _conn_path(conn) -> "str | None":
-    """The file a DuckDB connection is on, or None for an in-memory one."""
-    for _oid, _name, path in conn.execute("PRAGMA database_list").fetchall():
-        if path:
-            return str(path)
-    return None
-
-
 def _initial_state() -> dict:
     """A fresh session's state, every key present from the start.
 
@@ -1791,14 +1783,16 @@ class LiveRegistry:
         # each restored session also carries it in state["restore_thread"].
         self.restore_thread = None
         # WHICH LEAGUE FILES THIS PROCESS HOLDS, and for whom: realpath ->
-        # sid. Claimed by a connect BEFORE it decides whether a worker
+        # the sids of every room that has, or is about to have, the file
+        # open. Registered by a connect BEFORE it decides whether a worker
         # process may open the file (DuckDB's lock is per process, so a
-        # file any room here holds -- or is about to -- is not one a worker
-        # can open), and released when the room's connection closes. Two
-        # leaguemates connecting within seconds of each other are the case:
-        # the second finds the first's claim and builds inline, instead of
-        # handing a worker a file the first is about to open.
-        self.held_paths: dict[str, str] = {}
+        # file any room here holds is not one a worker can open), and a
+        # worker is allowed only while this room is the file's sole holder.
+        # A room that lost that and built inline is still a holder: when
+        # the first room stops, the file stays open in this process, and
+        # the next connect must build inline too. Each release removes one
+        # sid; the set empties when the last connection closes.
+        self.path_holders: dict[str, set] = {}
         # The reaper, started on the first real room rather than at
         # registration: a test builds dozens of apps, and each would
         # otherwise carry a sleeping thread for nothing. `reaper` is the
@@ -1823,28 +1817,30 @@ class LiveRegistry:
         return s
 
     def claim_path(self, path: str, sid: str) -> bool:
-        """Claim a league file for `sid`. True when the claim is now this
-        room's (fresh, or already its own); False when another room holds
-        it -- the caller then builds inline, in this process, where a
-        second connection to an open file is fine."""
+        """Register `sid` as a holder of a league file. True when it is the
+        file's ONLY holder -- a worker process may open the file; False
+        when another room holds it too -- the caller builds inline, in
+        this process, where a second connection to an open file is fine.
+        Either way the room is registered and must release_path later."""
         key = os.path.realpath(path)
         with self._lock:
-            holder = self.held_paths.get(key)
-            if holder is None or holder == sid:
-                self.held_paths[key] = sid
-                return True
-            return False
+            holders = self.path_holders.setdefault(key, set())
+            holders.add(sid)
+            return holders == {sid}
 
     def release_path(self, path: str, sid: str) -> None:
-        """Drop `sid`'s claim on a league file, if it is the holder."""
+        """Drop `sid` from a league file's holders."""
         key = os.path.realpath(path)
         with self._lock:
-            if self.held_paths.get(key) == sid:
-                del self.held_paths[key]
+            holders = self.path_holders.get(key)
+            if holders is not None:
+                holders.discard(sid)
+                if not holders:
+                    del self.path_holders[key]
 
-    def path_holder(self, path: str) -> "str | None":
+    def holders_of(self, path: str) -> set:
         with self._lock:
-            return self.held_paths.get(os.path.realpath(path))
+            return set(self.path_holders.get(os.path.realpath(path), ()))
 
     def drop(self, sid: str) -> None:
         with self._lock:
@@ -2458,9 +2454,11 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
             # the numpy is inside the slot: the drafted read above and the
             # store below are milliseconds and must not queue behind a
             # ranking somewhere else.
-            # The slot itself is taken by the recompute worker that calls
-            # this (see its wait loop), so a direct call from a test runs
-            # unbounded, as it always did.
+            # RECOMPUTE_SLOTS is held by the recompute worker across this
+            # whole call (acquired in its wait loop, released in its
+            # finally), so the bound covers the drafted read and the store
+            # as well as the numpy; a direct call from a test holds no slot
+            # and runs unbounded, as it always did.
             rollouts = survival(
                 session.pool, session.settings, session.slot_managers,
                 session.my_slot, taken, session.betas,
@@ -2553,13 +2551,14 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
             # to a second process at all -- DuckDB's lock is per process --
             # so that case builds inline, where a second connection to an
             # open file is fine.
-            # The claim comes FIRST, before worker-or-inline is decided
-            # (see LiveRegistry.held_paths): a claim another room already
-            # holds means the file is, or is about to be, open in this
-            # process, and a worker must not be handed it.
-            claimed = registry.claim_path(league_path, s.sid)
+            # The registration comes FIRST, before worker-or-inline is
+            # decided (see LiveRegistry.path_holders): any other room
+            # holding the file means it is, or is about to be, open in this
+            # process, and a worker must not be handed it. Registered
+            # either way, and released with the connection.
+            sole = registry.claim_path(league_path, s.sid)
             try:
-                if live_build.workers() > 0 and claimed:
+                if live_build.workers() > 0 and sole:
                     session = _build_off_process(league_path, league_id,
                                                  team_id, settings, progress)
                     league_conn = get_conn(league_path)
@@ -2576,8 +2575,11 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
                 league_conn = get_conn(league_path)
                 live_build.apply_conn_limits(league_conn)
             except Exception:
-                if claimed:
-                    registry.release_path(league_path, s.sid)
+                # NEW-4: a failure after the parent opened its connection
+                # closes it, exactly as the inline handler below does.
+                if league_conn is not None:
+                    league_conn.close()
+                registry.release_path(league_path, s.sid)
                 raise
         else:
             progress.ok("league", "the shared database")
@@ -2662,10 +2664,17 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
         running while the worker is busy (it is the first thing the worker
         resolves), the rest closed together when the session lands."""
         progress.begin("slot")
-        session = live_build.build_in_worker(
-            league_path, db_path, league_id,
-            league_mod.to_json(settings) if settings is not None else None,
-            team_id, None)
+        try:
+            session = live_build.build_in_worker(
+                league_path, db_path, league_id,
+                league_mod.to_json(settings) if settings is not None else None,
+                team_id, None)
+        except live_build.BuildTimedOut as exc:
+            # The worker still has the file open, so building inline here
+            # would race it for the lock; refuse this connect instead. A
+            # retry lands once the worker has let go.
+            raise HTTPException(status_code=503,
+                                detail=f"{exc} -- try again") from exc
         teams = getattr(session.settings, "teams", None)
         if session.my_slot is not None:
             progress.ok("slot", f"you pick {_ordinal(session.my_slot)}"
@@ -3019,6 +3028,15 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
                                 "busy: no ranking slot within "
                                 f"{RECOMPUTE_WAIT_SECONDS:.0f}s; showing the "
                                 "previous ranking")
+                    # Back into the slot, not dropped: the launch ranking is
+                    # the only one a quiet room will ever ask for, and a
+                    # dropped one leaves the list empty and the `ranking`
+                    # stage spinning. Only when nothing newer has arrived
+                    # meanwhile (latest wins, as always), and paced by the
+                    # wait above, so this cannot spin hot.
+                    with recompute_cv:
+                        if pending["made"] is None:
+                            pending["session"], pending["made"] = sess, made
                     continue
                 # Guarded, because this loop IS the thread's whole body: an
                 # exception propagating out of _recompute returns from

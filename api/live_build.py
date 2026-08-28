@@ -52,6 +52,16 @@ CONN_MEMORY_LIMIT = "256MB"
 # not hold a request thread for the rest of the evening: on expiry the
 # future is cancelled and that one connect builds inline instead.
 LIVE_BUILD_TIMEOUT = 120.0
+# How much longer a connect waits for a worker that would not cancel: a
+# running build cannot be cancelled, and while it runs the worker has the
+# league file open, so building inline would race it for the lock. Past
+# this the connect is refused (BuildTimedOut) rather than raced.
+LIVE_BUILD_GRACE = 30.0
+
+
+class BuildTimedOut(RuntimeError):
+    """A worker did not finish within LIVE_BUILD_TIMEOUT + LIVE_BUILD_GRACE
+    and could not be cancelled. The caller must not open the file."""
 
 _pool_lock = threading.Lock()
 _pool: ProcessPoolExecutor | None = None
@@ -193,8 +203,35 @@ def build_in_worker(league_path: str, universal_path: str, league_id: str,
         return _build_job(*args)
     try:
         return future.result(timeout=LIVE_BUILD_TIMEOUT)
-    except TimeoutError:
-        future.cancel()
-        print(f"live_build: worker did not build league {league_id} within "
-              f"{LIVE_BUILD_TIMEOUT:.0f}s; building it inline")
+    except BrokenProcessPool as exc:
+        # The worker died mid-build (the kernel's memory killer, most
+        # likely). The pool is finished with; the next connect gets a new
+        # one, and this one builds inline -- the file is free, the worker
+        # is gone.
+        print(f"live_build: worker died building league {league_id} "
+              f"({exc}); replacing the pool and building inline")
+        shutdown()
         return _build_job(*args)
+    except TimeoutError:
+        pass
+    if future.cancel():
+        # Never started: nothing holds the file, so inline is safe.
+        print(f"live_build: league {league_id} waited {LIVE_BUILD_TIMEOUT:.0f}s "
+              "for a worker; building it inline")
+        return _build_job(*args)
+    # Running, and a running worker cannot be cancelled -- it has the file
+    # open, so this process must NOT open it. Give it a little longer.
+    print(f"live_build: worker still building league {league_id} after "
+          f"{LIVE_BUILD_TIMEOUT:.0f}s; waiting {LIVE_BUILD_GRACE:.0f}s more")
+    try:
+        future.exception(timeout=LIVE_BUILD_GRACE)
+    except TimeoutError:
+        raise BuildTimedOut(
+            f"the build for league {league_id} timed out after "
+            f"{LIVE_BUILD_TIMEOUT + LIVE_BUILD_GRACE:.0f}s") from None
+    except BrokenProcessPool as exc:
+        print(f"live_build: worker died building league {league_id} "
+              f"({exc}); replacing the pool and building inline")
+        shutdown()
+        return _build_job(*args)
+    return future.result()          # finished in the grace; its exception, if any

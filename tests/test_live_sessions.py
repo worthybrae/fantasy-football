@@ -517,7 +517,7 @@ def test_two_leaguemates_connecting_at_once_share_one_file_safely(tmp_path, monk
         ta.start()
         registry = app.state.live_registry
         deadline = time.monotonic() + 10
-        while registry.path_holder(str(tmp_path / "leagues_root" / "1.duckdb")) is None:
+        while not registry.holders_of(str(tmp_path / "leagues_root" / "1.duckdb")):
             assert time.monotonic() < deadline, "the first connect never claimed the file"
             time.sleep(0.05)
         tb = threading.Thread(target=lambda: results.update(b=_connect(b, "1", team_id="3")))
@@ -600,5 +600,80 @@ def test_a_missing_replay_module_says_so_in_the_room(tmp_path, monkeypatch):
         assert "LIVE_FAKE_SOCKET is set but api.live_fake_socket is missing" in body["listener_error"]
         progress = a.get("/api/live/connect-progress").json()
         assert "api.live_fake_socket is missing" in (progress["error"] or {}).get("hint", "")
+    finally:
+        _stop_all([a])
+
+
+def test_a_file_stays_inline_while_any_room_still_holds_it(tmp_path, monkeypatch):
+    """A worker built room A; B, arriving while A held the file, built
+    inline and holds it too. When A stops, the file is still open in this
+    process for B -- so C's connect must build inline as well, never in a
+    worker. One submit in total."""
+    from concurrent.futures import ThreadPoolExecutor
+    monkeypatch.setenv(live_build.WORKERS_ENV, "1")
+    app, seen, stops = _app(tmp_path, monkeypatch)
+    submits = []
+    runner = ThreadPoolExecutor(max_workers=1)
+    real_build = live.build_session
+    monkeypatch.setattr(
+        "api.live_build.build_session",
+        lambda cur, my_slot, league_id="", settings=None, progress=None:
+            real_build(cur, my_slot, league_id=league_id, settings=settings))
+
+    def recorder(fn, *args):
+        submits.append(args[1])
+        return runner.submit(fn, *args)
+    monkeypatch.setattr("api.live_build.submit", recorder)
+    league_file = str(tmp_path / "leagues_root" / "1.duckdb")
+
+    a, b, c = _client(app), _client(app), _client(app)
+    try:
+        _connect(a, "1", team_id="2")            # sole holder: a worker built it
+        assert submits == ["1"]
+        _connect(b, "1", team_id="3")            # a holds it: inline
+        assert submits == ["1"]
+        registry = app.state.live_registry
+        assert registry.holders_of(league_file) == {a.cookies.get(SID_COOKIE),
+                                                    b.cookies.get(SID_COOKIE)}
+        assert a.post("/api/live/stop").json()["active"] is False
+        assert registry.holders_of(league_file) == {b.cookies.get(SID_COOKIE)}
+        _connect(c, "1", team_id="4")            # b still holds it: inline
+        assert submits == ["1"], "c's build went to a worker"
+        assert registry.active_count() == 2
+        _stop_all([b, c])
+        assert registry.holders_of(league_file) == set()
+    finally:
+        _stop_all([a, b, c])
+        runner.shutdown(wait=False)
+
+
+def test_a_worker_that_will_not_cancel_or_finish_refuses_the_connect(tmp_path, monkeypatch):
+    """A running worker holds the file; the connect must not open it
+    inline. Past the timeout and the grace it answers 503 instead."""
+    from concurrent.futures import Future
+    monkeypatch.setenv(live_build.WORKERS_ENV, "1")
+    monkeypatch.setattr("api.live_build.LIVE_BUILD_TIMEOUT", 0.2)
+    monkeypatch.setattr("api.live_build.LIVE_BUILD_GRACE", 0.2)
+    app, seen, stops = _app(tmp_path, monkeypatch)
+    running = Future()
+    running.set_running_or_notify_cancel()      # cancel() will answer False
+    monkeypatch.setattr("api.live_build.submit", lambda fn, *args: running)
+    inline = []
+    monkeypatch.setattr("api.live_build.build_session",
+                        lambda *a, **k: inline.append(1))
+    a = _client(app)
+    try:
+        assert a.post("/api/live/session").json()["sid_set"] is True
+        resp = a.post("/api/live/connect-token", json={
+            "leagueId": "1", "teamId": "2", "swid": "{X}",
+            "token": "tok-1", "season": "2026"})
+        assert resp.status_code == 503, resp.text
+        assert "timed out" in resp.json()["detail"]
+        assert inline == [], "the file was opened inline under a running worker"
+        assert a.get("/api/live/state").json()["active"] is False
+        # The room registered the file and released it on the failure.
+        registry = app.state.live_registry
+        assert registry.holders_of(str(tmp_path / "leagues_root" / "1.duckdb")) == set()
+        assert a.get("/api/live/connect-progress").json()["phase"] == "failed"
     finally:
         _stop_all([a])
