@@ -7,6 +7,7 @@ import { connectEspnAccount, connectWithToken, ensureLiveSession, fetchConnectPr
          type ConnectProgress, type LiveState, type TokenConnectParams,
          type UpcomingDrafts } from '../api'
 import { readAccount, rememberAccount } from '../lib/accountCache'
+import { useRoomProbe } from '../lib/useRoomProbe'
 import { useDocumentMeta } from '../lib/documentMeta'
 import SetupWizard, { ACCOUNT_CHANNEL, CHANNEL_ACK, CHANNEL_CONNECTED } from '../components/SetupWizard'
 import ConnectScreen from '../components/ConnectScreen'
@@ -373,35 +374,18 @@ export default function Landing() {
     if (progress?.phase === 'ready' && live?.draft_started) navigate('/draft')
   }, [progress?.phase, live?.draft_started, navigate])
 
-  // No token in the hash: this is the landing view. Still poll in case a
+  // No token in the hash: this is the landing view. Still watch in case a
   // connect is already running from a click in another window -- then this
-  // page can offer the board rather than pitch a tool already in use.
-  //
-  // A SESSION IS NOT A DRAFT. `active` and `token_received` only say a
-  // connect once happened in this server process: a token that was minted,
-  // used for nothing, and left behind reads as both for as long as the
-  // process lives. Measured on this deployment -- active, token_received,
-  // listener_alive false, stale, zero picks -- and the page was offering
-  // "your draft is synced, go to the board" over a session with no draft
-  // behind it and no listener attached. So the test is whether the thing is
-  // ALIVE: a listener on the socket, or picks that actually landed.
-  useEffect(() => {
-    if (gate !== 'idle') return
-    let cancelled = false
-    const poll = async () => {
-      try {
-        const state = await fetchLiveState()
-        const running = state.active
-          && (state.listener_alive || state.draft_started || state.picks_made > 0)
-        if (!cancelled && running) setGate('live')
-      } catch {
-        /* helper not up yet; the page simply stays on the landing view */
-      }
-    }
-    poll()
-    const id = setInterval(poll, 2500)
-    return () => { cancelled = true; clearInterval(id) }
-  }, [gate])
+  // page can offer the board rather than pitch a tool already in use. The
+  // cadence, and why it is not a flat 2.5s any more, is in useRoomProbe.
+  const onLive = useCallback(() => setGate('live'), [])
+  useRoomProbe({
+    enabled: gate === 'idle',
+    // A connect running on THIS page (a token in the hash) is a reason to
+    // watch closely from the first tick rather than to discover it.
+    busy: progress !== null,
+    onLive,
+  })
 
   // WHO IS LOOKING, AND THEREFORE WHICH PAGE THIS IS. `/api/espn/drafts` is
   // the authoritative answer and deliberately not the cheaper
