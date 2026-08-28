@@ -848,3 +848,67 @@ def test_a_worker_that_cannot_build_falls_back_to_an_inline_build(tmp_path, monk
     finally:
         _stop_all([a])
         runner.shutdown(wait=False)
+
+
+def test_a_connect_landing_mid_retirement_keeps_its_room(tmp_path, monkeypatch):
+    """The reaper decides to retire a room; before it drops the entry, the
+    same browser reconnects. The connect gets a fresh room under the sid,
+    the reaper's drop leaves that fresh room alone, and the file claim is
+    the fresh room's. One live room, one listener."""
+    app, seen, stops = _app(tmp_path, monkeypatch)
+    registry = app.state.live_registry
+    a = _client(app)
+    league_file = str(tmp_path / "leagues_root" / "1.duckdb")
+    try:
+        _connect(a, "1", team_id="2")
+        sid = a.cookies.get(SID_COOKIE)
+        old = registry.get(sid)
+        now = time.monotonic()
+        old.last_activity = now - 4 * 3600
+        real_retire = registry._retire
+
+        def retire_then_reconnect(s, now_, idle):
+            ok = real_retire(s, now_, idle)
+            # Between the reaper's decision and its drop: the browser is back.
+            _connect(a, "1", team_id="2")
+            return ok
+        registry.set_retire(retire_then_reconnect)
+
+        gone = registry.run_once(idle=3 * 3600, now=now)
+        assert gone == [sid], "the old room was retired"
+        fresh = registry.get(sid)
+        assert fresh is not None and fresh is not old
+        assert fresh.state["listener"] is not None
+        assert registry.active_count() == 1
+        assert a.get("/api/live/state").json()["active"] is True
+        assert registry.holders_of(league_file) == {sid}
+        assert stops[0].is_set() and not stops[1].is_set()
+        # And a request against the retiring old object sees nothing.
+        assert old.state["retiring"] is True
+    finally:
+        registry.set_retire(real_retire)
+        _stop_all([a])
+
+
+def test_a_room_touched_after_the_reaper_looked_is_kept(tmp_path, monkeypatch):
+    app, seen, stops = _app(tmp_path, monkeypatch)
+    registry = app.state.live_registry
+    a = _client(app)
+    try:
+        _connect(a, "1", team_id="2")
+        sid = a.cookies.get(SID_COOKIE)
+        room = registry.get(sid)
+        now = time.monotonic()
+        room.last_activity = now - 4 * 3600
+        real_retire = registry._retire
+
+        def touch_then_retire(s, now_, idle):
+            s.touch()                       # a poll landed after the scan
+            return real_retire(s, now_, idle)
+        registry.set_retire(touch_then_retire)
+        assert registry.run_once(idle=3 * 3600, now=now) == []
+        assert registry.get(sid) is room and not stops[0].is_set()
+        assert room.state["retiring"] is False
+    finally:
+        registry.set_retire(real_retire)
+        _stop_all([a])

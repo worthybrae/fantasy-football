@@ -1745,6 +1745,12 @@ def _initial_state() -> dict:
             # process: a file this process holds is not one another process
             # can open.
             "league_path": None,
+            # Set by the reaper, under the lock, the moment it decides to
+            # retire the room and before it stops anything. A request that
+            # arrives after that sees no room (a connect gets a fresh one),
+            # so a connect cannot land inside a room the reaper is about to
+            # drop and lose its listener with it.
+            "retiring": False,
             # (league_id, team_id) of the ESPN seat this room's socket holds,
             # as strings, set by the connect paths and the restore before the
             # listener starts. What a new connect scans the registry for, so
@@ -1883,7 +1889,14 @@ class LiveRegistry:
 
     def run_once(self, idle: float, now: "float | None" = None) -> list:
         """Retire every room idle for longer than `idle` seconds; return
-        the sids retired. `now` is injectable for the tests."""
+        the sids retired. `now` is injectable for the tests.
+
+        `retire(s, now, idle)` re-checks idleness under the room's lock and
+        marks the room retiring before it stops anything, and the drop
+        removes the room only if it is still the object under that sid: a
+        connect that landed meanwhile has replaced it with a fresh room
+        (see _session_for_connect), which must stay.
+        """
         now = time.monotonic() if now is None else now
         retire = getattr(self, "_retire", None)
         gone = []
@@ -1893,11 +1906,21 @@ class LiveRegistry:
             s = self.get(sid)
             if s is None or now - s.last_activity <= idle:
                 continue
-            if retire is not None and not retire(s):
+            if retire is not None and not retire(s, now, idle):
                 continue
-            self.drop(sid)
+            with self._lock:
+                if self._sessions.get(sid) is s:
+                    del self._sessions[sid]
             gone.append(sid)
         return gone
+
+    def replace(self, sid: str) -> LiveSession:
+        """A fresh room under `sid`, whatever was there. For a connect that
+        finds the reaper mid-retirement of the old one."""
+        with self._lock:
+            s = LiveSession(sid)
+            self._sessions[sid] = s
+            return s
 
     def start_reaper(self, interval: float = 300.0,
                      idle: float = 3 * 3600.0) -> threading.Thread:
@@ -2074,10 +2097,16 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
     default = registry.get_or_create(DEFAULT_SID)
 
     def _session_for(request) -> "LiveSession | None":
-        """The request's own room, or None. Stamps liveness on the way."""
+        """The request's own room, or None. Stamps liveness on the way. A
+        room the reaper is retiring is already gone as far as a request is
+        concerned."""
         sid = sid_for(request)
         s = registry.get(sid) if sid is not None else None
         if s is not None:
+            with s.lock:
+                retiring = s.state.get("retiring", False)
+            if retiring:
+                return None
             s.touch()
         return s
 
@@ -2099,7 +2128,13 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
         """The room a connect lands in. A request that already carries a
         cookie reuses that sid, so a second click supersedes only the
         clicker's own draft and never anybody else's."""
-        s = registry.get_or_create(_room_sid(request, response))
+        sid = _room_sid(request, response)
+        s = registry.get_or_create(sid)
+        with s.lock:
+            retiring = s.state.get("retiring", False)
+        if retiring:
+            # The reaper has this one; it will not drop what replaces it.
+            s = registry.replace(sid)
         s.touch()
         return s
 
@@ -2399,10 +2434,17 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
                           f"exit in {LISTENER_STOP_TIMEOUT:.0f}s; leaving its "
                           "connection and file claim held")
                     return
-                if old_league_conn is not None:
-                    old_league_conn.close()
-                if old_path is not None:
-                    registry.release_path(old_path, token)
+                try:
+                    if old_league_conn is not None:
+                        old_league_conn.close()
+                except Exception as exc:      # noqa: BLE001 -- a close that
+                    # raises must not strand the claim: the thread that held
+                    # the connection has exited, so the file is free.
+                    print(f"live: room {s.sid[:8]} could not close its "
+                          f"connection cleanly ({exc})")
+                finally:
+                    if old_path is not None:
+                        registry.release_path(old_path, token)
             threading.Thread(target=close_later,
                              name=f"live-closer-{s.sid[:8]}", daemon=True).start()
         else:
@@ -4743,7 +4785,7 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
                 # failure must not cost the rooms queued behind it. The
                 # failed one has already recorded restore_error where it
                 # could; this is the last line of defence for the thread.
-                print(f"live: restore of session {sid!r} failed: {exc}")
+                print(f"live: restore of session {sid[:8]} failed: {exc}")
 
     # The restart-resilience entry point, and the only thing in this file
     # that runs without a request behind it. Nothing happens at all unless a
@@ -4762,10 +4804,17 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
     app.state.live_settings = _settings_accessor
     app.state.live_registry = registry
 
-    def _retire(s) -> bool:
+    def _retire(s, now, idle) -> bool:
         """The reaper's hook: stop the room's listener, forget its record.
-        False when the listener would not stop -- the room stays."""
+        False when the room was touched after the reaper looked, or when
+        the listener would not stop -- the room stays either way."""
+        with s.lock:
+            if now - s.last_activity <= idle:
+                return False        # touched since the decision
+            s.state["retiring"] = True
         if not _stop_listener(s):
+            with s.lock:
+                s.state["retiring"] = False
             return False
         with s.lock:
             _clear_room(s)
