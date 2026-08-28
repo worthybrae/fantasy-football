@@ -19,13 +19,15 @@ import { Logo } from '../components/Logo'
 import { useDocumentMeta } from '../lib/documentMeta'
 
 const POLL_MS = 2500
-// Only used while the event stream is up: it is a safety net for a
-// silently dropped connection, not the way picks arrive.
 // Only used while the event stream is up, as a safety net for a connection
-// that drops silently. Not 15s: if the stream IS dead, this is how stale the
-// clock gets, and a drafter reading a fifteen-second-old clock under a
-// thirty-second timer is worse off than one who never had the stream.
-const FALLBACK_POLL_MS = 5000
+// that drops silently. The stream itself wakes the poll on every change --
+// a pick, a slot, and every second of the clock while one is running (see
+// api/live.py's _ui_revision) -- so this is not how anything arrives, and
+// at two hundred rooms a five-second fallback was a third of the server's
+// polls for nothing. If the stream IS dead, EventSource reconnects on its
+// own within seconds, and this is the ceiling on how stale the room can
+// get in between.
+const FALLBACK_POLL_MS = 15000
 
 type Tab = 'available' | 'board'
 

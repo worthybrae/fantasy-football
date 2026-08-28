@@ -294,8 +294,26 @@ volume Railway attaches by default is enough for a season, not for several.
 | `STRIPE_PRICE_ID` | `price_…` | The $9.99 price, made in the Stripe Dashboard |
 | `STRIPE_WEBHOOK_SECRET` | `whsec_…` | Required with the key. Without it the webhook refuses everything |
 | `PUBLIC_BASE_URL` | `https://…` | Where Stripe sends a buyer back to. Behind a proxy the app cannot work this out itself |
-| `SUPABASE_DB_URL` | `postgresql://…` | **Off by default.** A Supabase Postgres DSN, via the session pooler. Absent, custody, billing and the live session record stay in DuckDB files on the volume |
-| `LIVE_BUILD_WORKERS` | `3` | Process-pool size for draft-session builds. Set by the image. `0` runs them inline in the request thread, which is what a checkout and the test suite do |
+| `SUPABASE_DB_URL` | `postgresql://postgres.<ref>:…@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require` | **Off by default.** A Supabase Postgres DSN via the **session** pooler, port 5432, `sslmode=require`. Not the 6543 transaction pooler: psycopg's prepared statements break there. Absent, custody, billing and the live session records stay in DuckDB files on the volume |
+| `LIVE_BUILD_WORKERS` | `3` | Process-pool size for draft-session builds. Set by the image; 3 is the measured value for an 8 GB box (5 costs 8 GB and slows the polls). `0` runs them inline in the request thread, which is what a checkout and the test suite do |
+| `LIVE_RECOMPUTE_SLOTS` | `min(cores, 8)` | How many rooms' rankings run at once. Never under 2 |
+| `LIVE_MAX_ROOMS` | `150` | Rooms drafting at once before a new connect answers 503 "at capacity". A room already drafting may always reconnect |
+| `WARM_ON_BOOT` | `1` | Build the board, profile and game-points caches at boot so the first reader does not pay for them. `0` in the test suite |
+| `SEO_WARM`, `DEMO_WARM` | `1` | The ADP pages' aggregation and the demo room's board, built at boot for the same reason |
+| `LIVE_DEFAULT_ROOM` | unset | **Never in production.** Lets a request with no room cookie use a shared default room; the tests and a single-user machine that wants the pre-cookie behaviour |
+| `LIVE_FAKE_SOCKET` | unset | **Never in production.** Replays a recorded draft instead of ESPN's socket; `make load-test` sets it |
+
+**Rooms and records.** A browser gets one live draft room, keyed by an
+`httpOnly` cookie named `espn_live` (twelve hours, renewed on every connect)
+that the page asks for before it starts a connect. Every room has its own
+listener, its own per-league database connection and its own ranking thread;
+a second browser is a second room, and two leaguemates are two rooms on one
+league file. What a restart needs to reopen a room -- the league, the team,
+the draft token -- is one row per room in the `live_session` table when
+`SUPABASE_DB_URL` is set (the token encrypted under the custody key), a JSON
+file per room beside the database otherwise; every row younger than twelve
+hours is rebuilt at boot, one after another. A room nobody has touched for
+three hours is stopped and dropped.
 
 `ESPN_CUSTODY_TRUST_FORWARDED_PROTO` is the one that will waste an evening if
 it is missed. Railway terminates TLS at its edge and forwards plain HTTP to
