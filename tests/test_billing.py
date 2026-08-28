@@ -303,6 +303,37 @@ def test_every_mock_the_corpus_remembers_is_free(tmp_path, monkeypatch):
     assert billing.is_free_draft("999") is False
 
 
+def test_the_corpus_seed_writes_only_what_the_table_is_missing(
+        tmp_path, monkeypatch):
+    """Every id in `mock_room` is one an earlier boot already wrote, and
+    re-inserting all of them is one round trip per row to a database in
+    another region to say nothing. The seed asks what is there first."""
+    import duckdb
+    from pipeline import draft_log as dl
+
+    corpus = tmp_path / "corpus.duckdb"
+    conn = duckdb.connect(str(corpus))
+    conn.execute("CREATE TABLE draft_log (draft_id VARCHAR, source VARCHAR, "
+                 "league_id VARCHAR)")
+    conn.execute("INSERT INTO draft_log VALUES ('a', ?, '111'), ('b', ?, '222')",
+                 [dl.SOURCE_MOCK, dl.SOURCE_MOCK])
+    conn.close()
+    monkeypatch.setattr(dl, "CORPUS_PATH", str(corpus))
+    monkeypatch.setattr("api.lobby.cached_rows", lambda: [])
+    billing.reset_for_tests(str(tmp_path / "seeded-once.duckdb"))
+
+    store = billing._db()                   # the seed runs here, once
+    assert billing.is_free_draft("111") is True
+    assert billing.is_free_draft("222") is True
+
+    wrote = []
+    real = store.executemany
+    monkeypatch.setattr(store, "executemany",
+                        lambda sql, rows: wrote.append(list(rows)) or real(sql, rows))
+    billing._seed_mocks_from_corpus(store)
+    assert wrote == [], "the seed re-inserted rows already in the table"
+
+
 def test_a_corpus_that_cannot_be_read_is_not_fatal(tmp_path, monkeypatch):
     """The farm writes that file as drafts finish. A lock held by it is not a
     reason to fail a request -- the two live tests still work."""

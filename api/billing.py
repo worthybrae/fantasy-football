@@ -99,6 +99,9 @@ StoreError = pgstore.StoreError
 
 _lock = threading.Lock()
 _store = None
+# Whether the corpus seed has run in this process. Separate from `_store`
+# because the seed happens OUTSIDE `_lock` -- see `_db`.
+_seeded = False
 
 # Mock league ids already known to the table, so the hot path (a connect
 # asking "is this free") is a set lookup rather than a query.
@@ -279,13 +282,23 @@ def _db():
     one it got: both take `?` placeholders and naive UTC datetimes, and both
     answer with a list of tuples.
     """
-    global _store
+    global _store, _seeded
     with _lock:
         if _store is None:
             _store = (_Pg() if pgstore.enabled()
                       else _Duck(os.environ.get(DB_PATH_ENV) or DEFAULT_DB_PATH))
-            _seed_mocks_from_corpus(_store)
-    return _store
+        store = _store
+        seed = not _seeded
+        _seeded = True
+    if seed:
+        # NOT UNDER `_lock`. The seed reads the corpus and writes up to a
+        # few hundred rows to a database in another region; holding the
+        # lock across that put every other caller -- which on a draft
+        # evening is every connect, through `is_free_draft` -- in a queue
+        # behind one round trip per row. Only the caller that claimed the
+        # seed waits for it, and it claims it once per process.
+        _seed_mocks_from_corpus(store)
+    return store
 
 
 def _seed_mocks_from_corpus(store) -> None:
@@ -301,12 +314,17 @@ def _seed_mocks_from_corpus(store) -> None:
 
     `draft_log` has the answer and has had it all along: every row with
     source `mock` is a mock, with its league id, going back to the first
-    draft ever recorded. Read once per process, at the moment the tables are
-    created.
+    draft ever recorded. Read once per process, the first time anything
+    asks the store a question.
 
     Best-effort and read-only. The farm writes that file as drafts finish,
     and a lock held by it is not a reason to fail a request -- the seed is an
     improvement on two tests that still work without it.
+
+    ONLY WHAT IS MISSING GOES IN. Every row already in `mock_room` is one
+    this process wrote on a previous boot, and re-inserting all 854 of them
+    on every restart is 854 round trips to say nothing. One SELECT names
+    what is there, and the insert carries the difference -- usually none.
     """
     try:
         from pipeline import draft_log as dl
@@ -319,9 +337,14 @@ def _seed_mocks_from_corpus(store) -> None:
             "WHERE source = ? AND league_id IS NOT NULL",
             [dl.SOURCE_MOCK]).fetchall()
         if rows:
-            store.executemany(
-                "INSERT INTO mock_room VALUES (?, ?) ON CONFLICT DO NOTHING",
-                [[str(r[0]), _now()] for r in rows])
+            have = {str(r[0]) for r in store.execute(
+                "SELECT league_id FROM mock_room")}
+            missing = [[i, _now()] for i in
+                       {str(r[0]) for r in rows} - have]
+            if missing:
+                store.executemany(
+                    "INSERT INTO mock_room VALUES (?, ?) ON CONFLICT DO NOTHING",
+                    missing)
     except Exception:      # noqa: BLE001 -- an older corpus without the
         pass               # column, a partial write: the live tests remain
     finally:
@@ -334,11 +357,12 @@ def _now() -> datetime:
 
 def reset_for_tests(path: str | None = None) -> None:
     """Drop the cached store so a test can point at its own file."""
-    global _store
+    global _store, _seeded
     with _lock:
         if _store is not None:
             _store.close()
         _store = None
+        _seeded = False
         _known_mocks.clear()
     if path is not None:
         os.environ[DB_PATH_ENV] = path
