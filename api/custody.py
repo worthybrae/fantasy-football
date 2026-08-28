@@ -30,7 +30,6 @@ rather than the route.
 """
 from __future__ import annotations
 
-import duckdb
 from fastapi import HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -301,10 +300,11 @@ def establish_custody(request: Request, response: Response, swid: str,
         # lock. `str(exc)` is written to name the variable and never the
         # value (see _parse_keys).
         raise HTTPException(status_code=503, detail=str(exc)) from None
-    except duckdb.Error as exc:
-        # Any other storage failure. Never a 500 with a traceback: this
-        # request has an ESPN session in it, and an unhandled exception is the
-        # one path where a framework decides for itself what to print.
+    except cred.StoreError as exc:
+        # Any other storage failure, whichever store this deployment uses.
+        # Never a 500 with a traceback: this request has an ESPN session in
+        # it, and an unhandled exception is the one path where a framework
+        # decides for itself what to print.
         raise HTTPException(
             status_code=503,
             detail=f"the credential store is not usable "
@@ -356,10 +356,11 @@ def custody_for(request: Request, store=None):
         return _store(store).resolve(cookie)
     except cred.CustodyUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from None
-    except duckdb.Error as exc:
-        # Same reasoning as `establish_custody`: a second uvicorn worker
-        # holding the file lock must be a clean 503, not an unhandled 500 on a
-        # request that carries the custody cookie.
+    except cred.StoreError as exc:
+        # Same reasoning as `establish_custody`: a store that cannot answer --
+        # a second uvicorn worker holding the DuckDB file lock, a Postgres
+        # that is refusing connections -- must be a clean 503, not an
+        # unhandled 500 on a request that carries the custody cookie.
         raise HTTPException(
             status_code=503,
             detail=f"the credential store is not usable "

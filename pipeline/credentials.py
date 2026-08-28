@@ -50,6 +50,7 @@ That is not a close call.
 from __future__ import annotations
 
 import base64
+import contextlib
 import hmac
 import json
 import os
@@ -62,7 +63,7 @@ from pathlib import Path
 
 import duckdb
 
-from pipeline import redact
+from pipeline import pgstore, redact
 from pipeline.espn_identity import OwnershipUnproven, canonical_swid, verify_account
 
 # The environment variable holding the key material. NEVER a column, never a
@@ -122,6 +123,14 @@ ALLOW_PLAINTEXT_ENV = "ESPN_CUSTODY_ALLOW_PLAINTEXT_HTTP"
 # at a proxy sets this, having satisfied itself that the proxy overwrites the
 # header rather than passing the client's through.
 TRUST_FORWARDED_PROTO_ENV = "ESPN_CUSTODY_TRUST_FORWARDED_PROTO"
+
+
+# THE ONE STORAGE FAILURE TYPE, whichever store is underneath. It lives in
+# `pgstore` because the billing tables raise it too, and the DuckDB backend
+# below wraps every `duckdb.Error` into it. That is what lets `api/custody.py`
+# catch a single class and answer 503, instead of growing an `except` clause
+# every time a store learns a new backend.
+StoreError = pgstore.StoreError
 
 
 class CustodyUnavailable(RuntimeError):
@@ -596,6 +605,153 @@ def close_all() -> None:
         _CONNS.clear()
 
 
+# -- backends ----------------------------------------------------------------
+#
+# ONE SEAM, TWO STORES. Every statement `CredentialStore` runs goes through one
+# of these objects. DuckDB is the store this module was born with: a file, a
+# single writer, and two erasure guarantees (`_flush`, `_compact`) that only
+# mean anything to a file. Postgres is what lets more than one process hold
+# custody at all -- a second uvicorn worker opening the DuckDB file does not
+# get a slower store, it gets `IOException` on every request that carries a
+# credential.
+#
+# THREE METHODS AND NO TRANSACTIONS, on purpose. Every method below is a short
+# run of single statements, and what keeps two of them from interleaving is
+# the lock the backend hands out: the module-wide one for DuckDB, and nothing
+# at all for Postgres, which does its own concurrency control and would be
+# pointlessly funnelled through one mutex by a process holding eight
+# connections.
+
+
+class _DuckBackend:
+    """The custody file. `?` placeholders, naive UTC timestamps, one writer."""
+
+    def __init__(self, path: str):
+        # Deliberately does not connect. `_connect` CREATES the file, and a
+        # deployment with no key material must not leave an empty custody
+        # database behind as evidence that it tried -- see `resolve`, which
+        # reads the keys before it runs anything.
+        self.path = path
+        self.lock = _CONN_LOCK
+
+    def execute(self, sql: str, params=()) -> list:
+        # The connection is fetched per statement rather than held, because
+        # `_compact` closes it and swaps the file underneath. Every caller
+        # inherits that for free by never keeping one.
+        try:
+            return _connect(self.path).execute(sql, list(params)).fetchall()
+        except duckdb.Error as exc:
+            raise StoreError(
+                f"the credential store at {self.path} refused a statement "
+                f"({type(exc).__name__})") from None
+
+    def after_write(self) -> None:
+        _flush(_connect(self.path), self.path)
+
+    def after_delete(self) -> None:
+        _flush(_connect(self.path), self.path)
+        _compact(self.path)
+
+
+# The same two tables in Postgres spellings, derived from `_SCHEMA` rather
+# than copied beside it so that adding a column cannot leave the two backends
+# holding different tables. TIMESTAMPTZ because Postgres has a real one, and a
+# naive column would leave every deployment guessing at a session offset;
+# `_from_pg` turns the values back into the naive UTC the rest of this module
+# is written in. Still no foreign key on `credential_id`, deliberately: the
+# cascade stays in code (see `_delete_credential`) so that both backends
+# delete in the same order and neither can refuse a "disconnect everywhere".
+_PG_SCHEMA = tuple(
+    statement.replace(" VARCHAR", " TEXT").replace(" TIMESTAMP ", " TIMESTAMPTZ ")
+    for statement in _SCHEMA)
+
+_PG_READY = False
+_PG_LOCK = threading.Lock()
+
+
+def _to_pg(value):
+    """Naive UTC becomes aware UTC on the way into a TIMESTAMPTZ column.
+
+    Without this the value is sent with no zone at all and Postgres reads it
+    in whatever the session's TimeZone happens to be -- the same off-by-an-
+    offset that `_utc` exists to keep out of the reaper's arithmetic.
+    """
+    if isinstance(value, datetime) and value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def _from_pg(value):
+    """And back to naive UTC, so a caller cannot tell which store answered."""
+    if isinstance(value, datetime) and value.tzinfo is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
+
+class _PgBackend:
+    """The custody tables in Postgres, shared by every process that has the DSN.
+
+    `_flush` and `_compact` have no counterpart here and need none: a DELETE
+    is a delete, not a row left legible in a write-ahead log until something
+    folds it in. What that trades away is worth saying plainly -- "a stolen
+    copy of the file is inert" becomes a statement about the operator's
+    Postgres rather than about one file, and the rows are still ciphertext
+    under a key that is not in the database and row ids that are still HMACs.
+    """
+
+    def __init__(self):
+        # Imported here rather than at module scope so that a checkout with no
+        # DSN never needs the driver installed at all.
+        import psycopg
+
+        self._error = psycopg.Error
+        self.lock = contextlib.nullcontext()
+
+    def execute(self, sql: str, params=()) -> list:
+        self._ensure_schema()
+        return self._run(sql, params)
+
+    def after_write(self) -> None:
+        """Nothing to fold in. See the class docstring."""
+
+    def after_delete(self) -> None:
+        """Nothing to rewrite. See the class docstring."""
+
+    def _run(self, sql: str, params=()) -> list:
+        # `?` becomes `%s`: the SQL is written once, for both backends, and no
+        # statement in this module contains a literal question mark. Params go
+        # as None rather than an empty list when there are none, so a
+        # statement with no placeholders is never put through interpolation.
+        try:
+            with pgstore.pool().connection() as conn:
+                cursor = conn.execute(sql.replace("?", "%s"),
+                                      [_to_pg(p) for p in params] or None)
+                if cursor.description is None:
+                    return []
+                return [tuple(_from_pg(value) for value in row)
+                        for row in cursor.fetchall()]
+        except self._error as exc:
+            raise StoreError(
+                "the credential store is not usable "
+                f"({type(exc).__name__})") from None
+
+    def _ensure_schema(self) -> None:
+        """Create the tables once per process, on the first statement.
+
+        Lazily, for the same reason `_DuckBackend` does not connect in its
+        constructor: building the store must not be what reaches the network.
+        """
+        global _PG_READY
+        if _PG_READY:
+            return
+        with _PG_LOCK:
+            if _PG_READY:
+                return
+            for statement in _PG_SCHEMA:
+                self._run(statement)
+            _PG_READY = True
+
+
 class CredentialStore:
     """The custody tables, and the only code that reads or writes them.
 
@@ -608,8 +764,25 @@ class CredentialStore:
     """
 
     def __init__(self, path: str | None = None, keys: str | None = None,
-                 ttl_days: float | None = None, out=print, verifier=None):
+                 ttl_days: float | None = None, out=print, verifier=None,
+                 dsn: str | None = None):
+        if dsn and dsn != pgstore.dsn():
+            # The value selects the backend; the connection itself comes from
+            # the pool, which reads the environment. Accepting a different one
+            # here would silently talk to the wrong database.
+            raise StoreError(
+                f"a dsn argument selects the Postgres backend, but the "
+                f"connection comes from {pgstore.DSN_ENV} -- pass "
+                "pgstore.dsn(), or set that variable to this one")
         self.path = path or os.environ.get(DB_PATH_ENV) or DEFAULT_DB_PATH
+        # WHICH STORE THIS IS, decided once rather than at every statement. A
+        # `path` names a file and means DuckDB, which is what the tests and a
+        # laptop get; anything else follows `pgstore`, so one deployment
+        # variable moves the whole table without a call site knowing. The path
+        # is kept either way: `_compact` needs it, and so do the tests that
+        # assert on the raw bytes of the file.
+        self.backend = (_PgBackend() if (dsn or (path is None and pgstore.enabled()))
+                        else _DuckBackend(self.path))
         self._keys_spec = keys
         self._ttl_days = ttl_days
         # How this store proves that whoever sent an espn_s2 owns the account
@@ -789,18 +962,17 @@ class CredentialStore:
         # and running it inside this method's critical section would nest two
         # different jobs in one transaction for no reason.
         holder = self.resolve(cookie, now=now) if cookie else None
-        conn = _connect(self.path)
 
-        with _CONN_LOCK:
+        with self.backend.lock:
             # An existing row for this SESSION, possibly under an older key
             # version and therefore under a DIFFERENT id.
             previous = None
             for _candidate_key, candidate_id in self._candidate_ids(espn_s2):
-                row = conn.execute(
+                rows = self.backend.execute(
                     "SELECT id, created_at FROM espn_credential WHERE id = ?",
-                    [candidate_id]).fetchone()
-                if row:
-                    previous = row
+                    [candidate_id])
+                if rows:
+                    previous = rows[0]
                     break
 
             # THE SAME SECRET UNDER THE SAME KEY IS THE SAME ROW, and there is
@@ -829,9 +1001,10 @@ class CredentialStore:
                                separators=(",", ":")).encode("utf-8")
                 ).decode("ascii")
                 created_at = previous[1] if previous else now
-                conn.execute("DELETE FROM espn_credential WHERE id = ?",
-                             [credential_id])
-                conn.execute(
+                self.backend.execute(
+                    "DELETE FROM espn_credential WHERE id = ?",
+                    [credential_id])
+                self.backend.execute(
                     "INSERT INTO espn_credential VALUES (?, ?, ?, ?, ?, ?)",
                     [credential_id, blob, key.version, created_at, now,
                      expires_at])
@@ -856,11 +1029,11 @@ class CredentialStore:
                             holder.credential_id if holder else None)
                            if row and row != credential_id}
                 for stale in dropped:
-                    conn.execute(
+                    self.backend.execute(
                         "UPDATE espn_session SET credential_id = ? "
                         "WHERE credential_id = ?", [credential_id, stale])
-                    conn.execute("DELETE FROM espn_credential WHERE id = ?",
-                                 [stale])
+                    self.backend.execute(
+                        "DELETE FROM espn_credential WHERE id = ?", [stale])
                 replaced = True
 
             # 256 bits from the OS CSPRNG. This value is the password to a
@@ -869,22 +1042,23 @@ class CredentialStore:
             # guessable (no user id, no timestamp, no counter).
             minted = secrets.token_urlsafe(32)
             session_id = self._row_id(minted, key)
-            conn.execute("DELETE FROM espn_session WHERE id = ?", [session_id])
-            conn.execute(
+            self.backend.execute("DELETE FROM espn_session WHERE id = ?",
+                                 [session_id])
+            self.backend.execute(
                 "INSERT INTO espn_session VALUES (?, ?, ?, ?, ?, ?)",
                 [session_id, credential_id, key.version, now, now, expires_at])
             # The credential is alive again whether or not its secret changed,
             # so its clock restarts either way -- otherwise a user who keeps
             # connecting new browsers would still be reaped on the old one's
             # schedule.
-            conn.execute(
+            self.backend.execute(
                 "UPDATE espn_credential SET last_used_at = ?, expires_at = ? "
                 "WHERE id = ?", [now, expires_at, credential_id])
             # Fold the write-ahead log into the file now rather than at
             # DuckDB's 16 MB threshold, so a live credential is not left
             # sitting in a WAL that nothing will fold in for months. See
-            # `_flush`.
-            _flush(conn, self.path)
+            # `_flush`. Nothing to do on Postgres, which has no such window.
+            self.backend.after_write()
         if dropped:
             # A superseded credential leaves its ciphertext in a freed block,
             # which is the same residue a delete leaves and the same problem:
@@ -894,7 +1068,7 @@ class CredentialStore:
             # connect also writes a row and has nothing to compact away.
             # Outside the lock because `_compact` takes it again and does its
             # own bookkeeping.
-            _compact(self.path)
+            self.backend.after_delete()
         return MintedSession(cookie=minted, credential_id=credential_id,
                              session_id=session_id, expires_at=expires_at,
                              replaced=replaced)
@@ -922,24 +1096,24 @@ class CredentialStore:
         # custody database behind as evidence that it tried.
         self.keys
         now = _utc(now)
-        conn = _connect(self.path)
-        with _CONN_LOCK:
+        with self.backend.lock:
             # Reap first, so an expired row cannot be resolved even by a
             # deployment that never calls `reap` on a schedule. The TTL is the
             # only thing that ever removes an abandoned credential; making it
             # depend on a cron somebody remembered to write would mean it does
             # not really exist.
-            if self._reap(conn, now)["credentials"]:
-                # `_compact` replaces the file, so the handle taken above is
-                # dead from here on -- everything below uses the new one.
-                conn = _compact(self.path)
+            if self._reap(now)["credentials"]:
+                # `_compact` replaces the file, so any handle taken before this
+                # is dead -- which is why nothing here holds one and every
+                # statement goes back to the backend for its connection.
+                self.backend.after_delete()
             found = None
             for _key, session_id in self._candidate_ids(cookie):
-                row = conn.execute(
+                rows = self.backend.execute(
                     "SELECT id, credential_id FROM espn_session WHERE id = ?",
-                    [session_id]).fetchone()
-                if row:
-                    found = row
+                    [session_id])
+                if rows:
+                    found = rows[0]
                     break
             if not found:
                 # A miss is almost always an ordinary wrong or expired cookie
@@ -951,22 +1125,22 @@ class CredentialStore:
                 # is a whole deployment's users appearing to be logged out
                 # with not one line explaining why, so the rows are asked
                 # directly which versions they were written under.
-                self._warn_about_retired_keys(conn)
+                self._warn_about_retired_keys()
                 return None
             session_id, credential_id = found
-            row = conn.execute(
+            rows = self.backend.execute(
                 "SELECT blob, key_version, expires_at FROM espn_credential "
-                "WHERE id = ?", [credential_id]).fetchone()
-            if not row:
+                "WHERE id = ?", [credential_id])
+            if not rows:
                 # A session whose credential is gone: "disconnect everywhere"
                 # from another browser, a 401, or the reaper. The session row
                 # is cleaned up here rather than left to rot, since it can
                 # never again resolve to anything.
-                conn.execute("DELETE FROM espn_session WHERE id = ?",
-                             [session_id])
-                _flush(conn, self.path)
+                self.backend.execute("DELETE FROM espn_session WHERE id = ?",
+                                     [session_id])
+                self.backend.after_write()
                 return None
-            blob, key_version, expires_at = row
+            blob, key_version, expires_at = rows[0]
             key = self.keys.get(int(key_version))
             if key is None:
                 # The key this row was written under has been retired. Not an
@@ -996,10 +1170,10 @@ class CredentialStore:
             # the TTL an IDLE timeout. An active user is never logged out by
             # it, and a user who stopped coming is removed without anyone
             # having to notice they stopped.
-            conn.execute(
+            self.backend.execute(
                 "UPDATE espn_session SET last_used_at = ?, expires_at = ? "
                 "WHERE id = ?", [now, fresh, session_id])
-            conn.execute(
+            self.backend.execute(
                 "UPDATE espn_credential SET last_used_at = ?, expires_at = ? "
                 "WHERE id = ?", [now, fresh, credential_id])
         return ResolvedCredential(
@@ -1016,17 +1190,16 @@ class CredentialStore:
         browser's business."""
         if not cookie:
             return False
-        conn = _connect(self.path)
-        with _CONN_LOCK:
+        with self.backend.lock:
             for _key, session_id in self._candidate_ids(cookie):
-                if conn.execute(
+                if self.backend.execute(
                         "SELECT 1 FROM espn_session WHERE id = ?",
-                        [session_id]).fetchone():
-                    conn.execute("DELETE FROM espn_session WHERE id = ?",
-                                 [session_id])
+                        [session_id]):
+                    self.backend.execute(
+                        "DELETE FROM espn_session WHERE id = ?", [session_id])
                     # Without this the deleted row stays fully recoverable in
                     # the write-ahead log, possibly for months. See `_flush`.
-                    _flush(conn, self.path)
+                    self.backend.after_write()
                     return True
         return False
 
@@ -1044,40 +1217,39 @@ class CredentialStore:
 
     def forget_credential(self, credential_id: str) -> bool:
         """Delete one credential and every session that pointed at it."""
-        conn = _connect(self.path)
-        with _CONN_LOCK:
-            gone = self._delete_credential(conn, credential_id) >= 0
+        with self.backend.lock:
+            gone = self._delete_credential(credential_id) >= 0
             # THE DELETION THAT HAS TO BE REAL. This is the call behind
             # "disconnect everywhere" and behind a 401, so a copy left
             # recoverable anywhere in the file would make both of them a lie
             # told to the one user who cared enough to ask. `_flush` gets it
             # out of the write-ahead log; `_compact` gets it out of the blocks
             # the checkpoint merely marked free.
-            _flush(conn, self.path)
+            self.backend.after_write()
             if gone:
-                _compact(self.path)
+                self.backend.after_delete()
             return gone
 
-    @staticmethod
-    def _delete_credential(conn, credential_id: str) -> int:
+    def _delete_credential(self, credential_id: str) -> int:
         """Returns how many session rows went with it, or -1 if there was no
         such credential -- so a caller can tell "deleted, no browsers attached"
         from "there was nothing there", which `disconnect_everywhere` and the
         reaper report differently."""
-        existing = conn.execute("SELECT 1 FROM espn_credential WHERE id = ?",
-                                [credential_id]).fetchone()
-        sessions = int(conn.execute(
+        existing = self.backend.execute(
+            "SELECT 1 FROM espn_credential WHERE id = ?", [credential_id])
+        sessions = int(self.backend.execute(
             "SELECT count(*) FROM espn_session WHERE credential_id = ?",
-            [credential_id]).fetchone()[0])
-        # Sessions FIRST. DuckDB has no ON DELETE CASCADE (see _SCHEMA), so
-        # this ordering is the cascade, and it is the safe half to do first:
-        # an interrupted delete leaves a credential with no way to reach it,
-        # whereas the other order leaves live cookies pointing at a row that
-        # is about to vanish.
-        conn.execute("DELETE FROM espn_session WHERE credential_id = ?",
-                     [credential_id])
-        conn.execute("DELETE FROM espn_credential WHERE id = ?",
-                     [credential_id])
+            [credential_id])[0][0])
+        # Sessions FIRST. Neither backend declares the foreign key (see
+        # _SCHEMA), so this ordering IS the cascade, and it is the safe half to
+        # do first: an interrupted delete leaves a credential with no way to
+        # reach it, whereas the other order leaves live cookies pointing at a
+        # row that is about to vanish.
+        self.backend.execute(
+            "DELETE FROM espn_session WHERE credential_id = ?",
+            [credential_id])
+        self.backend.execute("DELETE FROM espn_credential WHERE id = ?",
+                             [credential_id])
         return sessions if existing else -1
 
     def forget_if_unauthorized(self, credential_id: str, exc_or_status) -> bool:
@@ -1128,36 +1300,34 @@ class CredentialStore:
         Callable on a schedule, but not DEPENDENT on one -- `resolve` runs it
         too. See that method for why.
         """
-        conn = _connect(self.path)
-        with _CONN_LOCK:
-            reaped = self._reap(conn, _utc(now))
-            _flush(conn, self.path)
+        with self.backend.lock:
+            reaped = self._reap(_utc(now))
+            self.backend.after_write()
             if reaped["credentials"]:
-                _compact(self.path)
+                self.backend.after_delete()
             return reaped
 
-    @staticmethod
-    def _reap(conn, now: datetime) -> dict:
-        expired = [r[0] for r in conn.execute(
-            "SELECT id FROM espn_credential WHERE expires_at <= ?",
-            [now]).fetchall()]
+    def _reap(self, now: datetime) -> dict:
+        expired = [r[0] for r in self.backend.execute(
+            "SELECT id FROM espn_credential WHERE expires_at <= ?", [now])]
         # Counted, not inferred. A reaped credential takes its browsers with
         # it, and a caller watching these numbers for "is the store growing
         # without bound" needs the total that actually went, not the subset
         # that happened to time out on its own clock.
         gone = 0
         for credential_id in expired:
-            gone += max(CredentialStore._delete_credential(conn, credential_id), 0)
+            gone += max(self._delete_credential(credential_id), 0)
         # Sessions expire on their own clock as well as with their credential:
         # a browser that has not come back in the TTL is logged out even if
         # another browser has been keeping the credential alive.
-        gone += int(conn.execute(
+        gone += int(self.backend.execute(
             "SELECT count(*) FROM espn_session WHERE expires_at <= ?",
-            [now]).fetchone()[0])
-        conn.execute("DELETE FROM espn_session WHERE expires_at <= ?", [now])
+            [now])[0][0])
+        self.backend.execute("DELETE FROM espn_session WHERE expires_at <= ?",
+                             [now])
         return {"credentials": len(expired), "sessions": gone}
 
-    def _warn_about_retired_keys(self, conn) -> None:
+    def _warn_about_retired_keys(self) -> None:
         """Say once, per version, that rows exist under a key we do not hold.
 
         Once, because the alternative is a line per request per browser for
@@ -1166,9 +1336,9 @@ class CredentialStore:
         """
         known = set(self.keys)
         try:
-            rows = conn.execute(
-                "SELECT DISTINCT key_version FROM espn_session").fetchall()
-        except duckdb.Error:
+            rows = self.backend.execute(
+                "SELECT DISTINCT key_version FROM espn_session")
+        except StoreError:
             return
         for (version,) in rows:
             version = int(version)
@@ -1187,13 +1357,12 @@ class CredentialStore:
         will tell a caller about the table as a whole: there is no "list the
         users" call, because there is no way to write one that does not
         decrypt every credential to produce its answer."""
-        conn = _connect(self.path)
-        with _CONN_LOCK:
+        with self.backend.lock:
             return {
-                "credentials": int(conn.execute(
-                    "SELECT count(*) FROM espn_credential").fetchone()[0]),
-                "sessions": int(conn.execute(
-                    "SELECT count(*) FROM espn_session").fetchone()[0]),
+                "credentials": int(self.backend.execute(
+                    "SELECT count(*) FROM espn_credential")[0][0]),
+                "sessions": int(self.backend.execute(
+                    "SELECT count(*) FROM espn_session")[0][0]),
             }
 
 
@@ -1204,10 +1373,11 @@ _DEFAULT_LOCK = threading.Lock()
 def default_store() -> CredentialStore:
     """The process-wide store, configured from the environment.
 
-    Lazy on purpose: constructing it opens (and creates) the database file and
-    takes DuckDB's lock on it, and a process that never touches a credential
-    -- the whole test suite, `make sim`, the farm -- should not be doing
-    either.
+    Lazy on purpose: the first statement it runs opens (and creates) the
+    database file and takes DuckDB's lock on it, and a process that never
+    touches a credential -- the whole test suite, `make sim`, the farm --
+    should not be doing either. With SUPABASE_DB_URL set it reaches Postgres
+    instead, and the same argument applies with more force.
     """
     global _DEFAULT
     with _DEFAULT_LOCK:
