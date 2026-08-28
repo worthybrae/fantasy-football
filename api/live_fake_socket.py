@@ -39,6 +39,7 @@ test runs whether or not the switch is present.
 """
 import json
 import threading
+import os
 import time
 from pathlib import Path
 
@@ -163,9 +164,26 @@ def _sleep_or_stopped(stop_event, seconds: float) -> bool:
     return stop_event.wait(seconds)
 
 
+# The pick cadence when the caller (api/live.py's pump, which passes no
+# `pick_interval`) leaves it to the environment. Two seconds is a stress
+# setting -- ten to twenty times what a real room produces, where a pick
+# lands every thirty to sixty seconds -- so a load run that wants the
+# realistic number sets this (scripts/load_server.py --pick-interval).
+PICK_INTERVAL_ENV = "LIVE_FAKE_PICK_INTERVAL"
+DEFAULT_PICK_INTERVAL = 2.0
+
+
+def pick_interval_from_env() -> float:
+    raw = (os.environ.get(PICK_INTERVAL_ENV) or "").strip()
+    try:
+        return float(raw) if raw else DEFAULT_PICK_INTERVAL
+    except ValueError:
+        return DEFAULT_PICK_INTERVAL
+
+
 def run_fake_socket_listener(listener, league_id, team_id, swid, token,
                              on_change=None, stop_event=None, on_activity=None,
-                             on_socket=None, pick_interval=2.0,
+                             on_socket=None, pick_interval=None,
                              trace_path=TRACE_PATH, loop=True) -> None:
     """Replay a recorded draft room into `listener`. Blocking, like the real one.
 
@@ -180,6 +198,8 @@ def run_fake_socket_listener(listener, league_id, team_id, swid, token,
     the second pass mostly reports no change -- exactly what ESPN's own JOIN
     replay does after a reconnect.
     """
+    if pick_interval is None:
+        pick_interval = pick_interval_from_env()
     frames = load_frames(trace_path)
     delays = frame_delays(frames, pick_interval)
     if on_socket is not None:

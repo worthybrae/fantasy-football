@@ -114,7 +114,7 @@ test: ## run the python test suite
 
 load-test: ## drive N fake live rooms against a local server
 	# Starts its own server, drives it, prints the numbers, cleans up.
-	# Tunable: make load-test N=100 DURATION=120 RAMP=20 WORKERS=3
+	# Tunable: make load-test N=100 DURATION=120 RAMP=20 WORKERS=3 PICK_INTERVAL=15
 	#
 	# NOTHING HERE TOUCHES ESPN. scripts/load_server.py replaces the draft
 	# socket with a replay of data/draft_room_trace.jsonl (one pick every two
@@ -142,6 +142,7 @@ load-test: ## drive N fake live rooms against a local server
 	@cp data/nfl.duckdb $(LOAD_DIR)/load.duckdb
 	@.venv/bin/python scripts/load_server.py --port $(LOAD_PORT) \
 		--db $(LOAD_DIR)/load.duckdb --workers $(or $(WORKERS),3) \
+		--pick-interval $(or $(PICK_INTERVAL),2) \
 		> $(LOAD_DIR)/server.log 2>&1 & \
 	pid=$$!; \
 	trap 'pkill -P $$pid 2>/dev/null; kill $$pid 2>/dev/null; rm -rf $(LOAD_DIR)/load.duckdb $(LOAD_DIR)/load.duckdb.wal $(LOAD_DIR)/load.duckdb.live-sessions' EXIT INT TERM; \
