@@ -65,8 +65,16 @@ def corpus(tmp_path, monkeypatch):
     conn.close()
     monkeypatch.setattr(market.dl, "CORPUS_PATH", str(path))
     market._CACHE.clear()
+    # AND THE RENDERED PAGES. `seo.rendered` keys on `_stamp`, whose
+    # universal half is `board_cache._identity_key` -- and the `board`
+    # fixture below is an in-memory database with no `meta` rows, so every
+    # test in this file that seeds the same ten drafts computes the SAME
+    # stamp. Without this, one test's HTML answers the next test's request.
+    # A deployment does not have this problem: its `meta` is stamped.
+    seo.clear_pages()
     yield path
     market._CACHE.clear()
+    seo.clear_pages()
 
 
 @pytest.fixture
@@ -470,3 +478,95 @@ def test_analytics_does_not_fire_off_the_production_hostname(corpus, board):
     would otherwise report themselves as traffic."""
     body = _client(board).get("/adp").text
     assert "location.hostname === 'espnfantasydraft.com'" in body
+
+
+# -- staying warm ------------------------------------------------------------
+
+def test_the_second_render_of_a_page_is_the_first_ones_bytes(corpus, board):
+    """`/adp` is a pure function of the ADP aggregate, so rendering it twice
+    for one snapshot is work done twice for one answer. A crawler walking the
+    232-URL sitemap is the caller that makes this worth holding."""
+    c = _client(board)
+    calls = []
+    first = c.get("/adp").text
+
+    real = seo.render
+    seo.render = lambda *a, **k: calls.append(a[0]) or real(*a, **k)
+    try:
+        second = c.get("/adp").text
+        # The other three page shapes too, since each keys itself.
+        c.get("/adp/round/1")
+        c.get("/adp/rb")
+        c.get("/adp/dandre-swift")
+        c.get("/sitemap.xml")
+        # ...all of which were built by the first pass through them.
+        c.get("/adp/round/1")
+        c.get("/adp/rb")
+        c.get("/adp/dandre-swift")
+        c.get("/sitemap.xml")
+    finally:
+        seo.render = real
+
+    assert second == first
+    # Four templates, rendered once each: the repeats came from the cache,
+    # and `/adp` itself was never rendered again at all.
+    assert sorted(calls) == ["adp_index.html", "adp_player.html", "adp_round.html"]
+
+
+def test_a_new_draft_in_the_corpus_retires_every_rendered_page(corpus, board):
+    """The cache may never outlive what it describes. The stamp
+    (`seo._stamp`) moves the moment the corpus does, and a stamp that does
+    not match empties the whole set rather than ageing pages out one by one
+    -- half a crawl on yesterday's snapshot beside half on today's would be
+    a worse answer than either."""
+    c = _client(board)
+    before = c.get("/adp").text
+    assert "10 real ESPN mock drafts" in before
+
+    conn = dl.corpus_conn(str(corpus))
+    conn.execute(
+        "INSERT INTO draft_log (draft_id, source, league_id, season,"
+        " recorded_at, teams, rounds, my_slot, scoring_json, settings_json,"
+        " human_seats) VALUES ('d10', 'mock', '1', 2026,"
+        " '2026-08-25 00:00:00'::TIMESTAMP, 4, 2, NULL, NULL, NULL, 3)")
+    conn.execute(
+        "INSERT INTO draft_log_pick (draft_id, pick_no, round, slot,"
+        " owner_key, is_anonymous, player_id, position, adp_rank,"
+        " proj_points, autodrafted, had_owner, seconds_to_pick,"
+        " clock_seconds) VALUES ('d10', 1, 1, 1, 'o', FALSE, 'star', 'RB',"
+        " 1.0, 100.0, FALSE, TRUE, 5.0, 30.0)")
+    conn.close()
+
+    # The aggregate is what the pages hang off, so retiring it is what a
+    # deployment's warm thread does every few minutes.
+    seo.rebuild_adp(board)
+    after = c.get("/adp").text
+    assert "11 real ESPN mock drafts" in after
+
+
+def test_rebuild_adp_does_not_hand_back_the_answer_it_is_replacing(corpus, board):
+    """THE BUG THE WARM LOOP WOULD OTHERWISE HAVE. `adp_data` serves the
+    cached aggregate for `market.CACHE_SECONDS`, so a warm thread calling it
+    inside that window would get the entry it is trying to renew, renew
+    nothing, and leave the next reader after the lapse paying the 0.9-2.8s
+    rebuild -- which was the measured 1.9s TTFB on `/adp`."""
+    built = []
+    real = seo.build_adp
+    seo.build_adp = lambda conn: built.append(1) or real(conn)
+    try:
+        seo.adp_data(board)
+        seo.adp_data(board)          # cached: no second build
+        assert len(built) == 1
+        seo.rebuild_adp(board)       # forced: a real rebuild
+        assert len(built) == 2
+        seo.adp_data(board)          # and the fresh entry is what is served
+        assert len(built) == 2
+    finally:
+        seo.build_adp = real
+
+
+def test_the_warm_interval_is_inside_the_life_of_what_it_warms():
+    """A warm loop slower than the cache it is renewing renews nothing: the
+    entry lapses between passes and a reader pays for the rebuild, which is
+    exactly the state this replaced."""
+    assert seo.WARM_SECONDS < market.CACHE_SECONDS

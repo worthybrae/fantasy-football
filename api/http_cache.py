@@ -40,6 +40,10 @@ ones with a live session close enough to reach.
 """
 from __future__ import annotations
 
+import hashlib
+import os
+import secrets
+
 from starlette.datastructures import MutableHeaders
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -49,6 +53,16 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 # `no-cache`, so nothing is written down at any hop, not even to be
 # revalidated later.
 PRIVATE = "private, no-store"
+
+# The answer for something that is this reader's alone but WORTH KEEPING:
+# stored in their own browser, never in a shared cache, and never used
+# without asking us first. The difference from `PRIVATE` above is the
+# difference between "do not write this down" and "write it down, and check
+# with me before you believe it" -- and only the second can ever be answered
+# 304. Only for a handler that also sends an `ETag`, because without one the
+# revalidation has no way to come back cheap and the reader pays for the
+# whole body anyway.
+REVALIDATE = "private, no-cache"
 
 # A stream. Not `private`, because these are anonymous and identical for
 # everybody -- there is simply nothing here for a cache to hold, and a proxy
@@ -105,6 +119,72 @@ def public(response, s_maxage: int, max_age: int = 0) -> None:
 def private(response) -> None:
     """Nobody but this reader, and nobody writes it down."""
     response.headers["Cache-Control"] = PRIVATE
+
+
+def revalidate(response, tag: str) -> None:
+    """This reader's own copy, kept, and checked with us before every use.
+
+    `Vary: Cookie` because the one thing that changes this kind of answer
+    without changing its URL is the reader's live-draft cookie: a board is
+    priced under the league ESPN says they are in. The ETag would catch that
+    on its own -- it is computed from the settings -- but a browser that
+    keys its cache on the cookie too never even asks the question.
+    """
+    response.headers["Cache-Control"] = REVALIDATE
+    response.headers["ETag"] = tag
+    response.headers["Vary"] = "Cookie"
+
+
+# WHAT THIS BUILD IS, mixed into every ETag.
+#
+# The alternative is a validator computed only from data, and a deploy that
+# changes what an endpoint SAYS about unchanged data -- a new column, a
+# different url in an existing one -- would then answer 304 and leave every
+# returning reader on the old build's payload until their data moved. The
+# platform's commit sha when there is one, so two instances of one build
+# agree and a reader bouncing between them still gets their 304s; a fresh
+# random token when there is not, which costs a full body once per process
+# and can never be wrong.
+BUILD_ID = (os.environ.get("RAILWAY_GIT_COMMIT_SHA")
+            or os.environ.get("GIT_COMMIT_SHA")
+            or secrets.token_hex(8))
+
+
+def etag(*parts) -> str:
+    """A strong validator over everything an answer is a function of.
+
+    Strong, not weak (`W/`): these bytes are byte-identical or they are not
+    the same answer, and a 304 is only ever sent when the whole key agreed.
+
+    `repr` over each part rather than a JSON dump, because the parts are
+    cache keys -- nested tuples of strings, floats and sets of ids -- and
+    `repr` is total over those where a serializer would need teaching. The
+    separator matters: without it, ("a", "bc") and ("ab", "c") are one
+    hash.
+    """
+    digest = hashlib.sha256()
+    digest.update(BUILD_ID.encode())
+    for part in parts:
+        digest.update(repr(part).encode())
+        digest.update(b"\x1e")
+    return f'"{digest.hexdigest()[:32]}"'
+
+
+def is_fresh(request, tag: str) -> bool:
+    """Whether the caller already holds exactly this answer.
+
+    `If-None-Match` is a LIST, and a browser that has been offered two
+    versions of a URL may send both. `*` means "any copy at all", which for
+    a validator we just computed means the one we would have sent.
+    """
+    header = request.headers.get("if-none-match")
+    if not header:
+        return False
+    offered = [t.strip() for t in header.split(",")]
+    # A cache is allowed to weaken a validator on the way through; compare
+    # on the entity tag itself rather than on the prefix.
+    return any(t == "*" or t == tag or t.removeprefix("W/") == tag
+               for t in offered)
 
 
 class DefaultPrivate:

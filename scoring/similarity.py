@@ -1,6 +1,7 @@
 """Cross-year player-season similarity (stat twins) and board value-neighbors."""
 import numpy as np
 import pandas as pd
+from scoring.headshot import thumb
 from scoring.ppr import compute_ppr_points, normalize_rules
 
 FEATURES = ["ppg", "games", "target_share", "carry_share",
@@ -335,7 +336,9 @@ def similar_players(board: pd.DataFrame, player_id: str, *,
         return str(value)
 
     rows = [{"player_id": r["player_id"], "name": r["name"],
-             "headshot": _text(r.get("headshot")),
+             # A row of faces at 28 pixels each -- sized on the way out
+             # rather than served as the stored original (scoring/headshot.py).
+             "headshot": thumb(_text(r.get("headshot"))),
              "similarity": float(r["similarity"]),
              "proj_points": _num(r.get("proj_points")),
              "ppg": _num(r.get("ppg")),

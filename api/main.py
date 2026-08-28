@@ -37,7 +37,7 @@ from scoring.board import build_board  # noqa: F401 -- kept importable so
 # test_landing_status_does_not_build_the_board can monkeypatch
 # "api.main.build_board" to assert /api/landing/status never reaches it.
 # Every real board build below goes through cached_build_board instead.
-from scoring.board_cache import cached_build_board
+from scoring.board_cache import board_answer_key, cached_build_board
 from scoring.config import DEFAULT_WEIGHTS
 from scoring.draft_model import SUMMARY_FEATURES
 from scoring.draft_sim import DEFAULT_ROLLOUTS, run_sim
@@ -262,7 +262,7 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
         return live if live is not None else league.load(cur)
 
     @app.get("/api/players")
-    def players(request: Request,
+    def players(request: Request, response: Response,
                 w_production: float = Query(DEFAULT_WEIGHTS["production"], ge=0),
                 w_role: float = Query(DEFAULT_WEIGHTS["role"], ge=0),
                 w_environment: float = Query(DEFAULT_WEIGHTS["environment"], ge=0),
@@ -274,6 +274,26 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
                        "environment": w_environment, "schedule": w_schedule,
                        "durability": w_durability}
             settings = _league_settings(cur, request)
+
+            # 285 KB (55 KB compressed), refetched in full on every page
+            # load, and most of those loads are looking at a board that has
+            # not moved. It stays PRIVATE -- with a room connected this is
+            # priced under the league ESPN says the reader is in, and no
+            # shared cache may hold that -- but private is not the same as
+            # unrepeatable, so it now carries a validator and the reader's
+            # own browser is allowed to keep a copy and ask.
+            #
+            # `board_answer_key` is the board cache's OWN key plus the
+            # drafted set (scoring/board_cache.py): two requests it agrees
+            # on are served the identical frame, so they are identical
+            # bytes. Computed BEFORE the build, which is the point -- a 304
+            # costs three small table reads and no board at all. The build
+            # id inside `etag` is what stops a deploy answering 304 with the
+            # previous build's columns.
+            tag = http_cache.etag(board_answer_key(cur, weights, settings))
+            http_cache.revalidate(response, tag)
+            if http_cache.is_fresh(request, tag):
+                return Response(status_code=304, headers=dict(response.headers))
             try:
                 # cached_build_board (scoring/board_cache.py): this endpoint
                 # alone cost ~1.6-1.9s per request rebuilding the same board
@@ -960,6 +980,12 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
 
     # The threadpool ceiling and the build-worker shutdown live in
     # `_lifespan` above, which this app was constructed with.
+
+    # `HEAD` answered wherever `GET` is. Outside routing, so it covers the
+    # SPA document, the ADP pages and every /api read at once -- an uptime
+    # monitor's `HEAD /` was a 405 on all of them. See api/head.py.
+    from api.head import install as install_head
+    install_head(app)
 
     # `private, no-store` on every /api answer that named no policy of its
     # own. LAST LINE, so it is the outermost middleware and every response

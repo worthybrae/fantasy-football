@@ -85,7 +85,12 @@ def register_spa(app, dist: Path | None = None) -> bool:
     if assets.is_dir():
         app.mount("/assets", _HashedAssets(directory=assets), name="assets")
 
-    @app.get("/{path:path}")
+    # `HEAD` as well as `GET`, so this route is honest about what it
+    # answers even outside the app that installs `api/head.py`'s rewrite --
+    # `register_spa` is handed a bare FastAPI in tests and could be handed
+    # one anywhere. An uptime monitor probing `HEAD /` was the 405 that
+    # started this.
+    @app.api_route("/{path:path}", methods=["GET", "HEAD"])
     def spa(path: str):
         """Any path the API did not claim: a file if there is one, the app
         if there is not.

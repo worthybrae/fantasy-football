@@ -109,6 +109,34 @@ def test_players_endpoint(tmp_path):
     assert "adp" not in row
     assert "espn_ppr_rank" in row  # None here (empty espn_adp seed), but key must be present
 
+def test_players_serves_a_thumbnail_and_not_the_original_photograph(tmp_path):
+    """nflverse stores nfl.com's 3400x2450 original -- 250-870 KB -- and the
+    board draws a 30-pixel avatar out of it. A cold landing load measured
+    10.5 MB, 10.2 MB of it these files. Every headshot leaving this endpoint
+    carries the Cloudinary width that makes it a thumbnail; see
+    scoring/headshot.py, and scoring/board.py for where it goes on."""
+    from scoring import board_cache, profile_cache
+    path = str(tmp_path / "t.duckdb")
+    _seed(path)
+    conn = get_conn(path)
+    write_table(conn, "players", pd.DataFrame([
+        {"gsis_id": "p1", "display_name": "A Star",
+         "birth_date": "2000-01-01", "rookie_season": 2022,
+         "headshot": "https://static.www.nfl.com/image/private/f_auto,q_auto/league/abc"}]))
+    conn.close()
+    board_cache.clear(); profile_cache.clear()
+    c = TestClient(create_app(path))
+
+    row = next(p for p in c.get("/api/players").json()["players"]
+               if p["player_id"] == "p1")
+    assert row["headshot"] == ("https://static.www.nfl.com/image/private/"
+                               "f_auto,q_auto,w_96,c_fill,g_face/league/abc")
+    # The card's portrait is read straight off `players` rather than off the
+    # board, so it is sized somewhere else (scoring/profile.py) and has to be
+    # checked somewhere else.
+    assert "w_96" in c.get("/api/players/p1/profile").json()["bio"]["headshot"]
+
+
 def test_players_custom_weights(tmp_path):
     c = _client(tmp_path)
     r = c.get("/api/players", params={"w_production": 1.0, "w_role": 0.0,
@@ -1368,6 +1396,113 @@ def test_the_cache_middleware_is_wired_into_create_app(tmp_path):
         assert "s-maxage=15" in client.get("/api/lobby").headers["Cache-Control"]
     finally:
         lobby.clear_cache()
+
+
+def test_a_repeat_load_of_the_board_is_answered_304(tmp_path):
+    """/api/players is 285 KB (55 KB compressed) and the page refetches all
+    of it on every load, mostly to be told the board has not moved.
+
+    It stays PRIVATE -- with a room connected the board is priced under the
+    league ESPN says the reader is in, and no shared cache may hold that --
+    but private is not the same as unrepeatable. `no-cache` (keep it, ask
+    first) rather than `no-store` (keep nothing) is what makes a 304
+    possible at all."""
+    c = _client(tmp_path)
+    first = c.get("/api/players")
+    assert first.status_code == 200
+    assert first.headers["Cache-Control"] == "private, no-cache"
+    assert first.headers["Vary"] == "Cookie"
+    tag = first.headers["ETag"]
+
+    again = c.get("/api/players", headers={"If-None-Match": tag})
+    assert again.status_code == 304
+    assert again.content == b""
+    # The validator comes back on the 304 too, or the browser has nothing
+    # to ask with next time.
+    assert again.headers["ETag"] == tag
+    assert again.headers["Cache-Control"] == "private, no-cache"
+
+
+def test_a_pick_retires_the_boards_validator(tmp_path):
+    """THE ONE THAT WOULD BE UNFORGIVABLE. The drafted set is deliberately
+    not in the board cache's key (one boolean column, and keying on it threw
+    a good board away on every pick), so it has to be in the ETag by itself
+    -- otherwise a draft room revalidates all evening and is told nothing
+    has changed while the picks land."""
+    c = _client(tmp_path)
+    before = c.get("/api/players")
+    tag = before.headers["ETag"]
+    pid = before.json()["players"][0]["player_id"]
+
+    assert c.post(f"/api/drafted/{pid}").json()["drafted"] is True
+
+    after = c.get("/api/players", headers={"If-None-Match": tag})
+    assert after.status_code == 200
+    assert after.headers["ETag"] != tag
+    assert any(p["drafted"] for p in after.json()["players"])
+
+
+def test_different_weights_are_different_answers_to_the_validator(tmp_path):
+    """A slider is a different board at the same URL, so it has to be a
+    different tag -- the sliders are query parameters and a browser caches
+    per full URL, but the tag is the thing that decides what is served."""
+    c = _client(tmp_path)
+    tag = c.get("/api/players").headers["ETag"]
+    other = c.get("/api/players", params={"w_role": 0.9},
+                  headers={"If-None-Match": tag})
+    assert other.status_code == 200
+    assert other.headers["ETag"] != tag
+
+
+def test_the_validator_costs_no_board_build(tmp_path):
+    """The whole saving. A 304 that still built the board would spare the
+    network and none of the 1.6s, which is the expensive half."""
+    from scoring import board_cache
+    c = _client(tmp_path)
+    tag = c.get("/api/players").headers["ETag"]
+    board_cache.clear()
+
+    built = []
+    real = board_cache.build_board
+    board_cache.build_board = lambda *a, **k: built.append(1) or real(*a, **k)
+    try:
+        assert c.get("/api/players",
+                     headers={"If-None-Match": tag}).status_code == 304
+        assert built == []
+    finally:
+        board_cache.build_board = real
+
+
+def test_head_is_answered_wherever_get_is(tmp_path):
+    """AN UPTIME MONITOR'S FIRST REQUEST. `HEAD /` and `HEAD /api/...` were
+    405 Method Not Allowed on every route in this app, because `@app.get`
+    registers GET and nothing else -- which a monitor reads as an outage.
+
+    The rewrite is app-wide (api/head.py) rather than a `methods=` list on
+    each decorator, so this test is about `create_app` having it installed:
+    a route added tomorrow answers HEAD without anyone remembering to say
+    so. The headers have to be the GET's, or the probe learns nothing it
+    could not have learned from a TCP connect."""
+    client = _client(tmp_path)
+    for path in ("/api/players", "/api/landing/status", "/api/meta",
+                 "/api/landing/preview"):
+        get = client.get(path)
+        head = client.head(path)
+        assert head.status_code == get.status_code == 200, path
+        # No body. That is the entire point of the method.
+        assert head.content == b"", path
+        # ...and every header the GET would have sent, so the policy, the
+        # type and the size are all still legible.
+        assert head.headers["Cache-Control"] == get.headers["Cache-Control"], path
+        assert head.headers["Content-Type"] == get.headers["Content-Type"], path
+
+
+def test_head_does_not_invent_a_method_a_route_refuses(tmp_path):
+    """The rewrite hands the request downstream as a GET; it does not hand a
+    POST-only route a caller it never agreed to serve. `/api/drafted/{id}`
+    takes POST and DELETE, and a HEAD to it stays a 405."""
+    client = _client(tmp_path)
+    assert client.head("/api/drafted/p1").status_code == 405
 
 
 def test_a_public_landing_answer_does_not_vary_with_a_cookie(tmp_path):

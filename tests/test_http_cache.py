@@ -311,5 +311,70 @@ def test_a_stream_is_never_compressed():
     assert res.text == "data: one\n\ndata: two\n\n"
 
 
+# -- validators ----------------------------------------------------------
+
+
+def test_revalidate_is_kept_not_forbidden():
+    """`private, no-store` and `private, no-cache` sound alike and are
+    opposites where it counts: `no-store` means the browser keeps nothing,
+    so it can never ask whether what it has is still good, so it can never
+    be answered 304. `no-cache` means keep it and ask first."""
+    res = Response()
+    http_cache.revalidate(res, '"abc"')
+    assert res.headers["Cache-Control"] == "private, no-cache"
+    assert res.headers["ETag"] == '"abc"'
+    # The one thing that changes such an answer without changing its URL.
+    assert res.headers["Vary"] == "Cookie"
+
+
+def test_an_etag_is_a_function_of_every_part_it_was_given():
+    a = http_cache.etag(("board", 1), {"x"})
+    assert a == http_cache.etag(("board", 1), {"x"})
+    assert a != http_cache.etag(("board", 2), {"x"})
+    assert a != http_cache.etag(("board", 1), {"y"})
+    # Quoted, and strong: these bytes are identical or it is a different
+    # answer.
+    assert a.startswith('"') and a.endswith('"') and not a.startswith("W/")
+
+
+def test_the_parts_of_an_etag_cannot_run_together():
+    """Without a separator, ("a", "bc") and ("ab", "c") hash the same -- and
+    the parts here are cache keys, where that collision is a board served
+    under another board's name."""
+    assert http_cache.etag("a", "bc") != http_cache.etag("ab", "c")
+
+
+def test_a_deploy_changes_every_etag():
+    """A validator computed from data alone cannot see a release that
+    changes what an endpoint SAYS about unchanged data -- a new column, a
+    resized url in an old one -- and would answer 304 with the previous
+    build's payload until the data itself moved."""
+    assert http_cache.BUILD_ID
+    before = http_cache.etag("same")
+    original = http_cache.BUILD_ID
+    try:
+        http_cache.BUILD_ID = "a-later-release"
+        assert http_cache.etag("same") != before
+    finally:
+        http_cache.BUILD_ID = original
+
+
+def test_is_fresh_reads_the_whole_if_none_match_list():
+    """It is a list, not a value: a browser offered two versions of a URL
+    may send both back. `*` is "any copy at all", and a cache is allowed to
+    weaken a validator on the way through."""
+    class _Req:
+        def __init__(self, value):
+            self.headers = {} if value is None else {"if-none-match": value}
+
+    tag = '"abc"'
+    assert http_cache.is_fresh(_Req(tag), tag)
+    assert http_cache.is_fresh(_Req(f'"other", {tag}'), tag)
+    assert http_cache.is_fresh(_Req(f"W/{tag}"), tag)
+    assert http_cache.is_fresh(_Req("*"), tag)
+    assert not http_cache.is_fresh(_Req('"other"'), tag)
+    assert not http_cache.is_fresh(_Req(None), tag)
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__])
