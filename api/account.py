@@ -36,12 +36,19 @@ second is that a `require_secure` here would refuse the owner's own machine:
 request with no forwarding headers, and a loopback request is `http` by
 definition. Nothing here reads or writes a credential; the body is a list of
 public player ids.
+
+That first reason is INHERITED, not owned, and the registration below says so
+again: the guard is installed by `custody.install_credential_guards`, which
+runs from `register_custody_routes`. `api/main.py` mounts both on the same
+app, which is why these routes are safe there. An app that mounted these
+routes WITHOUT the custody ones would have no transport guard at all.
 """
 from fastapi import HTTPException, Request
 from pydantic import BaseModel
 
 from api import billing
 from api.billing import StoreError
+from pipeline import redact
 
 # Both bounds are the product's, not the store's (spec §5). The floor exists
 # because a plan built from two names is not a plan; the ceiling because a
@@ -55,6 +62,30 @@ class FavoritesBody(BaseModel):
     players: list[str]
 
 
+# How many of the offending ids a refusal names, and how much of each one.
+# The message goes into a response body, an access log and whatever error
+# reporter the page installs, and every character of it came from the caller.
+_SHOWN = 5
+_SHOWN_CHARS = 40
+
+
+def _quote(ids) -> str:
+    """The ids a refusal names: a few of them, short, and scrubbed.
+
+    THREE BOUNDS, because this is client input on its way back out. The count,
+    so a list of twenty-five wrong ids is not twenty-five wrong ids in a log
+    line. The length of each, so one id cannot be a page of text. And
+    `redact`, the same scrubber `custody.safe_validation_error_handler` puts
+    FastAPI's own 422 through -- an id is not a credential, but nothing stops
+    somebody pasting one into this field, and the answer to "what did I just
+    send" should never be "here it is again, in your network tab".
+    """
+    shown = sorted(ids)[:_SHOWN]
+    text = ", ".join(redact.redact(str(i))[:_SHOWN_CHARS] for i in shown)
+    extra = len(ids) - len(shown)
+    return f"{text} and {extra} more" if extra > 0 else text
+
+
 def register_account_routes(app, conn, store=None):
     """`GET`/`PUT /api/account/favorites`.
 
@@ -64,6 +95,13 @@ def register_account_routes(app, conn, store=None):
     be made without a board would be a registration that silently accepts
     anything. `store` is the credential store, passed through to
     `billing._account_ids` so a test can hand in its own.
+
+    MOUNT `register_custody_routes` ON THE SAME APP. These routes have no
+    transport guard of their own (see the module docstring); the one that
+    covers them is the ASGI middleware `custody.install_credential_guards`
+    installs, and `register_custody_routes` is what installs it. `api/main.py`
+    is the only place that mounts both, and it is the only configuration these
+    routes are safe in.
     """
 
     def _account_ids(request: Request) -> list:
@@ -131,16 +169,16 @@ def register_account_routes(app, conn, store=None):
             raise HTTPException(
                 status_code=422,
                 detail=f"That list names the same player twice: "
-                       f"{', '.join(sorted(repeated))}.")
+                       f"{_quote(repeated)}.")
 
-        unknown = sorted(set(players) - _board_ids())
+        unknown = set(players) - _board_ids()
         if unknown:
             raise HTTPException(
                 status_code=422,
-                detail=f"Not players on this board: {', '.join(unknown)}.")
+                detail=f"Not players on this board: {_quote(unknown)}.")
 
         try:
-            stored = billing.set_favorites(ids[0], players)
+            stored = billing.set_favorites(ids, players)
         except StoreError as exc:
             raise billing._unavailable(exc) from None
         return {"players": stored}

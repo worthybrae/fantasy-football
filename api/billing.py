@@ -198,31 +198,51 @@ class _Duck:
         for statement in _SCHEMA:
             self._conn.execute(statement)
 
+    # EVERY STATEMENT GOES THROUGH A CURSOR, not through `self._conn`.
+    #
+    # A DuckDB connection holds the result of the last statement run on it.
+    # Two threads sharing one connection therefore share one result slot: A
+    # executes, B executes, A fetches -- and A gets B's rows, or none.
+    # Measured on this class before the change: four threads reading two
+    # accounts, seven empty answers in six thousand reads. Empty is the
+    # dangerous shape, because every read here means "nothing stored" by that
+    # answer -- an account with favourites is shown the onboarding picker, and
+    # a paying customer could be told they have not paid.
+    #
+    # `cursor()` hands out a separate connection to the same database with its
+    # own result slot, which is what `api/main.py` takes one of per request
+    # and what `transaction` below already did. The connection stays a single
+    # one per file because that part IS required: DuckDB takes a per-file
+    # write lock per process.
+
     def execute(self, sql: str, params=()) -> list:
+        cursor = self._conn.cursor()
         try:
-            return self._conn.execute(sql, list(params)).fetchall()
+            return cursor.execute(sql, list(params)).fetchall()
         except duckdb.Error as exc:
             raise StoreError(f"the entitlement store refused a statement "
                              f"({type(exc).__name__})") from None
+        finally:
+            cursor.close()
 
     def executemany(self, sql: str, rows) -> None:
+        cursor = self._conn.cursor()
         try:
-            self._conn.executemany(sql, [list(row) for row in rows])
+            cursor.executemany(sql, [list(row) for row in rows])
         except duckdb.Error as exc:
             raise StoreError(f"the entitlement store refused a statement "
                              f"({type(exc).__name__})") from None
+        finally:
+            cursor.close()
 
     def transaction(self, statements) -> None:
         """Several `(sql, params)` pairs, all of them or none.
 
-        ON A CURSOR RATHER THAN THE SHARED CONNECTION. A transaction is state
-        on the connection, and this class deliberately keeps ONE connection
-        for the whole process -- so two threads opening a transaction on it
-        would be one `BEGIN` inside another, which DuckDB refuses, and a
-        rollback by either would discard the other's work. `cursor()` hands
-        out a separate connection to the same database with its own
-        transaction, which is the same reason `api/main.py` takes one per
-        request.
+        On its own cursor like everything else here, and for a second reason
+        on top of the shared result slot above: a transaction is state on the
+        connection too, so two threads opening one on `self._conn` would be a
+        `BEGIN` inside a `BEGIN` -- which DuckDB refuses -- and a rollback by
+        either would discard the other's work.
 
         The `finally` is what actually makes this all-or-nothing, whatever
         goes wrong: closing a cursor with an open transaction discards it, so
@@ -765,14 +785,24 @@ def favorites(account_ids: list) -> list:
     return []
 
 
-def set_favorites(account_id: str, player_ids) -> list:
+def set_favorites(account_ids: list, player_ids) -> list:
     """Replace this account's whole list. Returns what was stored.
+
+    TAKES THE SAME LIST `favorites` DOES, newest first, and not just the id it
+    is about to write under. It DELETES UNDER EVERY VERSION and inserts under
+    the newest, because the read has to be able to say "nothing" afterwards.
+    Delete only under the newest and a rotated account that clears its list
+    finds the old key's rows again on the next read -- `favorites` falls
+    through to the version that still has rows -- so the user's clear silently
+    reverts to whatever they chose before the rotation. Latent today (nothing
+    clears a list yet: the endpoint's floor is five) and a bug the moment
+    anything does.
 
     ONE TRANSACTION, and that is the entire reason `transaction` exists on the
     adapters. The write is a replace, so it is a DELETE and an INSERT; if the
     delete committed and the insert did not, somebody who edited their list
-    would be left with no list at all -- and the endpoint above would then
-    show them the onboarding panel again as if they had never chosen.
+    would be left with no list at all -- and the Dashboard would then show
+    them the onboarding panel again as if they had never chosen.
 
     The insert is ONE statement with every row's values in it rather than a
     row at a time, so a save is two round trips whatever the backend and
@@ -783,14 +813,19 @@ def set_favorites(account_id: str, player_ids) -> list:
     A caller with a legitimate reason to store something else -- a test, a
     migration -- should not have to argue with this function.
     """
+    accounts = [str(account_id) for account_id in account_ids]
+    if not accounts:
+        raise ValueError("set_favorites needs an account id to write under")
     ids = [str(player_id) for player_id in player_ids]
-    statements = [("DELETE FROM favorite_player WHERE account_id = ?",
-                   [str(account_id)])]
+    marks = ", ".join("?" for _ in accounts)
+    statements = [
+        (f"DELETE FROM favorite_player WHERE account_id IN ({marks})",
+         accounts)]
     if ids:
         now = _now()
         params: list = []
         for position, player_id in enumerate(ids):
-            params.extend([str(account_id), player_id, position, now])
+            params.extend([accounts[0], player_id, position, now])
         values = ", ".join("(?, ?, ?, ?)" for _ in ids)
         statements.append((
             f"""INSERT INTO favorite_player

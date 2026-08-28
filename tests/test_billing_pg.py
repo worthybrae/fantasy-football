@@ -93,16 +93,16 @@ def test_a_favourites_list_round_trips_and_replaces_in_one_transaction():
     try:
         assert billing.favorites([account]) == []
 
-        assert billing.set_favorites(account, six) == six
+        assert billing.set_favorites([account], six) == six
         # In the order it was saved, not the order the rows came back.
         assert billing.favorites([account]) == six
 
         five = ["p1", "p4", "p5", "p6", "p8"]
-        billing.set_favorites(account, five)
+        billing.set_favorites([account], five)
         assert billing.favorites([account]) == five
 
         # And the rotation rule: the newest id that has rows is the answer.
-        billing.set_favorites(older, six)
+        billing.set_favorites([older], six)
         assert billing.favorites([account, older]) == five
         assert billing.favorites([older]) == six
     finally:

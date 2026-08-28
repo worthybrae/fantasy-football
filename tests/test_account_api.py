@@ -116,8 +116,13 @@ def client(board):
     fifteen apps to answer fifteen requests would only add fifteen sets of
     module-level state to a suite that already has tests counting board
     builds.
+
+    Closed at the end of the module rather than left to the garbage
+    collector, so the app's shutdown handlers run inside this file instead of
+    whenever the interpreter next feels like it.
     """
-    return TestClient(create_app(board))
+    with TestClient(create_app(board)) as ready:
+        yield ready
 
 
 def _sign_in(monkeypatch, ids=(NEW_ID,)):
@@ -233,6 +238,44 @@ def test_the_same_player_twice_is_refused(client, monkeypatch):
     assert "p2" in res.json()["detail"]
 
 
+def test_an_id_that_is_not_a_string_is_refused_without_being_echoed(
+        client, monkeypatch):
+    """Pydantic refuses the body before the handler sees it, and the 422 that
+    comes back carries no `input` key.
+
+    That last half is the point and it is not FastAPI's default:
+    `custody.safe_validation_error_handler` replaces the default handler
+    precisely because Pydantic attaches the WHOLE rejected body to every error
+    as `input`. Pinned here because these routes inherit that handler from
+    `register_custody_routes` -- an app that mounted them alone would echo the
+    body instead."""
+    _sign_in(monkeypatch)
+    res = client.put("/api/account/favorites",
+                     json={"players": [1, 2, 3, 4, 5]})
+
+    assert res.status_code == 422
+    problems = res.json()["detail"]
+    assert isinstance(problems, list) and problems
+    assert all(set(problem) <= {"type", "loc", "msg"} for problem in problems)
+
+
+def test_a_refusal_names_only_a_few_ids_and_scrubs_them(client, monkeypatch):
+    """The refusal quotes the caller back at itself, so it is bounded on every
+    axis: how many ids, how long each one is, and whether it can smuggle
+    something credential-shaped through `redact`."""
+    _sign_in(monkeypatch)
+    huge = "x" * 500
+    res = client.put("/api/account/favorites",
+                     json={"players": ["a1", "b2", "c3", "d4", "e5", "f6",
+                                       "g7", huge]})
+
+    assert res.status_code == 422
+    detail = res.json()["detail"]
+    assert "and 3 more" in detail            # eight wrong ids, five named
+    assert huge not in detail                # and none of them at full length
+    assert len(detail) < 400
+
+
 def test_a_signed_out_browser_can_neither_read_nor_write(client, monkeypatch):
     """THE ONE THAT MATTERS. There is no account id to write under, and
     inventing one would put a stranger's rows under a key the entitlement
@@ -244,6 +287,24 @@ def test_a_signed_out_browser_can_neither_read_nor_write(client, monkeypatch):
                       json={"players": SIX}).status_code == 401
 
 
+def test_reading_the_list_never_builds_the_board(client, monkeypatch):
+    """The board is the WRITE's validation and has no business on the read.
+
+    It matters during a draft: the room polls, and a GET that touched
+    `cached_build_board` would be a cache lookup on a good day and a
+    seconds-long rebuild on the day the cache was just invalidated by a pick.
+    """
+    _sign_in(monkeypatch)
+    billing.set_favorites([NEW_ID], SIX)
+
+    def _explode(*_a, **_k):
+        raise AssertionError("the read must not build a board")
+
+    monkeypatch.setattr("scoring.board_cache.cached_build_board", _explode)
+
+    assert client.get("/api/account/favorites").json() == {"players": SIX}
+
+
 # -- key rotation -------------------------------------------------------------
 
 
@@ -253,7 +314,7 @@ def test_favourites_written_under_a_retired_key_are_still_read(client,
     `account_ids` yields both, newest first, and the rows keep the id they
     were written under -- so the read has to look under every version, exactly
     as `entitled()` does."""
-    billing.set_favorites(OLD_ID, SIX)
+    billing.set_favorites([OLD_ID], SIX)
     _sign_in(monkeypatch, ids=(NEW_ID, OLD_ID))
 
     assert client.get("/api/account/favorites").json() == {"players": SIX}
@@ -269,12 +330,36 @@ def test_a_save_lands_under_the_newest_key(client, monkeypatch):
     assert billing.favorites([OLD_ID]) == []
 
 
+def test_clearing_a_list_clears_it_under_every_key(client, monkeypatch):
+    """A save DELETES under every id version and writes the newest.
+
+    Delete only under the newest and a rotated account that empties its list
+    finds the old key's rows again on the next read, because `favorites` falls
+    through to the version that still has rows -- the clear silently reverts
+    to whatever they chose before the rotation. Latent while the endpoint's
+    floor is five names, and a bug the moment anything can clear one.
+    """
+    billing.set_favorites([OLD_ID], SIX)
+
+    billing.set_favorites([NEW_ID, OLD_ID], [])
+
+    assert billing.favorites([NEW_ID, OLD_ID]) == []
+    assert billing.favorites([OLD_ID]) == []
+
+
+def test_a_save_needs_somewhere_to_put_it():
+    """No account ids is a caller bug, not an empty write: the delete would
+    match nothing and the insert would have no id to use."""
+    with pytest.raises(ValueError):
+        billing.set_favorites([], SIX)
+
+
 def test_the_newest_key_with_rows_wins(client, monkeypatch):
     """A list saved after a rotation is the answer, not a merge with whatever
     the same person chose under the old key -- a merge could hold more than
     twenty-five names and none of them in a coherent order."""
-    billing.set_favorites(OLD_ID, ["p1", "p2", "p3", "p4", "p5"])
-    billing.set_favorites(NEW_ID, SIX)
+    billing.set_favorites([OLD_ID], ["p1", "p2", "p3", "p4", "p5"])
+    billing.set_favorites([NEW_ID], SIX)
 
     assert billing.favorites([NEW_ID, OLD_ID]) == SIX
 
@@ -292,12 +377,12 @@ def test_a_save_that_cannot_finish_leaves_the_old_list_alone():
     refuses a repeated id before the store ever sees it -- the point here is
     the store's own promise, not the endpoint's validation.
     """
-    billing.set_favorites(NEW_ID, SIX)
+    billing.set_favorites([NEW_ID], SIX)
 
     with pytest.raises(billing.StoreError):
         # A repeated id violates the table's (account, player) key halfway
         # through the insert.
-        billing.set_favorites(NEW_ID, ["p1", "p2", "p1", "p4", "p5"])
+        billing.set_favorites([NEW_ID], ["p1", "p2", "p1", "p4", "p5"])
 
     assert billing.favorites([NEW_ID]) == SIX
 

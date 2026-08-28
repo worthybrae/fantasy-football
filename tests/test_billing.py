@@ -407,3 +407,57 @@ def test_a_forwarded_request_may_not_use_the_local_login(monkeypatch):
 
     assert billing._account_ids(_ProxiedRequest()) == []
     assert billing._account_ids(_RemoteRequest()) == []
+
+
+# -- the store under threads --------------------------------------------------
+
+# Enough reads that the interleaving actually happens. The measured rate of
+# the bug this guards was about one answer in a thousand, so a couple of
+# hundred reads would have missed a regression more often than it caught one;
+# these numbers cost a second or two and miss it rarely.
+THREADS = 4
+READS = 1500
+
+
+def test_two_accounts_read_from_four_threads_never_come_back_empty():
+    """THE FAILURE THIS PINS: A ASKS, B ASKS, A FETCHES B'S ANSWER.
+
+    A DuckDB connection holds the result of the last statement run on it, and
+    `_Duck` deliberately keeps ONE connection per file -- so every statement
+    that ran on it directly shared one result slot with every other thread.
+    FastAPI runs sync handlers in a threadpool, so "every other thread" is
+    "every other request". Measured before the fix: seven empty answers in six
+    thousand reads across four threads.
+
+    EMPTY IS THE DANGEROUS SHAPE, which is why this is worth 800 reads in the
+    suite. Every read through this store means "nothing stored" by an empty
+    answer: a customer is told they have not paid, and an account with a
+    favourites list is shown the onboarding picker for one it already made.
+
+    Both kinds of read, because the fix belongs to the adapter and not to
+    either caller.
+    """
+    from threading import Thread
+
+    billing.grant("acct-one", "111", 2026)
+    billing.set_favorites(["acct-two"], ["p1", "p2", "p3"])
+    wrong: list = []
+
+    def read_entitlement():
+        for _ in range(READS):
+            if not billing.entitled(["acct-one"], "111", 2026):
+                wrong.append("a paid draft came back unpaid")
+
+    def read_favorites():
+        for _ in range(READS):
+            if billing.favorites(["acct-two"]) != ["p1", "p2", "p3"]:
+                wrong.append("a saved list came back wrong")
+
+    threads = ([Thread(target=read_entitlement) for _ in range(THREADS // 2)]
+               + [Thread(target=read_favorites) for _ in range(THREADS // 2)])
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert wrong == []
