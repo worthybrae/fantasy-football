@@ -14,7 +14,7 @@ WHAT IT SERVES, AND WHAT IT REFUSES TO INVENT:
   * The names, positions and prices are this project's own board -- the same
     `cached_build_board` every other endpoint reads, so the numbers on the
     landing page are the numbers in the product and cannot drift from them.
-  * The recommendation is `rank_available` over what is genuinely still on
+  * The recommendation is `api.live.rank_and_plan` over what is genuinely still on
     the board in that room, for the team genuinely on the clock.
 
 There is no "demo mode" anywhere in here. If the farm is not running, this
@@ -40,6 +40,7 @@ import threading
 import time
 
 import numpy as np
+import pandas as pd
 
 from fastapi import Request, Response
 from fastapi.responses import StreamingResponse
@@ -93,7 +94,7 @@ STALE_SECONDS = 120.0
 # Thirty seconds is still well inside one seat's clock.
 CACHE_SECONDS = 30.0
 
-# The floor under rebuilds. A build is real work -- 400 survival rollouts and
+# The floor under rebuilds. A build is real work -- an availability lookup and
 # a ranking, measured at 2.8-4.0s warm -- and the identity key above would
 # otherwise put one behind every pick. Most of the time that is what you want
 # (a pick every 30-90 seconds), but a room whose empty seats are all
@@ -154,17 +155,6 @@ RECENT_PICKS = 8
 # is what the room shows above the fold plus room to move.
 SHORTLIST = 60
 
-# The wait, simulated. Four hundred is what the draft room itself runs
-# (`api/live.py`'s SURVIVAL_ROLLOUTS); a landing page can afford the same
-# because it does it once per cache window rather than once per pick, and
-# because a mock has no fitted managers to build first.
-SURVIVAL_ROLLOUTS = 400
-
-# Pinned, so two visitors reading the page at the same moment are shown the
-# same board. An unseeded rollout would put a different survival percentage in
-# front of each of them for the same draft, which is indistinguishable from
-# the tool being unreliable.
-SURVIVAL_SEED = 7
 
 _CACHE: dict = {}
 _LOCK = threading.Lock()
@@ -595,129 +585,102 @@ def _ranked(conn, board, picks: list, slot: int | None, limit: int) -> list:
     """The room's own ranked list, for the seat on the clock.
 
     THE RAW BOARD IS THE WRONG LIST, and this is the difference between
-    showing the product and showing a spreadsheet. Ordered by value over
-    replacement alone, the best available at pick 60 of an 8-team draft is a
-    KICKER -- worth twelve points over replacement and worth nothing to
-    anybody, because no roster needs one for another six rounds. The room does
-    not show that: `rank_available` weights by what this roster still needs
-    (`NEED_WEIGHTS`) and defers the positions a manager can safely wait on, so
-    kickers and defences sink until they are actually the pick.
+    showing the product and showing a spreadsheet. Ordered by value alone,
+    the best available at pick 60 of an 8-team draft is a KICKER -- worth
+    twelve points over replacement and worth nothing to anybody, because no
+    roster needs one for another six rounds. So the hero runs the same
+    functions the draft room runs (`api.live.rank_and_plan`: ESPN's order,
+    who is still there at this seat's next turn counted from recorded
+    drafts, what waiting would cost, and `scoring/plan.target_now` for the
+    three the cards show), against the seat genuinely on the clock and the
+    roster it genuinely holds. Rows carry the room's own candidate keys, so
+    the landing page hands them to the same component, plus the few things
+    the room reads from its join table (name, team, bye, adp, board_rank).
 
-    So the hero runs the same function the draft room runs, against the seat
-    genuinely on the clock and the roster it genuinely holds.
-
-    AND IT SIMULATES THE WAIT, which is the only part worth paying for. Every
-    other board on the internet can rank players; this one prices what it
-    costs to wait for one, and it learns that by running the rest of the round
-    `SURVIVAL_ROLLOUTS` times. A landing page that showed the ranking without
-    the survival would be advertising the half that is not the product.
-
-    It is affordable here for one reason: this is a MOCK. A room with no
-    imported history is exactly the case `build_session` handles with no
-    fitted managers at all -- empty `betas`, every opponent simulated by
-    `cold_start_opponent()` -- so the expensive part (fitting six seasons of a
-    real league) never happens, and what is left is the rollout itself behind
-    a thirty-second cache.
+    The three `target_now` picks lead the list, in their order; the rest
+    follow in ESPN order. `limit` caps the whole.
     """
-    from scoring.draft_sim import cold_start_opponent, horizon_picks, survival
-    from scoring.gain import rank_available
+    from api import live as live_mod
     from scoring import league
+    from scoring.availability import cached_table
+    from scoring.plan import health_level, target_now
 
     settings = league.load(conn)
     pool = _cached_pool(conn, board, settings)
+    if isinstance(board, pd.DataFrame) and "espn_rank" not in board.columns and conn is not None:
+        board = live_mod._attach_espn_rank(conn, board)
     positions = {str(pid): str(pos) for pid, pos in zip(pool.player_id, pool.position)}
     index_by_player = {str(pid): i for i, pid in enumerate(pool.player_id)}
     taken_ids = {str(p.get("player_id")) for p in picks}
     taken = np.array([str(pid) in taken_ids for pid in pool.player_id], dtype=bool)
-    # WHO took whom, in order -- not just what is gone. Without it every
-    # opponent between now and the next turn resumes with an empty roster, so
-    # `need` reads 1.0 everywhere and the caps re-arm from zero (see
-    # `survival`'s own docstring on `taken_order`).
     taken_order = [index_by_player[str(p.get("player_id"))]
                    for p in picks if str(p.get("player_id")) in index_by_player]
-
     counts = _seat_counts(picks, slot, positions)
-    # Every seat drafts the same number of times, so what is left for this one
-    # is the rounds it has not reached yet.
-    made = sum(counts.values())
-    turns_left = max(0, int(settings.rounds) - made)
+    mine = [index_by_player[str(p.get("player_id"))] for p in picks
+            if slot is not None and p.get("slot") == slot
+            and str(p.get("player_id")) in index_by_player]
 
-    # The wait, simulated, exactly as the room measures it -- `horizon_picks`
-    # and `horizon_target` included, which is what makes the number mean "still
-    # there when it is worth waiting for" rather than "still there in four
-    # seconds".
-    #
-    # `on_the_clock=True`, because the seat this list is for IS the seat about
-    # to pick -- the same thing the room passes when it is the owner's turn.
-    #
-    # This read False for a while, from a misdiagnosis worth recording: the
-    # landing page once showed 100% survival for every player, and the cause
-    # was a missing `horizon`, not this flag. With a horizon in hand the two
-    # differ in ways that both matter. False leaves `start` at the pick on the
-    # clock, so the rollout has an opponent model making THIS seat's own pick;
-    # and it makes "my next turn" resolve to that same pick, which is what the
-    # "lasts" column is now measured to -- so every player would read 100%
-    # again, this time in the one column a reader checks. Measured on a live
-    # room, seat 3 at pick 51: False gives a next turn of 51 and a mean
-    # survival of 1.000; True gives 62, the seat's real next turn, and 0.950.
-    h = horizon_picks(settings)
-    rollouts = survival(
-        pool, settings, {}, int(slot or 1), taken, {},
-        n_rollouts=SURVIVAL_ROLLOUTS, seed=SURVIVAL_SEED,
-        taken_order=taken_order, on_the_clock=True,
-        horizon=h, nested=cold_start_opponent(),
-    )
-
-    # The same split the room makes: priced against the horizon turn, shown
-    # against this seat's very next one. See `gain.rank_available`.
-    frame = rank_available(pool, settings, taken, counts,
-                           rollouts["avail_pct"].to_numpy(), turns_left,
-                           survive_display=rollouts["avail_next_pct"].to_numpy())
+    table = cached_table()
+    rows, _plan, turns = live_mod.rank_and_plan(
+        board, pool, taken, taken_order, counts, mine, int(slot or 1),
+        settings, frozenset(), table, picks_made=len(picks))
 
     by_id = {}
-    for row in board.itertuples():
-        by_id[str(getattr(row, "player_id", ""))] = row
+    if isinstance(board, pd.DataFrame):
+        for row in board.itertuples():
+            by_id[str(getattr(row, "player_id", ""))] = row
+    by_row = {r["player_id"]: r for r in rows}
 
-    rows = []
-    for entry in frame.head(limit).itertuples():
-        pid = str(getattr(entry, "player_id", ""))
+    # The cards: the same score the plan uses, with everyone available now.
+    leaders = []
+    if rows and turns:
+        ids = [r["player_id"] for r in rows]
+        col = lambda name: np.array([  # noqa: E731 -- one-liners over the rows
+            (np.nan if r.get(name) is None else float(r[name])) for r in rows], dtype=float)
+        games = np.array([
+            (np.nan if by_id.get(pid) is None else
+             float(getattr(by_id[pid], "career_games_pg", np.nan) or np.nan))
+            for pid in ids], dtype=float)
+        try:
+            leaders = [t["player_id"] for t in target_now(
+                proj=col("proj_points"), positions=np.array([r["position"] for r in rows], dtype=object),
+                player_ids=ids, espn_rank=col("espn_rank"), espn_adp=col("espn_adp"),
+                market_rank=col("market_rank"),
+                byes=np.array([(np.nan if by_id.get(pid) is None else
+                                float(getattr(by_id[pid], "bye", np.nan) or np.nan))
+                               for pid in ids], dtype=float),
+                health=health_level(games), roster_counts=dict(counts),
+                settings=settings, turns=turns, picks_made=len(picks),
+                favourites=set(), table=table,
+                names={pid: str(getattr(by_id[pid], "name", pid)) if by_id.get(pid) is not None else pid
+                       for pid in ids})]
+        except Exception:      # noqa: BLE001 -- the cards are a garnish on
+            # a list that stands on its own; a scoring failure costs them,
+            # not the page
+            leaders = []
+
+    ordered = [by_row[pid] for pid in leaders if pid in by_row]
+    ordered += [r for r in rows if r["player_id"] not in set(leaders)]
+
+    out = []
+    for entry in ordered[:limit]:
+        pid = entry["player_id"]
         source = by_id.get(pid)
-        if source is None:
-            continue
-        adp = _num(getattr(source, "market_rank", None))
-        rank = _num(getattr(source, "rank", None))
-        proj = _num(getattr(entry, "proj_points", None))
-        rows.append({
-            # The room's own candidate shape, field for field, so the landing
-            # page can hand these straight to `AvailableList` -- the actual
-            # component, not a copy of it. A second renderer for the same rows
-            # is how a landing page starts lying about the product.
-            "player_id": pid,
-            "position": getattr(entry, "position", None),
-            "proj_points": proj,
-            "vor_points": _num(getattr(entry, "vor_points", None)),
-            "gain_now": _num(getattr(entry, "gain_now", None), 1),
-            # What waiting costs, in points, against this seat's own next
-            # turn -- see `gain.rank_available`.
-            "gain_next": _num(getattr(entry, "gain_next", None), 1),
-            # And over the best OTHER player at his position at that same
-            # turn -- the figure the cards switch to while on the clock,
-            # where gain_next degenerates to 0 (see gain.rank_available).
-            "edge_next": _num(getattr(entry, "edge_next", None), 1),
-            "survive_pct": _num(getattr(entry, "survive_pct", None), 1),
-            "fills": getattr(entry, "fills", None),
-            "rank": _num(getattr(entry, "rank", None)),
+        adp = _num(getattr(source, "market_rank", None)) if source is not None else None
+        rank = _num(getattr(source, "rank", None)) if source is not None else None
+        out.append({
+            **entry,
             # And the few things the room reads from its own join table, which
             # this page fetches separately (`/api/players`): served here too so
             # a reader gets names even before that lands.
-            "name": getattr(source, "name", None),
-            "team": getattr(source, "team", None),
-            "bye": _num(getattr(source, "bye", None)),
+            "name": getattr(source, "name", None) if source is not None else None,
+            "team": getattr(source, "team", None) if source is not None else None,
+            "bye": _num(getattr(source, "bye", None)) if source is not None else None,
             "adp": adp,
             "vs_adp": None if (rank is None or adp is None) else round(adp - rank),
             "board_rank": rank,
         })
-    return rows
+    return out
 
 
 def _shortlist(board, taken: set, limit: int = SHORTLIST) -> list:
@@ -1489,7 +1452,7 @@ def register_demo_routes(app, conn=None):
         comment every twenty.
 
         WHY IT CARRIES NO PAYLOAD. What changed is one line; what a reader
-        needs is a board, a ranked shortlist and four hundred survival
+        needs is a board, a ranked shortlist and a plan drawn from recorded
         rollouts. Sending only the signal keeps this loop free of the work
         (it stats four files a second and holds no database handle) and keeps
         exactly one path to the board -- the cached endpoint above, which a

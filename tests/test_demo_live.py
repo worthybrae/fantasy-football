@@ -520,56 +520,54 @@ def test_every_pick_carries_the_whole_board_player_contract():
 
 def test_ranked_rows_carry_the_whole_live_candidate_contract(monkeypatch):
     """Same failure mode `test_every_pick_carries_the_whole_board_player_contract`
-    documents, one payload over: the room's own `TopThree`/`AvailableList`
-    read these rows as `LiveCandidate`, and a key left out arrives as
-    `undefined` past every `!== null` guard. `edge_next` especially -- the
-    live endpoint serializes `rank_available`'s frame wholesale, so only this
-    hand-built dict can drop it."""
+    documents, one payload over: the room's own components read these rows
+    as `LiveCandidate`, and a key left out arrives as `undefined` past every
+    `!== null` guard. The landing room runs the room's own `rank_and_plan`
+    and `target_now`, so its rows carry exactly the room's candidate keys
+    plus the join-table extras this page serves itself."""
     import numpy as np
     import pandas as pd
-    import scoring.draft_sim as draft_sim
     import scoring.league as league
+    from api import live
     from scoring.league import LeagueSettings
 
     class _Pool:
         player_id = np.array(["00-0001", "00-0002"], dtype=object)
         position = np.array(["RB", "RB"], dtype=object)
         points = np.array([300.0, 250.0])
-        vor = np.array([60.0, 40.0])
 
-    class _Row:
-        player_id = "00-0001"
-        name = "Somebody"
-        team = "SF"
-        bye = 9
-        rank = 1
-        market_rank = 2
-
-    class _Board:
-        def itertuples(self):
-            return iter((_Row(),))
-
+    board = pd.DataFrame([
+        {"player_id": "00-0001", "name": "Somebody", "team": "SF", "bye": 9,
+         "rank": 1, "market_rank": 2, "position": "RB", "proj_points": 300.0,
+         "espn_rank": 1.0, "espn_pos_rank": 1.0, "espn_adp": 1.5, "career_games_pg": 16.0},
+        {"player_id": "00-0002", "name": "Other", "team": "DET", "bye": 5,
+         "rank": 2, "market_rank": 3, "position": "RB", "proj_points": 250.0,
+         "espn_rank": 2.0, "espn_pos_rank": 2.0, "espn_adp": 2.5, "career_games_pg": 15.0},
+    ])
     monkeypatch.setattr(demo, "_cached_pool", lambda conn, board, s: _Pool())
     monkeypatch.setattr(league, "load", lambda conn: LeagueSettings(
         season=2026, teams=8,
         starters={"QB": 1, "RB": 2, "WR": 2, "TE": 1, "K": 1, "DST": 1},
         flex_slots=2, bench=5, scoring={}, draft_type="SNAKE"))
-    monkeypatch.setattr(draft_sim, "horizon_picks", lambda s: 5)
-    monkeypatch.setattr(draft_sim, "cold_start_opponent", lambda: None)
-    monkeypatch.setattr(draft_sim, "survival", lambda *a, **k: pd.DataFrame(
-        {"avail_pct": [1.0, 1.0], "avail_next_pct": [1.0, 1.0]}))
+    # Everybody lasts: what an empty corpus's fallback says about players
+    # nobody has ranked, and enough to see the shape of the rows.
+    monkeypatch.setattr(live, "availability_at",
+                        lambda table, ids, k, n, *a, **kw: np.ones(len(list(ids))))
 
-    rows = demo._ranked(conn=None, board=_Board(), picks=[], slot=1, limit=3)
-    assert rows, "the one board row should have come through"
+    rows = demo._ranked(conn=None, board=board, picks=[], slot=1, limit=3)
+    assert len(rows) == 2, "both board rows should have come through"
     assert set(rows[0]) == {
-        "player_id", "position", "proj_points", "vor_points", "gain_now",
-        "gain_next", "edge_next", "survive_pct", "fills", "rank",
+        "player_id", "position", "proj_points", "espn_rank", "espn_pos_rank",
+        "espn_adp", "market_rank", "lasts_pct", "lasts_at_pick", "edge_pts",
+        "need", "favourite", "rank",
         "name", "team", "bye", "adp", "vs_adp", "board_rank",
     }
-    # Both survive at 100%, so the self-inclusive figure reads 0 while the
-    # figure the on-the-clock cards show reads the real gap to the other RB.
-    assert rows[0]["gain_next"] == pytest.approx(0.0)
-    assert rows[0]["edge_next"] == pytest.approx(20.0)
+    # Seat 1 with nothing drafted is on the clock at pick 1; "lasts" is
+    # measured to its next turn, pick 16, and the better back leads.
+    assert rows[0]["player_id"] == "00-0001"
+    assert rows[0]["lasts_at_pick"] == 16 and rows[0]["lasts_pct"] == 100.0
+    assert rows[0]["edge_pts"] == pytest.approx(50.0)
+    assert rows[0]["name"] == "Somebody" and rows[0]["adp"] == 2 and rows[0]["board_rank"] == 1
 
 
 def test_a_pick_that_fell_past_its_adp_is_a_positive_value():
