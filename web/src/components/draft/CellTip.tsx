@@ -14,7 +14,7 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 
-import { fetchProfile } from '../../api'
+import { cachedGet, fetchProfile, forgetRequest } from '../../api'
 import type { LiveSettings, PlayerProfileData } from '../../api'
 import { Chart } from './Chart'
 import { startersAt, weightedFinish } from './finish'
@@ -28,19 +28,41 @@ export type CellTipKind = 'health' | 'games' | 'finish' | 'steady' | 'change'
 
 // One in-flight request per player, and one cached result, shared across all
 // three columns: hovering a row's Health and then its Finish is one fetch.
-const cache = new Map<string, PlayerProfileData>()
-const inflight = new Map<string, Promise<PlayerProfileData>>()
+/** How long one player's profile stands. It is a 3.5s request and the room
+ *  opens it from four places -- a hover, a card, the overlay, the board's
+ *  peek -- so the point of the window is that a reader poking at one player
+ *  pays for him once. A minute rather than forever because a profile carries
+ *  news and an injury status, and a room that is open for an hour should not
+ *  still be showing what those said when it opened. */
+const PROFILE_MS = 60_000
 
 export function loadProfile(playerId: string): Promise<PlayerProfileData> {
-  const hit = cache.get(playerId)
-  if (hit) return Promise.resolve(hit)
-  const running = inflight.get(playerId)
-  if (running) return running
-  const p = fetchProfile(playerId)
-    .then((data) => { cache.set(playerId, data); inflight.delete(playerId); return data })
-    .catch((e) => { inflight.delete(playerId); throw e })
-  inflight.set(playerId, p)
-  return p
+  // api.ts's own cache, not a second one here: the player overlay used to
+  // call `fetchProfile` directly and so paid for a profile this cache had
+  // already fetched -- two requests for the same player, one click apart.
+  return cachedGet(`profile/${playerId}`, () => fetchProfile(playerId), PROFILE_MS)
+    .then((data) => { settled.set(playerId, data); return data })
+}
+
+// What has already arrived, readable without a promise. NOT a second cache --
+// it never asks for anything -- but the panel below opens on a pointer and a
+// value it can paint in the same frame is the difference between a panel and
+// a skeleton that flashes. A stale entry here is painted for exactly one
+// frame: the effect that follows calls `loadProfile`, which refetches if the
+// shared window has passed and replaces it.
+const settled = new Map<string, PlayerProfileData>()
+
+/** Test seam, and the panel's own synchronous read. */
+export function peekProfile(playerId: string): PlayerProfileData | null {
+  return settled.get(playerId) ?? null
+}
+
+/** Drops one player, so the next read really asks. For the one case where
+ *  something on screen has CHANGED the profile -- marking a player drafted --
+ *  and a shared answer from a moment ago is the wrong one. */
+export function forgetProfile(playerId: string): void {
+  settled.delete(playerId)
+  forgetRequest(`profile/${playerId}`)
 }
 
 // Health, the 2025 sparkline, and Finish are all the same picture -- time
@@ -203,7 +225,7 @@ export const CellTip = memo(function CellTip(
   },
 ): ReactNode {
   const [data, setData] = useState<PlayerProfileData | null>(
-    () => cache.get(playerId) ?? null)
+    () => peekProfile(playerId))
   const [failed, setFailed] = useState(false)
   // Guards a resolve arriving after the pointer has moved to another row --
   // without it the panel would briefly show the previous player's seasons
@@ -212,9 +234,8 @@ export const CellTip = memo(function CellTip(
 
   useEffect(() => {
     wanted.current = playerId
-    const hit = cache.get(playerId)
-    if (hit) { setData(hit); setFailed(false); return }
-    setData(null); setFailed(false)
+    const hit = peekProfile(playerId)
+    if (hit) { setData(hit); setFailed(false) } else { setData(null); setFailed(false) }
     loadProfile(playerId)
       .then((d) => { if (wanted.current === playerId) setData(d) })
       .catch(() => { if (wanted.current === playerId) setFailed(true) })

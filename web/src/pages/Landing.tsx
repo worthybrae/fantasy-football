@@ -340,7 +340,9 @@ export default function Landing() {
         setProgress(body)
         if (settled && !settledAt) {
           settledAt = Date.now()
-          fetchLiveState().then((s) => { if (!cancelled) setLive(s) }).catch(() => {})
+          // A few seconds' tolerance, so this shares the gate poll's own read
+          // rather than opening a second one for the same answer.
+          fetchLiveState(5_000).then((s) => { if (!cancelled) setLive(s) }).catch(() => {})
         }
         // A short grace period rather than stopping dead on the first
         // terminal phase. `failed` is set the instant one stage fails, and

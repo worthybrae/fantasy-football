@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { fetchProfile, type LiveSettings, type Player } from '../api'
+import type { LiveSettings, Player } from '../api'
+import { forgetProfile, loadProfile as loadSharedProfile } from './draft/CellTip'
 import { Chart, type Col } from './draft/Chart'
 import { startersAt } from './draft/finish'
 import { SEASON_GAMES } from './draft/weeks'
@@ -589,11 +590,18 @@ export default function PlayerProfile({
     setLoading(true)
     setError(null)
     try {
-      // `fetchProfile` is typed against api.ts's PlayerProfileData, which
-      // describes the payload as it was before the card redesign; the seven
-      // keys the card actually reads are named in profile/payload.ts. See
-      // that file for why they live there and not in api.ts.
-      const data = await fetchProfile(forPlayerId) as unknown as ProfilePayload
+      // THE ROOM'S OWN PROFILE CACHE, not a second request. This drawer used
+      // to call `fetchProfile` directly, so opening a player the room had
+      // already fetched for a hover panel -- which is most of them, since the
+      // click that opens this drawer usually follows a hover over the same
+      // row -- paid for the same 3.5s payload twice. `loadProfile` is the
+      // cache every other reader of a profile already goes through.
+      //
+      // Typed against api.ts's PlayerProfileData, which describes the payload
+      // as it was before the card redesign; the seven keys the card actually
+      // reads are named in profile/payload.ts. See that file for why they
+      // live there and not in api.ts.
+      const data = await loadSharedProfile(forPlayerId) as unknown as ProfilePayload
       if (playerIdRef.current === forPlayerId) setProfile(data)
     } catch (e) {
       if (playerIdRef.current === forPlayerId) {
@@ -636,6 +644,9 @@ export default function PlayerProfile({
     // still-current toggle isn't needlessly dropped too.
     const forPlayerId = profile.header.player_id
     await onToggleDrafted(profile.header)
+    // The one read that must not be shared: this click CHANGED the thing
+    // being read, so the copy from a moment ago is the state before it.
+    forgetProfile(forPlayerId)
     await loadProfile(forPlayerId)
   }
 

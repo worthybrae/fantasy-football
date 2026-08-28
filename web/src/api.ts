@@ -98,6 +98,72 @@ async function detailText(res: Response): Promise<string> {
   return res.statusText || 'request failed'
 }
 
+// -- one request, however many callers ------------------------------------
+//
+// A single load of the landing page used to fire `/api/demo/live` five times,
+// `/api/market/overview` twice, `/api/market/slot/1` twice and
+// `/api/espn/custody` twice: three components that each show a piece of the
+// same room, each asking for it themselves. Nothing was wrong with any of
+// them individually -- a component that needs a figure should ask for it --
+// and a prop drilled down from the page would have coupled three cards to
+// their parent to save a request.
+//
+// So the deduplication lives here, at the one place every caller already goes
+// through. Two callers in the same tick share one request (the PROMISE is
+// cached, not its result), and a caller a second later gets the answer that
+// just arrived rather than asking again.
+//
+// The window is deliberately short. This is not a data cache -- nothing here
+// is stale-tolerant for long, and a landing page that showed a two-minute-old
+// draft room would be worse than one that fetched twice. Five seconds covers
+// "everything that mounts on one page load" and nothing else.
+const CACHE_MS = 5_000
+
+type CacheEntry = { at: number; pending: boolean; value: Promise<unknown> }
+const REQUESTS = new Map<string, CacheEntry>()
+
+/** One in-flight request per key, and its answer for `ttlMs` afterwards.
+ *
+ *  A rejection is evicted rather than remembered: the point of this is to
+ *  save a round trip, not to make one failure last five seconds. An entry
+ *  that is still in flight is shared regardless of age -- a slow request must
+ *  not be started twice just because it outlived its own TTL. */
+export function cachedGet<T>(
+  key: string, fetcher: () => Promise<T>, ttlMs: number = CACHE_MS,
+): Promise<T> {
+  const hit = REQUESTS.get(key)
+  if (hit && (hit.pending || Date.now() - hit.at < ttlMs)) {
+    return hit.value as Promise<T>
+  }
+  const entry: CacheEntry = { at: Date.now(), pending: true, value: Promise.resolve() }
+  entry.value = fetcher()
+    .then((value) => {
+      entry.pending = false
+      // Measured from when the answer landed, not from when it was asked
+      // for: a request that took two seconds has not already spent two
+      // seconds of its freshness.
+      entry.at = Date.now()
+      return value
+    })
+    .catch((e) => {
+      REQUESTS.delete(key)
+      throw e
+    })
+  REQUESTS.set(key, entry)
+  return entry.value as Promise<T>
+}
+
+/** Drops one key, so the next caller really asks. Used where a push (the
+ *  demo room's event stream) says the answer has changed. */
+export function forgetRequest(key: string): void {
+  REQUESTS.delete(key)
+}
+
+/** Test seam: a module-level cache outlives a test file's mocks. */
+export function forgetRequests(): void {
+  REQUESTS.clear()
+}
+
 export async function fetchPlayers(): Promise<Player[]> {
   const res = await fetch('/api/players')
   if (!res.ok) {
@@ -463,12 +529,27 @@ export interface LiveState {
   my_roster: RosterPlayer[]
 }
 
-export async function fetchLiveState(): Promise<LiveState> {
-  const res = await fetch('/api/live/state')
-  if (!res.ok) {
-    throw new Error(`Failed to load live state (${res.status}): ${await detailText(res)}`)
+/** The room's state. `maxAgeMs` is how stale an answer the CALLER can live
+ *  with, and it defaults to none: the draft room polls this every 2.5s to
+ *  decide whose turn it is, and a cached answer there is a wrong answer. The
+ *  landing page passes a few seconds, because its two readers are asking the
+ *  same question ("is there a room to show?") a few lines apart. */
+export function fetchLiveState(maxAgeMs = 0): Promise<LiveState> {
+  const read = async () => {
+    const res = await fetch('/api/live/state')
+    if (!res.ok) {
+      throw new Error(`Failed to load live state (${res.status}): ${await detailText(res)}`)
+    }
+    return res.json() as Promise<LiveState>
   }
-  return res.json()
+  // A fresh read still SHARES its answer -- it evicts what was there and
+  // puts its own result in the same place. That is what collapses the
+  // landing page's two readers into one request: the poll asks for a fresh
+  // one, the other reader tolerates a few seconds, and it gets the poll's
+  // answer (or joins the request that is already in the air) instead of
+  // opening a second connection for the same sentence.
+  if (maxAgeMs <= 0) forgetRequest('live/state')
+  return cachedGet('live/state', read, maxAgeMs)
 }
 
 export type SelectResult = { player_id: string; espn_id: number; pick_no: number }
@@ -902,10 +983,19 @@ export interface LiveMock {
   shortlist?: LiveMockCandidate[]
 }
 
-export async function fetchLiveMock(): Promise<LiveMock> {
-  const res = await fetch('/api/demo/live')
-  if (!res.ok) throw new Error(await detailText(res))
-  return res.json()
+export function fetchLiveMock(opts: { fresh?: boolean } = {}): Promise<LiveMock> {
+  // `fresh` is the demo room's own read. It polls this on a timer AND on the
+  // event stream's "the room moved" -- and a push arriving inside the shared
+  // window would otherwise be answered with the payload from before the pick
+  // that caused it, which is the one answer that must never come from a
+  // cache. Everything else on the page (the welcome card, the benefits
+  // strip) is showing the same room a moment ago and shares one request.
+  if (opts.fresh) forgetRequest('demo/live')
+  return cachedGet('demo/live', async () => {
+    const res = await fetch('/api/demo/live')
+    if (!res.ok) throw new Error(await detailText(res))
+    return res.json() as Promise<LiveMock>
+  })
 }
 
 // -- drafts you can join without the bookmarklet ---------------------------
@@ -985,10 +1075,15 @@ export async function disconnectEspn(): Promise<void> {
  *  A local lookup -- no ESPN call, no board work -- so it is the right probe
  *  for anything that only needs to know whether to offer a way in. It answers
  *  200 either way; `connected: false` is the ordinary case. */
-export async function fetchCustody(): Promise<{ connected: boolean }> {
-  const res = await fetch('/api/espn/custody')
-  if (!res.ok) throw new Error(await detailText(res))
-  return res.json()
+export function fetchCustody(): Promise<{ connected: boolean }> {
+  // Shared for the same reason the market figures are: the welcome card and
+  // the benefits strip both ask whether there is a session before deciding
+  // whether to introduce the product, and they mount together.
+  return cachedGet('espn/custody', async () => {
+    const res = await fetch('/api/espn/custody')
+    if (!res.ok) throw new Error(await detailText(res))
+    return res.json() as Promise<{ connected: boolean }>
+  })
 }
 
 export async function fetchUpcomingDrafts(): Promise<UpcomingDrafts> {
@@ -1603,11 +1698,13 @@ async function archive<T>(path: string): Promise<T> {
   return res.json()
 }
 
+// Shared: the welcome card, the benefits strip and the mobile gate all state
+// the size of the archive, and on a phone all three mount at once.
 export const fetchMarketOverview = () =>
-  archive<MarketOverview>('/api/market/overview')
+  cachedGet('market/overview', () => archive<MarketOverview>('/api/market/overview'))
 
 export const fetchMarketSlot = (slot: number) =>
-  archive<MarketSlot>(`/api/market/slot/${slot}`)
+  cachedGet(`market/slot/${slot}`, () => archive<MarketSlot>(`/api/market/slot/${slot}`))
 
 export const fetchMarketPlayers = (slot: number) =>
   archive<MarketPlayers>(`/api/market/players?slot=${slot}`)

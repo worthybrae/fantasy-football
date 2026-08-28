@@ -114,7 +114,7 @@ export default function DemoRoom({ onMode, live = false, site = false }: {
 
     const read = async () => {
       try {
-        const body = await fetchLiveMock()
+        const body = await fetchLiveMock({ fresh: true })
         if (cancelled) return
         live = Boolean(body.live)
         if (body.live) {
