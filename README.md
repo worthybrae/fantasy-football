@@ -377,6 +377,7 @@ volume Railway attaches by default is enough for a season, not for several.
 | `LIVE_BUILD_WORKERS` | `3` | Process-pool size for draft-session builds. Set by the image; 3 is the measured value for an 8 GB box (5 costs 8 GB and slows the polls). `0` runs them inline in the request thread, which is what a checkout and the test suite do |
 | `LIVE_MAX_ROOMS` | `150` | Rooms drafting at once before a new connect answers 503 "at capacity". A room already drafting may always reconnect |
 | `WARM_ON_BOOT` | `1` | Build the board, profile and game-points caches at boot so the first reader does not pay for them. `0` in the test suite |
+| `WARM_PROFILES` | `40` | Finished player profiles pre-built after the caches above, ESPN's ranking first. Each one is 239 ms of per-player work the caches above cannot cover, so without this the first card opened after a deploy still pays it. `0` disables; ~7 MB and ~10 s of background CPU at the default |
 | `SEO_WARM`, `DEMO_WARM` | `1` | The ADP pages' aggregation and the demo room's board, built at boot for the same reason |
 | `LIVE_DEFAULT_ROOM` | unset | **Never in production.** Lets a request with no room cookie use a shared default room; the tests and a single-user machine that wants the pre-cookie behaviour |
 | `LIVE_FAKE_SOCKET` | unset | **Never in production.** Replays a recorded draft instead of ESPN's socket; `make load-test` sets it |

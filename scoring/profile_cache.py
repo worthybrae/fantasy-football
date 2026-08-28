@@ -200,14 +200,34 @@ _SEASON_RANK_COLUMNS = ["player_id", "season", "position", "pos_rank_ppg",
 _COMP_POOL_COLUMNS = ["player_id", "name", "season", "position", "games",
                       "ppg", "next_ppg", "change", "nfl_season"]
 
-# One entry per physical database, at ~40 MB each. Unlike the board cache
-# there is no weights component and no drafted component in the key, so the
-# only way to hold more than one live entry is to serve several databases
-# from one process (the API serves one; the test suite makes a fresh
-# tmp_path database per test, which is what this bound is really sized for)
-# or to sit across a pipeline refresh. 4 keeps a refresh's worth of history
-# from pinning 200 MB while still never thrashing in normal use.
-_MAX_ENTRIES = 4
+# One entry per (physical database, scoring rules), at ~46 MB each. Unlike
+# the board cache there is no weights component and no drafted component in
+# the key, so the ways to hold more than one live entry are: serving several
+# databases from one process (the test suite makes a fresh tmp_path database
+# per test, which is what this bound was originally sized for), sitting
+# across a pipeline refresh, and -- the one that matters in production --
+# serving leagues that score differently. `normalize_rules` collapses every
+# full-PPR league onto one shared entry, so it takes genuinely different
+# rules to make a second.
+#
+# 4 -> 6, AND THE MEMORY MATH FOR IT. A frames MISS is 2.102s against an 8 ms
+# hit (measured on data/nfl.duckdb with `clear()` between calls), and this is
+# the only cache the profile endpoint has that a REQUEST can miss on its own
+# -- which makes thrashing here the most expensive thing that can quietly go
+# wrong. The live-room seam in api/main.py (`_league_settings`) is what makes
+# more than one shape plausible at once: a connected draft is priced under
+# ESPN's live settings while every anonymous reader is priced under the
+# stored `league` row, so one owner drafting is already two entries, and two
+# owners in differently-scored rooms is three. Six is that plus headroom
+# across a refresh, and it costs 6 x 46 = ~276 MB resident against 4 x 46 =
+# ~184 MB. That is the whole trade: +92 MB of steady state to stop a 2.1s
+# rebuild landing on somebody's hover.
+#
+# NOT RAISED FURTHER, deliberately. A cold build peaks at 1.67 GB (see this
+# module's docstring), so headroom above the resident figure is not optional,
+# and every entry past the ones actually being asked for is 46 MB held
+# against a case nobody is in.
+_MAX_ENTRIES = 6
 
 _lock = threading.Lock()
 _cache: "OrderedDict[tuple, ProfileFrames]" = OrderedDict()

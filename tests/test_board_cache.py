@@ -234,7 +234,14 @@ def test_warm_builds_all_three_caches(tmp_path, monkeypatch):
     conn = _seed_full(tmp_path)
     builds = _counting_build(monkeypatch)
 
-    assert bc.warm(conn) == ["board", "profile_frames", "game_points"]
+    # The environment decides how many profiles the fourth pass pre-builds;
+    # pinned here so this test says the same thing on a box that has turned
+    # it off. `_seed_full`'s board has one ESPN-ranked player, so the pass
+    # warms one and the board build below is still a hit.
+    monkeypatch.delenv(bc.WARM_PROFILES_ENV, raising=False)
+
+    assert bc.warm(conn) == ["board", "profile_frames", "game_points",
+                             "profiles"]
     assert builds == [1]
     assert len(bc._cache) == 1
     assert len(profile_cache._cache) == 1
@@ -243,6 +250,138 @@ def test_warm_builds_all_three_caches(tmp_path, monkeypatch):
     # ...and the request that follows is served from what it built.
     bc.cached_build_board(conn)
     assert builds == [1]
+
+
+def _seed_ranked_board(tmp_path):
+    """`_seed_full` with four ESPN-ranked players and one ESPN does not rank.
+
+    The ESPN ranks are deliberately NOT the ADP order (the ADP favourite is
+    ESPN's fourth), so a test that asserts on the warmed set is asserting
+    that ESPN's ranking was the one used and not merely that something in
+    board order came out."""
+    conn = _seed_full(tmp_path)
+    write_table(conn, "adp", pd.DataFrame([
+        {"adp_name": "Amon-Ra St Brown", "position": "WR", "team": "DET", "adp": 5.1},
+        {"adp_name": "Second Guy", "position": "RB", "team": "GB", "adp": 12.0},
+        {"adp_name": "Third Guy", "position": "TE", "team": "SF", "adp": 30.0},
+        {"adp_name": "Fourth Guy", "position": "WR", "team": "KC", "adp": 45.0},
+        {"adp_name": "Rookie Guy", "position": "WR", "team": "GB", "adp": 90.0}]))
+    write_table(conn, "espn_adp", pd.DataFrame([
+        {"espn_id": 501, "espn_name": "Amon-Ra St Brown", "position": "WR",
+         "espn_adp": 1.0, "espn_ppr_rank": 4},
+        {"espn_id": 502, "espn_name": "Second Guy", "position": "RB",
+         "espn_adp": 2.0, "espn_ppr_rank": 1},
+        {"espn_id": 503, "espn_name": "Third Guy", "position": "TE",
+         "espn_adp": 3.0, "espn_ppr_rank": 2},
+        {"espn_id": 504, "espn_name": "Fourth Guy", "position": "WR",
+         "espn_adp": 4.0, "espn_ppr_rank": 3}]))
+    return conn
+
+
+def _warmed_ids(profile_cache):
+    """The player_ids in the payload cache. `cached_profile` puts the player
+    last in its key tuple."""
+    return [key[-1] for key in profile_cache._payload_cache]
+
+
+def test_warm_pre_builds_the_top_profiles_in_espn_order(tmp_path, monkeypatch):
+    """The fourth pass. Board, frames and game points are league-wide and
+    every player shares them; what none of them covers is the 239 ms of
+    per-player work a card still costs with all three warm, so the first
+    person to open ANY card after a deploy paid it. Three asked for, three
+    built -- ESPN's top three, not the ADP order and not the player ESPN
+    does not rank at all."""
+    from scoring import profile_cache
+    conn = _seed_ranked_board(tmp_path)
+    monkeypatch.setenv(bc.WARM_PROFILES_ENV, "3")
+
+    assert "profiles" in bc.warm(conn)
+
+    assert _warmed_ids(profile_cache) == ["adp_second_guy", "adp_third_guy",
+                                          "adp_fourth_guy"]
+
+
+def test_warm_profiles_serves_the_request_that_follows(tmp_path, monkeypatch):
+    """What the pass is FOR: the click after the deploy is a lookup. Counted
+    through `build_profile` itself, because a cache that holds the right
+    number of entries under the wrong key would pass the test above."""
+    from scoring import profile as profile_mod
+    from scoring import profile_cache
+    conn = _seed_ranked_board(tmp_path)
+    monkeypatch.setenv(bc.WARM_PROFILES_ENV, "3")
+    bc.warm(conn)
+
+    def boom(*a, **k):
+        raise AssertionError("a warmed profile was rebuilt")
+
+    monkeypatch.setattr(profile_mod, "build_profile", boom)
+    assert profile_cache.cached_profile(conn, "adp_second_guy") is not None
+
+
+def test_warm_profiles_can_be_turned_off(tmp_path, monkeypatch):
+    """The escape hatch for a container too small to spend the CPU. Nothing
+    else about `warm` changes, and the absence is in the returned names
+    rather than only in a log nobody reads."""
+    from scoring import profile_cache
+    conn = _seed_ranked_board(tmp_path)
+    monkeypatch.setenv(bc.WARM_PROFILES_ENV, "0")
+
+    assert bc.warm(conn) == ["board", "profile_frames", "game_points"]
+    assert not profile_cache._payload_cache
+
+
+def test_warm_skips_the_profiles_when_the_board_would_not_build(tmp_path, monkeypatch):
+    """Every profile this pass builds reads the board and the frames. With
+    either cold, each of the forty would build its own -- 1.7s and 2.1s --
+    which is the stampede the rest of this module exists to prevent. A skip
+    is not an incident: it is a correctly cold cache."""
+    from scoring import profile_cache
+    conn = _seed_ranked_board(tmp_path)
+    monkeypatch.setenv(bc.WARM_PROFILES_ENV, "3")
+
+    def boom(*a, **k):
+        raise RuntimeError("no")
+
+    monkeypatch.setattr(bc, "build_board", boom)
+    warmed = bc.warm(conn)
+
+    assert "profiles" not in warmed
+    assert not profile_cache._payload_cache
+
+
+def test_warm_profiles_falls_back_to_board_order_without_espn_ranks(tmp_path, monkeypatch):
+    """An unrefreshed database, or a fixture, has no ESPN ranking to sort by.
+    The point is to warm SOMETHING rather than the ideal set, so the board's
+    own order is a perfectly good second answer -- warming nothing at all
+    would be the wrong reading of a missing column."""
+    from scoring import profile_cache
+    conn = _seed_ranked_board(tmp_path)
+    write_table(conn, "espn_adp", pd.DataFrame(
+        columns=["espn_id", "espn_name", "position", "espn_adp", "espn_ppr_rank"]))
+    monkeypatch.setenv(bc.WARM_PROFILES_ENV, "2")
+
+    assert "profiles" in bc.warm(conn)
+    assert len(profile_cache._payload_cache) == 2
+
+
+def test_warm_profile_count_reads_the_environment(monkeypatch):
+    """Unset, empty and unparseable all mean the default, never zero: this
+    runs on a boot thread nobody is watching, and a typo in a platform
+    variable silently turning a performance feature off is the failure that
+    takes months to notice."""
+    monkeypatch.delenv(bc.WARM_PROFILES_ENV, raising=False)
+    assert bc._warm_profile_count() == bc.DEFAULT_WARM_PROFILES
+    monkeypatch.setenv(bc.WARM_PROFILES_ENV, "  ")
+    assert bc._warm_profile_count() == bc.DEFAULT_WARM_PROFILES
+    monkeypatch.setenv(bc.WARM_PROFILES_ENV, "not-a-number")
+    assert bc._warm_profile_count() == bc.DEFAULT_WARM_PROFILES
+    monkeypatch.setenv(bc.WARM_PROFILES_ENV, "12")
+    assert bc._warm_profile_count() == 12
+    monkeypatch.setenv(bc.WARM_PROFILES_ENV, "0")
+    assert bc._warm_profile_count() == 0
+    # A negative can only sensibly mean off.
+    monkeypatch.setenv(bc.WARM_PROFILES_ENV, "-5")
+    assert bc._warm_profile_count() == 0
 
 
 def test_warm_carries_on_past_a_builder_that_raises(tmp_path, monkeypatch):
