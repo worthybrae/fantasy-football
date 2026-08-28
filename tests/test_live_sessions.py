@@ -1058,6 +1058,50 @@ def test_the_room_cap_refuses_new_rooms_but_not_reconnects(tmp_path, monkeypatch
         _stop_all([a, b])
 
 
+def test_a_refusal_at_capacity_mints_no_room_and_keeps_the_cookie(
+        tmp_path, monkeypatch):
+    """Two ways to arrive at a full server, and neither may leave rubbish
+    behind. A browser with no room cookie is refused before a sid is minted
+    at all, so ten retries are ten refusals and not ten empty rooms waiting
+    on the reaper. A browser that already has a cookie gets it renewed on
+    the 503 itself, so its retry lands in the same room rather than in a
+    new one."""
+    monkeypatch.setenv(live.MAX_ROOMS_ENV, "1")
+    app, seen, stops = _app(tmp_path, monkeypatch)
+    registry = app.state.live_registry
+    a, cookieless, carrying = _client(app), _client(app), _client(app)
+    try:
+        _connect(a, "1", team_id="2")
+        rooms = len(registry.sids())
+
+        for _ in range(3):
+            resp = cookieless.post("/api/live/connect-token", json={
+                "leagueId": "2", "teamId": "2", "swid": "{X}",
+                "token": "tok-2", "season": "2026"})
+            assert resp.status_code == 503, resp.text
+            assert resp.json()["detail"]["error"] == "at capacity"
+        assert cookieless.cookies.get(SID_COOKIE) is None
+        assert len(registry.sids()) == rooms, \
+            "a refusal at capacity minted a room"
+
+        # A browser that already has a room keeps it: the cookie rides back
+        # on the refusal, so the retry is the same sid and not another one.
+        assert carrying.post("/api/live/session").json()["sid_set"] is True
+        sid = carrying.cookies.get(SID_COOKIE)
+        for attempt in range(3):
+            resp = carrying.post("/api/live/connect-token", json={
+                "leagueId": "2", "teamId": "2", "swid": "{X}",
+                "token": "tok-2", "season": "2026"})
+            assert resp.status_code == 503, resp.text
+            assert resp.cookies.get(SID_COOKIE) == sid, resp.headers
+            assert carrying.cookies.get(SID_COOKIE) == sid
+            if attempt == 0:
+                rooms = len(registry.sids())    # its own room, and only it
+        assert len(registry.sids()) == rooms
+    finally:
+        _stop_all([a, cookieless, carrying])
+
+
 def test_the_knobs_read_the_environment(monkeypatch):
     monkeypatch.delenv(live.RECOMPUTE_SLOTS_ENV, raising=False)
     assert 2 <= live.recompute_slots_from_env() <= 8

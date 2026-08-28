@@ -2242,6 +2242,35 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
         _set_sid_cookie(response, sid)
         return sid
 
+    def _refuse_at_capacity(sid=None) -> None:
+        """Refuse a room this server has no room for, unless it has room.
+
+        THE COOKIE HAS TO SURVIVE THE REFUSAL. A 503 raised as an
+        HTTPException is answered by a response FastAPI builds from the
+        exception, not by the `response` the endpoint was handed -- so the
+        Set-Cookie naming this room was dropped on the way out, the browser
+        stayed cookieless, and every retry at capacity minted ANOTHER empty
+        room that only the reaper would ever clear. `sid` puts the cookie
+        back on the refusal itself.
+        """
+        cap = max_rooms_from_env()
+        active = registry.active_count()
+        if active < cap:
+            return
+        headers = None
+        if sid is not None:
+            carrier = Response()
+            _set_sid_cookie(carrier, sid)
+            cookie = carrier.headers.get("set-cookie")
+            if cookie:
+                headers = {"set-cookie": cookie}
+        raise HTTPException(
+            status_code=503, headers=headers,
+            detail={"error": "at capacity", "active": active, "cap": cap,
+                    "message": "This server is following as many drafts as "
+                               "it can right now. Try again in a few "
+                               "minutes."})
+
     def _session_for_connect(request, response) -> LiveSession:
         """The room a connect lands in. A request that already carries a
         cookie reuses that sid, so a second click supersedes only the
@@ -2253,6 +2282,13 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
         drafting; a room that already holds a listener may always
         reconnect -- its socket is what it is trying to replace.
         """
+        # A connect carrying no usable cookie is asking for a room that
+        # does not exist yet, so the cap is checked BEFORE one is minted:
+        # a refusal then leaves no sid, no registry entry and no cookie,
+        # rather than an empty room per retry.
+        fresh = _cookie_sid(request) is None and not _default_room_allowed()
+        if fresh:
+            _refuse_at_capacity()
         sid = _room_sid(request, response)
         s = registry.get_or_create(sid)
         with s.lock:
@@ -2262,17 +2298,8 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
             # The reaper has this one; it will not drop what replaces it.
             s = registry.replace(sid)
             has_listener = False
-        if not has_listener:
-            cap = max_rooms_from_env()
-            active = registry.active_count()
-            if active >= cap:
-                raise HTTPException(
-                    status_code=503,
-                    detail={"error": "at capacity", "active": active,
-                            "cap": cap,
-                            "message": "This server is following as many "
-                                       "drafts as it can right now. Try "
-                                       "again in a few minutes."})
+        if not has_listener and not fresh:
+            _refuse_at_capacity(sid)
         s.touch()
         return s
 
