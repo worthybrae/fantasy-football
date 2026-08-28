@@ -165,11 +165,15 @@ def test_a_thin_denominator_falls_back_too(corpus):
 
 
 def test_the_min_drafts_boundary_is_where_the_spec_puts_it():
+    """The bar for trusting a RATIO. Both of these players go at pick 10 in
+    four fifths of their drafts and last in the rest, so the counts have a
+    real number to offer -- and one of them has 24 drafts behind it, which
+    is not enough to print."""
     curve = {av.SKILL: {}}
-    twenty_five = _hand_table(25, {10: 25}, curve)
-    twenty_four = _hand_table(24, {10: 24}, curve)
+    twenty_five = _hand_table(25, {10: 20}, curve)
+    twenty_four = _hand_table(24, {10: 19}, curve)
     adp = np.array([200.0])
-    assert _at(twenty_five, ["x"], 0, 20, adp)[0] == pytest.approx(0.0)
+    assert _at(twenty_five, ["x"], 0, 20, adp)[0] == pytest.approx(5 / 25)
     assert _at(twenty_four, ["x"], 0, 20, adp)[0] > 0.9
 
 
@@ -269,8 +273,9 @@ def test_the_curve_takes_over_from_where_the_counts_left_him(corpus):
 
 def test_nothing_ever_gets_more_likely_to_last_as_the_pick_gets_later(corpus):
     """The one property the whole number has to have. It is checked across
-    the seam for every player in the corpus, because the seam is exactly
-    where two different estimators meet."""
+    the seam for every player in the corpus, from conditioning picks either
+    side of the corpus's own depth, because the seam is exactly where two
+    different estimators meet."""
     t = av.load_table(corpus)
     ids = list(t.index)
     ranks = np.array([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 20.0, 40.0,
@@ -278,9 +283,24 @@ def test_nothing_ever_gets_more_likely_to_last_as_the_pick_gets_later(corpus):
     order = np.array([{pid: i for i, pid in enumerate(
         EARLY + ["B", "D"] + NEVER)}[pid] for pid in ids])
     adp = ranks[order]
-    walk = np.array([_at(t, ids, 5, n, adp) for n in range(6, 201)])
-    steps = np.diff(walk, axis=0)
-    assert (steps <= 1e-12).all(), ids[int(np.argmax(steps.max(axis=0)))]
+    for k in (0, 5, 39, 40, 45, 90):
+        walk = np.array([_at(t, ids, k, n, adp) for n in range(k + 1, 201)])
+        steps = np.diff(walk, axis=0)
+        assert (steps <= 1e-12).all(), (k, ids[int(
+            np.argmax(steps.max(axis=0)))])
+
+
+def test_once_the_clock_is_past_the_corpus_the_curve_is_all_there_is(corpus):
+    """A censored player asked about pick 150 when 140 picks have already
+    been made. The counts have nothing to carry him with -- they stopped at
+    40 -- so conditioning on 40 rather than on 140 is asking a different
+    question, and it answers it two orders of magnitude too small."""
+    t = av.load_table(corpus)
+    depth = t.max_pick_observed
+    got = _at(t, ["n0"], depth + 5, 60, np.array([100.0]))
+    assert got[0] == pytest.approx(
+        av.fallback_probability(100.0, depth + 5, 60, t))
+    assert got[0] > _at(t, ["n0"], depth, 60, np.array([100.0]))[0]
 
 
 def test_past_the_deepest_pick_a_player_with_no_rank_still_reads_one(corpus):
@@ -456,3 +476,28 @@ def test_a_kicker_the_corpus_always_drafts_does_not_come_back_to_life(
     # seen taken, is still the curve's problem and still on the board.
     receiver = _at(t, ["w0"], 100, 139, np.array([240.0]), positions=["WR"])
     assert receiver[0] > 0.9
+
+
+def test_a_thin_history_that_is_complete_still_proves_he_is_gone(tmp_path):
+    """The reviewer's kicker: pooled in ten drafts, taken by pick 20 in every
+    one of them. Ten is under MIN_DRAFTS, so the ratio he is worth is not
+    trusted -- but "every draft that ever had him took him by 20" is not a
+    ratio, it is a fact, and the curve reading his ESPN rank of 240 as "goes
+    at pick 240" printed him as a certainty at pick 30."""
+    kicker = _hand_table(10, {20: 10}, {av.SKILL: {}}, observed=20)
+    adp = np.array([240.0])
+    assert _at(kicker, ["x"], 5, 30, adp)[0] == pytest.approx(0.0)
+    assert _at(kicker, ["x"], 5, 21, adp)[0] == pytest.approx(0.0)
+    # Before his last pick the thin ratio is still not the answer: MIN_DRAFTS
+    # governs the in-range number exactly as it did.
+    assert _at(kicker, ["x"], 5, 15, adp)[0] == pytest.approx(
+        av.fallback_probability(240.0, 5, 15, kicker))
+
+
+def test_a_handful_of_drafts_is_not_enough_to_call_him_gone(tmp_path):
+    """Four drafts that all took him early is a coincidence, not a history."""
+    thin = _hand_table(4, {20: 4}, {av.SKILL: {}}, observed=20)
+    adp = np.array([240.0])
+    assert _at(thin, ["x"], 5, 30, adp)[0] == pytest.approx(
+        av.fallback_probability(240.0, 5, 30, thin))
+    assert _at(thin, ["x"], 5, 30, adp)[0] > 0.5

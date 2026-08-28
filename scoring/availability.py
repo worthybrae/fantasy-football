@@ -97,6 +97,16 @@ FALLBACK_SIGMA = 12.0
 # sample of drafts supports.
 MIN_SIGMA = 1.0
 
+# How many drafts it takes before "every one of them took him by pick P" is
+# a fact rather than a coincidence. Far below MIN_DRAFTS, and deliberately:
+# MIN_DRAFTS is the bar for trusting a RATIO -- 12 drafts out of 40 is a
+# number nobody should print -- while this is the bar for a statement with no
+# ratio in it at all. Five drafts that unanimously took a player before pick
+# 21 say he is not there at pick 30; the alternative is what the room did
+# before, which was to read a kicker's ESPN rank of 240 off the curve and
+# print him as a certainty.
+MIN_COMPLETE_DRAFTS = 5
+
 # A bucket is only fitted from the picks that actually happened, so it can
 # only be trusted where most of the players in it were actually taken. The
 # corpus is 8-team 16-round -- 128 picks over a pool of 250 -- so past about
@@ -470,13 +480,20 @@ def availability_at(table: AvailabilityTable, player_ids, k: int, n: int,
         depth = table.max_pick_observed
         pooled = table.pooled[rows].astype(float)
         denominator = pooled - table.taken_by[rows, k]
+        numerator = pooled - table.taken_by[rows, n - 1]
         enough = denominator >= MIN_DRAFTS
         # Every pooled draft took him inside the recorded depth. Nothing
         # about him is censored, so the counts answer any pick, however deep.
         complete = table.taken_by[rows, depth] >= pooled
-        direct = enough & ((n <= depth) | complete)
-        out[where[direct]] = ((pooled - table.taken_by[rows, n - 1])[direct]
-                              / denominator[direct])
+        # And every pooled draft took him before THIS pick, which is not a
+        # ratio and does not need MIN_DRAFTS behind it -- it needs enough
+        # drafts to not be a coincidence (MIN_COMPLETE_DRAFTS) and one draft
+        # in which he actually reached the pick we are conditioning on, or
+        # the answer is the 0/0 the curve exists for.
+        gone = ((pooled >= MIN_COMPLETE_DRAFTS) & (numerator <= 0)
+                & (denominator > 0))
+        direct = (enough & ((n <= depth) | complete)) | gone
+        out[where[direct]] = numerator[direct] / denominator[direct]
         counted[where[direct]] = True
         # The rest of the counted players are asked about a pick past the
         # corpus's reach: the counts take them to the end of it and the curve
@@ -485,7 +502,15 @@ def availability_at(table: AvailabilityTable, player_ids, k: int, n: int,
         carry = enough & ~direct
         carried[where[carry]] = ((pooled - table.taken_by[rows, depth])[carry]
                                  / denominator[carry])
-        given[where[carry]] = float(depth)
+        # The depth, or the clock if the clock is already past it. Once `k`
+        # is deeper than anything the corpus recorded, the counts have
+        # nothing left to carry him with -- `taken_by` has been flat since
+        # the depth, so `carried` is 1.0 -- and conditioning the curve on the
+        # depth rather than on `k` asks how likely he was to reach pick 128
+        # when he has demonstrably reached 140. Understated by two orders of
+        # magnitude across the back half of a 12-team draft: 0.0009 against
+        # 0.0339 at k=140, n=150.
+        given[where[carry]] = float(max(depth, k))
 
     rest = ~counted
     if rest.any():
