@@ -25,6 +25,22 @@ def _isolated_leagues_root(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _connects_land_in_the_default_session(monkeypatch):
+    """Every connect in this file lands in the DEFAULT session.
+
+    api.live keys live sessions by the `espn_live` cookie and mints a fresh
+    sid for a connect that has none, so a TestClient's connect would
+    otherwise start a room the `state` dict this file unpacks from
+    register_live_routes cannot see. Pinning the mint to DEFAULT_SID keeps
+    the cookie (the client carries it on every later request) and the
+    unpacked dict pointing at the same room. tests/test_live_sessions.py is
+    where real, distinct sids are exercised.
+    """
+    from api.live import DEFAULT_SID
+    monkeypatch.setattr("api.live._mint_sid", lambda: DEFAULT_SID)
+
+
+@pytest.fixture(autouse=True)
 def _stub_team_slots_fetch(monkeypatch):
     """Keep every connect in this file hermetic. On connect, api.live now
     fetches ESPN's real team names AND the league's real roster/scoring for the

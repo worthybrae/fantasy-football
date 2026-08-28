@@ -1140,7 +1140,7 @@ def test_profile_and_board_price_a_kicker_by_the_live_sessions_league(tmp_path):
     assert board_before["k1"]["game_points"] is None
 
     # A live session, installed exactly where api/live.py installs it.
-    client.app.state.live_settings = lambda: _kicker_league()
+    client.app.state.live_settings = lambda request=None: _kicker_league()
 
     after = client.get("/api/players/k1/profile").json()
     assert [s["season"] for s in after["seasons"]] == [2025]
@@ -1186,11 +1186,11 @@ def test_a_live_session_does_not_serve_its_board_to_a_later_request_without_one(
                     if p["player_id"] == "k1")["stats"]["ppg"]
 
     assert ppg() == 0.0
-    client.app.state.live_settings = lambda: _kicker_league()
+    client.app.state.live_settings = lambda request=None: _kicker_league()
     assert ppg() == 9.0
-    client.app.state.live_settings = lambda: None
+    client.app.state.live_settings = lambda request=None: None
     assert ppg() == 0.0
-    client.app.state.live_settings = lambda: _kicker_league()
+    client.app.state.live_settings = lambda request=None: _kicker_league()
     assert ppg() == 9.0
 
 
@@ -1203,7 +1203,7 @@ def test_a_connected_session_does_not_rebuild_the_board_on_every_request(tmp_pat
     import scoring.board_cache as bc
     client = _kicker_app(tmp_path)
     settings = _kicker_league()
-    client.app.state.live_settings = lambda: settings
+    client.app.state.live_settings = lambda request=None: settings
 
     builds = []
     real = bc.build_board

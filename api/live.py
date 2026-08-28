@@ -20,7 +20,7 @@ import pandas as pd
 from pipeline.db import get_conn, read_table
 from pipeline.espn_live import build_crosswalk
 from scoring import league as league_mod
-from scoring.board import build_board
+from scoring.board_cache import cached_build_board
 from scoring.draft_model import FEATURE_NAMES, fit_all
 from scoring.draft_sim import build_pool, cold_start_opponent
 
@@ -199,7 +199,11 @@ def build_session(conn, my_slot: int | None, seed: int = DEFAULT_SEED,
         settings = league_mod.load(conn)
 
     progress.begin("board")
-    board = build_board(conn, settings=settings)
+    # Through the process-wide board cache, not a raw build_board: a build is
+    # 1.5-1.9s and the better part of a gigabyte of transient memory, and
+    # with many sessions connecting against the same settings the second and
+    # every later connect is a cache hit rather than another gigabyte.
+    board = cached_build_board(conn, settings=settings)
     board = _attach_espn_proj(conn, board)
     progress.ok("board", f"{len(board)} players")
     progress.fact(players=int(len(board)))
@@ -269,6 +273,7 @@ def build_session(conn, my_slot: int | None, seed: int = DEFAULT_SEED,
 
 
 import re
+import secrets
 import threading
 import time
 
@@ -683,6 +688,24 @@ def session_record_path(db_path: str) -> str:
     return str(db_path) + SESSION_RECORD_SUFFIX
 
 
+def session_record_body(league_id, team_id, season, swid, token,
+                        my_slot=None) -> dict:
+    """The record itself, as one dict: what a restart needs to reopen the
+    socket and nothing more. Shared by the legacy single-file writer below
+    and the per-session store (api/live_records.py), so the two cannot
+    disagree about the shape."""
+    return {
+        "version": SESSION_RECORD_VERSION,
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "league_id": str(league_id),
+        "team_id": str(team_id),
+        "season": str(season or ""),
+        "swid": str(swid),
+        "token": str(token),
+        "my_slot": None if my_slot is None else int(my_slot),
+    }
+
+
 def save_session_record(db_path, league_id, team_id, season, swid, token,
                         my_slot=None) -> str:
     """Write (or replace) the live-session record. Returns its path.
@@ -696,16 +719,8 @@ def save_session_record(db_path, league_id, team_id, season, swid, token,
     """
     path = session_record_path(db_path)
     tmp = f"{path}.tmp"
-    body = {
-        "version": SESSION_RECORD_VERSION,
-        "saved_at": datetime.now(timezone.utc).isoformat(),
-        "league_id": str(league_id),
-        "team_id": str(team_id),
-        "season": str(season or ""),
-        "swid": str(swid),
-        "token": str(token),
-        "my_slot": None if my_slot is None else int(my_slot),
-    }
+    body = session_record_body(league_id, team_id, season, swid, token,
+                               my_slot=my_slot)
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as fh:
         json.dump(body, fh)
@@ -1531,6 +1546,301 @@ def _espn_id_for(board_row) -> int | None:
     return None
 
 
+# -- one session per drafter -------------------------------------------------
+#
+# The live routes used to keep ONE `state` dict for the whole process, which
+# was correct for one person on one machine and wrong for a deployment: the
+# second person to click the bookmarklet stopped the first person's draft.
+# A session is now keyed by a cookie, `SID_COOKIE`, minted by the connect
+# endpoints when the request has none. The custody cookie still names the
+# ACCOUNT (api/custody.py); this one names the DRAFT ROOM a browser is
+# looking at, and the two are deliberately separate -- a bookmarklet connect
+# with no espn_s2 has no account at all and still needs a room of its own.
+SID_COOKIE = "espn_live"
+SID_MAX_AGE = 12 * 3600
+# The session a request with no cookie resolves to. Nothing in production
+# ever connects under it -- a connect with no cookie mints a fresh sid first
+# -- so a stranger polling without a cookie sees `active: false`. It exists
+# for the tests, which unpack `(state, _recompute)` from register_live_routes
+# and poke that dict directly, and for the pre-cookie single-file session
+# record, which the file-backed record store reports under this sid.
+DEFAULT_SID = "__default__"
+
+
+def _initial_state() -> dict:
+    """A fresh session's state, every key present from the start.
+
+    The keys and their meaning are documented on the dict literal itself;
+    it is a function rather than a module constant so each LiveSession gets
+    its own copy.
+    """
+    return {"session": None, "last_poll_at": None, "unmapped": [],
+            "candidates": [], "as_of_pick": None, "computing_for": None,
+            # The pick `candidates` was ranked against (see _recompute).
+            # Written and cleared with `candidates` everywhere, never on
+            # its own: a horizon left over from a previous session would
+            # caption the new one's list with the old one's pick number.
+            "horizon_pick": None,
+            # Pick count as the SOCKET has seen it, which is ahead of
+            # everything derived from it: `as_of_pick` trails it by a
+            # ranking. The event stream watches this so a pick reaches the
+            # room the moment ESPN sends it, rather than whenever the room
+            # next asks.
+            "picks_seen": 0,
+            # Bumped by live_start and live_stop. A stop/start cycle resets
+            # as_of_pick to None, which blinds the pick-count guard below --
+            # a stale _recompute launched under the old session would see
+            # `state["as_of_pick"] is not None` as False and sail through.
+            # The generation is the guard that catches session identity
+            # rather than pick count; the two check different things and
+            # dropping either leaves a hole.
+            "generation": 0,
+            # The socket listener's own lifecycle, set only by live_connect
+            # and cleared only by _stop_listener. `listener` is the live
+            # DraftListener instance -- checked by identity (`is`), not by
+            # generation number, so a superseded listener's own in-flight
+            # websocket callback (which is not gated by `listener_stop`;
+            # see run_listener) can still recognise it is no longer the
+            # active one and skip writing. `listener_thread` is what
+            # _stop_listener joins on. `listener_error` carries the text of
+            # any exception that killed the thread, so a dead listener is
+            # visible on /api/live/state instead of failing silently.
+            "listener": None, "listener_thread": None,
+            "listener_stop": None, "listener_error": None,
+            # The recompute worker's own last failure, same job
+            # `listener_error` does for the listener thread and separate
+            # from it because they fail independently: the listener can be
+            # perfectly healthy (frames arriving, picks landing, the board
+            # updating) while ranking has stopped dead. `listener_alive`
+            # tracks the listener thread and says nothing about this one,
+            # so without this key a dead worker is invisible -- candidates
+            # and as_of_pick simply freeze at the pick they last reached
+            # and the room keeps presenting them. Set and cleared only in
+            # recompute_worker, under `lock` and identity-guarded like
+            # every other write, so a superseded listener's worker cannot
+            # clobber its replacement's status.
+            "recompute_error": None,
+            # The live socket's send path, published by run_socket_listener
+            # via its on_socket callback (see pipeline.draft_socket.
+            # SocketHandle) exactly once, right after the first successful
+            # connect. None whenever no socket session is running -- either
+            # never started, still connecting, or torn down by
+            # _stop_listener -- so /api/live/select can refuse a SELECT
+            # rather than pretend one has somewhere to go. Only ever
+            # non-None for the connect-token (bookmarklet) path;
+            # live_connect's browser observer has no socket of its own to
+            # publish, so a session started that way always finds this None
+            # and /api/live/select correctly refuses with 503.
+            "socket": None,
+            # The per-session recompute worker (see _launch_listener):
+            # survival/rank_available still take real time (a fraction of a
+            # second, see SURVIVAL_ROLLOUTS), so it runs here, off the
+            # frame-reading thread, or a fast draft's frames would pile up
+            # unread behind it. Tracked so _stop_listener joins it before
+            # closing league_conn -- the worker holds a cursor on that
+            # connection mid-search, so closing it out from under the worker
+            # would be a use-after-close, the same hazard listener_thread
+            # guards against.
+            "recompute_thread": None,
+            # The session's own connection when it was built for a
+            # non-default league (None for the default league, which uses
+            # `conn` and never touches this). Set only by live_connect,
+            # closed and cleared only by _stop_listener, and only once it
+            # has confirmed the listener thread actually exited -- never on
+            # a join timeout, when the thread might still be using it (see
+            # _stop_listener's and live_stop's docstrings). DuckDB is
+            # single-writer per file, so a league's connection left open
+            # after its session truly ends would make every future
+            # reconnect to that same league fail; closing one a thread is
+            # still using would be worse.
+            "league_conn": None,
+            # The live ConnectProgress for the most recent connect (see the
+            # class, and GET /api/live/connect-progress). Deliberately the
+            # object, not a rendered snapshot: it is mutated only under
+            # `lock` and snapshotted only under `lock`, so the endpoint
+            # cannot serve a half-written stage, and the elapsed figure is
+            # computed at request time instead of freezing between stages.
+            # Survives the connect that built it -- the screen is still
+            # reading it while the socket opens and the first ranking lands,
+            # both of which happen after the connect handler has returned.
+            "connect": None,
+            # Bumped for every connect attempt, valid or not. The identity
+            # guard for progress writes, exactly as `listener` is for state
+            # writes: a superseded connect's late callback (its listener
+            # thread dying, its recompute worker finishing) must not write
+            # over the record of the connect that replaced it. A counter and
+            # not the object itself because the object is what it guards.
+            "connect_seq": 0,
+            # The startup restore's thread (see _restore_saved_sessions), or
+            # None when there was no saved session to restore for this sid.
+            # Kept for exactly two reasons: /api/live/state reports
+            # `restoring` off its is_alive(), which is the only thing that
+            # tells the room "your draft is coming back" apart from "there is
+            # no draft", and a test can join it instead of sleeping. Never
+            # joined by the app itself -- it is a daemon and the API must come
+            # up without waiting for it, which is the whole point of it being
+            # a thread.
+            "restore_thread": None,
+            # Why the restore could not rebuild the session, if it failed
+            # before it ever reached a listener (a board build that raised,
+            # a league file that would not open). Separate from
+            # listener_error, which needs a listener to exist to be set --
+            # a restore that dies in build_session has none, and without
+            # this key that failure is indistinguishable from "no draft was
+            # running", which is the exact silence this whole change is
+            # about. The socket refusing an expired token is NOT this: that
+            # happens after the listener is registered, and is reported
+            # through listener_error, exactly as it always was.
+            "restore_error": None}
+
+
+class LiveSession:
+    """One drafter's room: the state dict, the lock that guards it, and a
+    liveness stamp for the reaper.
+
+    `state` is exactly the dict the routes have always read and written;
+    `lock` is a plain threading.Lock (not an RLock, see ConnectProgress's
+    docstring for why that matters) and is only ever taken for this
+    session's own state, so two hundred rooms polling at once contend on
+    two hundred different locks rather than one.
+    """
+
+    def __init__(self, sid: str):
+        self.sid = sid
+        self.state = _initial_state()
+        self.lock = threading.Lock()
+        self.last_activity = time.monotonic()
+
+    def touch(self) -> None:
+        """Stamp liveness. Called on every route hit and every socket
+        frame; the reaper (a later task) drops rooms nobody has touched."""
+        self.last_activity = time.monotonic()
+
+
+class LiveRegistry:
+    """Every live session in this process, by sid."""
+
+    def __init__(self):
+        self._sessions: dict[str, LiveSession] = {}
+        self._lock = threading.Lock()
+        # The startup restore's thread, shared by every session it rebuilds;
+        # each restored session also carries it in state["restore_thread"].
+        self.restore_thread = None
+
+    def get(self, sid: str) -> "LiveSession | None":
+        with self._lock:
+            return self._sessions.get(sid)
+
+    def get_or_create(self, sid: str) -> LiveSession:
+        with self._lock:
+            s = self._sessions.get(sid)
+            if s is None:
+                s = LiveSession(sid)
+                self._sessions[sid] = s
+            return s
+
+    def drop(self, sid: str) -> None:
+        with self._lock:
+            self._sessions.pop(sid, None)
+
+    def sids(self) -> list[str]:
+        with self._lock:
+            return list(self._sessions)
+
+    def active_count(self) -> int:
+        """How many sessions currently hold a listener -- the number of
+        drafts actually being followed, not the number of cookies seen."""
+        with self._lock:
+            sessions = list(self._sessions.values())
+        n = 0
+        for s in sessions:
+            with s.lock:
+                if s.state["listener"] is not None:
+                    n += 1
+        return n
+
+
+def sid_for(request) -> str:
+    """Which session a request is about: its cookie, or the default."""
+    value = request.cookies.get(SID_COOKIE) if request is not None else None
+    return value or DEFAULT_SID
+
+
+def _mint_sid() -> str:
+    """A fresh session id. Module-level so a test can pin it."""
+    return secrets.token_urlsafe(24)
+
+
+def _set_sid_cookie(response, sid: str, request=None) -> None:
+    """Hand the browser its room.
+
+    `secure` follows the wire the request actually arrived on -- TLS, or a
+    proxy that says it ended TLS -- rather than the custody cookie's
+    stricter rule. A browser drops a Secure cookie set over plain HTTP, and
+    the owner's own `make up` at http://localhost is a plain-HTTP room that
+    must keep finding itself on the next poll. Over HTTPS it is Secure, as
+    the custody cookie is.
+    """
+    secure = False
+    if request is not None:
+        forwarded = request.headers.get("x-forwarded-proto", "")
+        secure = (request.url.scheme == "https"
+                  or forwarded.split(",")[0].strip().lower() == "https")
+    response.set_cookie(SID_COOKIE, sid, max_age=SID_MAX_AGE, httponly=True,
+                        secure=secure, samesite="lax", path="/")
+
+
+def live_settings(request):
+    """The league the request's own live session is priced under, or None.
+
+    The accessor api/main.py's board and profile endpoints call, so a
+    profile opened beside a running draft room is priced under that room's
+    real ESPN settings rather than the stored `league` row. Reads the
+    registry off the app the request arrived on.
+    """
+    accessor = getattr(request.app.state, "live_settings", None)
+    return accessor(request) if accessor is not None else None
+
+
+class _LegacyRecordStore:
+    """The single-file session record, behind the per-sid store interface.
+
+    Used only when api/live_records.py is not importable. Every sid maps to
+    the one legacy file, which is exactly the pre-cookie behaviour.
+    """
+
+    def __init__(self, db_path):
+        self.db_path = db_path
+
+    def save(self, sid, record) -> None:
+        save_session_record(self.db_path, record["league_id"],
+                            record["team_id"], record["season"],
+                            record["swid"], record["token"],
+                            my_slot=record.get("my_slot"))
+
+    def load(self, sid, now=None):
+        return load_session_record(self.db_path, now=now)
+
+    def load_all(self, now=None) -> dict:
+        record = load_session_record(self.db_path, now=now)
+        return {} if record is None else {DEFAULT_SID: record}
+
+    def delete(self, sid) -> None:
+        clear_session_record(self.db_path)
+
+
+def _records(db_path):
+    """The per-session record store: api/live_records.py's when present
+    (files, or Postgres when SUPABASE_DB_URL is set), the single-file
+    fallback otherwise. Imported lazily so this module has no import-order
+    dependency on it."""
+    try:
+        from api.live_records import record_store
+    except ImportError:
+        return _LegacyRecordStore(db_path)
+    return record_store(db_path)
+
+
 def register_live_routes(app, conn, db_path):
     """Mount live-draft endpoints.
 
@@ -1557,156 +1867,109 @@ def register_live_routes(app, conn, db_path):
     the connection the default league's session builds against, exactly as
     before Task 5.
     """
-    state = {"session": None, "last_poll_at": None, "unmapped": [],
-             "candidates": [], "as_of_pick": None, "computing_for": None,
-             # The pick `candidates` was ranked against (see _recompute).
-             # Written and cleared with `candidates` everywhere, never on
-             # its own: a horizon left over from a previous session would
-             # caption the new one's list with the old one's pick number.
-             "horizon_pick": None,
-             # Pick count as the SOCKET has seen it, which is ahead of
-             # everything derived from it: `as_of_pick` trails it by a
-             # ranking. The event stream watches this so a pick reaches the
-             # room the moment ESPN sends it, rather than whenever the room
-             # next asks.
-             "picks_seen": 0,
-             # Bumped by live_start and live_stop. A stop/start cycle resets
-             # as_of_pick to None, which blinds the pick-count guard below --
-             # a stale _recompute launched under the old session would see
-             # `state["as_of_pick"] is not None` as False and sail through.
-             # The generation is the guard that catches session identity
-             # rather than pick count; the two check different things and
-             # dropping either leaves a hole.
-             "generation": 0,
-             # The socket listener's own lifecycle, set only by live_connect
-             # and cleared only by _stop_listener. `listener` is the live
-             # DraftListener instance -- checked by identity (`is`), not by
-             # generation number, so a superseded listener's own in-flight
-             # websocket callback (which is not gated by `listener_stop`;
-             # see run_listener) can still recognise it is no longer the
-             # active one and skip writing. `listener_thread` is what
-             # _stop_listener joins on. `listener_error` carries the text of
-             # any exception that killed the thread, so a dead listener is
-             # visible on /api/live/state instead of failing silently.
-             "listener": None, "listener_thread": None,
-             "listener_stop": None, "listener_error": None,
-             # The recompute worker's own last failure, same job
-             # `listener_error` does for the listener thread and separate
-             # from it because they fail independently: the listener can be
-             # perfectly healthy (frames arriving, picks landing, the board
-             # updating) while ranking has stopped dead. `listener_alive`
-             # tracks the listener thread and says nothing about this one,
-             # so without this key a dead worker is invisible -- candidates
-             # and as_of_pick simply freeze at the pick they last reached
-             # and the room keeps presenting them. Set and cleared only in
-             # recompute_worker, under `lock` and identity-guarded like
-             # every other write, so a superseded listener's worker cannot
-             # clobber its replacement's status.
-             "recompute_error": None,
-             # The live socket's send path, published by run_socket_listener
-             # via its on_socket callback (see pipeline.draft_socket.
-             # SocketHandle) exactly once, right after the first successful
-             # connect. None whenever no socket session is running -- either
-             # never started, still connecting, or torn down by
-             # _stop_listener -- so /api/live/select can refuse a SELECT
-             # rather than pretend one has somewhere to go. Only ever
-             # non-None for the connect-token (bookmarklet) path;
-             # live_connect's browser observer has no socket of its own to
-             # publish, so a session started that way always finds this None
-             # and /api/live/select correctly refuses with 503.
-             "socket": None,
-             # The per-session recompute worker (see _launch_listener):
-             # survival/rank_available still take real time (a fraction of a
-             # second, see SURVIVAL_ROLLOUTS), so it runs here, off the
-             # frame-reading thread, or a fast draft's frames would pile up
-             # unread behind it. Tracked so _stop_listener joins it before
-             # closing league_conn -- the worker holds a cursor on that
-             # connection mid-search, so closing it out from under the worker
-             # would be a use-after-close, the same hazard listener_thread
-             # guards against.
-             "recompute_thread": None,
-             # The session's own connection when it was built for a
-             # non-default league (None for the default league, which uses
-             # `conn` and never touches this). Set only by live_connect,
-             # closed and cleared only by _stop_listener, and only once it
-             # has confirmed the listener thread actually exited -- never on
-             # a join timeout, when the thread might still be using it (see
-             # _stop_listener's and live_stop's docstrings). DuckDB is
-             # single-writer per file, so a league's connection left open
-             # after its session truly ends would make every future
-             # reconnect to that same league fail; closing one a thread is
-             # still using would be worse.
-             "league_conn": None,
-             # The live ConnectProgress for the most recent connect (see the
-             # class, and GET /api/live/connect-progress). Deliberately the
-             # object, not a rendered snapshot: it is mutated only under
-             # `lock` and snapshotted only under `lock`, so the endpoint
-             # cannot serve a half-written stage, and the elapsed figure is
-             # computed at request time instead of freezing between stages.
-             # Survives the connect that built it -- the screen is still
-             # reading it while the socket opens and the first ranking lands,
-             # both of which happen after the connect handler has returned.
-             "connect": None,
-             # Bumped for every connect attempt, valid or not. The identity
-             # guard for progress writes, exactly as `listener` is for state
-             # writes: a superseded connect's late callback (its listener
-             # thread dying, its recompute worker finishing) must not write
-             # over the record of the connect that replaced it. A counter and
-             # not the object itself because the object is what it guards.
-             "connect_seq": 0,
-             # The startup restore's own thread (see _restore_saved_session),
-             # or None when there was no saved session to restore. Kept for
-             # exactly two reasons: /api/live/state reports `restoring` off
-             # its is_alive(), which is the only thing that tells the room
-             # "your draft is coming back" apart from "there is no draft",
-             # and a test can join it instead of sleeping. Never joined by
-             # the app itself -- it is a daemon and the API must come up
-             # without waiting for it, which is the whole point of it being
-             # a thread.
-             "restore_thread": None,
-             # Why the restore could not rebuild the session, if it failed
-             # before it ever reached a listener (a board build that raised,
-             # a league file that would not open). Separate from
-             # listener_error, which needs a listener to exist to be set --
-             # a restore that dies in build_session has none, and without
-             # this key that failure is indistinguishable from "no draft was
-             # running", which is the exact silence this whole change is
-             # about. The socket refusing an expired token is NOT this: that
-             # happens after the listener is registered, and is reported
-             # through listener_error, exactly as it always was.
-             "restore_error": None}
-    lock = threading.Lock()
+    registry = LiveRegistry()
+    # The session requests with no cookie resolve to. Created eagerly so
+    # `(state, _recompute)` -- what this function returns, and what a dozen
+    # tests unpack -- always names a real dict. See DEFAULT_SID.
+    default = registry.get_or_create(DEFAULT_SID)
 
-    def live_settings():
-        """The league the running session is priced under, or None.
+    def _session_for(request) -> "LiveSession | None":
+        """The request's own room, or None. Stamps liveness on the way."""
+        s = registry.get(sid_for(request))
+        if s is not None:
+            s.touch()
+        return s
 
-        PUBLISHED ON `app.state` (at the bottom of this function) for exactly
-        one consumer: api/main.py's board and profile endpoints, which
-        otherwise price everything on the STORED `league` row -- the newest
-        imported season's, which on the owner's database is 2025 and scores no
+    def _session_for_connect(request, response) -> LiveSession:
+        """The room a connect lands in: the cookie's, or a freshly minted
+        one whose cookie rides back on `response`. A request that already
+        carries a cookie reuses that sid, so a second click supersedes only
+        the clicker's own draft and never anybody else's."""
+        sid = request.cookies.get(SID_COOKIE)
+        if not sid:
+            sid = _mint_sid()
+            _set_sid_cookie(response, sid, request)
+        s = registry.get_or_create(sid)
+        s.touch()
+        return s
+
+    def _settings_accessor(request=None):
+        """The league the request's session is priced under, or None.
+
+        PUBLISHED ON `app.state.live_settings` for exactly one consumer:
+        api/main.py's board and profile endpoints, which otherwise price
+        everything on the STORED `league` row -- the newest imported
+        season's, which on the owner's database is 2025 and scores no
         kicking at all. A connect fetches the real roster and scoring from
         ESPN (`_league_settings_from_espn`) and builds the session on it, so
         while a draft is running the room and the profile beside it were
         working from two different leagues.
 
-        An accessor, not the `state` dict itself, because `state` is only
-        safe to touch under `lock` and that discipline must not leak into
-        another module. One slot is read under the lock and the frozen
+        An accessor, not the state dict itself, because state is only safe
+        to touch under its session's lock and that discipline must not leak
+        into another module. One slot is read under the lock and the frozen
         LeagueSettings hanging off the frozen DraftSession is returned: both
         are replaced wholesale by dataclasses.replace, never mutated, so the
-        caller cannot see a half-updated session and its answer cannot change
-        underneath the request that asked.
+        caller cannot see a half-updated session and its answer cannot
+        change underneath the request that asked.
 
         `getattr` with a None default rather than `session.settings`: a
         DraftSession built directly by a test may carry no settings at all,
         and "no settings" has to mean the same thing as "no session" --
-        api/main.py falls back to `league.load` for both.
+        api/main.py falls back to `league.load` for both. No request means
+        the default session, which is what a test that installs a session
+        through the returned state dict is asking about.
         """
-        with lock:
-            session = state["session"]
+        s = registry.get(sid_for(request)) if request is not None else default
+        if s is None:
+            return None
+        with s.lock:
+            session = s.state["session"]
         return getattr(session, "settings", None)
 
-    def _new_progress(token_path: bool, **facts):
+    # -- the session record, per sid ----------------------------------------
+    # The default session keeps the single legacy file (session_record_path)
+    # so the pre-cookie tests and a pre-cookie deployment's saved draft keep
+    # working; every other sid goes through the per-session store.
+
+    def _save_record(s, league_id, team_id, season, swid, token, my_slot):
+        if s.sid == DEFAULT_SID:
+            save_session_record(db_path, league_id=league_id, team_id=team_id,
+                                season=season, swid=swid, token=token,
+                                my_slot=my_slot)
+            return
+        _records(db_path).save(s.sid, session_record_body(
+            league_id, team_id, season, swid, token, my_slot=my_slot))
+
+    def _record_exists(s) -> bool:
+        if s.sid == DEFAULT_SID:
+            return os.path.exists(session_record_path(db_path))
+        return _records(db_path).load(s.sid) is not None
+
+    def _delete_record(s) -> None:
+        if s.sid == DEFAULT_SID:
+            clear_session_record(db_path)
+            return
+        _records(db_path).delete(s.sid)
+
+    def _load_all_records() -> dict:
+        """Every saved session younger than the age bound, by sid: the
+        legacy single file as the default sid, plus the per-session store's.
+        The legacy read wins on a sid collision, since the store's own file
+        backend reports that same file under DEFAULT_SID too."""
+        records = {}
+        try:
+            records.update(_records(db_path).load_all())
+        except Exception as exc:      # noqa: BLE001 -- a store that cannot be
+            # read at boot must not stop the API from starting; the draft
+            # simply is not restored, and the owner can click the bookmark.
+            print(f"live: could not read saved sessions: {exc}")
+        legacy = load_session_record(db_path)
+        if legacy is not None:
+            records[DEFAULT_SID] = legacy
+        return records
+
+    def _new_progress(s, token_path: bool, **facts):
         """Open a progress record for a connect that is about to run.
 
         Publishes the whole stage plan up front -- every row pending -- so
@@ -1724,6 +1987,7 @@ def register_live_routes(app, conn, db_path):
         they hold the request thread, so their own supersession is already
         handled by _connect_work's _stop_listener.
         """
+        state, lock = s.state, s.lock
         with lock:
             state["connect_seq"] += 1
             seq = state["connect_seq"]
@@ -1744,8 +2008,8 @@ def register_live_routes(app, conn, db_path):
         progress.fact(**facts)      # the first publish, which registers it
         return progress, seq
 
-    def _stop_listener(timeout: float = LISTENER_STOP_TIMEOUT) -> bool:
-        """Signal the active listener thread to stop and wait for it to exit.
+    def _stop_listener(s, timeout: float = LISTENER_STOP_TIMEOUT) -> bool:
+        """Signal the session's listener thread to stop and wait for it to exit.
 
         Not called with `lock` held: joining a thread while holding it would
         block anyone else who needs `state` -- including, briefly, the very
@@ -1768,6 +2032,7 @@ def register_live_routes(app, conn, db_path):
         (see live_connect) would deadlock or error against one this function
         left open.
         """
+        state, lock = s.state, s.lock
         with lock:
             stop_event = state["listener_stop"]
             thread = state["listener_thread"]
@@ -1799,7 +2064,7 @@ def register_live_routes(app, conn, db_path):
             old_league_conn.close()
         return True
 
-    def _recompute(session, picks_made):
+    def _recompute(s, session, picks_made):
         """Run one ranking and store it, unless superseded meanwhile.
 
         A result computed against a board that has since changed is worse
@@ -1817,6 +2082,7 @@ def register_live_routes(app, conn, db_path):
         """
         if session.my_slot is None:
             return
+        state, lock = s.state, s.lock
         with lock:
             generation = state["generation"]
             # The connection this session's own data lives on: the shared
@@ -2041,7 +2307,7 @@ def register_live_routes(app, conn, db_path):
 
     _SCORING_LABELS = {"ppr": "PPR", "half": "half-PPR", "std": "standard"}
 
-    def _connect_work(progress, league_id, team_id, season):
+    def _connect_work(s, progress, league_id, team_id, season):
         """Everything both connect endpoints do between validating their own
         input and launching the listener, in one place so the two paths
         cannot drift -- and so the stages are recorded identically for both.
@@ -2053,14 +2319,15 @@ def register_live_routes(app, conn, db_path):
         _provision_and_build/build_session.
         """
         progress.begin("reset")
-        # Exactly one listener at a time. Rather than refuse a reconnect --
+        # Exactly one listener per session. Rather than refuse a reconnect --
         # which would trap a caller recovering from a dead listener behind a
-        # separate, easy-to-forget /api/live/stop -- the old one is always
-        # stopped and joined FIRST. That is also where its per-league
-        # connection is closed, so the single-writer DuckDB file is free
-        # before _provision_and_build reopens it. If it will not stop in
-        # time, refuse rather than race it.
-        if not _stop_listener():
+        # separate, easy-to-forget /api/live/stop -- this session's old one
+        # is always stopped and joined FIRST. That is also where its
+        # per-league connection is closed, so the single-writer DuckDB file
+        # is free before _provision_and_build reopens it. If it will not stop
+        # in time, refuse rather than race it. Other sessions are untouched:
+        # another drafter's room is theirs, whatever league it is in.
+        if not _stop_listener(s):
             progress.fail(
                 "reset", "the previous listener is still running",
                 hint="Wait a few seconds and click the bookmark again. Two "
@@ -2151,7 +2418,7 @@ def register_live_routes(app, conn, db_path):
                 "starters": dict(settings.starters),
                 "flex_slots": settings.flex_slots, "bench": settings.bench}
 
-    def _remember_my_slot(league_id, slot) -> None:
+    def _remember_my_slot(s, league_id, slot) -> None:
         """Update the saved session's slot, if this session is the saved one.
 
         UPDATES ONLY -- it never creates a record. Two guards, and both are
@@ -2172,21 +2439,24 @@ def register_live_routes(app, conn, db_path):
         the socket relearns from ESPN's JOIN replay anyway, whenever the
         token is still good -- rather than killing the listener mid-draft.
         """
-        if not os.path.exists(session_record_path(db_path)):
+        try:
+            if not _record_exists(s):
+                return
+        except Exception:      # noqa: BLE001 -- see the docstring
             return
-        with lock:
-            tok = state.get("token")
+        with s.lock:
+            tok = s.state.get("token")
         if not tok or str(tok.get("league_id")) != str(league_id):
             return
         try:
-            save_session_record(db_path, league_id=tok["league_id"],
-                                team_id=tok["team_id"], season=tok["season"],
-                                swid=tok["swid"], token=tok["token"],
-                                my_slot=slot)
-        except OSError:      # noqa: BLE001 -- see the docstring
+            _save_record(s, league_id=tok["league_id"],
+                         team_id=tok["team_id"], season=tok["season"],
+                         swid=tok["swid"], token=tok["token"],
+                         my_slot=slot)
+        except Exception:      # noqa: BLE001 -- see the docstring
             pass
 
-    def _socket_run_fn(league_id, team_id, swid, token, progress):
+    def _socket_run_fn(s, league_id, team_id, swid, token, progress):
         """The bookmarklet path's `run_fn`, for _launch_listener.
 
         One factory rather than the same closure written out at each call
@@ -2204,9 +2474,9 @@ def register_live_routes(app, conn, db_path):
                 # listener by the time the connect finishes, this callback
                 # must not resurrect a socket for a session that is no
                 # longer the active one.
-                with lock:
-                    if state["listener"] is listener:
-                        state["socket"] = handle
+                with s.lock:
+                    if s.state["listener"] is listener:
+                        s.state["socket"] = handle
                 # After the block, never inside it: `lock` is a plain Lock
                 # and ConnectProgress takes it (see its docstring). This is
                 # the first and only moment ESPN itself has accepted the
@@ -2219,7 +2489,7 @@ def register_live_routes(app, conn, db_path):
                                 on_activity=on_activity, on_socket=_on_socket)
         return run_fn
 
-    def _launch_listener(work_conn, league_conn, league_id, session, run_fn,
+    def _launch_listener(s, work_conn, league_conn, league_id, session, run_fn,
                          progress=None, guard_seq=None, guard_gen=None):
         """Register a built session's listener thread and start it.
 
@@ -2258,6 +2528,7 @@ def register_live_routes(app, conn, db_path):
         otherwise have the restore bring a session back up underneath them.
         """
         progress = progress or _NO_PROGRESS
+        state, lock = s.state, s.lock
         listener = DraftListener(session.crosswalk)
         stop_event = threading.Event()
         # DraftSession is frozen, so the my_slot back-fill replaces the
@@ -2343,7 +2614,7 @@ def register_live_routes(app, conn, db_path):
                 # loop stays alive and the next request self-heals (the
                 # success branch clears the error).
                 try:
-                    _recompute(sess, made)
+                    _recompute(s, sess, made)
                 except Exception as exc:      # noqa: BLE001 -- see above
                     with lock:
                         if state["listener"] is listener:
@@ -2434,7 +2705,7 @@ def register_live_routes(app, conn, db_path):
             # would not know which column is ours. Outside the lock above
             # because it is file I/O -- the same rule ConnectProgress's
             # callers follow for `lock`.
-            _remember_my_slot(league_id, resolved)
+            _remember_my_slot(s, league_id, resolved)
             return True
 
         def pump():
@@ -2449,6 +2720,7 @@ def register_live_routes(app, conn, db_path):
                     if state["listener"] is not listener:
                         return
                     state["last_poll_at"] = now
+                s.touch()
                 # Resolve my_slot as soon as the socket reveals it -- crucially
                 # on the SELECTING frame that puts our team on the clock, which
                 # on_change never sees. Only touches the database until the
@@ -2510,7 +2782,7 @@ def register_live_routes(app, conn, db_path):
                 # the lock above because it is a syscall, and nothing reads
                 # the record under `lock`.
                 if mine and total_picks and made >= total_picks:
-                    clear_session_record(db_path)
+                    _delete_record(s)
                     # The draft is over: hand the room to the report card.
                     # Read the picks here, where the connection is, and let
                     # the job compute off this thread -- which is what
@@ -2665,7 +2937,10 @@ def register_live_routes(app, conn, db_path):
                 "my_slot": session.my_slot}
 
     @app.post("/api/live/start")
-    def live_start(my_slot: int):
+    def live_start(my_slot: int, request: Request):
+        s = registry.get_or_create(sid_for(request))
+        s.touch()
+        state, lock = s.state, s.lock
         with lock:
             if state["session"] is not None:
                 return {"active": True, "reused": True}
@@ -2687,10 +2962,18 @@ def register_live_routes(app, conn, db_path):
     @app.get("/api/live/state")
     def live_state(request: Request):
         now = datetime.now(timezone.utc)
+        # A cookie with no room behind it -- a stranger, or a browser whose
+        # session this process never held -- reads as the same inactive body
+        # a room with no session does: `state` below is a fresh, empty dict
+        # in that case, so every key on the inactive branch has its default.
+        s = _session_for(request)
+        state, lock = (s.state, s.lock) if s is not None else (_initial_state(),
+                                                                threading.Lock())
         with lock:
             session = state["session"]
             if session is None:
-                return {"active": False, "picks_made": 0, "on_the_clock": None,
+                return {"active": False, "league_id": None,
+                        "picks_made": 0, "on_the_clock": None,
                         # No session, nothing to charge for. Same "present
                         # with a null/false value" convention as the rest of
                         # this branch -- the room reads it on every poll and
@@ -2932,6 +3215,10 @@ def register_live_routes(app, conn, db_path):
                                    and horizon_pick > len(slots))
         return {
             "active": True,
+            # Which draft this room follows. With one room per cookie the
+            # answer differs by caller, and the client has no other way to
+            # tell "my draft" from "a draft".
+            "league_id": session.league_id or None,
             # WHETHER THIS ROOM CAN BE DRAFTED FROM, answered here rather than
             # left to the page to work out. The room polls this endpoint
             # already, the server is the only side that knows which league
@@ -2991,7 +3278,7 @@ def register_live_routes(app, conn, db_path):
         }
 
     @app.get("/api/live/connect-progress")
-    def live_connect_progress():
+    def live_connect_progress(request: Request):
         """What the connect is doing right now, stage by stage.
 
         A separate endpoint from /api/live/state, and a deliberately tiny
@@ -3015,15 +3302,18 @@ def register_live_routes(app, conn, db_path):
         connected since it started -- the same "present with an empty value"
         convention live_state's inactive branch follows.
         """
-        with lock:
-            progress = state["connect"]
-            body = progress.snapshot() if progress is not None else None
+        s = _session_for(request)
+        body = None
+        if s is not None:
+            with s.lock:
+                progress = s.state["connect"]
+                body = progress.snapshot() if progress is not None else None
         if body is None:
             return {"phase": "idle", "stages": [], "facts": {},
                     "error": None, "elapsed_ms": 0}
         return body
 
-    def _ui_revision() -> tuple:
+    def _ui_revision(s) -> tuple:
         """What the room is actually looking at, as one comparable value.
 
         A fingerprint rather than an event bus, and deliberately so: state is
@@ -3032,8 +3322,9 @@ def register_live_routes(app, conn, db_path):
         guards. Publishing an event from each of them would mean touching
         every one of those guards and inventing a third way to be wrong about
         ordering. Reading the values the room renders from cannot be out of
-        order with itself.
+        order with itself. Called with `s.lock` held.
         """
+        state = s.state
         listener = state["listener"]
         return (
             state["generation"], state["picks_seen"], state["as_of_pick"],
@@ -3060,15 +3351,17 @@ def register_live_routes(app, conn, db_path):
         )
 
     # Long enough that an idle draft is not a busy-loop, short enough to be
-    # invisible next to the 2500ms poll it replaces. A pick now reaches the
-    # room in about a tenth of a second instead of up to two and a half.
-    EVENT_TICK = 0.12
+    # invisible next to the 2500ms poll it replaces. A pick reaches the room
+    # in about a quarter of a second instead of up to two and a half; with
+    # a couple of hundred rooms open at once, each stream's tick is a lock
+    # acquisition, and this cadence keeps that to a few hundred a second.
+    EVENT_TICK = 0.25
     # Proxies and browsers drop a silent stream; a comment frame is the
     # cheapest thing that is not a state update.
     EVENT_HEARTBEAT = 15.0
 
     @app.get("/api/live/events")
-    async def live_events():
+    async def live_events(request: Request):
         """Server-sent events: one message whenever the room's state moves.
 
         One-way on purpose. Everything the browser SENDS already has a
@@ -3076,14 +3369,23 @@ def register_live_routes(app, conn, db_path):
         websocket would buy a return channel nothing needs and cost a
         protocol upgrade, a heartbeat of its own and a reconnect loop
         EventSource gives away for nothing.
+
+        The stream re-resolves its session on every tick rather than once:
+        a browser opens this before it connects, and the room it belongs to
+        is created by the connect that follows. Until then it watches an
+        unregistered, empty session and reports "no listener".
         """
+        sid = sid_for(request)
+        idle_session = LiveSession(sid)
+
         async def stream():
             last, idle = None, 0.0
             # Prime immediately so a reconnecting client is never left
             # waiting for the next state change to learn where the draft is.
             while True:
-                with lock:
-                    rev = _ui_revision()
+                s = registry.get(sid) or idle_session
+                with s.lock:
+                    rev = _ui_revision(s)
                 if rev != last:
                     last, idle = rev, 0.0
                     payload = {"generation": rev[0], "picks_made": rev[1],
@@ -3104,14 +3406,23 @@ def register_live_routes(app, conn, db_path):
                                           "X-Accel-Buffering": "no"})
 
     @app.get("/api/live/board")
-    def live_board():
+    def live_board(request: Request):
         """The full draft-board grid: every column named, every pick placed.
 
         Read-only and purely additive to the live session -- it touches none
         of the recompute/listener machinery, only the same `drafted` rows
         live_state reads. The board itself (player stats) and the slot->name
         map were both computed once, on connect, and are read off the session.
+
+        404 for a cookie this process holds no room for at all; `active:
+        false` for a room that exists but has no session yet. The room polls
+        this beside /api/live/state, whose inactive body covers the first
+        case, so the distinction is for a caller with no state poll.
         """
+        s = _session_for(request)
+        if s is None:
+            raise HTTPException(status_code=404, detail="no live session")
+        state, lock = s.state, s.lock
         with lock:
             session = state["session"]
             if session is None:
@@ -3196,6 +3507,10 @@ def register_live_routes(app, conn, db_path):
         TypeError from a malformed payload, say) must still surface as a
         500, not be laundered into "the socket is down."
         """
+        s = _session_for(request)
+        if s is None:
+            raise HTTPException(status_code=409, detail="no live session")
+        state, lock = s.state, s.lock
         with lock:
             session = state["session"]
             socket = state["socket"]
@@ -3363,6 +3678,10 @@ def register_live_routes(app, conn, db_path):
         request is the one failure this endpoint exists to turn into a clean
         503 rather than a 500.
         """
+        s = _session_for(request)
+        if s is None:
+            raise HTTPException(status_code=409, detail="no live session")
+        state, lock = s.state, s.lock
         with lock:
             session = state["session"]
             socket = state["socket"]
@@ -3426,8 +3745,12 @@ def register_live_routes(app, conn, db_path):
             "check the ESPN draft room")
 
     @app.post("/api/live/stop")
-    def live_stop():
-        stopped = _stop_listener()
+    def live_stop(request: Request):
+        s = _session_for(request)
+        if s is None:
+            raise HTTPException(status_code=409, detail="no live session")
+        state, lock = s.state, s.lock
+        stopped = _stop_listener(s)
         with lock:
             state["generation"] += 1
             # league_conn is deliberately left out of this update.
@@ -3460,12 +3783,13 @@ def register_live_routes(app, conn, db_path):
         # Deliberately not swallowed: a token this failed to delete is still
         # on disk, and the user who pressed stop deserves to hear that rather
         # than a quiet 200.
-        clear_session_record(db_path)
+        _delete_record(s)
         return {"active": False, "listener_stopped": stopped}
 
     @app.post("/api/live/connect")
-    def live_connect(body: ConnectBody):
-        progress, _seq = _new_progress(token_path=False)
+    def live_connect(body: ConnectBody, request: Request, response: Response):
+        s = _session_for_connect(request, response)
+        progress, _seq = _new_progress(s, token_path=False)
         progress.begin("token")
         # Validate the one thing that can be invalid (the league id) BEFORE
         # tearing down a working listener -- an invalid request must never
@@ -3482,7 +3806,7 @@ def register_live_routes(app, conn, db_path):
         team_id = _team_id_from_url(body.url)
         season = _season_from_url(body.url)
         work_conn, league_conn, session = _connect_work(
-            progress, league_id, team_id, season)
+            s, progress, league_id, team_id, season)
 
         # The browser-observer path is the machine owner's: the saved login
         # is the credential, when there is one.
@@ -3506,8 +3830,8 @@ def register_live_routes(app, conn, db_path):
         # opened. So the record goes, rather than being left to restore a
         # session that is no longer the live one on the next restart: the
         # record must always describe the CURRENT session or nothing at all.
-        clear_session_record(db_path)
-        return _launch_listener(work_conn, league_conn, league_id, session,
+        _delete_record(s)
+        return _launch_listener(s, work_conn, league_conn, league_id, session,
                                 run_fn, progress=progress)
 
     @app.post("/api/live/connect-token")
@@ -3555,7 +3879,8 @@ def register_live_routes(app, conn, db_path):
         # Somebody who has not paid still gets the room, the board and the
         # clock -- what they do not get is this tool putting a pick into
         # their draft.
-        progress, _seq = _new_progress(token_path=True, league_id=body.leagueId)
+        s = _session_for_connect(request, response)
+        progress, _seq = _new_progress(s, token_path=True, league_id=body.leagueId)
         progress.begin("token")
         # NOTHING about this step reaches ESPN: the token is a per-draft nonce
         # the bookmarklet already minted on ESPN's own page, and the first
@@ -3586,7 +3911,7 @@ def register_live_routes(app, conn, db_path):
         progress.ok("token", f"team {team_id} · season {body.season or '?'}")
 
         work_conn, league_conn, session = _connect_work(
-            progress, body.leagueId, team_id, body.season)
+            s, progress, body.leagueId, team_id, body.season)
 
         # The account's cookies are in hand right now and at no later point
         # in this draft, so this is when the league's history is fetched for
@@ -3597,14 +3922,14 @@ def register_live_routes(app, conn, db_path):
             if cookies:
                 league_history.spawn_import_if_stale(body.leagueId, cookies)
 
-        run_fn = _socket_run_fn(body.leagueId, body.teamId, body.swid,
+        run_fn = _socket_run_fn(s, body.leagueId, body.teamId, body.swid,
                                 body.token, progress)
 
         # Record the token so /api/live/state's token_received stays truthful
         # for the connect screen. Set before launch; _launch_listener's own
         # state.update never touches "token".
-        with lock:
-            state["token"] = {
+        with s.lock:
+            s.state["token"] = {
                 "league_id": body.leagueId, "team_id": body.teamId,
                 "swid": body.swid, "token": body.token, "season": body.season,
                 "received_at": datetime.now(timezone.utc).isoformat(),
@@ -3630,11 +3955,12 @@ def register_live_routes(app, conn, db_path):
         # bookmarklet -- strictly better than failing a connect that
         # otherwise worked, on a thirty-second pick clock.
         try:
-            save_session_record(
-                db_path, league_id=body.leagueId, team_id=body.teamId,
-                season=body.season, swid=body.swid, token=body.token,
-                my_slot=session.my_slot)
-        except OSError:      # noqa: BLE001 -- see above
+            _save_record(s, league_id=body.leagueId, team_id=body.teamId,
+                         season=body.season, swid=body.swid, token=body.token,
+                         my_slot=session.my_slot)
+        except Exception:      # noqa: BLE001 -- see above; a store that is
+            # down (Postgres unreachable) is the same convenience lost as an
+            # unwritable file.
             pass
         # CUSTODY, last, deliberately.
         #
@@ -3656,7 +3982,7 @@ def register_live_routes(app, conn, db_path):
             minted = establish_custody(request, response, body.swid,
                                        body.espn_s2)
         try:
-            launched = _launch_listener(work_conn, league_conn, body.leagueId,
+            launched = _launch_listener(s, work_conn, league_conn, body.leagueId,
                                         session, run_fn, progress=progress)
         except BaseException:
             # THE ROW MUST NOT OUTLIVE THE REQUEST THAT FAILED. The cookie
@@ -3667,20 +3993,23 @@ def register_live_routes(app, conn, db_path):
             # request strands the row exactly as thoroughly as a failed one.
             abandon_custody(minted)
             raise
-        if minted is not None and isinstance(launched, Response):
-            # The cookie rides on the injected `response` object, which FastAPI
+        if isinstance(launched, Response):
+            # The cookies ride on the injected `response` object, which FastAPI
             # merges into whatever the handler RETURNS -- unless the handler
             # returns a Response of its own, in which case that object is used
             # as-is and the merge never happens. `_launch_listener` returns a
             # dict today, so this branch is defensive; it is here because the
             # failure it prevents is silent and produces precisely the
-            # stranded row above.
-            set_session_cookie(launched, minted)
+            # stranded row above (and, for the room cookie, a browser that
+            # can never find the session it just started).
+            if minted is not None:
+                set_session_cookie(launched, minted)
+            _set_sid_cookie(launched, s.sid, request)
         return launched
 
-    def _restore_saved_session(record):
+    def _restore_saved_session(sid, record):
         """Rebuild the session the previous process was running, and reopen
-        its socket, from the record on disk.
+        its socket, from the saved record.
 
         WHEN: on a thread started at app construction, not inline and not on
         the first request that needs a session. All three were weighed and
@@ -3734,13 +4063,15 @@ def register_live_routes(app, conn, db_path):
         owner what to do, and never as a silent dead session or a loop.
         """
         league_id = record["league_id"]
+        s = registry.get_or_create(sid)
+        state, lock = s.state, s.lock
         with lock:
             # Captured before any work, and re-checked at the instant this
             # registers (see _launch_listener's guard_gen): /api/live/stop
             # bumps this and nothing else, so it is the only way to notice
             # that the user stopped the draft while the rebuild was running.
             generation = state["generation"]
-        progress, seq = _new_progress(token_path=True, league_id=league_id)
+        progress, seq = _new_progress(s, token_path=True, league_id=league_id)
         progress.begin("token")
         # Read off disk, not off ESPN -- the same thing live_connect_token's
         # own token row means, and equally not a statement that the token is
@@ -3751,7 +4082,7 @@ def register_live_routes(app, conn, db_path):
         progress.fact(restored=True)
         try:
             work_conn, league_conn, session = _connect_work(
-                progress, league_id, int(record["team_id"]), record["season"])
+                s, progress, league_id, int(record["team_id"]), record["season"])
         except Exception as exc:      # noqa: BLE001 -- this is a bare daemon
             # thread with no request to raise into, and a restore that dies
             # in the board build has no listener for listener_error to hang
@@ -3799,19 +4130,38 @@ def register_live_routes(app, conn, db_path):
                 "report_url": (_report_url(league_id, record["season"])
                                if real_league else None),
             }
-        _launch_listener(work_conn, league_conn, league_id, session,
-                         _socket_run_fn(league_id, record["team_id"],
+        _launch_listener(s, work_conn, league_conn, league_id, session,
+                         _socket_run_fn(s, league_id, record["team_id"],
                                         record["swid"], record["token"],
                                         progress),
                          progress=progress, guard_seq=seq,
                          guard_gen=generation)
 
+    def _restore_saved_sessions(records):
+        """Every saved session, one after another on the one restore thread.
+
+        Sequential rather than one thread per record: each rebuild is a
+        board and pool build (see build_session), and a deployment that
+        comes back with fifty rooms saved would otherwise start fifty of
+        them at once against one CPU. The first room is back in seconds;
+        the last is back when it is back, and /api/live/state says
+        `restoring` to each of them meanwhile.
+        """
+        for sid, record in records.items():
+            try:
+                _restore_saved_session(sid, record)
+            except Exception as exc:      # noqa: BLE001 -- one room's
+                # failure must not cost the rooms queued behind it. The
+                # failed one has already recorded restore_error where it
+                # could; this is the last line of defence for the thread.
+                print(f"live: restore of session {sid!r} failed: {exc}")
+
     # The restart-resilience entry point, and the only thing in this file
     # that runs without a request behind it. Nothing happens at all unless a
-    # record is actually on disk, which is true only between a bookmarklet
+    # record is actually saved, which is true only between a bookmarklet
     # connect and the end of that draft -- so every ordinary start, and every
     # test that builds an app against a scratch database, skips this in one
-    # stat(). The thread is a daemon and is never joined by the app: create_app
+    # read. The thread is a daemon and is never joined by the app: create_app
     # must return, and uvicorn must bind its port, without waiting on a
     # 4.1-34.8s board build.
     # Published before the restore thread starts, not after: a restore
@@ -3820,12 +4170,23 @@ def register_live_routes(app, conn, db_path):
     # the stub api/main.py declared. Set on `app.state` (Starlette's own
     # per-app namespace) rather than returned, because the return value is
     # `(state, _recompute)` and a dozen tests unpack exactly those two.
-    app.state.live_settings = live_settings
+    app.state.live_settings = _settings_accessor
+    app.state.live_registry = registry
 
-    _saved = load_session_record(db_path)
-    if _saved is not None:
-        state["restore_thread"] = threading.Thread(
-            target=_restore_saved_session, args=(_saved,), daemon=True)
-        state["restore_thread"].start()
+    _saved = _load_all_records()
+    if _saved:
+        thread = threading.Thread(target=_restore_saved_sessions,
+                                  args=(_saved,), daemon=True)
+        registry.restore_thread = thread
+        # Each room reports `restoring` off this one thread, so every saved
+        # sid gets its session object -- and the handle -- before it starts.
+        for sid in _saved:
+            registry.get_or_create(sid).state["restore_thread"] = thread
+        thread.start()
 
-    return state, _recompute
+    def _recompute_default(session, picks_made):
+        """`_recompute` against the default session: the callable the tests
+        unpack beside its state dict, kept on the old signature."""
+        return _recompute(default, session, picks_made)
+
+    return default.state, _recompute_default
