@@ -14,15 +14,17 @@ on a lock its parent's thread was holding. Spawned workers import this
 module fresh, which is why `_build_job` and everything it calls has to
 be reachable from the module top level.
 
-WHAT THE WORKER MAY TOUCH. One league file, and only after the parent has
-provisioned it and closed its own handle: DuckDB's lock is per process,
-so the worker cannot open a file the parent still has open, and it cannot
-open the shared universal database at all (the parent holds that one for
-its whole life). api/live.py's `_provision_and_build` keeps that order --
-provision, submit, wait, then open the parent's own connection -- and
-falls back to building inline when another room in the parent already
-holds the league file (two leaguemates share one), because that file is
-not available to a second process either.
+WHAT THE WORKER MAY TOUCH. One league file, which it provisions for itself
+from the read-only universal snapshot (pipeline/leagues.snapshot_universal)
+when the file does not exist yet, then opens, builds against and closes.
+DuckDB's lock is per process, so the worker cannot open a file the parent
+has open, and it never opens the live universal database at all (the
+parent holds that one for its whole life; the snapshot is the worker's
+copy of it). api/live.py's `_provision_and_build` keeps the order that
+makes this safe -- register the room as a holder of the file, submit,
+wait, then open the parent's own connection -- and builds inline instead
+when another room in the parent already holds the file (two leaguemates
+share one), because that file is not available to a second process.
 
 With the variable unset or zero everything runs inline, exactly as before
 this module existed, and a test that monkeypatches `build_session` here is
@@ -228,14 +230,18 @@ def build_in_worker(league_path: str, universal_path: str, league_id: str,
     print(f"live_build: worker still building league {league_id} after "
           f"{LIVE_BUILD_TIMEOUT:.0f}s; waiting {LIVE_BUILD_GRACE:.0f}s more")
     try:
-        future.exception(timeout=LIVE_BUILD_GRACE)
+        failure = future.exception(timeout=LIVE_BUILD_GRACE)
     except TimeoutError:
         raise BuildTimedOut(
             f"the build for league {league_id} timed out after "
             f"{LIVE_BUILD_TIMEOUT + LIVE_BUILD_GRACE:.0f}s") from None
-    except BrokenProcessPool as exc:
+    # `exception()` RETURNS the worker's failure rather than raising it, so
+    # a worker that died during the grace shows up here as a value.
+    if isinstance(failure, BrokenProcessPool):
         print(f"live_build: worker died building league {league_id} "
-              f"({exc}); replacing the pool and building inline")
+              f"({failure}); replacing the pool and building inline")
         shutdown()
         return _build_job(*args)
-    return future.result()          # finished in the grace; its exception, if any
+    if failure is not None:
+        raise failure               # the build's own error, as the inline path would
+    return future.result()          # finished in the grace

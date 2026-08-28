@@ -221,3 +221,51 @@ def test_a_worker_that_dies_mid_build_drops_the_pool_and_builds_inline(tmp_path,
     assert live_build.build_in_worker(league_path, universal, "77", None, None, None) == "inline"
     assert live_build._pool is None, "the broken pool was dropped"
     assert pools == ["shut down"]
+
+
+def test_a_worker_that_dies_during_the_grace_window_builds_inline(tmp_path, monkeypatch):
+    """The worker was running at the timeout, then died before the grace
+    ran out: `exception()` hands that death back as a value, the pool is
+    dropped, and the connect builds inline."""
+    import threading
+    from concurrent.futures import Future
+    from concurrent.futures.process import BrokenProcessPool
+    monkeypatch.setenv(live_build.WORKERS_ENV, "1")
+    monkeypatch.setattr("api.live_build.LIVE_BUILD_TIMEOUT", 0.2)
+    monkeypatch.setattr("api.live_build.LIVE_BUILD_GRACE", 5.0)
+    universal, league_path = _league_file(tmp_path, monkeypatch)
+    monkeypatch.setattr("api.live_build.build_session",
+                        lambda cur, my_slot, league_id="", settings=None, progress=None: "inline")
+    running = Future()
+    running.set_running_or_notify_cancel()
+    threading.Timer(0.5, running.set_exception, args=(BrokenProcessPool("died"),)).start()
+    shut = []
+
+    class _Pool:
+        def submit(self, fn, *args):
+            return running
+
+        def shutdown(self, wait=True, cancel_futures=False):
+            shut.append(1)
+    monkeypatch.setattr("api.live_build._pool", _Pool())
+    monkeypatch.setattr("api.live_build._get_pool", lambda: live_build._pool)
+    assert live_build.build_in_worker(league_path, universal, "77", None, None, None) == "inline"
+    assert shut == [1] and live_build._pool is None
+
+
+def test_a_workers_own_build_error_is_raised_not_hidden(tmp_path, monkeypatch):
+    import threading
+    from concurrent.futures import Future
+    monkeypatch.setenv(live_build.WORKERS_ENV, "1")
+    monkeypatch.setattr("api.live_build.LIVE_BUILD_TIMEOUT", 0.2)
+    monkeypatch.setattr("api.live_build.LIVE_BUILD_GRACE", 5.0)
+    universal, league_path = _league_file(tmp_path, monkeypatch)
+    inline = []
+    monkeypatch.setattr("api.live_build.build_session", lambda *a, **k: inline.append(1))
+    running = Future()
+    running.set_running_or_notify_cancel()
+    threading.Timer(0.3, running.set_exception, args=(ValueError("duplicate player_id"),)).start()
+    monkeypatch.setattr("api.live_build.submit", lambda fn, *args: running)
+    with pytest.raises(ValueError, match="duplicate player_id"):
+        live_build.build_in_worker(league_path, universal, "77", None, None, None)
+    assert inline == []
