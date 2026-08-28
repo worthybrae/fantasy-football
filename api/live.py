@@ -1825,8 +1825,22 @@ class LiveSession:
 
     def touch(self) -> None:
         """Stamp liveness. Called on every route hit and every socket
-        frame; the reaper (a later task) drops rooms nobody has touched."""
-        self.last_activity = time.monotonic()
+        frame; the reaper drops rooms nobody has touched.
+
+        UNDER THE ROOM'S OWN LOCK, which is what makes the reaper's
+        decision safe rather than nearly safe: `_retire` re-reads
+        `last_activity` under this same lock and marks the room retiring in
+        the same critical section, so a poll that lands between those two
+        either happens first (and the room is kept) or happens after (and
+        finds the room retiring, which is what a connect looks for). A
+        write outside the lock could be lost between them, retiring a room
+        somebody is actively drafting in.
+
+        Never called with the lock already held -- every call site stamps
+        outside its own `with s.lock` block, and `lock` is a plain Lock.
+        """
+        with self.lock:
+            self.last_activity = time.monotonic()
 
 
 class LiveRegistry:
@@ -1962,13 +1976,17 @@ class LiveRegistry:
 
     def run_once(self, idle: float, now: "float | None" = None) -> list:
         """Retire every room idle for longer than `idle` seconds; return
-        the sids retired. `now` is injectable for the tests.
+        the sids ACTUALLY DROPPED. `now` is injectable for the tests.
 
         `retire(s, now, idle)` re-checks idleness under the room's lock and
         marks the room retiring before it stops anything, and the drop
         removes the room only if it is still the object under that sid: a
         connect that landed meanwhile has replaced it with a fresh room
-        (see _session_for_connect), which must stay.
+        (see _session_for_connect), which must stay -- and which is why the
+        return value is built from the drop rather than from the decision.
+        A pass that retired a room whose sid had been taken back used to
+        report it as gone while the entry was still there, which is the one
+        thing this list is read for.
         """
         now = time.monotonic() if now is None else now
         retire = getattr(self, "_retire", None)
@@ -1977,14 +1995,19 @@ class LiveRegistry:
             if sid == DEFAULT_SID:
                 continue            # the tests' room, and never minted
             s = self.get(sid)
+            # A hint, not the decision: `last_activity` is re-read under the
+            # room's own lock inside `retire`, where a touch cannot slip
+            # between the read and the mark. This only skips the obvious.
             if s is None or now - s.last_activity <= idle:
                 continue
             if retire is not None and not retire(s, now, idle):
                 continue
             with self._lock:
-                if self._sessions.get(sid) is s:
+                dropped = self._sessions.get(sid) is s
+                if dropped:
                     del self._sessions[sid]
-            gone.append(sid)
+            if dropped:
+                gone.append(sid)
         return gone
 
     def replace(self, sid: str) -> LiveSession:

@@ -879,7 +879,7 @@ def test_a_connect_landing_mid_retirement_keeps_its_room(tmp_path, monkeypatch):
         registry.set_retire(retire_then_reconnect)
 
         gone = registry.run_once(idle=3 * 3600, now=now)
-        assert gone == [sid], "the old room was retired"
+        assert gone == [], "the sid was taken back, so nothing was dropped"
         fresh = registry.get(sid)
         assert fresh is not None and fresh is not old
         assert fresh.state["listener"] is not None
