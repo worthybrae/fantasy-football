@@ -460,7 +460,7 @@ function SteadyPanel({ profile }: { profile: ProfilePayload }): ReactNode {
   // and the note is here to make that column legible, not to average them.
   const rated = ratedSeasons(seasons)
   return (
-    <PopPanel title="Steady"
+    <PopPanel title="Reliable"
               note={rated.length ? `of ${rated[0].cv_rank_n}` : undefined}
               hint={CARD_HINTS.steady}
               cols={cols} />

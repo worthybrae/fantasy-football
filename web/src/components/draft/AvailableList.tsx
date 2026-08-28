@@ -1221,7 +1221,7 @@ export default function AvailableList({
     + 'PROJECTED for than he actually averaged LAST SEASON. Per game on both '
     + 'sides, so a year cut short by injury does not read as decline. Five '
     + 'bars is the biggest projected gain and one bar the biggest fall, the '
-    + 'same direction as Health and Steady. One caveat: a large fall is '
+    + 'same direction as Health and Reliable. One caveat: a large fall is '
     + 'usually a lost starting job rather than a player getting worse -- '
     + 'ESPN projects a full season for almost everyone, so a backup shows as '
     + 'a huge per-game fall. This is what the projection expects, not a '
@@ -1370,7 +1370,7 @@ export default function AvailableList({
                 to fit five bars without growing the 32px row. */}
             {sortableTh('finish', 'Rank', 'avail-col-finish')}
             {sortableTh('health', 'Health', 'avail-col-health')}
-            {sortableTh('steady', 'Steady', 'avail-col-steady')}
+            {sortableTh('steady', 'Reliable', 'avail-col-steady')}
             {sortableTh('change', 'Growth', 'avail-col-change')}
             {sortableTh('proj', 'Proj/G', 'avail-col-num')}
             {/* One word. A header naming the horizon at all ("Lasts to pick

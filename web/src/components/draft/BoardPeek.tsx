@@ -148,7 +148,7 @@ export default function BoardPeek({ player, pick, style }: {
         )}
         {steady !== null && (
           <span className="board-peek-meter">
-            <span className="draft-cap">Steady</span>
+            <span className="draft-cap">Reliable</span>
             <SteadyMeter level={steady} cv={header?.consistency_cv ?? null} />
           </span>
         )}

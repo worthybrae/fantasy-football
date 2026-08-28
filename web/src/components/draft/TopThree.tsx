@@ -595,7 +595,7 @@ export default function TopThree({
                                    gamesPg={player?.career_games_pg as number} />
                     : <span className="top3-meter-none">—</span>}
                 </Meter>
-                <Meter caption="Steady"
+                <Meter caption="Reliable"
                        onEnter={player?.consistency_pct == null ? null
                          : (el) => showPanel('steady', c.player_id, el)}
                        onLeave={hidePanel}>
