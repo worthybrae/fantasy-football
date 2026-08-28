@@ -943,6 +943,14 @@ export default function DraftRoom() {
                   players={players}
                   onDraft={handleDraftClick}
                   isMyTurn={isMyTurn && !locked}
+                  // Two different facts, deliberately two props. `isMyTurn
+                  // && !locked` is "may he send this pick" and gates the
+                  // Draft button; `youAreUp` is "is the pick his", which is
+                  // what decides WHICH TURN the cards describe. An unpaid
+                  // room and a socket mid-reconnect both disable the button
+                  // with the clock still running on his seat, and the cards
+                  // must not answer a different question during it.
+                  onTheClock={youAreUp}
                   pickNo={thisPickNo}
                   settings={state?.settings}
                   recompute={recompute}

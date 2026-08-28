@@ -43,11 +43,12 @@ function player(i: number): Player {
   }
 }
 
-function draw() {
+function draw(board: 'ok' | 'fails' = 'ok') {
   fetchLeagueReports.mockResolvedValue([])
   fetchMockRooms.mockResolvedValue({ rooms: [], next: null })
   fetchRoomProgress.mockResolvedValue([])
-  fetchPlayers.mockResolvedValue([player(1), player(2), player(3)])
+  if (board === 'fails') fetchPlayers.mockRejectedValue(new Error('players 503'))
+  else fetchPlayers.mockResolvedValue([player(1), player(2), player(3)])
   return render(
     <MemoryRouter>
       <Dashboard leagues={[]} onJoin={() => {}} onOpenRoom={() => {}} />
@@ -70,6 +71,14 @@ test('nothing picked yet opens the picker', async () => {
   draw()
   expect(await screen.findByText('Pick your guys')).toBeTruthy()
   expect(screen.getByText('0 / 5-25')).toBeTruthy()
+})
+
+test('a board that will not load says so, rather than loading forever', async () => {
+  fetchFavorites.mockResolvedValue([])
+  draw('fails')
+  expect(await screen.findByRole('alert')).toBeTruthy()
+  expect(screen.getByRole('alert').textContent).toContain('players 503')
+  expect(screen.queryByText('Loading the board…')).toBeNull()
 })
 
 test('a saved list is a card, not the picker', async () => {

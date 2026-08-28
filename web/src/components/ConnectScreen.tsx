@@ -412,9 +412,10 @@ function warnBody(key: string, saved: string, source?: string): string {
       + 'else is affected — picks still land in the right column.'
   }
   return 'ESPN names your team on the draft socket, which happens when the draft '
-    + 'room opens. Until then the board shows every available player by value '
-    + 'over replacement, and the ranking built for your roster arrives as soon '
-    + 'as your seat is known.'
+    + 'room opens. Until then the board shows every available player in ESPN\'s '
+    + 'own order, and the two things that need a seat -- the chance each player '
+    + 'lasts until your next turn, and the plan for the turns after it -- '
+    + 'arrive as soon as yours is known.'
 }
 
 // -- stopped ---------------------------------------------------------------

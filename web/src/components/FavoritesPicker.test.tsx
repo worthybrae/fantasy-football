@@ -73,7 +73,7 @@ test('a chosen player can be dropped again from the list at the top', () => {
   render(<FavoritesPicker players={BOARD} initial={['p1', 'p2', 'p3', 'p4', 'p5']}
                           onSaved={() => {}} />)
   expect(save().disabled).toBe(false)
-  fireEvent.click(screen.getAllByTitle('Remove')[0])
+  fireEvent.click(screen.getByRole('button', { name: 'Remove Player 1' }))
   expect(screen.getByText('4 / 5-25')).toBeTruthy()
   expect(save().disabled).toBe(true)
 })

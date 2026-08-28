@@ -62,6 +62,17 @@ test('renders the turn, its target and the plan\'s own reasons', () => {
   expect(screen.getByLabelText('One of your guys')).toBeTruthy()
 })
 
+// EVERY REMAINING TURN, not a quiet first few: the header counts the whole
+// plan, and a list that stopped short of its own count would be wrong about
+// itself. The panel scrolls instead.
+test('draws every turn the plan carries', () => {
+  const turns = Array.from({ length: 9 }, (_, i) => (
+    { ...TURN, pick_no: 21 + i * 12, round: 2 + i }))
+  const { container } = render(<PlanPanel plan={turns} players={PLAYERS} />)
+  expect(container.querySelectorAll('.plan-turn')).toHaveLength(9)
+  expect(screen.getByText('9 turns left')).toBeTruthy()
+})
+
 test('a reader with no turns left gets no panel, not an empty one', () => {
   const { container } = render(<PlanPanel plan={[]} players={PLAYERS} />)
   expect(container.querySelector('.plan-panel')).toBeNull()

@@ -227,11 +227,15 @@ export function benefits(data: ShowcaseData): Benefit[] {
     // know any of this".
     {
       key: 'survival',
-      eyebrow: 'The wait, simulated',
+      eyebrow: 'The wait, counted',
       title: 'Who will still be there',
-      body: 'The rest of the draft is played out hundreds of times before '
-        + 'your turn comes round. This is the room\u2019s own top pick, priced '
-        + 'the way yours would be.',
+      // NOT "simulated" any more, and the word matters: this figure is
+      // counted from the recorded drafts the slide two below is about, not
+      // played out by a model. The old copy sold an opponent model the room
+      // no longer runs.
+      body: `Out of ${drafts.toLowerCase()} recorded ESPN drafts, how often `
+        + 'a player was still on the board when your next turn came round, '
+        + 'and what taking him now is worth in points against waiting.',
       figure: (
         <Stage>
           {room?.shortlist?.[0] && profile

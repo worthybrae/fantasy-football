@@ -44,6 +44,14 @@ function fmtSigned(n: number): string {
   return r > 0 ? `+${r}` : `${r}`
 }
 
+// Rounded before the sign is read, and null is not a zero: a figure nobody
+// computed carries no direction, so it carries no colour either.
+function edgeTone(edge: number | null): string {
+  if (edge === null) return ''
+  const shown = Math.round(edge)
+  return shown > 0 ? 'is-up' : shown < 0 ? 'is-down' : ''
+}
+
 // Same shape as AvailableList's own fmtRank.
 function fmtRank(n: number | null | undefined): string {
   if (n === null || n === undefined) return '—'
@@ -68,13 +76,21 @@ export type RecomputeState = { forPick: number; listedForPick: number }
  *  the turn is chosen by PICK NUMBER against the clock rather than by
  *  position in the list, and `plan[0]` is only the fallback when no entry
  *  matches at all.
+ *
+ *  `onTheClock`, NOT the boolean that drives the Draft button. Whether the
+ *  reader may send a pick and whether the pick is his are two different
+ *  facts: an unpaid room and a socket mid-reconnect both disable the button
+ *  while the clock is still running on his seat. Choosing the turn off the
+ *  button's boolean showed him next turn's three names, headed "Your next
+ *  turn", during the pick he was actually holding -- the worst moment in the
+ *  draft to be describing a different one.
  */
 export function turnFor(
-  plan: LivePlanTurn[], pickNo: number | null, isMyTurn: boolean,
+  plan: LivePlanTurn[], pickNo: number | null, onTheClock: boolean,
 ): LivePlanTurn | null {
   if (plan.length === 0) return null
   if (pickNo === null) return plan[0]
-  if (isMyTurn) return plan.find((t) => t.pick_no === pickNo) ?? plan[0]
+  if (onTheClock) return plan.find((t) => t.pick_no === pickNo) ?? plan[0]
   return plan.find((t) => t.pick_no > pickNo) ?? plan[0]
 }
 
@@ -104,9 +120,14 @@ interface TargetCardsProps {
   candidates: LiveCandidate[]
   players: Record<string, Player>
   onDraft: (c: LiveCandidate) => void
-  // See AvailableList.tsx's own field comment -- the draft button has to
-  // gate on whose turn it is, and this component has no other way to know.
+  /** Whether the reader may actually send a pick right now: his turn, on a
+   *  live socket, in a room he has paid for. Gates the Draft button and
+   *  nothing else. */
   isMyTurn: boolean
+  /** Whether the pick on the clock is HIS -- which is true in a room he
+   *  cannot draft from too. This is what decides which turn these cards
+   *  describe; see `turnFor`. */
+  onTheClock?: boolean
   /** The pick on the clock. Decides which turn these cards are for, and
    *  lets the market figures say how far past his ADP a player has fallen. */
   pickNo?: number | null
@@ -123,8 +144,8 @@ interface TargetCardsProps {
 }
 
 export default function TargetCards({
-  plan, candidates, players, onDraft, isMyTurn, pickNo = null,
-  settings = null, recompute, onOpenPlayer,
+  plan, candidates, players, onDraft, isMyTurn, onTheClock = false,
+  pickNo = null, settings = null, recompute, onOpenPlayer,
 }: TargetCardsProps) {
   // THE TABLE'S OWN HOVER PANELS, on the cards. `CellTip` is the same
   // component the available list opens under its Health, Reliable and Growth
@@ -174,7 +195,7 @@ export default function TargetCards({
     return () => window.removeEventListener('scroll', hidePanel, true)
   }, [panel, hidePanel])
 
-  const turn = turnFor(plan, pickNo, isMyTurn)
+  const turn = turnFor(plan, pickNo, onTheClock)
   const rows: PlanPlayer[] = turn
     ? [turn.target, ...turn.alternates].slice(0, 3)
     : candidates.slice(0, 3).map(fromCandidate)
@@ -309,13 +330,19 @@ export default function TargetCards({
                   </span>
                   <span className="target-fig-cap">still there at {at}</span>
                 </div>
+                {/* A missing edge is toned like a missing anything else --
+                    not green. `is-up` on a dash claimed a gain nobody
+                    computed. An edge that rounds to nothing gets no tone
+                    either, the same rule panels.ts's `signedChange` uses. */}
                 <div className="target-fig">
-                  <span className={`target-fig-num mono ${edge === null || Math.round(edge) >= 0 ? 'is-up' : 'is-down'}`}>
+                  <span className={`target-fig-num mono ${edgeTone(edge)}`}>
                     {edge === null ? '—' : fmtSigned(edge)}
                     {edge !== null && <span className="target-fig-unit">pts</span>}
                   </span>
                   <span className="target-fig-cap">
-                    over the next {position || 'player'} you would get at {at}
+                    {edge !== null && Math.round(edge) < 0
+                      ? <>vs waiting for {position || 'him'} at {at}</>
+                      : <>over the next {position || 'player'} you would get at {at}</>}
                   </span>
                 </div>
               </div>
@@ -373,9 +400,11 @@ export default function TargetCards({
                     over a value, so the eye reads one row of labelled facts
                     rather than three charts and a sentence. */}
                 <span className="target-market">
-                  <Market caption="ESPN" rank={c?.espn_rank ?? player?.espn_ppr_rank ?? null}
+                  <Market caption="ESPN" basis="ESPN's rank for him"
+                          rank={c?.espn_rank ?? player?.espn_ppr_rank ?? null}
                           pickNo={pickNo} />
-                  <Market caption="ADP" rank={c?.espn_adp ?? null} pickNo={pickNo} />
+                  <Market caption="ADP" basis="his ADP"
+                          rank={c?.espn_adp ?? null} pickNo={pickNo} />
                 </span>
               </div>
             </div>
@@ -431,16 +460,21 @@ function Meter({ caption, children, onEnter, onLeave }: {
   )
 }
 
-/** One market's answer: where it ranks him, and how far past that he is. */
-function Market({ caption, rank, pickNo }: {
-  caption: string; rank: number | null; pickNo: number | null
+/** One market's answer: where it ranks him, and how far past that he is.
+ *
+ *  `basis` is what the distance is measured against, in words, because the
+ *  two cells here are NOT the same kind of number: one is ESPN's rank and
+ *  one is ESPN's ADP, and a tooltip that said "past his ADP" under a rank
+ *  would be describing a figure that is not on screen. */
+function Market({ caption, basis, rank, pickNo }: {
+  caption: string; basis: string; rank: number | null; pickNo: number | null
 }) {
   return (
     <span className="target-meter">
       <span className="draft-cap">{caption}</span>
       <span className="target-market-val mono">
         {fmtRank(rank)}
-        <MarketMove pickNo={pickNo} rank={rank} />
+        <MarketMove pickNo={pickNo} rank={rank} basis={basis} />
       </span>
     </span>
   )
@@ -457,7 +491,9 @@ function Market({ caption, rank, pickNo }: {
  *  triangle means the same thing everywhere in the room. Nothing at all when
  *  there is no rank to compare against, or when the pick landed on it: a
  *  bare zero is a fact about arithmetic rather than about the draft. */
-function MarketMove({ pickNo, rank }: { pickNo: number | null; rank: number | null }) {
+function MarketMove({ pickNo, rank, basis }: {
+  pickNo: number | null; rank: number | null; basis: string
+}) {
   if (pickNo === null || rank === null) return null
   const slots = Math.round(pickNo - rank)
   if (slots === 0) return null
@@ -465,8 +501,8 @@ function MarketMove({ pickNo, rank }: { pickNo: number | null; rank: number | nu
   return (
     <span className={`target-market-move ${steal ? 'is-steal' : 'is-reach'}`}
           title={steal
-            ? `Still here ${Math.abs(slots)} picks past his ADP`
-            : `Taking him now is ${Math.abs(slots)} picks before his ADP`}>
+            ? `Still here ${Math.abs(slots)} picks past ${basis}`
+            : `Taking him now is ${Math.abs(slots)} picks before ${basis}`}>
       <span aria-hidden="true">{steal ? '▲' : '▼'}</span>
       {Math.abs(slots)}
     </span>

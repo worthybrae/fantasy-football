@@ -118,12 +118,16 @@ export default function FavoritesPicker({
       <ol className="fav-chosen">
         {chosen.map((id, i) => {
           const player = byId.get(id)
+          const name = player?.name ?? id
           return (
             <li key={id}>
+              {/* Named, because a row of twenty-five identical "Remove"
+                  buttons tells a screen reader nothing about which name it
+                  is about to drop. */}
               <button type="button" className="fav-chip" onClick={() => toggle(id)}
-                      title="Remove">
+                      aria-label={`Remove ${name}`} title={`Remove ${name}`}>
                 <span className="fav-chip-ord mono">{i + 1}</span>
-                <span className="fav-chip-name">{player?.name ?? id}</span>
+                <span className="fav-chip-name">{name}</span>
                 <span className="fav-chip-x" aria-hidden="true">×</span>
               </button>
             </li>

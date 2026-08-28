@@ -1495,11 +1495,14 @@ button.roster-row:focus-visible {
    sentence: these are the holes, and this is how they get filled. */
 
 .plan-panel {
-  /* Shrinks before the roster does and never grows past a third of the
-     rail: the roster is the thing a reader checks every pick, and the plan
-     is what he reads between them. `min-height: 0` is what actually lets it
-     shrink -- a flex item's default `min-height: auto` refuses to go below
-     its content, which would push the rail past the bottom of the room. */
+  /* Shrinks before the roster does and never grows past 42% of the rail:
+     the roster is the thing a reader checks every pick, and the plan is what
+     he reads between them. Every remaining turn is drawn (PlanPanel caps
+     nothing), so this rule and the panel's own scrolling are what keep an
+     eleven-turn plan inside the rail. `min-height: 0` is what actually lets
+     it shrink -- a flex item's default `min-height: auto` refuses to go
+     below its content, which would push the rail past the bottom of the
+     room. */
   flex: 0 1 auto;
   min-height: 0;
   max-height: 42%;
@@ -1593,6 +1596,17 @@ button.plan-target:focus-visible {
   font-size: var(--text-sm);
   font-weight: 600;
   color: var(--text-1);
+}
+
+/* The face at rail scale -- small enough that a row is still one line
+   tall, which is what keeps a long plan readable in a 340px column. */
+.plan-shot {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--bg-2);
+  flex-shrink: 0;
 }
 
 .plan-star {
@@ -2111,15 +2125,13 @@ button.plan-target:focus-visible {
   color: var(--text-3);
 }
 
-/* This table is descriptive, not argumentative: there is no longer an
-   emphasised "this is the pick" column here, because the column that used
-   to carry that weight (`.avail-gain`, gain_now) was deliberately removed
-   along with `.avail-vor` (over-replacement) and `.avail-fills` -- see the
-   long comment at the top of AvailableList.tsx. The model still ranks on
-   gain_now and the recommendation cards above still make the argument; the
-   remaining split is only "what this player is projected to do"
-   (--text-2) against "where the market has him" (--text-3), which is
-   context, not a claim. Do not reintroduce a loud column here. */
+/* This table is descriptive, not argumentative: no column here is drawn as
+   "this is the pick". The argument is made by the target cards above it,
+   which name one turn's target and say why; the table's own split is only
+   "what this player is projected to do" (--text-2) against "where the
+   markets have him" (--text-3), which is context, not a claim. The two
+   computed columns (Lasts, Edge) carry their own tone from the numbers
+   themselves. Do not reintroduce a loud column here. */
 .avail-proj {
   font-size: var(--text-sm);
   color: var(--text-2);
@@ -4283,8 +4295,8 @@ button.plan-target:focus-visible {
 }
 
 /* -- pulse: how likely a row is to be gone by your next look --------------
-   `survive_pct` already prints in `riskTone`'s own red/amber/green language
-   two cells over (see AvailableList.tsx's Lasts `<td>`) -- this is the same
+   `lasts_pct` already prints in `riskTone`'s own red/amber/green language in
+   the Lasts column (see AvailableList.tsx's Lasts `<td>`) -- this is the same
    number, read as motion instead of digits, so a row worth worrying about
    is impossible to miss even by a reader who isn't reading percentages.
    `--pulse` (0..1, the row's own eased danger -- see pulseIntensity's own
@@ -4328,7 +4340,7 @@ button.plan-target:focus-visible {
      either -- these are a WHOLE ROW, text and all, where the toolbar's key
      (`avail-key-pulse`, 24-78%) is an 11px chip with nothing on top of it and
      can be as loud as it likes. 38% at a row's own peak (`--pulse: 1`,
-     survive_pct 0) is the most red this can carry while the name and the
+     lasts_pct 0) is the most red this can carry while the name and the
      numbers still read cleanly over it, which is the constraint that decides
      this number rather than taste.
 

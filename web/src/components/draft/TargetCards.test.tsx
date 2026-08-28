@@ -63,7 +63,9 @@ const PLAN = [
   turn(21, 2, ['next1', 'next2', 'next3']),
 ]
 
-function draw(isMyTurn: boolean) {
+// `onTheClock` defaults to `isMyTurn` here only because that is the ordinary
+// case; the third test below is the one that pulls them apart.
+function draw(isMyTurn: boolean, onTheClock = isMyTurn) {
   return render(
     <TargetCards
       plan={PLAN}
@@ -71,6 +73,7 @@ function draw(isMyTurn: boolean) {
       players={PLAYERS}
       onDraft={() => {}}
       isMyTurn={isMyTurn}
+      onTheClock={onTheClock}
       pickNo={12}
       settings={null}
       recompute={null}
@@ -108,6 +111,23 @@ test('waiting, they are the next turn\'s', () => {
   expect(screen.getAllByText('60')).toHaveLength(2)
 })
 
+// A PAYWALLED OR RECONNECTING ROOM STILL KNOWS WHOSE PICK IT IS. Both
+// disable the Draft button with the clock running on the reader's own seat,
+// and the cards used to answer that by describing his NEXT turn -- three
+// names he cannot use, headed "Your next turn", during the pick he is
+// actually holding.
+test('locked on the clock still describes the pick he is holding', () => {
+  const { container } = draw(false, true)
+  expect(screen.getByText('Now One')).toBeTruthy()
+  expect(screen.queryByText('Next One')).toBeNull()
+  expect(screen.getByText('Take one of these')).toBeTruthy()
+  expect(screen.getByText('pick 12 · round 1')).toBeTruthy()
+  // ...and the buttons are still off, which is the other half of the fact.
+  const buttons = Array.from(container.querySelectorAll('.avail-draft-btn'))
+  expect(buttons).toHaveLength(3)
+  expect(buttons.every((b) => (b as HTMLButtonElement).disabled)).toBe(true)
+})
+
 test('with no plan at all, the top of the board stands in', () => {
   render(
     <TargetCards
@@ -116,6 +136,7 @@ test('with no plan at all, the top of the board stands in', () => {
       players={PLAYERS}
       onDraft={() => {}}
       isMyTurn={false}
+      onTheClock={false}
       pickNo={12}
       settings={null}
       recompute={null}

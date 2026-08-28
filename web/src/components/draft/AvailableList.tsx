@@ -480,10 +480,11 @@ interface AvailableListProps {
   // because "the draft button is disabled unless it is your turn" (the
   // brief's own rule) has nowhere else to come from: this component has no
   // access to `state`, only to the ranked list and the join table. DraftRoom
-  // computes it once (on_the_clock === my_slot, the same test ClockPanel's
-  // youAreUp already uses) and hands it down, so both this list and
-  // TopThree gate their buttons on the exact same boolean rather than each
-  // re-deriving "is it my turn" from state fields they don't have.
+  // computes it once -- his turn, on a live socket, in a room he has paid
+  // for -- and hands it down, so this list and the target cards gate their
+  // buttons on the exact same boolean rather than each re-deriving "may I
+  // pick" from state fields they don't have. (The cards take a SECOND
+  // boolean for which turn to describe; see TargetCards' own props.)
   isMyTurn: boolean
   // Opens the player's profile over the room (DraftRoom's PlayerOverlay).
   // The whole row is not the target -- only the name -- because every other

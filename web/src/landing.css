@@ -1611,6 +1611,17 @@
   color: var(--accent);
 }
 
+/* A chip is one line and a name can be long: 20ch is about the longest
+   real name on the board, past which it clips rather than pushing the row
+   of chips into a fifth line. */
+.fav-chip-name {
+  min-width: 0;
+  max-width: 20ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .fav-chip-x {
   color: var(--text-3);
 }
@@ -1745,6 +1756,17 @@
   background: color-mix(in srgb, var(--fail) 10%, var(--bg-1));
   font-size: var(--text-sm);
   color: var(--text-1);
+}
+
+/* The same strip, but inside a section rather than across the top of the
+   page: it is about the favourites panel and nothing else, so it is boxed
+   and padded like a card instead of ruled like a page-wide banner. AFTER
+   `.db-error` on purpose -- both are single-class selectors, so source
+   order is what decides the padding and the bottom border. */
+.db-fav-error {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--fail);
+  border-radius: var(--radius);
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -125,6 +125,10 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
   // -- it is a 250-row payload and a dashboard with no session for it has no
   // use for a single row.
   const [board, setBoard] = useState<Player[]>([])
+  // A board that never arrives is a state, not a spinner. Without this the
+  // section sat on "Loading the board…" for as long as the page was open,
+  // which is a promise it had already stopped keeping.
+  const [boardError, setBoardError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -139,7 +143,9 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
     let cancelled = false
     fetchPlayers()
       .then((rows) => { if (!cancelled) setBoard(rows) })
-      .catch(() => { /* the panel says it is still loading, and stays honest */ })
+      .catch((e) => {
+        if (!cancelled) setBoardError(e instanceof Error ? e.message : String(e))
+      })
     return () => { cancelled = true }
   }, [favorites, board.length])
 
@@ -424,7 +430,12 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
               )}
             </div>
             {board.length === 0 ? (
-              <p className="db-empty">Loading the board…</p>
+              boardError !== null ? (
+                <p className="db-error db-fav-error" role="alert">
+                  The player list did not load ({boardError}), so there is
+                  nothing to pick from. Reload to try again.
+                </p>
+              ) : <p className="db-empty">Loading the board…</p>
             ) : editing || favorites.length === 0 ? (
               <FavoritesPicker
                 players={board}

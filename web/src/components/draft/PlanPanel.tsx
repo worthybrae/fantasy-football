@@ -43,22 +43,20 @@ interface PlanPanelProps {
   /** Opens the profile over the room. Optional: the landing page's
    *  spectator room has a plan to show and nobody to open it for. */
   onOpenPlayer?: (playerId: string) => void
-  /** How many turns to draw. The rail is a column, not a page, and a
-   *  fifteen-round league's whole plan below the roster is a scroll nobody
-   *  makes under a pick clock -- the next few turns are the ones a reader
-   *  is actually holding. */
-  limit?: number
 }
 
-const DEFAULT_LIMIT = 6
-
 export default function PlanPanel({
-  plan, players, favourites, onOpenPlayer, limit = DEFAULT_LIMIT,
+  plan, players, favourites, onOpenPlayer,
 }: PlanPanelProps) {
   // No plan is not an error -- a spectator has no turns, and the panel is
   // simply absent rather than standing there empty saying so.
   if (plan.length === 0) return null
-  const turns = plan.slice(0, limit)
+  // EVERY REMAINING TURN, not the next few. The panel is a scroll region of
+  // its own (`.plan-panel`), so the whole plan costs nothing but scrolling
+  // -- and a panel that quietly stopped at six turns while its own header
+  // counted eleven would be the one thing a plan must never be, which is
+  // wrong about itself.
+  const turns = plan
 
   return (
     <div className="plan-panel">
@@ -75,7 +73,13 @@ export default function PlanPanel({
           const name = player?.name ?? target.player_id
           const body = (
             <>
-              {posBadge(player?.position)}
+              {/* The face, at rail scale. Same rule the cards follow: the
+                  badge is what a player with no photograph gets, not a
+                  second thing beside the photograph. */}
+              {player?.headshot ? (
+                <img className="plan-shot" src={player.headshot} alt=""
+                     loading="lazy" />
+              ) : posBadge(player?.position)}
               <span className="plan-name">
                 {favourites?.has(target.player_id) && (
                   <span className="plan-star" role="img"

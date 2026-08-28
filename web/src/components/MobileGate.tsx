@@ -114,8 +114,8 @@ function GatePage() {
           preload="metadata"
         />
         <figcaption className="mg-caption">
-          A real ESPN mock draft, the room&rsquo;s own pick priced by
-          simulating the rest of the draft.
+          A real ESPN mock draft, in ESPN&rsquo;s own order, with the room&rsquo;s
+          pick priced against the drafts on record.
         </figcaption>
       </figure>
 
