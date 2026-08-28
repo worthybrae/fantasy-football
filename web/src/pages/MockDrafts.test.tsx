@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import type { BoardPlayer, LiveBoard, MockDraft } from '../api'
@@ -105,4 +105,66 @@ test('a listing with no board of its own falls back to fetching one', async () =
 
   expect(await screen.findByText('Fetched Pick')).toBeTruthy()
   expect(fetchMockBoard).toHaveBeenCalledWith('d1')
+})
+
+const roomA: MockDraft = { ...live, id: 'a', league_id: '111' }
+const roomB: MockDraft = {
+  ...live, id: 'b', league_id: '222', status: 'complete',
+  started_at: null, recorded_at: '2026-08-28T00:00:00Z',
+}
+
+function boardsById() {
+  fetchMockBoard.mockImplementation(async (id: string) =>
+    board(id === 'a' ? 'A Board' : 'B Board'))
+}
+
+test('another room and back reloads that board rather than stranding it', async () => {
+  // The first row is live, so the listing keeps polling and keeps handing the
+  // page its board. That is what made this go wrong: the page knew a listing
+  // had delivered room A's board, went on knowing it after `handleSelect`
+  // threw the board away for room B, and on the way back skipped the fetch on
+  // the strength of it. The panel then read "Loading the board..." with
+  // nothing on the way.
+  fetchMockDrafts.mockResolvedValue({
+    drafts: [roomA, roomB], first_board: board('A Board'),
+  })
+  boardsById()
+
+  render(<MemoryRouter><MockDrafts /></MemoryRouter>)
+  expect(await screen.findByText('A Board')).toBeTruthy()
+  // At least one poll, so anything the page remembers about the listing's
+  // board has been remembered again since the first paint.
+  await act(async () => { await vi.advanceTimersByTimeAsync(POLL_MS) })
+
+  fireEvent.click(screen.getByRole('button', { name: /222/ }))
+  expect(await screen.findByText('B Board')).toBeTruthy()
+
+  fireEvent.click(screen.getByRole('button', { name: /111/ }))
+
+  expect(await screen.findByText('A Board')).toBeTruthy()
+  expect(screen.queryByText(/Loading the board/)).toBeNull()
+  // ASKED FOR, not waited for. Whether the next listing poll would eventually
+  // have brought this board is beside the point: on a page whose rooms have
+  // all finished there is no next poll, and the panel would never fill.
+  expect(fetchMockBoard).toHaveBeenCalledWith('a')
+})
+
+test('switching away and straight back, before the first board lands', async () => {
+  // Same fault, a hundred milliseconds wide: leave room A, and come back
+  // before room B's board has arrived. Nothing has replaced what the page
+  // threw away, so a page that decides by what it once had rather than by
+  // what it has now strands itself here too.
+  fetchMockDrafts.mockResolvedValue({
+    drafts: [roomA, roomB], first_board: board('A Board'),
+  })
+  boardsById()
+
+  render(<MemoryRouter><MockDrafts /></MemoryRouter>)
+  expect(await screen.findByText('A Board')).toBeTruthy()
+
+  fireEvent.click(screen.getByRole('button', { name: /222/ }))
+  fireEvent.click(screen.getByRole('button', { name: /111/ }))
+
+  expect(await screen.findByText('A Board')).toBeTruthy()
+  expect(screen.queryByText(/Loading the board/)).toBeNull()
 })

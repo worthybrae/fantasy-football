@@ -107,8 +107,12 @@ up: ## run API + web together; Ctrl-C stops both
 test: ## run the python test suite
 	.venv/bin/pytest -q
 
-build: ## typecheck + production-build the frontend
-	cd web && npm run build
+build: ## run the frontend tests, then typecheck + production-build it
+	# Tests first, so a green build is not the only thing standing between a
+	# broken page and a deploy. They are two seconds of jsdom and they hold
+	# the things a type error cannot: which requests the mock-draft page
+	# makes, and which it has stopped making.
+	cd web && npm test && npm run build
 
 image: ## build the deployable image locally (same one Railway builds)
 	# Worth running before a push: the web stage runs `tsc -b`, so a type

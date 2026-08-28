@@ -241,10 +241,13 @@ export default function MockDrafts() {
   //   the server could not build has to fall back to the fetch below, or the
   //   panel would sit empty forever waiting for a listing to bring one.
   //
-  //   `seededIdRef` names the draft whose board is already in state and has
-  //   not been accounted for by the board effect yet. That effect consumes
-  //   it and clears it, so re-selecting the same room after looking at
-  //   another one still fetches.
+  //   `boardForRef` names the draft the board CURRENTLY IN STATE belongs to,
+  //   or null when there is none. The board effect skips its fetch only when
+  //   that says the board is already on screen -- never on "a listing
+  //   delivered this id at some point", which is a different claim and stops
+  //   being true the moment somebody looks at another room: `handleSelect`
+  //   blanks the board, and a skip based on the older claim would leave the
+  //   panel reading "Loading the board..." with nothing on the way.
   //
   //   `selectedIdRef` is the current selection read from inside
   //   `loadDrafts`, which is memoised with no dependencies (its identity
@@ -253,7 +256,7 @@ export default function MockDrafts() {
   //   -- or nothing yet -- keeps a poll from throwing that board over one
   //   somebody chose, and keeps `?draft=<id>` pointing where it says.
   const [firstBoardId, setFirstBoardId] = useState<string | null>(null)
-  const seededIdRef = useRef<string | null>(null)
+  const boardForRef = useRef<string | null>(null)
   const selectedIdRef = useRef(selectedId)
   useEffect(() => { selectedIdRef.current = selectedId }, [selectedId])
 
@@ -267,7 +270,7 @@ export default function MockDrafts() {
       setFirstBoardId(list.first_board && first ? first.id : null)
       if (list.first_board && first &&
           (selectedIdRef.current === null || selectedIdRef.current === first.id)) {
-        seededIdRef.current = first.id
+        boardForRef.current = first.id
         setBoard(list.first_board)
         setBoardError(null)
       }
@@ -321,6 +324,12 @@ export default function MockDrafts() {
   const handleSelect = useCallback((id: string) => {
     if (id === selectedId) return
     setBoard(null)
+    // In step with the state it describes. Leaving it behind would tell the
+    // effect below that a board it has just thrown away is still on screen,
+    // and the panel would sit on "Loading the board..." with no request out
+    // -- until the next listing poll, or for good on a page with nothing
+    // live on it, which does not poll at all.
+    boardForRef.current = null
     setBoardError(null)
     setSelectedId(id)
   }, [selectedId])
@@ -339,6 +348,7 @@ export default function MockDrafts() {
         const data = await fetchMockBoard(id)
         if (cancelled || wantedRef.current !== id) return
         setBoard(data)
+        boardForRef.current = id
         setBoardError(null)
       } catch (e) {
         if (cancelled || wantedRef.current !== id) return
@@ -346,11 +356,12 @@ export default function MockDrafts() {
       }
     }
 
-    if (seededIdRef.current === selectedId) {
-      // Already on screen, inlined with the listing. Fetching it again on
-      // the same tick is the request this whole arrangement exists to avoid.
-      seededIdRef.current = null
-    } else {
+    // Fetch unless this room's board is already the one on screen -- which
+    // it is when the listing brought it. That is the request this whole
+    // arrangement exists to avoid, and the condition is deliberately about
+    // the board in state rather than about what some earlier listing
+    // carried: the two agree until somebody selects another room.
+    if (boardForRef.current !== selectedId) {
       load(selectedId)
     }
     // A finished draft is fetched exactly once. Nothing about it can change
