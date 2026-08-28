@@ -742,6 +742,157 @@ def test_profile_frame_cache_is_not_annotated_by_the_player_who_used_it_first(tm
     assert "_norm_name" not in frames.prior_weekly.columns
 
 
+# -- the finished payload cache (scoring/profile_cache.cached_profile) -----
+#
+# With the board, the frames and game points all cached, a profile click was
+# still 239 ms of per-player work on data/nfl.duckdb -- and it was the same
+# 239 ms the second time the same player was asked for. `cached_profile`
+# holds the finished payload. These pin the four ways it could be wrong: a
+# second call that quietly rebuilds, a payload that is not what
+# `build_profile` would have returned, a pick made after the first call, and
+# one player's answer served for another's key.
+
+def _count_builds(monkeypatch):
+    """Count `build_profile` calls made THROUGH cached_profile.
+
+    It resolves the name from `scoring.profile` inside the call (the import
+    is function-local, to break the cycle), so patching the attribute on
+    that module is what a real miss goes through."""
+    from scoring import profile as profile_mod
+
+    calls = []
+    real = profile_mod.build_profile
+
+    def counted(*a, **k):
+        calls.append(a[1] if len(a) > 1 else k.get("player_id"))
+        return real(*a, **k)
+
+    monkeypatch.setattr(profile_mod, "build_profile", counted)
+    return calls
+
+
+def test_two_profile_hits_for_one_player_build_once(tmp_path, monkeypatch):
+    """The whole point. Two requests for one player, one build -- and the
+    second answer is the first answer, not a differently-shaped one."""
+    from scoring import profile_cache
+    conn = _seed_with_real_depth_schema(tmp_path)
+    profile_cache.clear()
+    calls = _count_builds(monkeypatch)
+
+    first = profile_cache.cached_profile(conn, "p1")
+    again = profile_cache.cached_profile(conn, "p1")
+
+    assert calls == ["p1"]          # not ["p1", "p1"]
+    assert first == again
+
+
+def test_cached_profile_returns_exactly_what_build_profile_returns(tmp_path):
+    """A cache is only allowed to be faster. Same keys, same values, same
+    order -- compared as JSON so key order is part of the assertion."""
+    import json
+
+    from scoring import profile_cache
+    conn = _seed_with_real_depth_schema(tmp_path)
+    profile_cache.clear()
+
+    for pid in ("p1", "p2"):
+        direct = json.dumps(build_profile(conn, pid), default=str)
+        cached = json.dumps(profile_cache.cached_profile(conn, pid), default=str)
+        assert direct == cached, pid
+
+
+def test_cached_profile_hands_each_caller_its_own_copy(tmp_path):
+    """A consumer that annotates the payload it was given must not be
+    annotating the cache. Same argument as ProfileFrames.copy, one level up."""
+    from scoring import profile_cache
+    conn = _seed_with_real_depth_schema(tmp_path)
+    profile_cache.clear()
+
+    first = profile_cache.cached_profile(conn, "p1")
+    first["header"]["name"] = "SCRIBBLED"
+    first["seasons"].append({"season": 1999})
+
+    again = profile_cache.cached_profile(conn, "p1")
+    assert again["header"]["name"] != "SCRIBBLED"
+    assert {"season": 1999} not in again["seasons"]
+
+
+def test_cached_profile_reflects_a_pick_made_after_the_first_call(tmp_path):
+    """`drafted` is deliberately NOT in the key -- it is the one thing that
+    changes a dozen times an hour during a draft, and it changes exactly one
+    value in the payload. It is stamped on from a fresh read instead, so the
+    cache survives a pick and the answer still moves."""
+    from scoring import profile_cache
+    conn = _seed(tmp_path)
+    profile_cache.clear()
+
+    before = profile_cache.cached_profile(conn, "p1")
+    assert before["header"]["drafted"] is False
+
+    # The same INSERT POST /api/drafted/{id} and api/live.py's socket both
+    # make, neither of them through this cache.
+    conn.execute("INSERT INTO drafted VALUES (?, ?)", ["p1", 1])
+
+    after = profile_cache.cached_profile(conn, "p1")
+    assert after["header"]["drafted"] is True
+    # ...and nothing else moved, which is what lets the entry be kept.
+    assert {k: v for k, v in after["header"].items() if k != "drafted"} == \
+           {k: v for k, v in before["header"].items() if k != "drafted"}
+
+
+def test_cached_profile_keys_on_the_player_and_the_weights(tmp_path, monkeypatch):
+    """Two players and two weight sets are four answers, not one."""
+    from scoring import profile_cache
+    conn = _seed_two_players(tmp_path)
+    profile_cache.clear()
+    durability_only = {"production": 0.0, "role": 0.0, "environment": 0.0,
+                       "schedule": 0.0, "durability": 1.0}
+    calls = _count_builds(monkeypatch)
+
+    p1 = profile_cache.cached_profile(conn, "p1")
+    p2 = profile_cache.cached_profile(conn, "p2")
+    p1_custom = profile_cache.cached_profile(conn, "p1", durability_only)
+    p1_again = profile_cache.cached_profile(conn, "p1")
+
+    assert calls == ["p1", "p2", "p1"]        # the fourth call is a hit
+    assert p1["header"]["player_id"] == "p1"
+    assert p2["header"]["player_id"] == "p2"
+    assert p1_custom["header"]["composite"] != p1["header"]["composite"]
+    assert p1_again["header"]["composite"] == p1["header"]["composite"]
+
+
+def test_cached_profile_caches_the_unknown_player_answer(tmp_path, monkeypatch):
+    """None is a real answer, not a miss -- `get_or_build` tests the stored
+    value against None, so the payload is stored wrapped. Without that, a bad
+    id rebuilt every time AND left a dead entry evicting a live one."""
+    from scoring import profile_cache
+    conn = _seed(tmp_path)
+    profile_cache.clear()
+    calls = _count_builds(monkeypatch)
+
+    assert profile_cache.cached_profile(conn, "nope") is None
+    assert profile_cache.cached_profile(conn, "nope") is None
+    assert calls == ["nope"]
+
+
+def test_clearing_the_board_cache_drops_the_finished_payloads(tmp_path, monkeypatch):
+    """A profile is built out of a board. The escape valve for one has to be
+    the escape valve for the other, or a test that rewrites `adp` without
+    stamping `meta` gets a fresh board inside a stale payload."""
+    from scoring import board_cache, profile_cache
+    conn = _seed_with_real_depth_schema(tmp_path)
+    profile_cache.clear()
+    profile_cache.cached_profile(conn, "p1")
+    assert profile_cache._payload_cache
+
+    board_cache.clear()
+
+    assert not profile_cache._payload_cache
+    # The frames survive: they are a function of the universal tables alone
+    # and cost seconds to rebuild.
+    assert profile_cache._cache
+
+
 def test_the_projected_reads_build_the_same_frames_as_the_whole_tables(tmp_path):
     """scoring/profile_cache._build reads `weekly` and `snap_counts` through
     a column list now -- 244 MB and 144 MB read whole, against 39 and 9

@@ -142,6 +142,7 @@ the fact), so a test that seeds a profile database, calls `build_profile`,
 and only then writes `player_news` will keep serving `news: []` until it
 clears.
 """
+import copy
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -155,7 +156,9 @@ from scoring.board import _norm_name, weekly_columns
 # second, divergent "has the data changed" signal is worse than reusing the
 # board's -- and it is: two keys that disagree by one table would show a
 # profile assembled half from before a refresh and half from after.
-from scoring.board_cache import _db_key, _meta_key, get_or_build
+from scoring.board_cache import (_db_key, _drafted_ids, _identity_key,
+                                 _meta_key, _sim_key, _weights_key,
+                                 get_or_build)
 from scoring.config import CURRENT_SEASON
 from scoring.oline import (LINE_QUALITY_COLUMNS, LINE_UNITS_COLUMNS,
                            _ol_snaps_with_gsis, line_units, line_quality,
@@ -767,12 +770,147 @@ def cached_profile_frames(conn, rules: dict | None = None) -> ProfileFrames:
     return frames.copy()
 
 
+# ONE FINISHED PROFILE PAYLOAD PER PLAYER -- the cache the other two in this
+# file could not be.
+#
+# `cached_profile_frames` above removed the reads and the league-wide
+# aggregates from a profile click, and `scoring/board_cache.py` removed the
+# board build. What neither of them could remove is the per-player work that
+# is left, and measurement says that is now the whole cost: on
+# data/nfl.duckdb, with the board, the frames and game points all warm,
+# `build_profile` still takes 239 ms a call, spread across twenty-five
+# sections with no hot spot to attack --
+#
+#     season_summaries 27.3   _outlook 25.0   _scrub 21.2   find_twins 20.8
+#     _depth_slice 20.2   _player_weekly 20.0   similar_players 16.7
+#     _player_futures 15.3   _espn_projected_usage 10.2   ... (ms per call)
+#
+# -- and it took the same 239 ms the second time the SAME player was asked
+# for, and the third, and every time after. Nothing above this line noticed
+# that the question had already been answered. The draft room asks it a lot:
+# a hover tip, a board-grid peek and the card itself are three separate
+# requests for one player, and a reader who opens a card, closes it and
+# opens it again pays full price each time.
+#
+# WHAT THE PAYLOAD IS A FUNCTION OF, which is what the key has to carry:
+#   * `player_id` -- obviously.
+#   * the universal data (`_identity_key`) and the physical database
+#     (`_db_key`). Both, not one: `_identity_key` is what the board keys on
+#     and `_db_key` + `_meta_key` is what the frames above key on, and this
+#     payload is built out of BOTH of those, so its key is their union and
+#     it cannot outlive either of them. `_identity_key` already folds in
+#     `_meta_key`, which is what covers the tables `build_profile` reads
+#     directly and neither other cache holds -- espn_projections,
+#     player_futures, player_news, player_status, snap_counts, depth_charts.
+#   * `weights` and `settings` -- the board row in the header is priced under
+#     them, and so is every figure derived from `settings.scoring`.
+#   * `_sim_key` -- the board carries the simulation's columns.
+#
+# WHAT IS DELIBERATELY NOT IN THE KEY: the drafted set. This was MEASURED,
+# not assumed, because it is the one thing that changes a dozen times an
+# hour on the evening this cache matters. Building a profile with an empty
+# `drafted` table and again with twelve OTHER players drafted produces a
+# byte-identical payload; drafting the SUBJECT changes exactly one value,
+# `header["drafted"]`, and nothing else in 48 KB of JSON -- not `similar`,
+# not `similar_players`, not the market ranks. (Verified on
+# data/nfl.duckdb by diffing the two payloads key by key.) That is the same
+# fact `_drafted_ids` documents for the board, and it gets the same
+# treatment: the flag is stamped on afterwards from a read of the table
+# taken on THIS request, so a whole draft's worth of picks shares one
+# cached payload per player and no pick can ever be served stale.
+#
+# THE STALENESS ENVELOPE IS EXACTLY THE UNION OF THE TWO CACHES BELOW IT.
+# This adds no new gap of its own: anything that would make
+# `cached_build_board` or `cached_profile_frames` serve something out of
+# date makes this serve it too, and nothing else does. `clear()` empties
+# this along with the frames for the same reason and in the same breath.
+#
+# SIZE. A payload is ~165 KB resident (48 KB as JSON); 256 of them is ~42 MB,
+# which is one full board of one league -- the case worth holding -- and
+# an order of magnitude less than the 46 MB ONE frame set costs. It is a
+# cheap cache to keep large.
+_PAYLOAD_MAX_ENTRIES = 256
+
+_payload_cache: "OrderedDict[tuple, tuple]" = OrderedDict()
+_payload_inflight: "dict[tuple, threading.Event]" = {}
+
+
+def cached_profile(conn, player_id: str, weights: dict | None = None,
+                   settings=None) -> dict | None:
+    """Cached `scoring.profile.build_profile`, keyed on everything it reads.
+
+    Returns what `build_profile` returns, key for key and value for value,
+    with `header["drafted"]` re-read from the `drafted` table on every call
+    (see the block comment above for why that one field is not in the key).
+    `None` for an unknown player, and that answer is cached too.
+
+    Costs ~9 ms on a hit -- 5.9 for the key, 1.3 for the drafted read, 1.6
+    to copy the payload -- against 239 ms to build one.
+    """
+    # Imported here, not at the top: scoring/profile.py imports this module,
+    # so a module-level import would be a cycle. Same reason and same shape
+    # as `board_cache.warm`'s local imports.
+    from scoring import league
+    from scoring.profile import build_profile
+
+    settings = settings or league.load(conn)
+    key = (_db_key(conn), _identity_key(conn), _weights_key(weights),
+           league.to_json(settings), _sim_key(conn), str(player_id))
+
+    # Wrapped in a 1-tuple so that `None` -- a real, cacheable answer for an
+    # unknown player_id -- is not mistaken for a miss by `get_or_build`,
+    # which tests the stored value against None. Without this, every request
+    # for a bad id would rebuild AND would leave a dead entry evicting a
+    # good one.
+    #
+    # Single-flight, for the reason `get_or_build` gives: a hover across a
+    # column of players is a burst of misses, and before the board and the
+    # frames were cached that burst took the production container down.
+    (payload,) = get_or_build(_payload_cache, _payload_inflight, _lock, key,
+                              lambda: (build_profile(conn, player_id, weights,
+                                                     settings),),
+                              _PAYLOAD_MAX_ENTRIES)
+    if payload is None:
+        return None
+    # A private copy per caller, on the argument `ProfileFrames.copy` makes
+    # at length: the cached object is handed to nobody, so no consumer --
+    # today's or a future one -- can annotate it in place and poison every
+    # later click. 1.6 ms for the whole 165 KB structure.
+    payload = copy.deepcopy(payload)
+    # The one field the key does not cover, answered from the table as of
+    # now. Guarded on the key already existing rather than written blind:
+    # `build_board` always sets the column, and if it ever stops, this must
+    # not invent a field the uncached path would not have produced.
+    if "drafted" in payload["header"]:
+        ids = _drafted_ids(conn)
+        # Both forms tested because `_drafted_ids` returns the table's own
+        # values: a numpy string hashes equal to a str, an integer id would
+        # not, and `build_board`'s `.isin` matches on the raw value.
+        payload["header"]["drafted"] = player_id in ids or str(player_id) in ids
+    return payload
+
+
 def clear() -> None:
     """Drop every cached frame set. Test hook, and the escape valve for the
     gap in the module docstring: after a test or a script rewrites
     `weekly`/`snap_counts`/`depth_charts`/`schedules`/`players`/
     `player_news`/`player_status` via `write_table` without also updating
     `meta`, call this so the next profile can't be assembled from the old
-    contents."""
+    contents.
+
+    Drops the finished payloads too: they are built out of these frames, so
+    a frame set that has to go takes every profile assembled from it with
+    it."""
     with _lock:
         _cache.clear()
+        _payload_cache.clear()
+
+
+def clear_payloads() -> None:
+    """Drop the finished profile payloads, keeping the frames.
+
+    What `scoring.board_cache.clear` calls: a board thrown away invalidates
+    every profile built from one, but not the league-wide frames, which are
+    a function of the universal tables alone and cost 2.1s to rebuild."""
+    with _lock:
+        _payload_cache.clear()

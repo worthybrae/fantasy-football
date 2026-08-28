@@ -42,7 +42,7 @@ from scoring.config import DEFAULT_WEIGHTS
 from scoring.draft_model import SUMMARY_FEATURES
 from scoring.draft_sim import DEFAULT_ROLLOUTS, run_sim
 from scoring.game_points import cached_game_points
-from scoring.profile import build_profile
+from scoring.profile_cache import cached_profile
 
 def _int_or_none(value):
     return None if value is None or pd.isna(value) else int(value)
@@ -464,7 +464,7 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
                        "environment": w_environment, "schedule": w_schedule,
                        "durability": w_durability}
             try:
-                # `settings` passed rather than left to build_profile's own
+                # `settings` passed rather than left to the builder's own
                 # `league.load` fallback: with a draft connected, this is the
                 # league ESPN says the owner is IN, and every figure on the
                 # card -- points per game, the game log, the volatility rank,
@@ -473,8 +473,19 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
                 # row prices no kicking, so a kicker's card came back with an
                 # empty history while the room next to it, built on the live
                 # settings, was ranking him on real points.
-                payload = build_profile(cur, player_id, weights,
-                                        _league_settings(cur, request))
+                # cached_profile (scoring/profile_cache.py), not
+                # build_profile: with the board, the frames and game points
+                # all warm this endpoint still spent 239 ms per request
+                # rebuilding a payload it had already built, every time,
+                # including for the same player twice in a row -- and the
+                # room asks for one player three times over (the hover tip,
+                # the board-grid peek, the card itself). The cache keys on
+                # everything the payload is a function of and re-reads the
+                # drafted flag per request, so a pick is still visible
+                # immediately; see that module for the key and the
+                # measurement behind it.
+                payload = cached_profile(cur, player_id, weights,
+                                         _league_settings(cur, request))
             except ValueError as e:
                 # Same as /api/players -- compute_composite raises when
                 # weights sum <= 0, reachable if every slider is at 0.

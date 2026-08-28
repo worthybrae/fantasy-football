@@ -169,11 +169,14 @@ export default function TargetCards({
     (kind: CellTipKind, playerId: string, el: HTMLElement) => {
       if (panelTimer.current !== null) window.clearTimeout(panelTimer.current)
       const rect = el.getBoundingClientRect()
-      // The fetch starts on the first hover, before the panel is due, so the
-      // request and the delay overlap rather than queue.
-      void loadProfile(playerId).catch(() => {})
+      // Behind the delay, not ahead of it -- see the same change in
+      // AvailableList's `showCellTip` for why a pointer merely passing over
+      // these cards must not fire a profile request per card it touches.
       panelTimer.current = window.setTimeout(
-        () => setPanel({ kind, playerId, rect }), TIP_DELAY_MS)
+        () => {
+          void loadProfile(playerId).catch(() => {})
+          setPanel({ kind, playerId, rect })
+        }, TIP_DELAY_MS)
     }, [])
 
   // Measured after it renders and before the paint, because the panel

@@ -43,6 +43,20 @@ export function loadProfile(playerId: string): Promise<PlayerProfileData> {
   return p
 }
 
+/** Read the cached payload for a player, or null. Synchronous: for a
+ *  consumer that wants to paint the answer it already has on the frame it
+ *  opens rather than behind a skeleton it does not need. */
+export function cachedProfile(playerId: string): PlayerProfileData | null {
+  return cache.get(playerId) ?? null
+}
+
+/** Drop one player's cached payload, so the next `loadProfile` fetches.
+ *  For a caller that has just changed something the payload reports -- the
+ *  card's own drafted toggle is the only one today. */
+export function forgetProfile(playerId: string): void {
+  cache.delete(playerId)
+}
+
 // Health, the 2025 sparkline, and Finish are all the same picture -- time
 // along the bottom, one column per period, something growing from a shared
 // baseline -- built here from each panel's own data and drawn by the shared

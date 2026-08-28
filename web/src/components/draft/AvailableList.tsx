@@ -884,12 +884,28 @@ export default function AvailableList({
     (kind: CellTipKind, playerId: string, el: HTMLElement) => {
       if (cellTimer.current !== null) window.clearTimeout(cellTimer.current)
       const rect = el.getBoundingClientRect()
-      // The fetch starts on the FIRST hover, before the panel is due to
-      // appear, so the request and the delay overlap rather than queue. By
-      // the time the panel opens the data is usually already cached.
-      void loadProfile(playerId).catch(() => {})
+      // THE FETCH IS BEHIND THE SAME DELAY AS THE PANEL, and it did not use
+      // to be. It used to fire on the first hover so the request and the
+      // delay would overlap -- true, and it meant a pointer crossing this
+      // list on its way somewhere else fired one
+      // `GET /api/players/{id}/profile` per row it touched. That endpoint is
+      // the most expensive one this app serves (239 ms of per-player work
+      // even with every server-side cache warm, and multiples of that on a
+      // shared vCPU), and the requests a sweep starts are still running when
+      // the one the reader actually wants arrives behind them.
+      //
+      // TIP_DELAY_MS is the room's existing hover-intent threshold -- the
+      // same 130 ms that already decides whether this panel, the header
+      // tooltips and the pick ticker's are wanted at all -- so nothing new
+      // has to be tuned or learned: a pointer passing through now costs
+      // nothing, and a pointer that stops still gets its fetch before the
+      // reader can read the panel. What the reader sees while it lands is
+      // `CellTip`'s skeleton, which is what that skeleton is for.
       cellTimer.current = window.setTimeout(
-        () => setCellTip({ kind, playerId, rect }), TIP_DELAY_MS)
+        () => {
+          void loadProfile(playerId).catch(() => {})
+          setCellTip({ kind, playerId, rect })
+        }, TIP_DELAY_MS)
     }, [])
 
   useLayoutEffect(() => {

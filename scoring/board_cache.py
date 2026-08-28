@@ -430,7 +430,17 @@ def clear() -> None:
     gap this cache accepts (see the module docstring): after a test or a
     script writes `weekly`/`adp`/etc. directly via `write_table` without
     also updating `meta`, call this so the next `cached_build_board` call
-    can't serve a board built from the old contents."""
+    can't serve a board built from the old contents.
+
+    Drops scoring/profile_cache.py's finished payloads too. A profile is
+    built out of a board, so a board that has to be thrown away takes every
+    payload assembled from one with it -- and that cache's own key carries
+    this module's `_identity_key`, so a test that gets past THIS escape
+    valve would get past that one by the same route. Imported inside the
+    function because profile_cache imports this module."""
+    from scoring import profile_cache
+
     with _lock:
         _cache.clear()
         _pool_cache.clear()
+    profile_cache.clear_payloads()
