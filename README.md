@@ -215,6 +215,12 @@ Step 4 has no deadline, and step 5 does not wait for it. A row that never moved
 becomes unreadable when you delete its key. The server logs a line that names
 the version, and the reaper deletes the row inside `ESPN_CUSTODY_TTL_DAYS`.
 
+Live draft records follow the same rule. A `live_session` row is written under
+the newest key and read under any key in the list, so a draft that started
+before the rotation still restores after it. Those rows expire twelve hours
+after they are written, so step 5 waits one draft night for them and not
+`ESPN_CUSTODY_TTL_DAYS`.
+
 ## Usage
 
 ```bash

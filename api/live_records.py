@@ -247,17 +247,61 @@ _PG_READY = False
 _PG_LOCK = threading.Lock()
 
 
-def _token_key():
-    """The custody key the token rides under, or None if there is not one.
+def _write_key():
+    """The custody key a new record rides under, or None if there is not one.
 
     None is the same exposure the file has today, which is the honest floor:
     a deployment with no custody key is not holding anybody else's ESPN
     sessions either. A deployment that is has this key by definition.
+
+    The NEWEST configured version, exactly like every other write under
+    custody: adding a key version changes what new rows are written under
+    and nothing else.
     """
     try:
         return cred.default_store().current_key.fernet
     except cred.CustodyUnavailable:
         return None
+
+
+def _read_keys() -> list:
+    """Every configured custody key, newest version first.
+
+    ROTATION IS WHY THIS IS A LIST, and why it is not the current key alone.
+    Adding a key version is not a migration anywhere else in this project
+    (see `pipeline/credentials.py` and its `_candidate_ids`): a row written
+    under version 1 keeps version 1 forever and lookups try every version.
+    A record here carries no version of its own -- it is one blob inside a
+    JSONB document -- so the keys are simply tried newest first. That costs
+    one failed decrypt per older version on a rotation day and nothing on
+    any other day.
+
+    What it buys is the whole point: read under the current key alone, a
+    rotation made every live draft's token undecryptable, `load` answered
+    None for a record that was perfectly good, and the restore brought the
+    room back with no socket in it -- mid-draft, on the one morning
+    somebody was rotating keys.
+    """
+    try:
+        keys = cred.default_store().keys
+    except cred.CustodyUnavailable:
+        return []
+    return [keys[version].fernet for version in sorted(keys, reverse=True)]
+
+
+def _decrypt(blob):
+    """`blob` under whichever configured key wrote it, or None for none of
+    them. Bytes out; the callers decode what they know they wrote."""
+    try:
+        raw = str(blob).encode("ascii")
+    except (UnicodeEncodeError, AttributeError):
+        return None
+    for key in _read_keys():
+        try:
+            return key.decrypt(raw)
+        except Exception:      # noqa: BLE001 -- InvalidToken (this key did
+            continue           # not write it), or not a Fernet token at all
+    return None
 
 
 class _PgRecords(SessionRecordStore):
@@ -307,7 +351,7 @@ class _PgRecords(SessionRecordStore):
         from psycopg.types.json import Jsonb
 
         body = dict(record)
-        key = _token_key()
+        key = _write_key()
         if key is not None:
             body[_TOKEN_BLOB] = key.encrypt(
                 str(body.pop("token", "")).encode("utf-8")).decode("ascii")
@@ -326,18 +370,17 @@ class _PgRecords(SessionRecordStore):
         the likeliest cause is a key list that is temporarily wrong, and
         reacting to a misconfigured environment by destroying live drafts is
         worse than any outage.
+
+        Every configured key version is tried (see `_read_keys`), so a
+        record written before a rotation still opens after one.
         """
         if not isinstance(body, dict) or _TOKEN_BLOB not in body:
             return body
         body = dict(body)
-        blob = body.pop(_TOKEN_BLOB)
-        key = _token_key()
-        if key is None:
+        token = _decrypt(body.pop(_TOKEN_BLOB))
+        if token is None:
             return None
-        try:
-            body["token"] = key.decrypt(str(blob).encode("ascii")).decode("utf-8")
-        except Exception:      # noqa: BLE001 -- InvalidToken, or not a token
-            return None
+        body["token"] = token.decode("utf-8")
         return body
 
     def load(self, sid: str, now=None) -> dict | None:

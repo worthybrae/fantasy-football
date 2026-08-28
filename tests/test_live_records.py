@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from api import live, live_records
+from pipeline import credentials as cred
 
 
 def _record(now=None, token="tok-abc", league="777", team="3"):
@@ -38,6 +39,74 @@ def _record(now=None, token="tok-abc", league="777", team="3"):
 @pytest.fixture
 def store(tmp_path):
     return live_records.record_store(str(tmp_path / "draft.duckdb"))
+
+
+class _FakePgRecords(live_records._PgRecords):
+    """The Postgres backend with its table in a dictionary.
+
+    WHY THIS IS HERE AND NOT ONLY IN tests/test_live_records_pg.py: that
+    file needs a real database and is skipped without one, and this suite
+    must pass with no network. What these tests exercise is not the driver
+    but the ENCODING -- what this class puts in the `record` column and
+    what it can read back out of it -- which is its own code either way.
+    `_run` is the whole seam: every statement the class issues goes through
+    it, so replacing it with a dict is replacing Postgres and nothing else.
+    """
+
+    def __init__(self):
+        self.rows: dict = {}
+
+    def _run(self, sql: str, params=()):
+        if sql.startswith("INSERT"):
+            sid, body, _saved_at = params
+            self.rows[sid] = getattr(body, "obj", body)   # unwrap Jsonb
+            return []
+        if sql.startswith("SELECT record"):
+            row = self.rows.get(params[0])
+            return [] if row is None else [(row,)]
+        if sql.startswith("SELECT sid, record"):
+            return list(self.rows.items())
+        if sql.startswith("DELETE"):
+            self.rows.pop(params[0], None)
+            return []
+        raise AssertionError(f"unexpected statement: {sql}")
+
+
+@pytest.fixture
+def keys(monkeypatch):
+    """Configure the custody key list for one test and rebuild the store."""
+    def use(spec: str) -> None:
+        monkeypatch.setenv(cred.KEYS_ENV, spec)
+        cred.reset_default_store()
+    yield use
+    cred.reset_default_store()
+
+
+def test_a_record_written_before_a_key_rotation_still_opens_after_one(keys):
+    """Adding a key version is not a migration anywhere else in this project
+    (see pipeline/credentials.py), and it must not be one here. Read under
+    the newest key alone, a rotation turned every live draft's token into
+    something that would not decrypt: `load` answered None for a perfectly
+    good record and the restart brought the room back with no socket in
+    it, on the one morning somebody was rotating keys."""
+    one, two = cred.generate_key(), cred.generate_key()
+    keys(f"1:{one}")
+    store = _FakePgRecords()
+    store.save("draft-a", _record(token="tok-before"))
+
+    keys(f"1:{one},2:{two}")                    # the rotation
+    assert store.load("draft-a")["token"] == "tok-before"
+    store.save("draft-b", _record(token="tok-after"))
+    assert store.load("draft-b")["token"] == "tok-after"
+    assert store.load("draft-a")["token"] == "tok-before"
+
+    # And once version 1 is retired, its record is unreadable -- but still
+    # there, because destroying a live draft over a key list that might
+    # simply be wrong today is worse than any outage.
+    keys(f"2:{two}")
+    assert store.load("draft-a") is None
+    assert "draft-a" in store.rows
+    assert store.load("draft-b")["token"] == "tok-after"
 
 
 def test_a_saved_record_comes_back_and_a_deleted_one_does_not(store):
