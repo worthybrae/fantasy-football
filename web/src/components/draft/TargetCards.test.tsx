@@ -89,6 +89,10 @@ test('on the clock, the three cards are this turn\'s', () => {
   expect(screen.queryByText('Next One')).toBeNull()
   expect(screen.getByText('Take one of these')).toBeTruthy()
   expect(screen.getByText('pick 12 · round 1')).toBeTruthy()
+  // The figures are the candidate row's (40%, measured to the reader's next
+  // turn at pick 21), not the plan turn's 100% for the pick he is holding.
+  expect(screen.getAllByText('40')).toHaveLength(3)
+  expect(screen.getAllByText('still there at pick 21').length).toBe(3)
 })
 
 test('waiting, they are the next turn\'s', () => {
@@ -98,6 +102,10 @@ test('waiting, they are the next turn\'s', () => {
   expect(screen.queryByText('Now One')).toBeNull()
   expect(screen.getByText('Your next turn')).toBeTruthy()
   expect(screen.getByText('pick 21 · round 2')).toBeTruthy()
+  // Waiting, the plan turn's own figures stand: its target at 100%, its two
+  // alternates at 60.
+  expect(screen.getByText('100')).toBeTruthy()
+  expect(screen.getAllByText('60')).toHaveLength(2)
 })
 
 test('with no plan at all, the top of the board stands in', () => {

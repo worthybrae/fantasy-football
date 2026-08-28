@@ -230,8 +230,18 @@ export default function TargetCards({
             ? c?.lasts_at_pick ?? null
             : turn.pick_no
           const at = atPick === null ? 'your next turn' : `pick ${atPick}`
-          const lasts = row.lasts_pct
-          const edge = row.edge_pts
+          // ON THE CLOCK THE FIGURES COME OFF THE CANDIDATE ROW, not the
+          // plan's. Both are measured to the same pick in that case, but
+          // only the candidate row is measured to it BY CONTRACT: its
+          // `lasts_pct` is always the chance at `lasts_at_pick`, which is
+          // the pick the caption names. A plan turn's figures belong to
+          // that turn, and for the turn you are already holding the honest
+          // reading of "will he last" is the one about waiting for the
+          // next one. On a future turn the plan's are the only ones that
+          // describe it, so those are used.
+          const source = onClockTurn || turn === null ? c ?? row : row
+          const lasts = source.lasts_pct
+          const edge = source.edge_pts
           return (
             <div key={row.player_id}
                  className={`target-card${i === 0 ? ' target-card-lead' : ''}`}>
