@@ -23,10 +23,11 @@ one pass gets right.
 
 WHY THE SCORE IS NOT THE EDGE. The edge is a claim about the board that can
 be checked against the two players it compares, so it is what the room prints.
-The score is a ranking quantity and carries the roster in it: a 300-point
-running back is not a good pick at a turn where the roster is capped at
-running back, and `need_kind`/`NEED_WEIGHTS` are how that gets said. Same
-split, and the same two functions, as `gain.rank_available` before it.
+The score is a ranking quantity and carries the roster in it -- `weight *
+(proj - best_next)`, the roster's need applied to what the pick GAINS rather
+than to the projection it gains it from, and a position already at its roster
+cap is not a candidate at all. Same split, and the same two functions
+(`need_kind`, `NEED_WEIGHTS`), as `gain.rank_available` before it.
 """
 from __future__ import annotations
 
@@ -94,8 +95,25 @@ def health_level(games_pg) -> np.ndarray:
 
 
 def _best_other(proj: np.ndarray, positions: np.ndarray,
-                avail: np.ndarray) -> np.ndarray:
+                avail: np.ndarray, present: np.ndarray = None) -> np.ndarray:
     """Expected best survivor at each player's position, EXCLUDING himself.
+
+    `present` is who counts as the field. The plan passes the players it has
+    not already struck off: pricing a candidate against a man the plan itself
+    has claimed for an earlier turn is pricing him against somebody who will
+    not be there.
+
+    A CANDIDATE WITH NO FIELD AT ALL IS PRICED AGAINST HIMSELF, so his edge
+    is zero rather than his whole projection. The walk's own answer for an
+    empty field is 0 ("the position is gone and waiting costs you
+    everything"), which is right when the position's players are all likely
+    to be TAKEN and wrong when there simply are none of them on our board --
+    and the two are not distinguishable from the arithmetic. A level and a
+    differential cannot be compared inside one score: a lone tight end at 120
+    would outscore a 220-point running back with two behind him, and the
+    moment the plan strikes off the last other player at a position the
+    remaining one would leap to the top of the next turn. So a field of
+    nobody is not priced.
 
     `gain.expected_best_next` answers this for a whole position in one walk:
     best first, each player charged the probability that he survives and
@@ -114,8 +132,14 @@ def _best_other(proj: np.ndarray, positions: np.ndarray,
     survive, which on the clock is most of the board.
     """
     out = np.zeros(proj.shape, dtype=float)
+    if present is None:
+        present = np.ones(proj.shape, dtype=bool)
     for pos in np.unique(positions):
-        at = np.flatnonzero(positions == pos)
+        at = np.flatnonzero((positions == pos) & present)
+        alone = np.flatnonzero(positions == pos)
+        # Everyone at this position whose field is empty: the players not in
+        # `present` at all, and the one man who IS the field.
+        out[alone] = proj[alone]
         if at.size == 0:
             continue
         order = at[np.argsort(-proj[at], kind="stable")]
@@ -129,6 +153,9 @@ def _best_other(proj: np.ndarray, positions: np.ndarray,
         for i in range(order.size - 2, -1, -1):
             tail[i] = contribution[i + 1] + survives_none[i + 1] * tail[i + 1]
         out[order] = head + prefix * tail
+        if order.size == 1:
+            # One man in the field is one man with no field of his own.
+            out[order] = proj[order]
     return out
 
 
@@ -154,9 +181,9 @@ def edge_at(proj, positions, avail_next) -> np.ndarray:
     Positive means taking him now is worth more than waiting for what
     survives to the turn `avail_next` was measured at; negative means the
     position will still be there and this pick is spending an early turn on
-    it. A player who is the last of his position on the board has nobody to
-    be measured against, and his whole projection is the edge -- correctly:
-    wait, and you get none of it.
+    it. A player who is the last of his position on the board reads 0, not
+    his whole projection: see `_best_other` on why a field of nobody is not
+    priced.
     """
     proj = np.nan_to_num(np.asarray(proj, dtype=float), nan=0.0)
     positions = np.asarray([str(p) for p in positions], dtype=object)
@@ -249,12 +276,18 @@ class _Board:
                                       for pid in self.ids], dtype=bool)
         self.bonus = np.where(self.is_favourite, NEED_BONUS, 1.0)
 
-    def weights(self, settings, roster, turns_left) -> np.ndarray:
-        """NEED_WEIGHTS per player, one `need_kind` call per position."""
-        kinds = {pos: NEED_WEIGHTS[need_kind(settings, roster, pos,
-                                             turns_left)]
+    def need(self, settings, roster, turns_left):
+        """(weight per player, "cannot be rostered" mask).
+
+        One `need_kind` call per position, not per player: it reads the
+        league and the roster, neither of which varies down the board.
+        """
+        kinds = {pos: need_kind(settings, roster, pos, turns_left)
                  for pos in np.unique(self.positions)}
-        return np.array([kinds[pos] for pos in self.positions])
+        weights = np.array([NEED_WEIGHTS[kinds[pos]]
+                            for pos in self.positions])
+        capped = np.array([kinds[pos] == "capped" for pos in self.positions])
+        return weights, capped
 
     def name(self, i) -> str:
         return self.names.get(self.ids[i], self.ids[i])
@@ -293,7 +326,16 @@ def build_plan(*, proj, positions, player_ids, espn_rank, espn_adp,
 
     A target and its two alternates are struck off for every later turn: a
     plan that names the same three faces at every remaining round is a list
-    of the three best players, which the room already shows.
+    of the three best players, which the room already shows. They are struck
+    out of the PRICING as well as the eligibility -- what a later turn can
+    expect at a position does not include the man this plan has already
+    spent an earlier turn on.
+
+    `roster_byes` is for the STARTERS already drafted, not the whole roster:
+    a bye week is a lineup problem, and two benched players sharing one is
+    not a lineup problem. Picking which of the drafted players are starters
+    is the caller's job (api/live.py), since it is the caller that knows the
+    roster slots.
     """
     board = _Board(proj=proj, positions=positions, player_ids=player_ids,
                    espn_rank=espn_rank, espn_adp=espn_adp,
@@ -307,7 +349,8 @@ def build_plan(*, proj, positions, player_ids, espn_rank, espn_adp,
     # to be there) and turn t+1's (what waiting would get you), so computing
     # them in the loop would do each one twice.
     avail = [availability_at(table, board.ids, picks_made, pick,
-                             board.espn_adp, board.market_rank)
+                             board.espn_adp, board.market_rank,
+                             board.positions)
              for pick in turns]
 
     roster = dict(roster_counts or {})
@@ -318,18 +361,27 @@ def build_plan(*, proj, positions, player_ids, espn_rank, espn_adp,
     for t, pick_no in enumerate(turns):
         here = avail[t]
         next_pick = turns[t + 1] if t + 1 < len(turns) else None
-        # Nothing to wait for at the last turn, so the score is the roster's
-        # own valuation and the edge is not a number anyone can check.
-        best_next = (_best_other(board.proj, board.positions, avail[t + 1])
+        # Nothing to wait for at the last turn, so the whole projection is
+        # what the pick is worth and the edge is not a number anyone can
+        # check.
+        best_next = (_best_other(board.proj, board.positions, avail[t + 1],
+                                 ~planned)
                      if next_pick is not None
                      else np.zeros(board.size))
         turns_left = len(turns) - t
-        score = (board.weights(settings, roster, turns_left) * board.proj
-                 * board.bonus - best_next)
+        weights, capped = board.need(settings, roster, turns_left)
+        # THE WEIGHT MULTIPLIES THE DIFFERENCE, not the projection. Weighting
+        # the level and subtracting an unweighted expectation compares two
+        # quantities on different scales: a 300-point quarterback nine points
+        # clear of the next one scored 0.35 * 300 - 290.9 = -185.9 while a
+        # 173-point receiver two points clear scored -110.2, so the room
+        # planned the receiver. What the roster's need scales is what the
+        # pick GAINS.
+        score = weights * (board.proj - best_next) * board.bonus
 
-        eligible = ~planned & ((here >= THRESHOLD)
-                               | (board.is_favourite
-                                  & (here >= FAVOURITE_THRESHOLD)))
+        eligible = ~planned & ~capped & ((here >= THRESHOLD)
+                                         | (board.is_favourite
+                                            & (here >= FAVOURITE_THRESHOLD)))
         row = {"pick_no": pick_no,
                "round": (pick_no - 1) // settings.teams + 1,
                "target": None, "alternates": []}
@@ -416,19 +468,25 @@ def target_now(*, proj, positions, player_ids, espn_rank, espn_adp,
         best_next = np.zeros(board.size)
     else:
         here = availability_at(table, board.ids, picks_made, next_pick,
-                               board.espn_adp, board.market_rank)
+                               board.espn_adp, board.market_rank,
+                               board.positions)
         best_next = _best_other(board.proj, board.positions, here)
 
     # My remaining picks INCLUDING this one, the reading `need_kind` wants.
     # None when there are none left to count, which is its "cannot say".
     turns_left = sum(1 for t in turns if t >= on_the_clock) or None
     roster = dict(roster_counts or {})
-    score = (board.weights(settings, roster, turns_left) * board.proj
-             * board.bonus - best_next)
+    weights, capped = board.need(settings, roster, turns_left)
+    score = weights * (board.proj - best_next) * board.bonus
+    # A player at his position's roster cap has no slot to go in, starter or
+    # bench, so he is not a card however the numbers read.
+    score = np.where(capped, -np.inf, score)
     stack = _bye_stack(board, roster_byes)
 
     cards = []
     for i in np.argsort(-score, kind="stable")[:3]:
+        if not np.isfinite(score[int(i)]):
+            break
         i = int(i)
         edge = None if next_pick is None else board.proj[i] - best_next[i]
         pros, cons = reasons_for(

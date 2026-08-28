@@ -39,7 +39,30 @@ def make_table(taken, pooled=100):
         player_ids=np.array(ids, dtype=object),
         pooled=np.full(len(ids), pooled, dtype=np.int64),
         taken_by=np.cumsum(counts, axis=1),
-        adp_curve={}, corpus_mtime=1.0)
+        adp_curve={}, corpus_mtime=1.0, max_pick_observed=MAX_PICK)
+
+
+def settings12():
+    """A twelve-team league, the shape the reviewer's cases are set in."""
+    return LeagueSettings(
+        season=2026, teams=12,
+        starters={"QB": 1, "RB": 2, "WR": 2, "TE": 1, "K": 1, "DST": 1},
+        flex_slots=1, bench=7, scoring={}, draft_type="SNAKE")
+
+
+def board_args(table, ids, positions, proj, **over):
+    """Plan arguments for an arbitrary little board."""
+    n = len(ids)
+    args = dict(
+        proj=list(proj), positions=list(positions), player_ids=list(ids),
+        espn_rank=[float(i + 1) for i in range(n)],
+        espn_adp=[float(i + 1) for i in range(n)],
+        market_rank=[float(i + 1) for i in range(n)],
+        byes=[5 + (i % 9) for i in range(n)], health=[5] * n,
+        names={p: p for p in ids}, roster_counts={}, settings=settings12(),
+        turns=[6, 19], picks_made=0, favourites=set(), table=table)
+    args.update(over)
+    return args
 
 
 def plan_args(table, **over):
@@ -65,8 +88,9 @@ def test_edge_excludes_the_candidate_himself():
                       [1.0, 1.0, 1.0])
     assert edge[0] == pytest.approx(10.0)
     assert edge[1] == pytest.approx(-10.0)
-    # The only WR has nobody to be measured against: waiting gets you none.
-    assert edge[2] == pytest.approx(280.0)
+    # The only WR has no field to be measured against, so he is not priced
+    # at all rather than priced at his whole projection.
+    assert edge[2] == pytest.approx(0.0)
 
 
 def test_expected_best_excluding_matches_the_vectorised_form():
@@ -173,7 +197,8 @@ def test_the_last_turn_has_no_next_pick_to_be_measured_against():
 
 
 def test_a_turn_with_nobody_eligible_says_so():
-    table = make_table({pid: {6: 100} for pid in IDS})
+    # Taken at pick 5 in every draft, so nobody survives to make pick 6.
+    table = make_table({pid: {5: 100} for pid in IDS})
     turns = pl.build_plan(**plan_args(table, turns=[6], picks_made=0))
     assert turns[0]["target"] is None
     assert turns[0]["alternates"] == []
@@ -268,3 +293,101 @@ def test_the_plan_names_the_roster_mate_a_bye_would_stack_with():
         roster_byes={"old1": 7}))
     third = turns[2]["target"]
     assert any("bye week 7" in c for c in third["cons"]), third["cons"]
+
+
+# --- the score is the roster's weight on what the pick GAINS -----------------
+
+def test_a_bench_quarterback_nine_points_clear_beats_a_receiver_two_clear():
+    """Round 12 of a twelve-team draft, roster QB1/RB4/WR3/TE2. Both are
+    bench needs at 0.35, so the pick is decided by what it gains: 9.1 points
+    against 2.2. Weighting the PROJECTION instead scored the quarterback
+    -185.9 and the receiver -110.2, and the plan took the receiver."""
+    ids = ["qb_hi", "qb_lo", "wr_hi", "wr_lo"]
+    table = make_table(dict.fromkeys(ids, {}))
+    turns = pl.build_plan(**board_args(
+        table, ids, ["QB", "QB", "WR", "WR"], [300.0, 290.9, 173.0, 170.8],
+        roster_counts={"QB": 1, "RB": 4, "WR": 3, "TE": 2},
+        turns=[133, 145]))
+    assert turns[0]["target"]["player_id"] == "qb_hi"
+    assert turns[0]["target"]["edge_pts"] == pytest.approx(9.1)
+    assert [a["player_id"] for a in turns[0]["alternates"]] == ["wr_hi",
+                                                                "wr_lo"]
+
+
+def test_a_position_at_its_cap_is_not_a_candidate_at_any_turn():
+    """A second kicker cannot be rostered in any slot, starter or bench, so
+    he is not on the list however the arithmetic reads."""
+    ids = ["wr_hi", "wr_lo", "rb_hi", "rb_lo", "k1"]
+    table = make_table(dict.fromkeys(ids, {}))
+    args = board_args(
+        table, ids, ["WR", "WR", "RB", "RB", "K"],
+        [150.0, 145.0, 140.0, 138.0, 130.0],
+        roster_counts={"QB": 1, "RB": 2, "WR": 3, "TE": 1, "K": 1, "DST": 1},
+        turns=[100, 112])
+    named = []
+    for turn in pl.build_plan(**args):
+        if turn["target"]:
+            named.append(turn["target"]["player_id"])
+        named += [a["player_id"] for a in turn["alternates"]]
+    assert "k1" not in named
+    cards = pl.target_now(**args)
+    assert "k1" not in [c["player_id"] for c in cards]
+
+
+def test_a_lone_tight_end_does_not_outrank_a_running_back_worth_more():
+    """The 120-point tight end is the last one on the board, so waiting
+    "costs" his whole projection -- a level, against the 5-point difference
+    the running backs are separated by. Comparing those two decides the pick
+    on which position happens to be thin in our own list."""
+    ids = ["rb_hi", "rb_lo", "te1"]
+    table = make_table(dict.fromkeys(ids, {}))
+    turns = pl.build_plan(**board_args(
+        table, ids, ["RB", "RB", "TE"], [220.0, 215.0, 120.0],
+        roster_counts={"QB": 1, "WR": 2, "TE": 1}))
+    assert turns[0]["target"]["player_id"] == "rb_hi"
+
+
+def test_a_later_turn_is_not_priced_against_a_name_the_plan_already_spent():
+    """rb1 and rb2 are the target and an alternate at turn one. At turn two
+    the only running backs the plan can still expect are rb3 and rb4, so
+    rb3's edge is 280 - 100 = 180. Counting rb1 would price him at -20 and
+    the plan would take somebody else."""
+    ids = ["rb1", "rb2", "rb3", "rb4", "wr1"]
+    table = make_table(dict.fromkeys(ids, {}))
+    turns = pl.build_plan(**board_args(
+        table, ids, ["RB", "RB", "RB", "RB", "WR"],
+        [300.0, 290.0, 280.0, 100.0, 50.0], turns=[6, 19, 30]))
+    assert turns[0]["target"]["player_id"] == "rb1"
+    assert "rb2" in [a["player_id"] for a in turns[0]["alternates"]]
+    assert turns[1]["target"]["player_id"] == "rb3"
+    assert turns[1]["target"]["edge_pts"] == pytest.approx(180.0)
+
+
+def test_the_pick_on_the_clock_is_certain_inside_the_plan_too():
+    """api/live.py passes the current pick as the plan's first turn. He is
+    on the board now, so 70% of drafts having taken him by pick 6 is not a
+    reason to plan around him -- it is the reason to take him."""
+    table = make_table({**ALWAYS_THERE, "rb1": {6: 70}})
+    turns = pl.build_plan(**plan_args(table, turns=[6, 19], picks_made=5))
+    assert turns[0]["target"]["player_id"] == "rb1"
+    assert turns[0]["target"]["lasts_pct"] == pytest.approx(100.0)
+    # And the turn after it is priced on his real chances of lasting.
+    assert pl.target_now(**plan_args(
+        table, turns=[6, 19], picks_made=5))[0]["player_id"] == "rb1"
+
+
+def test_the_roster_the_plan_builds_is_what_the_next_turn_needs():
+    ids = ["rb1", "rb2", "rb3", "wr1"]
+    table = make_table(dict.fromkeys(ids, {}))
+    turns = pl.build_plan(**board_args(
+        table, ids, ["RB", "RB", "RB", "WR"],
+        [300.0, 290.0, 280.0, 50.0], turns=[6, 19, 30]))
+    assert "fills RB1" in turns[0]["target"]["pros"]
+    assert "fills RB2" in turns[1]["target"]["pros"]
+
+
+def test_health_level_bands_the_board_the_way_the_room_draws_it():
+    got = pl.health_level([5.0, 9.9, 10.0, 12.9, 13.0, 14.9, 15.0, 16.2,
+                           16.3, 20.0])
+    assert list(got) == [1, 1, 2, 2, 3, 3, 4, 4, 5, 5]
+    assert np.isnan(pl.health_level([np.nan])[0])
