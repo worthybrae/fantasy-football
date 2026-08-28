@@ -190,11 +190,6 @@ class _Pg:
     """
 
     def __init__(self):
-        # Imported here rather than at module scope so a checkout with no DSN
-        # never needs the driver at all.
-        import psycopg
-
-        self._error = psycopg.Error
         for statement in _PG_SCHEMA:
             self.execute(statement)
 
