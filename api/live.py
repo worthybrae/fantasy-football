@@ -2977,16 +2977,39 @@ def register_live_routes(app, conn, db_path, reaper: bool = True):
         boundary, so the rows are marked here, after the fact -- `slot`
         running while the worker is busy (it is the first thing the worker
         resolves), the rest closed together when the session lands."""
+        def hold_until_the_worker_lets_go(future):
+            """Keep the league file claimed while a worker nobody is waiting
+            for still has it open.
+
+            The connect that gave up releases its own claim on the way out,
+            and without this the file would then look free: the retry the
+            503 invites would be sole holder, hand the same file to a
+            SECOND worker, and meet the first one's lock. A closer-style
+            token (see _stop_listener) says the same thing the closer's
+            does -- this process cannot promise the file to another one --
+            so the retry builds inline instead, and the token comes off the
+            moment the abandoned build ends, however it ends.
+            """
+            token = f"{league_id}:abandoned:{next(_CLOSER_SEQ)}"
+            registry.claim_path(league_path, token)
+
+            def release(_future):
+                registry.release_path(league_path, token)
+                print(f"live: the abandoned worker for league {league_id} "
+                      "finished; its file claim is released")
+            future.add_done_callback(release)
+
         progress.begin("slot")
         try:
             session = live_build.build_in_worker(
                 league_path, snapshot_path, league_id,
                 league_mod.to_json(settings) if settings is not None else None,
-                team_id, None)
+                team_id, None, abandoned=hold_until_the_worker_lets_go)
         except live_build.BuildTimedOut as exc:
             # The worker still has the file open, so building inline here
-            # would race it for the lock; refuse this connect instead. A
-            # retry lands once the worker has let go.
+            # would race it for the lock; refuse this connect instead. The
+            # retry finds the file still claimed (above) and builds inline,
+            # in this process, rather than handing it to another worker.
             raise HTTPException(status_code=503,
                                 detail=f"{exc} -- try again") from exc
         teams = getattr(session.settings, "teams", None)

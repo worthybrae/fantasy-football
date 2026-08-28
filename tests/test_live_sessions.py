@@ -676,11 +676,67 @@ def test_a_worker_that_will_not_cancel_or_finish_refuses_the_connect(tmp_path, m
         assert "timed out" in resp.json()["detail"]
         assert inline == [], "the file was opened inline under a running worker"
         assert a.get("/api/live/state").json()["active"] is False
-        # The room registered the file and released it on the failure.
+        # The room released its own claim on the failure -- but the worker
+        # still has the file, so the file stays spoken for under a token of
+        # the abandoned build's own until that build ends.
         registry = app.state.live_registry
-        assert registry.holders_of(str(tmp_path / "leagues_root" / "1.duckdb")) == set()
+        league_file = str(tmp_path / "leagues_root" / "1.duckdb")
+        holders = registry.holders_of(league_file)
+        assert holders == {h for h in holders if h.startswith("1:abandoned:")}
+        assert len(holders) == 1, holders
         assert a.get("/api/live/connect-progress").json()["phase"] == "failed"
+
+        running.set_result(None)            # the abandoned worker finishes
+        assert registry.holders_of(league_file) == set()
     finally:
+        running.cancel()
+        _stop_all([a])
+
+
+def test_a_retry_after_a_build_timeout_does_not_hand_the_file_to_a_second_worker(
+        tmp_path, monkeypatch):
+    """The residual the 503 leaves behind. The abandoned worker is still
+    building and still has the league file open, so the retry the refusal
+    invites must not be sole holder of it: it builds inline in this
+    process, where a second connection to an open file is fine, and never
+    in another process, where it is a lock error."""
+    from concurrent.futures import Future
+    monkeypatch.setenv(live_build.WORKERS_ENV, "1")
+    monkeypatch.setattr("api.live_build.LIVE_BUILD_TIMEOUT", 0.2)
+    monkeypatch.setattr("api.live_build.LIVE_BUILD_GRACE", 0.2)
+    app, seen, stops = _app(tmp_path, monkeypatch)
+    _seed_league_one_with_slot_seven(str(tmp_path / "live.duckdb"),
+                                     str(tmp_path / "leagues_root"))
+    slow = Future()
+    slow.set_running_or_notify_cancel()     # cancel() will answer False
+    submits = []
+
+    def one_slow_worker(fn, *args):
+        submits.append(args[2])
+        return slow
+    monkeypatch.setattr("api.live_build.submit", one_slow_worker)
+    registry = app.state.live_registry
+    league_file = str(tmp_path / "leagues_root" / "1.duckdb")
+    a = _client(app)
+    try:
+        assert a.post("/api/live/session").json()["sid_set"] is True
+        resp = a.post("/api/live/connect-token", json={
+            "leagueId": "1", "teamId": "2", "swid": "{X}",
+            "token": "tok-1", "season": "2026"})
+        assert resp.status_code == 503 and submits == ["1"]
+        assert registry.holders_of(league_file), "the file was left unclaimed"
+
+        # The retry. One submit still: this one built inline.
+        assert _connect(a, "1", team_id="2").status_code == 200
+        assert submits == ["1"], "the retry went to a second worker"
+        assert a.get("/api/live/state").json()["active"] is True
+
+        # And when the abandoned build finally ends, its claim goes with it.
+        slow.set_result(None)
+        assert registry.holders_of(league_file) == {registry.get(
+            a.cookies.get(SID_COOKIE)).token}
+    finally:
+        slow.cancel()
         _stop_all([a])
 
 

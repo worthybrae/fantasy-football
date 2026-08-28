@@ -62,7 +62,12 @@ LIVE_BUILD_GRACE = 30.0
 
 class BuildTimedOut(RuntimeError):
     """A worker did not finish within LIVE_BUILD_TIMEOUT + LIVE_BUILD_GRACE
-    and could not be cancelled. The caller must not open the file."""
+    and could not be cancelled. The caller must not open the file.
+
+    The build itself is NOT over: the worker is still running and still has
+    the league file open, for as long as it takes. That is what
+    `build_in_worker`'s `abandoned` hook is for -- see it, and api/live.py's
+    `_build_off_process`, for who keeps the file spoken for meanwhile."""
 
 _pool_lock = threading.Lock()
 _pool: ProcessPoolExecutor | None = None
@@ -180,7 +185,7 @@ def _build_job(league_path: str, snapshot_path: str, league_id: str,
 
 def build_in_worker(league_path: str, universal_path: str, league_id: str,
                     settings_json: str | None, team_id: int | None,
-                    season) -> object:
+                    season, abandoned=None) -> object:
     """Build one league's session and return it (a DraftSession).
 
     `universal_path` is the READ-ONLY SNAPSHOT of the universal database
@@ -194,6 +199,14 @@ def build_in_worker(league_path: str, universal_path: str, league_id: str,
     inline for THIS call, with a line in the log, when the pool is broken
     twice over or the worker does not answer within LIVE_BUILD_TIMEOUT.
     A connect that falls back is slower, not failed.
+
+    `abandoned(future)` is called on the one path this function gives up on
+    a worker that is still running (BuildTimedOut). The build goes on with
+    nobody waiting for it, and until it ends the worker still has the
+    league file open -- so the caller is handed the future and can keep the
+    file spoken for until it completes. Without that, the retry the 503
+    invites finds the file unclaimed and hands it to a SECOND worker, which
+    is a lock error rather than a slow connect.
     """
     args = (league_path, universal_path, league_id, settings_json, team_id,
             season)
@@ -230,6 +243,10 @@ def build_in_worker(league_path: str, universal_path: str, league_id: str,
     try:
         failure = future.exception(timeout=LIVE_BUILD_GRACE)
     except TimeoutError:
+        if abandoned is not None:
+            # Before the raise, so the file is claimed by the time the
+            # caller's own claim comes off in its failure handler.
+            abandoned(future)
         raise BuildTimedOut(
             f"the build for league {league_id} timed out after "
             f"{LIVE_BUILD_TIMEOUT + LIVE_BUILD_GRACE:.0f}s") from None
