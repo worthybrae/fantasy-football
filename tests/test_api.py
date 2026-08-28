@@ -1500,9 +1500,33 @@ def test_head_is_answered_wherever_get_is(tmp_path):
 def test_head_does_not_invent_a_method_a_route_refuses(tmp_path):
     """The rewrite hands the request downstream as a GET; it does not hand a
     POST-only route a caller it never agreed to serve. `/api/drafted/{id}`
-    takes POST and DELETE, and a HEAD to it stays a 405."""
+    takes POST and DELETE, so a HEAD to it must be refused exactly as a GET
+    to it is refused, and the pick must not happen.
+
+    WHY THE STATUS IS NOT PINNED TO A NUMBER. Which refusal comes back
+    depends on something that has nothing to do with HEAD: whether this
+    checkout has a frontend build in it. With no `web/dist`, nothing
+    full-matches the path and Starlette answers 405 from the method
+    mismatch. With one -- which is every deployment -- `register_spa`'s
+    catch-all full-matches first and refuses `/api/...` with a 404 on
+    purpose (see api/static.py: answering an API path with index.html turns
+    a routing mistake into a corrupt payload). GET has always behaved that
+    way. Asserting the 405 asserted "this checkout has no frontend build",
+    which is true of a fresh worktree, false of the built image, and false
+    on any branch where someone has run the build -- so it failed on the
+    integration branch and passed alone.
+
+    The property that IS about the rewrite is the one below: HEAD is
+    answered exactly as GET is, and neither one reaches the handler.
+    """
     client = _client(tmp_path)
-    assert client.head("/api/drafted/p1").status_code == 405
+    head = client.head("/api/drafted/p1")
+    get = client.get("/api/drafted/p1")
+
+    assert head.status_code == get.status_code
+    assert head.status_code in (404, 405)
+    # The refusal is real, not a 404 with the pick already made behind it.
+    assert not any(p["drafted"] for p in client.get("/api/players").json()["players"])
 
 
 def test_a_public_landing_answer_does_not_vary_with_a_cookie(tmp_path):
