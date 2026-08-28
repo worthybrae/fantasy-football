@@ -616,12 +616,17 @@ def register_lobby_routes(app):
         return _lobby_summary()
 
     @app.get("/api/lobby/rooms")
-    def rooms():
+    def rooms(response: Response):
         """The open mock rooms a signed-in reader can take a seat in.
 
         Public, like the summary above -- the directory is. The seat itself is
         `POST /api/espn/mock-join`, which needs the session this does not.
+
+        Cacheable for the same reason and the same fifteen seconds: this
+        reads the one module-level cache `/api/lobby` reads, touches no
+        request and no cookie, and hands every caller the same rooms.
         """
+        http_cache.public(response, 15)
         _note_demand()
         return _lobby_rooms()
 

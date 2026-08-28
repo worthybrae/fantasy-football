@@ -128,7 +128,10 @@ def test_get_reports_lists_and_serves(tmp_path, league_root):
     assert rows[0]["season"] == 2024 and rows[0]["status"] == "numbers_only"
     resp = client.get("/api/leagues/424242/report/2024")
     assert resp.status_code == 200
-    assert resp.headers["cache-control"] == "public, max-age=300"
+    # The same vocabulary every other public read uses: the reader's own
+    # browser asks again, the edge answers everybody else. A report is a
+    # link dropped in a group chat, so the edge is where the traffic lands.
+    assert resp.headers["cache-control"] == "public, max-age=0, s-maxage=300"
     assert resp.json()["league_name"] == "Test League"
     assert client.get("/api/leagues/424242/report/2019").status_code == 404
 

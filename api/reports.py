@@ -31,6 +31,7 @@ import duckdb
 from fastapi import HTTPException, Request, Response
 
 from api import billing
+from api import http_cache
 from pipeline import espn_drafts
 from pipeline.db import get_conn
 from pipeline.league_history import import_history, is_fresh
@@ -45,7 +46,12 @@ REPORTS_DDL = """CREATE TABLE IF NOT EXISTS league_reports (
 
 LOCK_TRIES = 4
 LOCK_RETRY_SECONDS = 0.15
-CACHE_HEADER = "public, max-age=300"
+# How long a shared cache may hold a stored report. Five minutes, the same
+# window the other public reads use. Said through `http_cache.public` so a
+# reader's own browser still asks (`max-age=0`) while the edge answers
+# everybody else -- a report is a link in a group chat, so the edge is
+# where the traffic lands.
+SHARED_CACHE_SECONDS = 300
 
 _lock = threading.Lock()
 _inflight: set = set()
@@ -393,7 +399,7 @@ def register_report_routes(app, store=None, fetch=None, spawn=None, root: str | 
             payload = load_report(conn, season)
         if payload is None:
             raise HTTPException(status_code=404, detail="No report for this season.")
-        response.headers["Cache-Control"] = CACHE_HEADER
+        http_cache.public(response, SHARED_CACHE_SECONDS)
         return payload
 
     @app.post("/api/leagues/{league_id}/report/{season}", status_code=202)

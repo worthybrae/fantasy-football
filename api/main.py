@@ -149,9 +149,10 @@ def _history_round_bucket(round_no: int) -> str:
 
 def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
     app = FastAPI(title="Draft Board API")
-    # Compression, and `private, no-store` on every /api answer that does not
-    # say otherwise. First, before a single route exists, so no endpoint can
-    # ever be registered outside it -- see api/http_cache.py.
+    # Compression. First, before a single route exists. The other half of
+    # this -- the `private, no-store` default -- goes on at the very END of
+    # this function, because it has to be the outermost middleware to see
+    # the responses that never reach a route. See api/http_cache.py.
     http_cache.install(app)
     conn = get_conn(db_path)
     # In-process only: run status lives here, not in the database, so a
@@ -900,6 +901,12 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
     # throughout it.
     from api.jobs import start_jobs
     start_jobs(conn)
+
+    # `private, no-store` on every /api answer that named no policy of its
+    # own. LAST LINE, so it is the outermost middleware and every response
+    # passes through it -- including the 400s CredentialTransportGuard
+    # produces without routing. See api/http_cache.py.
+    http_cache.install_private_default(app)
 
     return app
 

@@ -229,21 +229,30 @@ export default function MockDrafts() {
   const [board, setBoard] = useState<LiveBoard | null>(null)
   const [boardError, setBoardError] = useState<string | null>(null)
 
-  // ONE REQUEST FOR THE FIRST PAINT, NOT TWO. The listing carries the board
-  // of its own first row (`first_board`, see api/mocks.py), which is the
-  // board this page was always going to ask for next. These two refs are how
-  // that arrives without the fetch below racing it:
+  // ONE REQUEST PER POLL, NOT TWO. The listing carries the board of its own
+  // first row (`first_board`, see api/mocks.py), and the first row is what
+  // this page opens and what nearly everybody keeps reading. So while that
+  // is the selection, the board endpoint is not polled at all: every listing
+  // response brings the board with it, and the page's whole five-second tick
+  // is a single request.
   //
-  //   `seededIdRef` names the draft whose board is ALREADY in state. The
-  //   board effect consumes it once and clears it, so a later re-run of that
-  //   effect -- a live draft finishing, say -- still refetches.
+  //   `firstBoardId` is the draft whose board the LAST listing response
+  //   actually carried, or null if it carried none. Null matters: a board
+  //   the server could not build has to fall back to the fetch below, or the
+  //   panel would sit empty forever waiting for a listing to bring one.
   //
-  //   `selectedIdRef` is the current selection read from inside `loadDrafts`,
-  //   which is memoised with no dependencies (its identity gates the polling
-  //   effect) and would otherwise close over the selection as it was on
-  //   mount. Seeding only when nothing is selected keeps a poll from throwing
-  //   the first room's board over one somebody chose, and keeps `?draft=<id>`
-  //   -- a link straight to a particular room -- pointing where it says.
+  //   `seededIdRef` names the draft whose board is already in state and has
+  //   not been accounted for by the board effect yet. That effect consumes
+  //   it and clears it, so re-selecting the same room after looking at
+  //   another one still fetches.
+  //
+  //   `selectedIdRef` is the current selection read from inside
+  //   `loadDrafts`, which is memoised with no dependencies (its identity
+  //   gates the polling effect) and would otherwise close over the selection
+  //   as it was on mount. Seeding only when the selection is the first row
+  //   -- or nothing yet -- keeps a poll from throwing that board over one
+  //   somebody chose, and keeps `?draft=<id>` pointing where it says.
+  const [firstBoardId, setFirstBoardId] = useState<string | null>(null)
   const seededIdRef = useRef<string | null>(null)
   const selectedIdRef = useRef(selectedId)
   useEffect(() => { selectedIdRef.current = selectedId }, [selectedId])
@@ -254,9 +263,13 @@ export default function MockDrafts() {
       if (signal.cancelled) return
       setDrafts(list.drafts)
       setListError(null)
-      if (selectedIdRef.current === null && list.first_board && list.drafts.length > 0) {
-        seededIdRef.current = list.drafts[0].id
+      const first = list.drafts.length > 0 ? list.drafts[0] : null
+      setFirstBoardId(list.first_board && first ? first.id : null)
+      if (list.first_board && first &&
+          (selectedIdRef.current === null || selectedIdRef.current === first.id)) {
+        seededIdRef.current = first.id
         setBoard(list.first_board)
+        setBoardError(null)
       }
     } catch (e) {
       if (signal.cancelled) return
@@ -344,12 +357,17 @@ export default function MockDrafts() {
     // again, so polling it would be five seconds of noise a minute for a
     // board that is already final.
     if (!selectedLive) return () => { cancelled = true }
+    // Nor is the first row polled here, ever: the listing poll above is
+    // already running for exactly as long as this board can change, and it
+    // brings the board with it. Two timers asking two endpoints for the same
+    // five seconds of a draft is the thing `first_board` exists to stop.
+    if (selectedId === firstBoardId) return () => { cancelled = true }
     const id = window.setInterval(() => load(selectedId), POLL_MS)
     return () => {
       cancelled = true
       window.clearInterval(id)
     }
-  }, [selectedId, selectedLive])
+  }, [selectedId, selectedLive, firstBoardId])
 
   const tally = useMemo(() => tallyMakers(board), [board])
 

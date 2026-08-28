@@ -350,7 +350,12 @@ def register_mock_routes(app, conn):
         row flips to "complete" on the next poll.
         """
         http_cache.public(response, SHARED_CACHE_SECONDS)
-        live = [_live_summary(p) for p in farm.live_drafts()]
+        # Read ONCE and passed down. `_board` would otherwise sweep the live
+        # directory again to answer `first_board`, which is a second scan of
+        # the same files -- and a sweep that deletes stale ones, so the two
+        # reads are not even guaranteed to agree with each other.
+        payloads = farm.live_drafts()
+        live = [_live_summary(p) for p in payloads]
         live.sort(key=lambda row: (row["started_at"] or ""), reverse=True)
         seen = {row["id"] for row in live}
 
@@ -388,15 +393,18 @@ def register_mock_routes(app, conn):
                 })
 
         drafts = live + done
-        return {"drafts": drafts, "first_board": _first_board(drafts)}
+        return {"drafts": drafts,
+                "first_board": _first_board(drafts, payloads)}
 
-    def _first_board(drafts: list):
+    def _first_board(drafts: list, payloads: list):
         """The board of the row the page is about to open, sent with the row.
 
         The page lands on the first draft in the list -- the server sorts live
-        first, then newest -- so the second request it made was always
-        predictable, and always for this. Sending it inline turns the first
-        paint from two round trips into one.
+        first, then newest -- and keeps reading it, so the board it fetched
+        separately every five seconds was always this one. Sending it inline
+        makes the page's whole poll a single request rather than two: see
+        web/src/pages/MockDrafts.tsx, which stops polling the board endpoint
+        entirely while the row it is reading is the first one.
 
         BEST EFFORT, ALWAYS. This endpoint's job is the listing; a board that
         cannot be built is a null here and a fetch the page makes for itself,
@@ -406,11 +414,11 @@ def register_mock_routes(app, conn):
         if not drafts:
             return None
         try:
-            return _board(drafts[0]["id"])
+            return _board(drafts[0]["id"], payloads)
         except Exception:      # noqa: BLE001 -- see above.
             return None
 
-    def _board(draft_id: str):
+    def _board(draft_id: str, payloads: list | None = None):
         """The snake board for one draft, live or completed, or None.
 
         Live is checked first for the same reason the listing prefers it: for
@@ -424,8 +432,12 @@ def register_mock_routes(app, conn):
         two different things from "no such draft": the route below turns it
         into the 404 it has always been, and the listing above simply leaves
         `first_board` null.
+
+        `payloads` is the live directory already read by the caller, if it
+        has one. The listing has; the route below has not, and sweeps for
+        itself.
         """
-        for payload in farm.live_drafts():
+        for payload in (farm.live_drafts() if payloads is None else payloads):
             if payload.get("draft_id") == draft_id:
                 return _live_board(conn, payload)
 

@@ -1322,3 +1322,70 @@ def test_the_per_game_chart_is_built_once_per_refresh_not_once_per_pick(tmp_path
     assert len(boards) == 1
     # ...and this is untouched either way.
     assert len(games) == 1
+
+
+# ---------------------------------------------------------------------------
+# Cache headers, at the level of the assembled app
+# ---------------------------------------------------------------------------
+
+
+def test_the_cache_middleware_is_wired_into_create_app(tmp_path):
+    """NOTHING ELSE PINS THE INSTALL. `api/http_cache.py` has its own tests,
+    but they build two-route apps; if the two `install` calls fell out of
+    `create_app` in a merge, every one of them would still pass and the
+    deployed app would answer every endpoint with no policy at all -- which,
+    behind a cache-everything rule, is how one reader's draft ends up served
+    to the next.
+
+    Two endpoints, one for each half. `/api/live/state` names no policy of
+    its own, so it can only be `private, no-store` if the default middleware
+    is on the app. `/api/lobby` opts in, so it can only say `s-maxage=15` if
+    the route was reached and its header survived to the socket."""
+    from api import lobby
+    lobby.clear_cache()
+    try:
+        # Primed so the route reads the module cache rather than ESPN.
+        lobby._lobby_summary(fetch=lambda season=None: [], now_ms=1_000.0)
+        client = _client(tmp_path)
+
+        assert client.get("/api/live/state").headers["Cache-Control"] == "private, no-store"
+        assert "s-maxage=15" in client.get("/api/lobby").headers["Cache-Control"]
+    finally:
+        lobby.clear_cache()
+
+
+def test_a_public_landing_answer_does_not_vary_with_a_cookie(tmp_path):
+    """THE ONE MISTAKE A LATER HEADER EDIT CANNOT UNDO. `public` tells a
+    shared cache it may hand this response to the next visitor. If the
+    handler behind it reads a cookie -- `espn_live` names one browser's draft
+    room, `espn_custody` its stored ESPN session -- then what the cache
+    stores is one person's answer and what it serves is everybody's.
+
+    These two endpoints are the ones close enough to reach: the preview
+    prices its board through `_league_settings`, which HAS a live-session
+    path, and the status strip reads the same league. Both are pinned here
+    rather than in the handlers, because the property has to survive whoever
+    edits them next -- it is about the header, not about today's code.
+    """
+    import uuid
+    # OVER HTTPS, because `espn_custody` is one of the two cookies and
+    # `CredentialTransportGuard` refuses any request carrying it over
+    # plaintext -- correctly, and on every path, so a plain-http client here
+    # would be testing the guard instead of the header.
+    path = str(tmp_path / "t.duckdb")
+    _seed(path)
+    client = TestClient(create_app(path), base_url="https://testserver")
+    cookies = {"Cookie": f"espn_live={uuid.uuid4().hex}; "
+                         f"espn_custody={uuid.uuid4().hex}"}
+
+    for path in ("/api/landing/status", "/api/landing/preview"):
+        anonymous = client.get(path)
+        carrying = client.get(path, headers=cookies)
+
+        assert anonymous.status_code == 200, path
+        assert carrying.status_code == 200, path
+        assert "public" in anonymous.headers["Cache-Control"], path
+        # Same policy for both, or the cache would key one of them differently
+        # and the question of which body it stored would be a coin toss.
+        assert anonymous.headers["Cache-Control"] == carrying.headers["Cache-Control"], path
+        assert anonymous.json() == carrying.json(), path

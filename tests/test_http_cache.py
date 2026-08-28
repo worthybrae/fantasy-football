@@ -31,14 +31,14 @@ from api.static import register_spa
 
 def test_public_writes_a_browser_window_and_a_shared_one():
     """Two different questions with two different answers: the reader's own
-    browser revalidates (`max-age=0`), the CDN holds a copy for everybody."""
+    browser revalidates (`max-age=0`), the CDN holds a copy for everybody.
+
+    And nothing else on the end. `stale-while-revalidate` was here and came
+    off: it is not shared-cache-scoped, so a browser honours it too, which
+    is the opposite of what the `max-age=0` beside it is for."""
     res = Response()
     http_cache.public(res, 15)
-    value = res.headers["Cache-Control"]
-    assert "public" in value
-    assert "max-age=0" in value
-    assert "s-maxage=15" in value
-    assert "stale-while-revalidate=15" in value
+    assert res.headers["Cache-Control"] == "public, max-age=0, s-maxage=15"
 
 
 def test_private_says_nobody_writes_it_down():
@@ -48,6 +48,21 @@ def test_private_says_nobody_writes_it_down():
 
 
 # -- the default ---------------------------------------------------------
+
+
+def _wire(app, build=None):
+    """The two halves of the middleware in the order `create_app` uses them.
+
+    Compression first, before any route; the private default LAST, after
+    everything `build` registers. That order is the point of the split --
+    see `install_private_default` -- so every test here goes through it
+    rather than calling the two by hand in whatever order happens to work.
+    """
+    http_cache.install(app)
+    if build is not None:
+        build(app)
+    http_cache.install_private_default(app)
+    return TestClient(app)
 
 
 def _app():
@@ -79,6 +94,7 @@ def _app():
     def health():
         return {"ok": True}
 
+    http_cache.install_private_default(app)
     return TestClient(app)
 
 
@@ -101,6 +117,43 @@ def test_a_handler_that_named_its_own_policy_keeps_it():
 def test_a_public_endpoint_is_not_overwritten_either():
     res = _app().get("/api/market/overview")
     assert "s-maxage=300" in res.headers["Cache-Control"]
+
+
+def test_a_response_that_never_reached_a_route_is_stamped_too():
+    """THE REASON THE DEFAULT GOES ON LAST. `api/custody.py` adds
+    `CredentialTransportGuard` while its routes are registered, and that
+    guard refuses a plaintext request to a credential endpoint with a 400 of
+    its own -- before routing, so no handler runs and nothing sets a header.
+    Registered before that guard, this stamp would never see the 400 and a
+    cache-everything rule would be free to store it. Registered after it, as
+    `create_app` does, every response the app emits passes through here.
+
+    The guard below stands in for it: same shape, one file's worth of
+    plumbing less."""
+
+    class Refuse:
+        """Short-circuits without routing, exactly as the custody guard does."""
+
+        def __init__(self, app):
+            self.app = app
+
+        async def __call__(self, scope, receive, send):
+            if scope["type"] == "http" and scope["path"] == "/api/x":
+                await Response(content="no", status_code=400)(scope, receive, send)
+                return
+            await self.app(scope, receive, send)
+
+    def build(app):
+        @app.get("/api/x")
+        def never_runs():        # pragma: no cover -- the guard gets there first
+            return {"ok": True}
+
+        app.add_middleware(Refuse)
+
+    res = _wire(FastAPI(), build).get("/api/x")
+
+    assert res.status_code == 400
+    assert res.headers["Cache-Control"] == "private, no-store"
 
 
 def test_paths_outside_the_api_are_left_to_their_own_modules():
@@ -127,11 +180,9 @@ def _built(tmp_path):
 def test_hashed_assets_are_immutable(tmp_path):
     """Vite fingerprints these names, so the bytes behind one cannot change
     and a browser holding it need never ask again."""
-    app = FastAPI()
-    http_cache.install(app)
-    register_spa(app, _built(tmp_path))
+    client = _wire(FastAPI(), lambda app: register_spa(app, _built(tmp_path)))
 
-    res = TestClient(app).get("/assets/index-abc123.js")
+    res = client.get("/assets/index-abc123.js")
 
     assert res.status_code == 200
     assert res.headers["Cache-Control"] == "public, max-age=31536000, immutable"
@@ -142,10 +193,7 @@ def test_the_document_is_always_revalidated(tmp_path):
     so a cached copy of it keeps booting the build it was written for --
     whose assets are all still there and still served. Cache it and a deploy
     reaches nobody who has visited before."""
-    app = FastAPI()
-    http_cache.install(app)
-    register_spa(app, _built(tmp_path))
-    client = TestClient(app)
+    client = _wire(FastAPI(), lambda app: register_spa(app, _built(tmp_path)))
 
     assert client.get("/").headers["Cache-Control"] == "no-cache"
     # Same document, reached through the router fallback.
@@ -155,11 +203,9 @@ def test_the_document_is_always_revalidated(tmp_path):
 def test_files_copied_out_of_public_are_cacheable_but_not_forever(tmp_path):
     """`robots.txt`, the favicon and the demo video keep their own names
     across builds, so `immutable` would be a lie about them."""
-    app = FastAPI()
-    http_cache.install(app)
-    register_spa(app, _built(tmp_path))
+    client = _wire(FastAPI(), lambda app: register_spa(app, _built(tmp_path)))
 
-    res = TestClient(app).get("/robots.txt")
+    res = client.get("/robots.txt")
 
     assert res.headers["Cache-Control"] == "public, max-age=3600"
 
@@ -170,14 +216,18 @@ def test_the_lobby_is_held_by_a_shared_cache_for_fifteen_seconds():
     lobby.clear_cache()
     try:
         lobby._lobby_summary(fetch=lambda season=None: [], now_ms=1_000.0)
-        app = FastAPI()
-        http_cache.install(app)
-        lobby.register_lobby_routes(app)
+        lobby._lobby_rooms(fetch=lambda season=None: [], now_ms=1_000.0)
+        client = _wire(FastAPI(), lobby.register_lobby_routes)
 
-        res = TestClient(app).get("/api/lobby")
+        summary = client.get("/api/lobby")
+        rooms = client.get("/api/lobby/rooms")
 
-        assert res.status_code == 200
-        assert "s-maxage=15" in res.headers["Cache-Control"]
+        assert summary.status_code == 200
+        assert "s-maxage=15" in summary.headers["Cache-Control"]
+        # The rooms directory is the same module-level cache read through a
+        # second shape, with no cookie and no request touched either.
+        assert rooms.status_code == 200
+        assert "s-maxage=15" in rooms.headers["Cache-Control"]
     finally:
         lobby.clear_cache()
 
@@ -207,6 +257,7 @@ def _gzip_app():
             yield "data: two\n\n"
         return StreamingResponse(body(), media_type="text/event-stream")
 
+    http_cache.install_private_default(app)
     return TestClient(app)
 
 

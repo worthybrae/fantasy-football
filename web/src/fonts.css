@@ -19,8 +19,12 @@
  * the system fallback, in the middle of a table, visibly. It is still only
  * fetched if such a name is on the page.
  *
- * If the package is upgraded and these paths move, the build fails loudly:
- * Vite resolves every `url()` here at build time.
+ * WHAT AN UPGRADE CAN AND CANNOT BREAK. Vite resolves every `url()` here at
+ * build time, so a release that moves or renames these two files fails the
+ * build. A release that CHANGES A UNICODE RANGE does not: the ranges below
+ * are copied text, and a stale one would quietly stop matching a character
+ * upstream had started covering. Diff them against the package's `wght.css`
+ * when bumping @fontsource-variable/inter.
  */
 
 /* inter-latin-wght-normal */
