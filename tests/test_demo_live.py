@@ -90,23 +90,56 @@ def test_the_shown_room_is_not_stolen_by_one_that_overtakes_it(farm):
     assert demo._identity(time.time())[0] == "111"
 
 
-def test_the_shown_room_is_left_when_it_reaches_the_handoff_round(farm):
-    """Stay through round nine; the moment the room enters round ten, move
-    to the best of the others."""
+def test_the_shown_room_is_left_after_ten_of_its_own_picks(farm):
+    """A room gets the hero for ten of its own picks and then hands it on.
+    That is the whole of the rule: the page is a rotation through the rooms
+    the farm is in, not a contest between them. It used to let a room go the
+    moment that room entered round ten, which is why round ten arrives in the
+    middle of the turn below and changes nothing."""
     teams = 8
-    _write(farm, _room(league_id="111", picks=teams * 7, teams=teams))
+    opening = teams * 8 - 1        # last pick of round eight
+    _write(farm, _room(league_id="111", picks=opening, teams=teams))
     _write(farm, _room(league_id="222", picks=20, teams=teams))
     assert demo._identity(time.time())[0] == "111"
-    # Last pick of round nine: still round nine, still ours -- though a
-    # fresh choice would not have picked a room this deep.
-    _write(farm, _room(league_id="111", picks=teams * 9 - 1, teams=teams))
+    # Nine picks in. Round ten began two picks ago and the room is still ours.
+    _write(farm, _room(league_id="111",
+                       picks=opening + demo.STICKY_PICKS - 1, teams=teams))
     assert demo._identity(time.time())[0] == "111"
-    # Round ten begins.
-    _write(farm, _room(league_id="111", picks=teams * 9, teams=teams))
+    # The tenth ends the turn, and the next room in the rotation has one.
+    _write(farm, _room(league_id="111",
+                       picks=opening + demo.STICKY_PICKS, teams=teams))
     assert demo._identity(time.time())[0] == "222"
-    # And it does not come back, even though it has more picks than 222.
-    _write(farm, _room(league_id="111", picks=teams * 9 + 1, teams=teams))
+    # 111 does not take it back until 222 has had its ten.
+    _write(farm, _room(league_id="111",
+                       picks=opening + demo.STICKY_PICKS + 1, teams=teams))
     assert demo._identity(time.time())[0] == "222"
+
+
+def test_the_rooms_take_it_in_turns_and_the_rotation_comes_round(farm):
+    """Three rooms, a turn each, in league id order -- and when everybody has
+    had one the page starts again rather than stopping on the last."""
+    teams = 8
+    made = {"111": teams * 2, "222": teams * 2 + 1, "333": teams * 2 + 2}
+    for league_id, picks in made.items():
+        _write(farm, _room(league_id=league_id, picks=picks, teams=teams))
+    assert demo._identity(time.time())[0] == "111"
+    for expected in ("222", "333", "111"):
+        # Ten picks in whichever room is on screen ends its turn.
+        shown = demo._identity(time.time())[0]
+        made[shown] += demo.STICKY_PICKS
+        _write(farm, _room(league_id=shown, picks=made[shown], teams=teams))
+        assert demo._identity(time.time())[0] == expected
+
+
+def test_one_live_room_keeps_the_hero_with_nothing_to_rotate_to(farm):
+    """A turn ending is not a reason to show nothing. With one room drafting,
+    the rotation comes back round to it."""
+    teams = 8
+    _write(farm, _room(league_id="111", picks=teams * 2, teams=teams))
+    assert demo._identity(time.time())[0] == "111"
+    _write(farm, _room(league_id="111",
+                       picks=teams * 2 + demo.STICKY_PICKS, teams=teams))
+    assert demo._identity(time.time())[0] == "111"
 
 
 def test_the_shown_room_is_shown_live_past_the_interesting_rounds(farm):
@@ -135,33 +168,33 @@ def test_a_room_that_went_quiet_is_left(farm):
     assert demo._identity(time.time())[0] == "222"
 
 
-def test_a_room_is_kept_for_its_first_ten_picks_however_the_others_run(farm):
-    """A room past the handoff round has nothing to recommend it but its pick
-    count, and a farm sitting in several of those at once has a new "furthest
-    along" after nearly every pick in the building -- which is a hero that
-    flips drafts on most polls. The page picks one and keeps it for ten of its
-    own picks before it will look at the others again."""
+def test_a_room_keeps_its_turn_however_the_others_run(farm):
+    """The rooms the farm sits in run neck and neck, so "the furthest along"
+    is a different room after nearly every pick in the building -- which is a
+    hero that flips drafts on most polls. What a room does with its turn, and
+    what the others do while it has it, makes no difference to whose turn it
+    is."""
     teams = 8
     _write(farm, _room(league_id="111", picks=teams * 11, teams=teams))
     _write(farm, _room(league_id="222", picks=teams * 10, teams=teams))
     assert demo._identity(time.time())[0] == "111"
     # 222 runs away with it, three picks to every one of 111's. Without a
-    # floor under the choice that is a different room on screen every time.
+    # turn to sit out, that is a different room on screen every time.
     for extra in range(1, demo.STICKY_PICKS):
         _write(farm, _room(league_id="222", picks=teams * 10 + extra * 3,
                            teams=teams))
         _write(farm, _room(league_id="111", picks=teams * 11 + extra,
                            teams=teams))
         assert demo._identity(time.time())[0] == "111"
-    # The tenth pick since it was chosen spends the floor, and the room with
-    # the most picks takes over.
+    # The tenth pick since it was chosen ends the turn, and the next room in
+    # the rotation takes over.
     _write(farm, _room(league_id="111", picks=teams * 11 + demo.STICKY_PICKS,
                        teams=teams))
     assert demo._identity(time.time())[0] == "222"
 
 
 def test_a_held_room_that_goes_quiet_is_left_at_once(farm):
-    """The floor is spent in picks, but a room whose file has stopped being
+    """A turn is spent in picks, but a room whose file has stopped being
     written is over -- and being over does not wait for ten of them."""
     teams = 8
     path = _write(farm, _room(league_id="111", picks=teams * 11, teams=teams))
@@ -174,7 +207,7 @@ def test_a_held_room_that_goes_quiet_is_left_at_once(farm):
 
 def test_a_held_room_that_ends_is_left_at_once(farm):
     """Nor does a room that has drafted its last pick: there is nothing left
-    to hold on to, four picks into the floor or not."""
+    to show, four picks into its turn or not."""
     teams = 8
     _write(farm, _room(league_id="111", picks=20, teams=teams, rounds=3))
     _write(farm, _room(league_id="222", picks=10, teams=teams))

@@ -219,51 +219,50 @@ def _pick_of(record: dict) -> int:
 # least useful moment. Measured on a live farm draft: round 14 offered "Cameron
 # Dicker, +2" as its best available.
 #
-# This is where a room is PICKED UP from. Where it is put down is below.
+# This is where a room is PICKED UP from. How long it is then kept is
+# `STICKY_PICKS` below.
 INTERESTING_ROUNDS = 8
 
 # And not the first pick either: an empty board is eight empty columns and a
 # recommendation nobody has had to make a decision against yet.
 WARMED_UP_PICKS = 4
 
-# The round at which the page leaves the room it has been showing and moves
-# to another. Later than `INTERESTING_ROUNDS` on purpose: a room is chosen
-# while it is interesting and then STAYED WITH, because a reader watching a
-# draft is watching a story -- these eight teams, this roster filling up --
-# and the story survives a couple of rounds of the board thinning out better
-# than it survives being swapped for a different draft mid-sentence. The room
-# is left the moment it enters this round.
-HANDOFF_ROUND = 10
+# The round past which a room is shown REWOUND rather than where it stands
+# (see `_moment`). Later than `INTERESTING_ROUNDS` on purpose: a room picked
+# up while it was interesting is worth following a couple of rounds past that
+# as it stands, because a reader watching a draft is watching a story and the
+# story survives the board thinning out. Past this round it does not, and the
+# room is shown at the moment it had something to say instead.
+#
+# This used to decide when the page LEFT a room as well, which is now
+# `STICKY_PICKS`.
+REWIND_ROUND = 10
 
-# THE FLOOR UNDER EVERY CHOICE, counted in the shown room's own picks.
-# `HANDOFF_ROUND` above keeps the page in a room while that room is still
-# worth watching, which covers most of a farm's day -- but it says nothing
-# about the case that put a slideshow back on the front page: a farm sitting
-# in several rooms that are ALL past the handoff round. None of them is worth
-# staying in, so the choice was re-made from scratch on every call, and among
-# rooms running neck and neck "the furthest along" is a different room after
-# nearly every pick in the building -- so the hero changed drafts on nearly
-# every poll, which is what a reader reported and what the test named for
-# this constant reproduces against the old rule.
+# HOW LONG A ROOM GETS THE HERO, in that room's own picks. This is the whole
+# of the rule now: the page shows a draft, keeps it for ten of its picks, and
+# then hands the hero to the next live room. It does not weigh the rooms up on
+# every call and take whichever is winning.
 #
-# So a choice is now remembered whether or not it named a room the page would
-# stay in for rounds, and it stands until that room has made ten of its own
-# picks. Ten is about a round of a lobby room (eight to twelve seats): long
-# enough that a reader watches a decision get made and answered rather than a
-# board flashing past, short enough that a room shown only because nothing
-# better existed hands over within a few minutes of a better one appearing.
+# WHY IT IS A ROTATION AND NOT A WINNER. The farm sits in several rooms at
+# once and they run neck and neck, so "the furthest along" is a different room
+# after nearly every pick in the building -- and a page that re-chose on every
+# poll was a slideshow of strangers rather than a draft. The room it is on
+# never got long enough on screen for a reader to see a decision get made and
+# answered.
 #
-# A FLOOR, not a ceiling. A room in its interesting rounds is still kept for
-# as long as `HANDOFF_ROUND` says; this only stops the page letting go of a
-# room it has just picked up.
+# Ten because it is about a round of a lobby room (eight to twelve seats):
+# long enough to watch a turn come round, short enough that no single draft
+# owns the front page and every room the farm is in gets shown.
+#
+# The turn ends early for the two things that end a draft rather than pause
+# it -- the room finishing, and its file going quiet -- and for nothing else.
 STICKY_PICKS = 10
 
 # The room the page is currently showing: which room, the pick it was on when
-# it was chosen, and when that was. This is what keeps the page on one draft:
-# the farm sits in a hundred rooms at once and they run neck and neck, so "the
-# furthest along" is a different room after nearly every pick in the building.
-# Without a memory the hero was a slideshow of strangers -- measured: it
-# changed rooms on most picks.
+# it was chosen, when that was, and which rooms have already had a turn in the
+# rotation now under way. Without this memory the hero changed drafts on
+# nearly every poll, which is what a reader reported and what the rotation
+# tests reproduce against the old rule.
 #
 # Process-local, seeded from the last persisted answer at startup (see
 # `register_demo_routes`) so a restart is not itself a jump.
@@ -282,23 +281,18 @@ def _unfinished(record: dict) -> bool:
     return bool(total) and _pick_of(record) < total
 
 
-def _worth_staying_in(record: dict) -> bool:
-    """Whether the room the page is on is still the room to be on."""
-    return _unfinished(record) and _round_of(record) < HANDOFF_ROUND
-
-
 def _held(record: dict, since, chosen_at, now: float) -> bool:
-    """Whether the page is still inside the floor under its last choice.
+    """Whether the room on screen is still inside its turn.
 
-    Spent by the room making `STICKY_PICKS` picks, and broken early by the two
+    Spent by the room making `STICKY_PICKS` picks, and ended early by the two
     things that end a draft rather than pause it: the room finishing, and its
     file going quiet (which `_live_files` has already dealt with by the time
     this is asked -- a quiet room is not among the records at all).
 
     The clock is the backstop for the third case, a room whose file keeps
-    being rewritten while its picks have stopped. A hold that can only be
+    being rewritten while its picks have stopped. A turn that can only be
     spent in picks would never be spent there, and the page would sit on a
-    frozen room for as long as something kept touching the file. So a hold
+    frozen room for as long as something kept touching the file. So a turn
     that has not seen a single pick land is given `STALE_SECONDS` -- this
     module's own answer to "a room that has not moved is over" -- and no more.
     """
@@ -310,55 +304,80 @@ def _held(record: dict, since, chosen_at, now: float) -> bool:
     return made > 0 or now - float(chosen_at or 0.0) <= STALE_SECONDS
 
 
+def _in_the_interesting_part(record: dict) -> bool:
+    """Whether this room is in the rounds worth putting in front of a
+    stranger: warmed up, and not yet past `INTERESTING_ROUNDS`."""
+    if not int(record.get("teams") or 0) or _pick_of(record) < WARMED_UP_PICKS:
+        return False
+    return _round_of(record) <= INTERESTING_ROUNDS
+
+
+def _next_up(live: list, seen: set):
+    """Whose turn it is now, given the rooms that have already had one.
+
+    A ROUND ROBIN, in league id order, because the order has to be the same
+    answer every time it is asked and a league id is the only thing about a
+    room that does not move while it drafts. Ordering on picks or on mtime is
+    what the page was doing before, and those change under it constantly.
+
+    Two preferences on top of the order, and they are in this order:
+
+      * a room that has not had a turn in the rotation now under way, so the
+        page works its way round the farm rather than settling on a pair;
+      * failing a tie-break between those, a room in its interesting rounds,
+        so a turn is spent on the picks this tool has something to say about.
+
+    When everybody has had a turn the rotation starts again, which is why the
+    caller clears `seen` on the answer this gives from a full house.
+    """
+    order = sorted(live, key=lambda r: str(r.get("league_id") or ""))
+    pool = [r for r in order if str(r.get("league_id") or "") not in seen]
+    pool = pool or order
+    good = [r for r in pool if _in_the_interesting_part(r)]
+    return (good or pool)[0] if pool else None
+
+
 def _liveliest(records: list, now: float | None = None):
     """The room a stranger should be shown.
 
-    THE ROOM ALREADY ON SCREEN, if the page is still holding it -- either
-    because the floor under the last choice has not been spent yet
-    (`STICKY_PICKS`) or because the room is still worth watching
-    (`HANDOFF_ROUND`). Both live in `_SHOWING`.
+    THE ROOM ALREADY ON SCREEN, for as long as its turn runs -- ten of its own
+    picks, see `STICKY_PICKS`. Then the next room in the rotation, see
+    `_next_up`. With one room live there is nothing to rotate to and it simply
+    keeps its place.
 
-    Otherwise, a fresh choice, and each step of it is about what the reader
-    sees rather than about the data: a room in its middle rounds (real
-    players, real prices), furthest along among those; failing that, any
-    unfinished room, so the page shows something true rather than nothing.
-    The choice is remembered, and the next call defers to it.
+    A room that finishes, or whose farm file goes quiet, is left the moment it
+    does: it is not among the records, or not unfinished, and either way the
+    turn is over rather than waiting out its ten picks.
     """
     now = time.time() if now is None else now
-
-    def in_the_interesting_part(record):
-        made = _pick_of(record)
-        if not int(record.get("teams") or 0) or made < WARMED_UP_PICKS:
-            return False
-        return _round_of(record) <= INTERESTING_ROUNDS
-
     with _SHOWING_LOCK:
         showing = _SHOWING.get("league_id")
         since = _SHOWING.get("since_pick")
         chosen_at = _SHOWING.get("chosen_at")
+        seen = set(_SHOWING.get("seen") or ())
+        live = [r for r in records if _unfinished(r)]
         if showing is not None:
-            for record in records:
+            for record in live:
                 if (str(record.get("league_id")) == showing
-                        and (_held(record, since, chosen_at, now)
-                             or _worth_staying_in(record))):
+                        and _held(record, since, chosen_at, now)):
                     return record
 
-        live = [r for r in records if _unfinished(r)]
-        good = [r for r in live if in_the_interesting_part(r)]
-        pool = good or live
-        chosen = max(pool, key=_pick_of) if pool else None
-        # Remembered whether or not it is a room the page would stay in for
-        # rounds. A room past the handoff round, shown because nothing better
-        # exists, used to be re-chosen on every call so that a better one
-        # could take over the moment it appeared -- which, with several such
-        # rooms live at once, is the slideshow `STICKY_PICKS` exists to stop.
-        # It still hands over to a better room, ten of its own picks later.
-        if chosen is not None:
-            _SHOWING["league_id"] = str(chosen.get("league_id"))
-            _SHOWING["since_pick"] = _pick_of(chosen)
-            _SHOWING["chosen_at"] = now
-        else:
+        # Only rooms still drafting are in the rotation, and only they are
+        # remembered as having had a turn: a set that kept the ids of rooms
+        # that have finished would grow all day and would eventually claim
+        # every live room had already been shown.
+        seen &= {str(r.get("league_id") or "") for r in live}
+        chosen = _next_up(live, seen)
+        if chosen is None:
             _SHOWING.clear()
+            return None
+        league_id = str(chosen.get("league_id") or "")
+        if league_id in seen:
+            seen = set()        # round complete; everybody goes again
+        _SHOWING["league_id"] = league_id
+        _SHOWING["since_pick"] = _pick_of(chosen)
+        _SHOWING["chosen_at"] = now
+        _SHOWING["seen"] = seen | {league_id}
         return chosen
 
 
@@ -836,9 +855,10 @@ def _moment(record: dict) -> tuple:
     teams = int(record.get("teams") or 0)
     picks = record.get("picks") or []
     made = len(picks)
-    # Live up to the handoff round, not the interesting one: a room the page
-    # stayed in past round eight (see `_liveliest`) is shown where it is.
-    if not teams or made // teams + 1 < HANDOFF_ROUND:
+    # Live up to the rewind round, not the interesting one: a room the page
+    # picked up in round eight (see `_liveliest`) is shown where it is while
+    # its turn runs on into round nine.
+    if not teams or made // teams + 1 < REWIND_ROUND:
         return made, True
     return min(made, teams * 3), False
 
@@ -1620,13 +1640,16 @@ def register_demo_routes(app, conn=None):
         if restored.get("league_id"):
             with _SHOWING_LOCK:
                 if not _SHOWING.get("league_id"):
-                    # The floor comes back with the room, from the pick the
-                    # last answer was written at, so a restart is not a way
-                    # of getting a fresh choice a moment after making one.
+                    # The turn comes back with the room, counted from the
+                    # pick the last answer was written at, so a restart is
+                    # not a way of cutting a room's turn short a moment
+                    # after giving it one.
+                    league_id = str(restored["league_id"])
                     made = int(restored.get("picks_made") or 0)
-                    _SHOWING["league_id"] = str(restored["league_id"])
+                    _SHOWING["league_id"] = league_id
                     _SHOWING["since_pick"] = made
                     _SHOWING["chosen_at"] = stamp
+                    _SHOWING["seen"] = {league_id}
         mark = time.monotonic()
         with _LOCK:
             # Identity `None` so it matches nothing: this is served
