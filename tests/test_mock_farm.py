@@ -492,6 +492,28 @@ def test_the_record_carries_every_pick_at_its_own_slot():
         for slot in range(1, TRACE_TEAMS + 1)}
 
 
+def test_the_record_carries_the_rooms_own_shape():
+    """A draft's shape is (teams, format) and both are read off the room, not
+    assumed: the corpus is counted per shape now (`scoring.availability`), so
+    a draft filed under a guessed one is a draft counted into somebody else's
+    table."""
+    import dataclasses
+
+    timeline = mf.draft_timeline(_trace_listener().events)
+    tool = _tool_for(timeline)
+    settings = _mock_settings()
+    standard = dataclasses.replace(
+        settings, scoring={**settings.scoring, "receptions": 0.0})
+    for shape_settings, expected in ((settings, "ppr"), (standard, "std")):
+        record, _ = mf.build_record(
+            timeline, tool, shape_settings, league_id="999", season=2026,
+            my_slot=4, started_at=None, teams=TRACE_TEAMS, rounds=TRACE_ROUNDS)
+        assert record.teams == TRACE_TEAMS and record.rounds == TRACE_ROUNDS
+        assert dl.draft_format(record.scoring_json) == expected
+        # And the whole-settings blob agrees, because it is the same object.
+        assert dl.draft_format(record.settings_json) == expected
+
+
 def test_the_record_carries_the_autodraft_flag_the_capture_shows():
     timeline = mf.draft_timeline(_trace_listener().events)
     record, _ = mf.build_record(
@@ -891,15 +913,35 @@ def _room(**overrides) -> dict:
     return row
 
 
+def _std(**overrides) -> dict:
+    """A standard-scoring room: ESPN names the format and omits receptions
+    from the scoring items, and the two have to agree."""
+    return _room(**{"rankType": "STANDARD", "scoringItemStatIds": [42],
+                    **overrides})
+
+
 def test_the_policy_accepts_an_eight_team_ppr_snake_room():
     assert lobby.is_farmable(_room(), NOW_MS) is True
 
 
+def test_every_shape_in_the_rotation_is_accepted():
+    """The policy is a LIST now (spec 2026-08-29 section 2): the corpus is
+    counted per shape, so a 12-team standard room is the beginning of the
+    table a 12-team standard league reads rather than contamination."""
+    assert lobby.FARM_SHAPES == ((8, "ppr"), (10, "ppr"), (12, "ppr"),
+                                 (10, "std"), (12, "std"))
+    for teams, fmt in lobby.FARM_SHAPES:
+        row = (_room(leagueSize=teams) if fmt == "ppr"
+               else _std(leagueSize=teams))
+        assert lobby.is_farmable(row, NOW_MS) is True, (teams, fmt)
+
+
 @pytest.mark.parametrize("override", [
-    {"leagueSize": 10},                       # wrong league shape
+    {"leagueSize": 14},                       # no shape in the rotation
     {"draftType": "AUCTION"},
-    {"rankType": "STANDARD"},
+    {"rankType": "STANDARD"},                 # says standard, scores catches
     {"scoringItemStatIds": [42]},             # PPR by name, no receptions
+    {"rankType": "BEST_BALL"},                # a format we cannot name
     {"full": True},
     {"draftInProgress": True},
     {"draftDate": NOW_MS - 1},                # already started
@@ -911,13 +953,46 @@ def test_the_policy_rejects_everything_else(override):
     assert lobby.is_farmable(_room(**override), NOW_MS) is False
 
 
-def test_receptions_are_required_even_when_the_name_says_ppr():
+def test_a_shape_outside_the_rotation_is_skipped_however_good_the_room():
+    """Eight-team standard is not in the default list -- it is the rarest
+    room in the lobby and the corpus already holds 854 8-team PPR drafts --
+    so a full one starting in five minutes is still not ours to take."""
+    assert lobby.is_farmable(_std(leagueSize=8, teamsJoined=7), NOW_MS) is False
+    assert lobby.is_farmable(_std(leagueSize=8), NOW_MS,
+                             shapes=[(8, "std")]) is True
+
+
+def test_the_two_format_signals_have_to_agree():
     """`rankType` and stat id 53 agreed in every row observed, which is
     exactly why disagreement is worth hearing about: a room labelled PPR whose
     scoring omits receptions would fill the corpus with standard-scoring
-    behaviour."""
-    assert lobby.is_farmable(
-        _room(rankType="PPR", scoringItemStatIds=[]), NOW_MS) is False
+    behaviour, and a STANDARD room that scores catches would do the same in
+    the other direction."""
+    assert lobby.row_format(_room()) == "ppr"
+    assert lobby.row_format(_std()) == "std"
+    assert lobby.row_format(_room(scoringItemStatIds=[])) is None
+    assert lobby.row_format(_std(scoringItemStatIds=[53])) is None
+    assert lobby.row_format(_room(rankType="BEST_BALL")) is None
+    assert lobby.shape_of(_room(leagueSize=10)) == (10, "ppr")
+    assert lobby.shape_of(_std(leagueSize=12)) == (12, "std")
+    assert lobby.shape_of(_room(leagueSize=None)) is None
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("8:ppr", ((8, "ppr"),)),
+    (" 10 : STD , 12:half ", ((10, "std"), (12, "half"))),
+    ("8:ppr,8:ppr", ((8, "ppr"),)),           # the same shape twice is one
+])
+def test_shapes_are_parsed_in_the_order_they_are_listed(text, expected):
+    assert lobby.parse_shapes(text) == expected
+
+
+@pytest.mark.parametrize("text", ["8:pppr", "eight:ppr", "8", "", "  "])
+def test_an_unreadable_shape_list_is_refused_rather_than_narrowed(text):
+    """A farm that quietly dropped the half of FARM_SHAPES it could not read
+    would spend the night recording a corpus nobody asked for."""
+    with pytest.raises(ValueError):
+        lobby.parse_shapes(text)
 
 
 def test_the_fullest_room_wins():
@@ -966,13 +1041,63 @@ def test_the_lobby_report_says_whether_the_floor_is_the_problem():
     is starving the run."""
     empty = [_room(leagueId=1, teamsJoined=0),
              _room(leagueId=2, teamsJoined=0),
-             _room(leagueId=3, leagueSize=12)]      # wrong shape entirely
+             _room(leagueId=3, leagueSize=14)]      # wrong shape entirely
     report = lobby.lobby_report(empty, NOW_MS)
-    assert report == {"rows": 3, "open": 2, "best": 0, "size": 8}
-    # Nothing of the right shape at all: `best` is None rather than 0, which
+    assert report["rows"] == 3 and report["open"] == 2
+    assert report["best"] == 0 and report["size"] == 8
+    # Nothing of a farmed shape at all: `best` is None rather than 0, which
     # is the distinction the log turns into two different sentences.
-    nothing = lobby.lobby_report([_room(leagueSize=12)], NOW_MS)
+    nothing = lobby.lobby_report([_room(leagueSize=14)], NOW_MS)
     assert nothing["open"] == 0 and nothing["best"] is None
+    assert nothing["size"] is None
+
+
+def test_the_report_counts_the_open_rooms_of_every_farmed_shape():
+    """The morning question is no longer only "is anybody in there" but "is
+    the lobby even serving the shape the corpus is short of"."""
+    rows = [_room(leagueId=1, leagueSize=8),
+            _room(leagueId=2, leagueSize=10),
+            _room(leagueId=3, leagueSize=10),
+            _std(leagueId=4, leagueSize=12, teamsJoined=5)]
+    report = lobby.lobby_report(rows, NOW_MS)
+    assert report["by_shape"] == {(8, "ppr"): 1, (10, "ppr"): 2,
+                                  (12, "ppr"): 0, (10, "std"): 0,
+                                  (12, "std"): 1}
+    # `size` names the fullest room's own seat count, since the rooms in this
+    # list are no longer all the same size.
+    assert report["best"] == 5 and report["size"] == 12
+    line = lobby.shape_line({(8, "ppr"): 854}, report)
+    assert "8:ppr 854 recorded/1 open" in line
+    assert "12:std 0 recorded/1 open" in line
+
+
+def test_the_rotation_joins_the_shape_the_corpus_is_shortest_of():
+    """The corpus holds 854 8-team PPR drafts and nine 10-team ones, so the
+    10-team room is taken even though it is emptier -- and the 8-team room is
+    still ranked, so a claim lost on the first choice falls to it in the same
+    poll rather than costing a pass."""
+    rooms = [_room(leagueId=1, leagueSize=8, teamsJoined=7),
+             _room(leagueId=2, leagueSize=10, teamsJoined=1),
+             _room(leagueId=3, leagueSize=10, teamsJoined=4)]
+    counts = {(8, "ppr"): 854, (10, "ppr"): 9}
+    ranked = lobby.rank_rooms(rooms, NOW_MS, counts=counts)
+    # The short shape first, fullest room within it, then the other shape.
+    assert [r["leagueId"] for r in ranked] == [3, 2, 1]
+    # Without counts nothing has changed: fullness decides, as it always did.
+    assert [r["leagueId"] for r in lobby.rank_rooms(rooms, NOW_MS)] == [1, 3, 2]
+    assert lobby.pick_room(rooms, NOW_MS, counts=counts)["leagueId"] == 3
+
+
+def test_shapes_the_corpus_holds_none_of_are_tried_in_the_listed_order():
+    """Every shape starts at zero, and two farm processes that broke that tie
+    on anything unstable would rank differently, both join, and put two bot
+    seats in one room."""
+    rooms = [_std(leagueId=1, leagueSize=12, teamsJoined=1),
+             _room(leagueId=2, leagueSize=12, teamsJoined=1),
+             _room(leagueId=3, leagueSize=10, teamsJoined=1)]
+    ranked = lobby.rank_rooms(rooms, NOW_MS, counts={})
+    # FARM_SHAPES order: 10:ppr, then 12:ppr, then 12:std.
+    assert [r["leagueId"] for r in ranked] == [3, 2, 1]
 
 
 def test_experience_breaks_a_tie_before_start_time():
@@ -995,7 +1120,7 @@ def test_a_room_already_played_is_not_ranked_again():
 
 def test_an_empty_lobby_is_an_ordinary_answer():
     assert lobby.pick_room([], NOW_MS) is None
-    assert lobby.pick_room([_room(leagueSize=12)], NOW_MS) is None
+    assert lobby.pick_room([_room(leagueSize=14)], NOW_MS) is None
 
 
 def test_the_lobby_listing_refuses_a_body_that_is_not_a_list():
@@ -1114,6 +1239,86 @@ def test_a_recorded_draft_is_counted_once(monkeypatch, tmp_path):
     assert counts["picks"] == 256
     assert counts["by_status"] == {"recorded": 2}
     assert seen == [11, 12]
+
+
+def _seed_corpus(path, shape, drafts: int) -> str:
+    """A corpus holding `drafts` head rows of one `(teams, format)` shape.
+
+    Heads only: `draft_log.shape_counts`, which is what the rotation reads,
+    counts recorded drafts and does not care what is in them."""
+    import json as _json
+
+    teams, fmt = shape
+    receptions = {"ppr": 1.0, "half": 0.5, "std": 0.0}[fmt]
+    conn = dl.corpus_conn(str(path))
+    try:
+        for i in range(drafts):
+            dl.record(conn, dl.DraftRecord(
+                source=dl.SOURCE_MOCK, league_id="1", season=2026,
+                teams=teams, rounds=16, started_at=f"seeded-{fmt}-{i}",
+                scoring_json=_json.dumps({"receptions": receptions})))
+    finally:
+        conn.close()
+    return str(path)
+
+
+def test_the_loop_joins_the_shape_the_corpus_is_shortest_of(monkeypatch, tmp_path):
+    """The rotation, end to end: 40 8-team PPR drafts recorded and no 10-team
+    ones, so the emptier 10-team room is taken first even though the 8-team
+    room is nearly full."""
+    corpus = _seed_corpus(tmp_path / "c.duckdb", (8, "ppr"), 40)
+    _stub_farm_deps(monkeypatch,
+                    [_live_room(leagueId=81, leagueSize=8, teamsJoined=7),
+                     _live_room(leagueId=101, leagueSize=10, teamsJoined=1)],
+                    tmp_path)
+    seen = []
+
+    def fake_play(conn, corpus_path, cookies, room, rng, season=2026,
+                  out=print):
+        seen.append(room["leagueId"])
+        return {"status": "recorded", "picks": 128,
+                "league_id": room["leagueId"]}
+
+    monkeypatch.setattr(mf, "play_draft", fake_play)
+    mf.farm(2, corpus_path=corpus, out=lambda *a: None)
+    assert seen == [101, 81]
+
+
+def test_every_pass_logs_what_each_shape_holds_and_what_is_open(monkeypatch,
+                                                                tmp_path):
+    """One line per pass. The shape counts are the only account of why the
+    farm chose what it chose, and the open counts are the only way to tell
+    "the corpus is short of 12-team standard" from "ESPN is not serving
+    12-team standard tonight"."""
+    corpus = _seed_corpus(tmp_path / "c.duckdb", (8, "ppr"), 3)
+    _stub_farm_deps(monkeypatch,
+                    [_live_room(leagueId=101, leagueSize=10, teamsJoined=1)],
+                    tmp_path)
+    monkeypatch.setattr(mf, "play_draft",
+                        lambda *a, **k: {"status": "recorded", "picks": 1,
+                                         "league_id": 101})
+    said = []
+    mf.farm(1, corpus_path=corpus, out=said.append)
+    line = next(l for l in said if l.startswith("shapes -- "))
+    assert "8:ppr 3 recorded/0 open" in line
+    assert "10:ppr 0 recorded/1 open" in line
+    assert "12:std 0 recorded/0 open" in line
+
+
+def test_a_corpus_that_cannot_be_read_still_farms(monkeypatch, tmp_path):
+    """The farm itself holds the corpus's write lock while it records, so a
+    poll that cannot count it is ordinary. No counts means no rotation, not
+    no room."""
+    monkeypatch.setattr(dl, "shape_counts", lambda path=None: {})
+    _stub_farm_deps(monkeypatch,
+                    [_live_room(leagueId=101, leagueSize=10, teamsJoined=1)],
+                    tmp_path)
+    monkeypatch.setattr(mf, "play_draft",
+                        lambda *a, **k: {"status": "recorded", "picks": 1,
+                                         "league_id": 101})
+    counts = mf.farm(1, corpus_path=str(tmp_path / "gone.duckdb"),
+                     out=lambda *a: None)
+    assert counts["recorded"] == 1
 
 
 def test_one_rooms_crash_does_not_end_the_night(monkeypatch, tmp_path):
