@@ -5,14 +5,26 @@ import re
 import threading
 import time
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
 import duckdb
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import scoring.profile  # noqa: F401 -- see below
 from api import market, seo
 from pipeline import draft_log as dl
+
+# `scoring/profile.py` BINDS `cached_build_board` BY NAME AT IMPORT
+# (`from scoring.board_cache import cached_build_board`), so whichever test
+# first causes that module to be imported decides what the name means for the
+# rest of the run. Several tests below hand `board_cache` a fake board for
+# `scoring/adp_facts.board_rows`, and the player pages now build a profile
+# too -- so without the import above, the first of those tests imported
+# `scoring.profile` while its fake was installed and every later test's
+# profile was built from a one-row defense frame. Imported here, at
+# collection, the binding is made before any monkeypatch exists.
 
 
 @pytest.fixture(autouse=True)
@@ -1318,3 +1330,260 @@ def test_both_season_sources_hand_the_page_the_same_keys():
     assert set(player["last_season"]) == set(adp_facts._EMPTY_SEASON)
     assert player["last_season"]["points"] == 210.8
     assert player["last_season"]["worst"] is None
+
+
+# -- the profile the app draws, on a page a crawler can read -----------------
+#
+# These sections are the popup's fifteen cards, rendered from the popup's own
+# payload (`scoring.profile_cache.cached_profile`). What the tests below are
+# for is the seam: that the numbers really are that payload's rather than a
+# second calculation, that the page survives the payload not being there at
+# all, and that a defense -- which has almost none of it -- is a page rather
+# than an exception.
+
+@pytest.fixture
+def profiled(tmp_path):
+    """A universal database a REAL profile can be built from, keyed the way
+    the `corpus` fixture is.
+
+    The `board` fixture above is deliberately partial -- `cached_build_board`
+    cannot build from it, which is what the retry and fallback tests need --
+    so nothing there can answer a profile. This one is the other case: the
+    same two ids (`star`, `mid`) with weekly rows behind them, so the board
+    builds, the profile builds, and the page renders every section.
+
+    Modelled on `tests/test_profile.py`'s own `_seed`, which is the minimum
+    `build_board` and `build_profile` are known to work against.
+    """
+    import pandas as pd
+    from pipeline.db import get_conn, write_table
+    from scoring import board_cache, profile_cache
+
+    conn = get_conn(str(tmp_path / "universal.duckdb"))
+    weekly = []
+    for pid, name, team in (("star", "D'Andre Swift", "CHI"),
+                            ("mid", "Amon-Ra St. Brown", "DET")):
+        for season, per_week in ((2024, 5), (2025, 7)):
+            for week in range(1, 13):
+                weekly.append({
+                    "player_id": pid, "player_display_name": name,
+                    "position": "RB", "recent_team": team, "opponent_team": "GB",
+                    "season": season, "week": week,
+                    "carries": per_week + 8, "rushing_yards": per_week * 9,
+                    "rushing_tds": 1 if week % 4 == 0 else 0,
+                    "targets": per_week, "receptions": per_week - 2,
+                    "receiving_yards": per_week * 7,
+                    "receiving_tds": 1 if week % 6 == 0 else 0})
+    write_table(conn, "weekly", pd.DataFrame(weekly))
+    # `market._names` reads this one, which is what gives the pages their
+    # slugs; the board and the profile read `weekly` above.
+    write_table(conn, "players", pd.DataFrame([
+        {"gsis_id": "star", "display_name": "D'Andre Swift", "headshot": None,
+         "birth_date": "1999-01-14", "rookie_season": 2020, "height": 70.0,
+         "weight": 215.0},
+        {"gsis_id": "mid", "display_name": "Amon-Ra St. Brown", "headshot": None,
+         "birth_date": "1999-10-24", "rookie_season": 2021, "height": 72.0,
+         "weight": 197.0}]))
+    write_table(conn, "schedules", pd.DataFrame([
+        {"home_team": "CHI", "away_team": "GB", "week": 1,
+         "total_line": 44.0, "spread_line": 2.0},
+        {"home_team": "DET", "away_team": "GB", "week": 1,
+         "total_line": 51.0, "spread_line": 3.0}]))
+    write_table(conn, "adp", pd.DataFrame([
+        {"adp_name": "D'Andre Swift", "position": "RB", "team": "CHI", "adp": 12.0},
+        {"adp_name": "Amon-Ra St. Brown", "position": "RB", "team": "DET", "adp": 5.1}]))
+    for name, columns in (
+            ("depth_charts", ["gsis_id", "depth_team", "formation", "week", "position"]),
+            ("snap_counts", ["player", "team", "season", "offense_pct"]),
+            ("espn_adp", ["espn_id", "espn_name", "position", "espn_adp", "espn_ppr_rank"]),
+            ("fp_ecr", ["fp_name", "team", "position", "rank_ecr", "rank_ave",
+                        "rank_std", "fp_tier"]),
+            ("sleeper_ids", ["gsis_id", "espn_id", "sleeper_name", "position", "team"])):
+        write_table(conn, name, pd.DataFrame(columns=columns))
+    # `write_table` does not stamp `meta`, which is what both caches key on --
+    # so without this a second test in the same run is served the first one's
+    # board and the first one's profiles.
+    board_cache.clear()
+    profile_cache.clear()
+    yield conn
+    conn.close()
+    board_cache.clear()
+    profile_cache.clear()
+
+
+def _profile(conn, player_id: str):
+    """The payload `/api/players/{id}/profile` would serve for this player,
+    fetched the way `api/main.py` fetches it."""
+    from scoring import league
+    from scoring.profile_cache import cached_profile
+    return cached_profile(conn, player_id, None, league.load(conn))
+
+
+def test_the_profile_sections_print_the_app_s_own_numbers(corpus, profiled):
+    """THE WHOLE POINT OF READING ONE PAYLOAD. Every figure in these
+    sections has to be the one `/api/players/{id}/profile` serves the draft
+    room -- not a second calculation over the same tables that agrees today
+    and drifts the first time either is fixed. So the assertions below are
+    against the payload itself, not against literals."""
+    payload = _profile(profiled, "star")
+    assert payload is not None, "the fixture cannot build a profile at all"
+    body = html.unescape(_client(profiled).get("/adp/dandre-swift").text)
+
+    for heading in ("How he grades", "Every season he has played",
+                    "by week", "What his points are made of"):
+        assert heading in body, heading
+
+    # The meters, off the header the board hands the popup.
+    header = payload["header"]
+    assert f"{header['career_games_pg']:.1f}" in body
+    assert f"{header['consistency_cv']:.2f}" in body
+    # The season table: the average, the finish, and the pool the steadiness
+    # rank is out of -- three different shapes of number from three keys.
+    season = payload["seasons"][0]
+    assert f"{season['ppg']:.1f}" in body
+    assert f"RB{season['pos_finish']}" in body
+    assert f"{season['cv_rank']} of {season['cv_rank_n']}" in body
+    # The week chart's own axis is the game log's opponents.
+    assert payload["game_log"][0]["opponent"] in body
+    # And the market row's positional place, which only the payload has.
+    assert f"RB{payload['header']['market_pos']['board']}" in body
+
+
+def test_the_season_and_week_figures_are_the_league_s_points_not_ppr(corpus, profiled):
+    """`cached_profile` is handed `league.load(conn)`, the same settings the
+    room's board is priced under, so a half-PPR league's page cannot print
+    PPR points beside a board row priced correctly. The check is that the
+    page's average IS the payload's -- and the payload's is the league's,
+    which tests/test_profile.py owns."""
+    payload = _profile(profiled, "star")
+    body = html.unescape(_client(profiled).get("/adp/dandre-swift").text)
+    assert f"{payload['seasons'][0]['ppg']:.1f} a game" in body
+
+
+def test_a_profile_that_will_not_build_costs_the_sections_not_the_page(
+        corpus, profiled, monkeypatch):
+    """THE PAGE IS NOT THE PROFILE. Everything above these sections comes out
+    of the corpus and needs nothing from the universal database; the profile
+    is an enrichment on top of it, exactly like `scoring/adp_facts.attach`.
+    A universal database that cannot answer must cost the enrichment, never
+    the page -- and never a 500 on the 203 pages a crawler is walking."""
+    from scoring import profile_cache
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("no profile today")
+
+    monkeypatch.setattr(profile_cache, "cached_profile", boom)
+    monkeypatch.setattr(seo, "_profile_failed", False)
+    seo.clear_pages()
+    res = _client(profiled).get("/adp/dandre-swift")
+    assert res.status_code == 200
+    body = html.unescape(res.text)
+    # The corpus's own page, whole.
+    assert "D'Andre Swift ADP" in body and "Where the room takes him" in body
+    # And not one section that would have needed the payload.
+    for heading in ("How he grades", "Every season he has played",
+                    "What his points are made of", "The team around him"):
+        assert heading not in body, heading
+
+
+def test_the_profile_failure_is_reported_once_not_per_page(corpus, profiled,
+                                                           monkeypatch, capsys):
+    """A profile failing on every page of a crawl is one fact about the
+    database, not two hundred."""
+    from scoring import profile_cache
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("no profile today")
+
+    monkeypatch.setattr(profile_cache, "cached_profile", boom)
+    monkeypatch.setattr(seo, "_profile_failed", False)
+    seo.clear_pages()
+    capsys.readouterr()
+    client = _client(profiled)
+    client.get("/adp/dandre-swift")
+    client.get("/adp/amon-ra-st-brown")
+    said = [line for line in capsys.readouterr().out.splitlines()
+            if "profile enrichment unavailable" in line]
+    assert len(said) == 1, said
+
+
+def test_a_defense_gets_a_page_and_whatever_its_profile_has(corpus, board,
+                                                            monkeypatch):
+    """A defense has no weekly rows, no o-line, no news and no comparable
+    seasons, and `cached_profile` answers for it with almost nothing or with
+    nothing at all. Either way the page is a page: the corpus knows exactly
+    where a defense goes, which is what somebody searching for one wants."""
+    from scoring import board_cache
+    monkeypatch.setattr(board_cache, "cached_build_board",
+                        lambda conn, *a, **k: _board_frame())
+    seo.clear_pages()
+    res = _client(board).get("/adp/seattle-defense")
+    assert res.status_code == 200
+    body = html.unescape(res.text)
+    assert "Seattle Defense ADP" in body
+    # A DEFENSE IS NOT A HE, in the new sections as much as the old ones.
+    assert "Where the room takes it" in body
+    assert "Every season he has played" not in body
+
+
+def test_a_player_page_stays_inside_its_size_budget(corpus, profiled):
+    """WHAT A PAGE COSTS TO SEND. These pages are read by a crawler working
+    through a 228-URL sitemap and by a person on a phone; the profile
+    sections roughly doubled one, and the ceiling is what stops the next
+    section being added without anybody measuring.
+
+    Measured against the real corpus and the real universal database, the
+    heaviest player page is 56 KB (a tight end: five cards of history, a
+    full game log and eight news items). The fixture's pages are far
+    smaller, so this is a guard rail rather than a measurement -- see the
+    task report for the real figures."""
+    client = _client(profiled)
+    for player in seo.adp_data(profiled)["players"]:
+        body = client.get(f"/adp/{player['slug']}").text
+        assert len(body.encode()) <= seo.PLAYER_PAGE_MAX_BYTES, (
+            f"{player['slug']} is {len(body.encode()) / 1024:.0f} KB")
+
+
+def test_the_warm_pass_renders_the_first_player_pages_itself(corpus, board,
+                                                             monkeypatch):
+    """A crawler must not be the one who pays for a cold profile.
+
+    `cached_profile` is ~250 ms on a first look at a player, so warming the
+    aggregate and leaving the pages cold would only move the stall from
+    /adp onto whichever player page was opened first. The loop renders the
+    first `PROFILE_WARM` of them on its own thread instead.
+    """
+    monkeypatch.setattr(seo, "WARM_ON_REGISTER", True)
+    monkeypatch.setattr(seo, "PROFILE_WARM", 2)
+    # Far enough away that the loop's second pass cannot run inside this
+    # test and reach a connection the fixture has since closed.
+    monkeypatch.setattr(seo, "WARM_SECONDS", 3600.0)
+    seo.clear_pages()
+    app = FastAPI()
+    seo.register_seo_routes(app, conn=board)
+
+    deadline = time.time() + 10
+    while time.time() < deadline and ("player", "dandre-swift") not in seo._pages:
+        time.sleep(0.05)
+    warmed = {key[1] for key in seo._pages if key[0] == "player"}
+    assert warmed == {"dandre-swift", "amon-ra-st-brown"}, warmed
+
+
+def test_nothing_on_a_player_page_can_push_it_sideways():
+    """MOBILE OVERFLOW IS A WHOLE-PAGE FAILURE, not a wide element: a table
+    that will not fit drags the document's scroll width with it and every
+    heading on the page moves under the reader's thumb.
+
+    Two scrollports, because there are two places something wide sits.
+    `.scroll` is for a section at the page's own width and breaks out
+    through the gutters to use them; `.xscroll` is for something wide inside
+    a card or a figure, where those negative margins would put a table
+    through the side of the box holding it.
+    """
+    css = (Path(seo.TEMPLATES) / "base.html").read_text(encoding="utf-8")
+    assert ".scroll{overflow-x:auto" in css
+    assert ".xscroll{overflow-x:auto" in css
+    page = (Path(seo.TEMPLATES) / "adp_player.html").read_text(encoding="utf-8")
+    # Every wide thing the profile sections add is inside one of the two.
+    assert '<div class="scroll">\n<table class="sched">' in page
+    assert '<div class="xscroll">\n<svg viewBox="0 0 720 128"' in page
