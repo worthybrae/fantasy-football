@@ -2080,3 +2080,78 @@ export async function fetchManagerProfile(leagueId: string, memberId: string): P
   if (!res.ok) throw new Error(await detailText(res))
   return res.json()
 }
+
+// -- the plan a seat gets before it has drafted anything --------------------
+//
+// The front door's own reading of the same planner the draft room runs, with
+// no picks made and no roster. See api/plan_preview.py.
+
+/** One player on a plan card: who he is, and the plan's two numbers for him. */
+export interface PreviewPlayer {
+  player_id: string
+  name: string
+  position: string | null
+  team: string | null
+  headshot: string | null
+  /** Chance he is still on the board at this turn, counted from the start of
+   *  the draft -- so the first turn reads 100% for everybody, and should. */
+  lasts_pct: number | null
+  /** What taking him now beats waiting for, in projected points. Priced at
+   *  `edge_at_pick`, which is the turn AFTER this one. */
+  edge_pts: number | null
+  edge_at_pick: number | null
+  /** Whether this reader starred him. */
+  favourite: boolean
+  pros: string[]
+  cons: string[]
+}
+
+export interface PreviewTurn {
+  pick_no: number
+  round: number
+  target: PreviewPlayer | null
+  alternates: PreviewPlayer[]
+}
+
+/** The shape of draft the corpus numbers were counted over. Not necessarily
+ *  the shape asked about -- the farm has recorded one league size, and saying
+ *  which is what keeps the opening cards honest. Null when nothing has been
+ *  recorded at all. */
+export interface PreviewCorpus {
+  teams: number
+  rounds: number
+  drafts: number
+}
+
+export interface PlanPreview {
+  teams: number
+  slot: number
+  /** The first four overall picks this seat owns. */
+  picks: number[]
+  /** The position paths most walked from this seat, most common first. */
+  opening: { path: string[]; count: number; share: number }[]
+  opening_rounds: number
+  opening_observed: number
+  /** Position -> the median pick at which the first one comes off the board.
+   *  Null for a position the archive has never seen taken. */
+  position_runs: Record<string, number | null>
+  corpus: PreviewCorpus | null
+  targets: PreviewTurn[]
+}
+
+/** What this seat would be told on draft night.
+ *
+ *  Deduplicated by seat, like the market reads: the landing page and the
+ *  dashboard can both ask for the same one on the same load. The server
+ *  answers per account -- a signed-in reader's stars change the plan -- so
+ *  `tag` exists for the same reason the outlook's does, to keep a save from
+ *  being followed by five seconds of the pre-save answer. */
+export function fetchPlanPreview(
+  teams: number, slot: number, tag = '',
+): Promise<PlanPreview> {
+  return cachedGet(`plan/preview/${teams}/${slot}/${tag}`, async () => {
+    const res = await fetch(`/api/plan/preview?teams=${teams}&slot=${slot}`)
+    if (!res.ok) throw new Error(await detailText(res))
+    return res.json() as Promise<PlanPreview>
+  })
+}
