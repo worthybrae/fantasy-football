@@ -23,13 +23,14 @@ would be served the index document instead.
 """
 from __future__ import annotations
 
+import math
 import os
 import re
 import threading
 import time
 import unicodedata
 from collections import Counter
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from statistics import mean, median, median_low
 
@@ -1050,6 +1051,869 @@ def clear_pages() -> None:
         _pages_stamp = None
 
 
+# ---------------------------------------------------------------------------
+# The profile the app draws, as static HTML
+# ---------------------------------------------------------------------------
+#
+# ONE PAYLOAD, TWO RENDERERS. Everything in this section is read out of
+# `scoring.profile_cache.cached_profile` -- the same object the app serves at
+# `/api/players/{id}/profile` and the same one the draft room's popup builds
+# its fifteen cards from. A page that ran its own queries would be a second
+# answer to every question the popup already answers, and the two would drift
+# the first time either was fixed. What this section adds is the DRAWING: the
+# popup is React, and a crawler and a reader on a slow line get none of it.
+#
+# THE CUT POINTS ARE PORTS, NOT NEW RULES. `_HEALTH_CUTS`, `_CHANGE_CUTS`,
+# `_BAR_*`, `_FALLBACK_STARTERS` and the four tone functions below are the
+# app's own, from web/src/components/draft/{panels,finish,weeks}.ts and
+# draft/AvailableList.tsx. Ported rather than re-derived: a season graded
+# green here and amber in the room would be two answers about one year.
+
+# How many pages the keep-warm pass renders after each `rebuild_adp`, in ESPN
+# rank order. The first render of a player page is the only one that pays for
+# `cached_profile`, and forty is the depth a crawler and a reader both reach
+# first -- the whole first five rounds of an 8-team room.
+PROFILE_WARM = 40
+
+# What a player page is allowed to weigh, finished.
+#
+# These pages are read by a crawler working through a 228-URL sitemap in a
+# burst and by a person on a phone on a train. The profile sections roughly
+# doubled one -- the heaviest measured against the real corpus is 56 KB, a
+# tight end with five seasons of history, a full game log and eight news
+# items -- and this ceiling is what stops the next section being added
+# without anybody measuring. Enforced by the suite, not at render time: a
+# page that has grown past it is a thing to go and look at, not a thing to
+# truncate under a reader.
+PLAYER_PAGE_MAX_BYTES = 90 * 1024
+
+# The app's `SEASON_WEEKS` (18: the season, not the games a team plays) and
+# `BAR_CEILING` (one scale for every player, so a bad player's best week
+# cannot draw as tall as a stud's). See web/src/components/draft/weeks.ts.
+WEEK_SLOTS = 18
+BAR_CEILING = 30.0
+# GAMES a team plays, which is `WEEK_SLOTS` minus the bye -- deliberately a
+# separate number, and the one the app divides a season projection by
+# (`SEASON_GAMES` in draft/weeks.ts, `GAMES` in scoring/board.py). A peer's
+# projected points a game must be the same arithmetic the popup does or the
+# two would not subtract.
+SEASON_GAMES = 17
+
+# `SHOWN` in UsageLine.tsx: three seasons of columns, because a percentage
+# needs its width to stay legible. The line behind them is not drawn here.
+USAGE_SEASONS = 3
+
+# How many comparable seasons and how many board peers the page lists. The
+# popup pages through twelve at a time and shows five peers; a static page
+# has one page, and these are what fit before the section stops being read.
+PROFILE_COMPS = 8
+PROFILE_PEERS = 5
+
+# Games per season a career averages, cut so the five steps spread the real
+# board -- AvailableList.tsx's `HEALTH_CUTS`.
+_HEALTH_CUTS = (10.0, 13.0, 15.0, 16.3)
+# Projected points per game against the recency-weighted actual, same file's
+# `CHANGE_CUTS`. Outliers are pinned rather than allowed to set the scale.
+_CHANGE_CUTS = (-2.0, -0.5, 0.5, 2.0)
+
+# How many of a position start, which is what makes a finish mean anything --
+# `FALLBACK_STARTERS` in draft/finish.ts. These pages have no league to ask
+# (nothing here reads a session), so the fallback IS the yardstick, and it is
+# the twelve-team shape the app falls back to before a room is connected.
+_FALLBACK_STARTERS = {"QB": 12, "TE": 12, "RB": 24, "WR": 24, "K": 12, "DST": 12}
+
+# What a week was worth and what colour that makes it -- `BAR_THRESHOLDS` in
+# draft/weeks.ts.
+_BAR_THRESHOLDS = {"QB": (10.0, 20.0), "K": (5.0, 10.0), "DST": (5.0, 10.0)}
+_BAR_DEFAULT = (10.0, 15.0)
+
+# The two five-step ramps the app draws with, as class names this page's own
+# stylesheet answers to (see base.html).
+#
+# TWO, BECAUSE THE APP HAS TWO. `e1..e5` is the panel ramp -- the one a
+# season's finish, a week's points and a schedule's softness are graded on --
+# and `m1..m5` is the meter ramp the board's Health, Reliable and Growth
+# columns use. They agree at both ends and at the fourth step and differ in
+# the middle, and collapsing them into one would repaint a column of the app.
+_PANEL_RAMP = ("e1", "e2", "e3", "e4", "e5")
+_METER_RAMP = ("m1", "m2", "m3", "m4", "m5")
+
+# The game log's own columns per position, from WeekByWeek.tsx's `LOG`. A
+# position not in here falls through to the payload's `stat_line`, which is
+# what that component does.
+_LOG_COLUMNS = {
+    "QB": (("C/A", "ca"), ("Yds", "pass_yards"), ("TD", "pass_tds"),
+           ("Int", "interceptions"), ("Ru", "rush_yards")),
+    "RB": (("Car", "carries"), ("Ru", "rush_yards"), ("Rec", "receptions"),
+           ("Re", "rec_yards"), ("TD", "tds"), ("Snap", "snap_pct"),
+           ("Tgt%", "target_pct")),
+    "WR": (("Tgt", "targets"), ("Rec", "receptions"), ("Yds", "yards"),
+           ("TD", "tds"), ("Snap", "snap_pct"), ("Tgt%", "target_pct")),
+}
+_LOG_COLUMNS["TE"] = _LOG_COLUMNS["WR"]
+
+# The usage rows per position, from UsageLine.tsx's `ROWS` and `SHARES`. Each
+# is (label, how to read a season, how to read the projection, how to print
+# it). `None` for the projection is the card declining rather than guessing:
+# ESPN projects no completions, no team total and no snaps.
+# Each row is (label, how to read a season, how to read the projection, how
+# to print it, whether the season figure is a per-game rate, whether up is
+# worse). A projection of `None` is the card declining rather than guessing:
+# ESPN projects no completions, no team total and no snaps at all, so
+# neither share and neither completion rate has a projected column.
+#
+# A `(numerator, denominator)` pair is a ratio -- catch rate is receptions
+# over targets, not a column anybody stores -- and is per-game on neither
+# side, since the games cancel.
+_SHARE_ROWS = (
+    ("Snap %", ("snap_share",), None, "pct", False, False),
+    ("Target %", ("target_share",), None, "pct", False, False),
+)
+# Availability, last because it qualifies every row above it: a rate is per
+# game, so a career of 11-game seasons reads identically to a career of
+# 17-game ones until this row says otherwise.
+_GAMES_ROW = ("Games", ("games",), ("games",), "count", False, False)
+_USAGE_ROWS = {
+    "QB": (("Att / g", ("attempts",), ("attempts",), "rate", True, False),
+           ("Comp %", (("completions",), ("attempts",)), None, "pct", False, False),
+           ("Pass yds / g", ("pass_yards",), ("pass_yards",), "rate", True, False),
+           ("Pass TD / g", ("pass_tds",), ("pass_tds",), "rate", True, False),
+           # Up is worse for exactly one row on this card: interceptions
+           # rising is a quarterback getting worse.
+           ("INT / g", ("interceptions",), ("interceptions",), "rate", True, True),
+           ("Rush yds / g", ("rush_yards",), ("rush_yards",), "rate", True, False),
+           # `tds` is rushing plus receiving and never a throw, so for a
+           # quarterback it is his legs and nothing else.
+           ("Rush TD / g", ("tds",), ("tds",), "rate", True, False),
+           _GAMES_ROW),
+    "RB": (("Car / g", ("carries",), ("carries",), "rate", True, False),
+           ("Rec / g", ("receptions",), ("receptions",), "rate", True, False),
+           ("Yds / g", ("rush_yards", "rec_yards"), ("yards",), "rate", True, False),
+           # Yards per opportunity: what one touch or one look was worth.
+           ("Yds / opp", (("rush_yards", "rec_yards"), ("carries", "targets")),
+            (("yards",), ("carries", "targets")), "rate", False, False),
+           ("TD / g", ("tds",), ("tds",), "rate", True, False),
+           _GAMES_ROW),
+    "WR": (("Tgt / g", ("targets",), ("targets",), "rate", True, False),
+           ("Rec / g", ("receptions",), ("receptions",), "rate", True, False),
+           ("Catch %", (("receptions",), ("targets",)),
+            (("receptions",), ("targets",)), "pct", False, False),
+           ("Yds / g", ("rec_yards", "rush_yards"), ("yards",), "rate", True, False),
+           ("Yds / opp", (("rec_yards", "rush_yards"), ("targets", "carries")),
+            (("yards",), ("targets", "carries")), "rate", False, False),
+           ("TD / g", ("tds",), ("tds",), "rate", True, False),
+           _GAMES_ROW),
+}
+_USAGE_ROWS["TE"] = _USAGE_ROWS["WR"]
+
+# The step a season-to-season move has to clear to earn a colour, as a
+# fraction of what it moved FROM -- UsageLine.tsx's `MOVE`. Relative, because
+# three points of snap share is a real change at 20% and rounding at 90%.
+_USAGE_MOVE = 0.05
+
+# The five sources, labels and order of `scoring/market.py`'s consensus, the
+# same list MarketRow.tsx keeps.
+_MARKET_SOURCES = (("ffc", "FFC"), ("espn", "ESPN"), ("fp", "FantasyPros"),
+                   ("mfl", "MFL"), ("cbs", "CBS"))
+
+
+def _num_or_none(value):
+    """A float, or None for a null, a NaN or anything that is not a number."""
+    if value is None:
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if out != out else out
+
+
+def _level(value, cuts) -> int | None:
+    """Which of five steps `value` lands on. One is the worst outcome and
+    five the best in every meter on the page, which is what makes a glance
+    across them mean one thing."""
+    value = _num_or_none(value)
+    if value is None:
+        return None
+    return 1 + sum(1 for cut in cuts if value >= cut)
+
+
+def _starters_at(position: str) -> int:
+    return _FALLBACK_STARTERS.get(position, 24)
+
+
+def _finish_level(finish, starters: int) -> int | None:
+    """`finishTone` in draft/finish.ts, as a step rather than a class name."""
+    finish = _num_or_none(finish)
+    if finish is None:
+        return None
+    if finish <= starters / 4:
+        return 5
+    if finish <= starters / 2:
+        return 4
+    if finish <= starters:
+        return 3
+    if finish <= starters * 2:
+        return 2
+    return 1
+
+
+def _bar_level(points, position: str) -> int:
+    """`barTone` in draft/weeks.ts: good, mid, bad -- the ramp's ends and its
+    middle, which is the three steps a week is graded on."""
+    amber, green = _BAR_THRESHOLDS.get(position, _BAR_DEFAULT)
+    points = _num_or_none(points) or 0.0
+    return 5 if points >= green else 3 if points >= amber else 1
+
+
+def _band_level(value, cuts) -> int | None:
+    """The step a value on a descending ladder of cuts takes: `cuts` is five
+    steps' worth of floors, best first. `shareTone`, `placeTone` and the
+    schedule strip's own ramp are all this shape."""
+    value = _num_or_none(value)
+    if value is None:
+        return None
+    for i, floor in enumerate(cuts):
+        if value >= floor:
+            return 5 - i
+    return 1
+
+
+_ORDINALS = {1: "st", 2: "nd", 3: "rd"}
+
+
+def _ordinal(n: int) -> str:
+    """21 -> "21st". `ordinal` in profile/payload.ts, for the same rows."""
+    if 11 <= n % 100 <= 13:
+        return f"{n}th"
+    return f"{n}{_ORDINALS.get(n % 10, 'th')}"
+
+
+def _fmt(value, digits: int = 1) -> str:
+    value = _num_or_none(value)
+    return "—" if value is None else f"{value:.{digits}f}"
+
+
+def _pct_str(share) -> str:
+    share = _num_or_none(share)
+    return "—" if share is None else f"{round(share * 100):.0f}%"
+
+
+def _count_str(value) -> str:
+    """Games are counted, not measured: seventeen is "17", and only the
+    projection's fractional 16.4 spends a decimal place. `count` in
+    UsageLine.tsx."""
+    value = _num_or_none(value)
+    if value is None:
+        return "—"
+    return str(int(value)) if float(value).is_integer() else f"{value:.1f}"
+
+
+def _year(season) -> str:
+    return f"’{str(int(season))[2:]}"
+
+
+def _sum_or_none(row: dict, keys) -> float | None:
+    """The sum of `keys`, or None when every one of them is missing. A row
+    where nothing is known must not print a zero -- `projTotal` in
+    UsageLine.tsx makes the same distinction for the same reason."""
+    values = [_num_or_none(row.get(k)) for k in keys]
+    if all(v is None for v in values):
+        return None
+    return sum(v or 0.0 for v in values)
+
+
+def _usage_value(row: dict, spec, per_game: bool):
+    """One usage cell: a per-game rate, or one column over another.
+
+    `spec` is either a tuple of column names (summed, and divided by games
+    where the source is a season rather than the already-per-game
+    projection), or a pair of them (a ratio -- catch rate is receptions over
+    targets, not a column anybody stores). A zero denominator is None, not
+    zero: a back with no targets has no catch rate, and 0% would say he
+    dropped everything.
+    """
+    if spec and isinstance(spec[0], tuple):
+        top = _sum_or_none(row, spec[0])
+        bottom = _sum_or_none(row, spec[1])
+        return None if top is None or not bottom else top / bottom
+    total = _sum_or_none(row, spec)
+    if total is None:
+        return None
+    if not per_game:
+        return total
+    games = _num_or_none(row.get("games"))
+    return total / games if games else None
+
+
+def _move_tone(now, prev, invert: bool = False) -> str:
+    """Green if the number is up on the one before it, red if it is down --
+    `tone` in UsageLine.tsx, including the one row where up is worse."""
+    now, prev = _num_or_none(now), _num_or_none(prev)
+    if now is None or prev is None or prev == 0:
+        return ""
+    move = ((now - prev) / abs(prev)) * (-1 if invert else 1)
+    if move >= _USAGE_MOVE:
+        return "up"
+    if move <= -_USAGE_MOVE:
+        return "down"
+    return ""
+
+
+_profile_failed = False
+
+
+def cached_profile_or_none(conn, player_id: str, settings=None):
+    """`scoring.profile_cache.cached_profile`, or None however it fails.
+
+    THE PAGE IS NOT THE PROFILE. Every figure above these sections comes out
+    of the corpus and needs nothing from the universal database; the profile
+    is an enrichment on top, exactly like `scoring/adp_facts.attach`, and a
+    universal database that cannot answer must cost the enrichment rather
+    than the page. So this swallows -- and says so once per process, because
+    a profile failing on all 203 pages of a crawl is one fact about the
+    database, not two hundred.
+
+    NOTHING IS HELD WHILE THIS RUNS. `cached_profile` single-flights on its
+    own lock and takes one of `scoring.board_cache.BUILD_SLOTS`' two build
+    permits, and it can sit behind another thread's build for a second or
+    more. It is called from inside `rendered`'s `build()`, which runs with
+    neither `_pages_lock` nor `_adp_lock` held -- see `rendered` for why the
+    page cache is written after the build rather than around it.
+    """
+    global _profile_failed
+    if conn is None:
+        return None
+    try:
+        from scoring import league
+        from scoring.profile_cache import cached_profile
+        return cached_profile(conn, player_id, None, settings or league.load(conn))
+    except Exception as exc:      # noqa: BLE001 -- see the docstring
+        if not _profile_failed:
+            _profile_failed = True
+            print(f"seo: profile enrichment unavailable, pages render "
+                  f"without it: {exc!r}", flush=True)
+        return None
+
+
+def _meters(payload: dict) -> list:
+    """The four the board's own columns carry: how much of the season he is
+    there for, where he finishes, how steady he is week to week, and which
+    way the projection moves. Each is a step of five with the number it was
+    cut from beside it -- the bars are the glance, the number is what makes
+    them falsifiable."""
+    header = payload["header"]
+    position = str(header.get("position") or "")
+    starters = _starters_at(position)
+    out = []
+
+    games_pg = _num_or_none(header.get("career_games_pg"))
+    level = _level(games_pg, _HEALTH_CUTS)
+    if level is not None:
+        out.append({"label": "Health", "level": level, "cls": _METER_RAMP[level - 1],
+                    "value": _fmt(games_pg), "note": "games a season, career"})
+
+    # The projection's own place first, and a played season only where there
+    # is no projection: the app's Finish panel draws the forecast as the last
+    # column on the ladder the played seasons are on, and it is the column a
+    # reader carries away.
+    finish = _num_or_none(header.get("proj_pos_finish"))
+    note = f"projected finish, of {starters} starters"
+    if finish is None:
+        played = [s for s in payload.get("seasons") or [] if (s.get("games") or 0) > 0]
+        if played:
+            finish = _num_or_none(played[0].get("pos_finish"))
+            note = f"{played[0]['season']} finish, of {starters} starters"
+    level = _finish_level(finish, starters)
+    if level is not None:
+        out.append({"label": "Finish", "level": level, "cls": _PANEL_RAMP[level - 1],
+                    "value": f"{position}{int(finish)}", "note": note})
+
+    pct = _num_or_none(header.get("consistency_pct"))
+    if pct is not None:
+        # `steadyLevel` in AvailableList.tsx: the percentile IS the meter,
+        # so an even fifth of the position lands on each bar by construction.
+        level = min(5, max(1, math.ceil(pct * 5)))
+        cv = _num_or_none(header.get("consistency_cv"))
+        out.append({"label": "Reliable", "level": level, "cls": _METER_RAMP[level - 1],
+                    "value": "—" if cv is None else f"{cv:.2f}",
+                    "note": f"steadier than {(level - 1) * 20}–{level * 20}% "
+                            "of his position"})
+
+    change = _num_or_none(header.get("proj_change"))
+    level = _level(change, _CHANGE_CUTS)
+    if level is not None:
+        out.append({"label": "Growth", "level": level, "cls": _METER_RAMP[level - 1],
+                    "value": _signed(change, 1), "note": "points a game vs last season"})
+    return out
+
+
+def _season_rows(payload: dict) -> dict | None:
+    """Every season he has played, as the four panels state them: games, the
+    average, where it finished him, and how steady it was. Newest first, the
+    order the payload has them in, with the projection as its own last row --
+    the one line here that has not happened."""
+    seasons = payload.get("seasons") or []
+    if not seasons:
+        return None
+    position = str(payload["header"].get("position") or "")
+    starters = _starters_at(position)
+    rows = []
+    for s in seasons:
+        finish = _num_or_none(s.get("pos_finish"))
+        level = _finish_level(finish, starters)
+        ppg = _num_or_none(s.get("ppg"))
+        cv_rank, cv_of = _num_or_none(s.get("cv_rank")), _num_or_none(s.get("cv_rank_n"))
+        rows.append({
+            "season": int(s["season"]),
+            "age": s.get("age"), "nfl": s.get("nfl_season"),
+            "games": s.get("games"),
+            "ppg": _fmt(ppg),
+            "ppg_cls": _PANEL_RAMP[_bar_level(ppg, position) - 1],
+            "finish": "—" if finish is None else f"{position}{int(finish)}",
+            "finish_cls": "" if level is None else _PANEL_RAMP[level - 1],
+            "ppg_rank": ("—" if s.get("pos_rank_ppg") is None
+                         else f"{int(s['pos_rank_ppg'])} of {int(s['pos_rank_ppg_n'])}"),
+            "steady": ("—" if cv_rank is None or not cv_of
+                       else f"{int(cv_rank)} of {int(cv_of)}"),
+            "steady_cls": ("" if cv_rank is None or not cv_of else
+                           _PANEL_RAMP[_band_level(1 - cv_rank / cv_of,
+                                                   (0.75, 0.5, 0.25, 0.1)) - 1]),
+        })
+    proj_ppg = _num_or_none((payload.get("summary") or {}).get("proj_ppg"))
+    proj_finish = _num_or_none(payload["header"].get("proj_pos_finish"))
+    level = _finish_level(proj_finish, starters)
+    proj = None
+    if proj_ppg is not None or proj_finish is not None:
+        proj = {"season": payload["bio"].get("season"),
+                "ppg": _fmt(proj_ppg),
+                "ppg_cls": ("" if proj_ppg is None
+                            else _PANEL_RAMP[_bar_level(proj_ppg, position) - 1]),
+                "finish": ("—" if proj_finish is None
+                           else f"{position}{int(proj_finish)}"),
+                "finish_cls": "" if level is None else _PANEL_RAMP[level - 1]}
+    return {"position": position, "starters": starters, "rows": rows, "proj": proj}
+
+
+def _weeks(payload: dict) -> dict | None:
+    """Last season by week: eighteen slots, one per week of the season rather
+    than one per game he appeared in -- a row of twelve bars beside a row of
+    eighteen would make six missed games invisible. `WeekByWeek` and
+    `weekCols` draw exactly this.
+
+    A week with no game is a mark on the baseline, not a bar of no height:
+    "did not play" and "played and scored nothing" are different claims.
+    """
+    log = payload.get("game_log") or []
+    played = [g for g in log if not g.get("dnp")]
+    if not played:
+        return None
+    season = max(int(g["season"]) for g in played)
+    position = str(payload["header"].get("position") or "")
+    rows = {int(g["week"]): g for g in played if int(g["season"]) == season}
+    if not rows:
+        return None
+    cols = []
+    for week in range(1, WEEK_SLOTS + 1):
+        game = rows.get(week)
+        points = None if game is None else _num_or_none(game.get("ppr_points"))
+        cols.append({
+            "week": week,
+            "label": (game or {}).get("opponent") or "—",
+            "value": "·" if points is None else f"{round(points):.0f}",
+            # The bar's own height in the drawing, so the template does no
+            # arithmetic: 80 units of chart above a baseline at 104, with a
+            # floor of five so a game he played and scored nothing in is
+            # still a bar. A week with no game is not one -- see `empty`.
+            "h": (0 if points is None else
+                  max(5, round(min(1.0, max(0.0, points / BAR_CEILING)) * 80))),
+            "cls": "" if points is None else _PANEL_RAMP[_bar_level(points, position) - 1],
+            "empty": points is None,
+        })
+    summary = next((s for s in payload.get("seasons") or []
+                    if int(s["season"]) == season), None)
+    heads = _LOG_COLUMNS.get(position)
+    lines = []
+    for game in sorted(rows.values(), key=lambda g: -int(g["week"])):
+        stats = game.get("stats") or {}
+        cells = []
+        if heads is None:
+            cells.append(game.get("stat_line") or "—")
+        else:
+            for _, key in heads:
+                if key == "ca":
+                    cells.append(f"{stats.get('completions', 0)}/{stats.get('attempts', 0)}")
+                elif key == "tds":
+                    cells.append(str(int((stats.get("rush_tds") or 0)
+                                         + (stats.get("rec_tds") or 0))))
+                elif key == "yards":
+                    cells.append(str(int((stats.get("rec_yards") or 0)
+                                         + (stats.get("rush_yards") or 0))))
+                elif key in ("snap_pct", "target_pct"):
+                    cells.append(_pct_str(game.get(key)))
+                else:
+                    cells.append(str(int(stats.get(key) or 0)))
+        points = _num_or_none(game.get("ppr_points")) or 0.0
+        lines.append({"week": int(game["week"]),
+                      "opponent": game.get("opponent") or "—",
+                      "cells": cells, "points": _fmt(points),
+                      "cls": _PANEL_RAMP[_bar_level(points, position) - 1]})
+    return {"season": season, "cols": cols, "lines": lines,
+            "heads": [h for h, _ in heads] if heads else ["Line"],
+            "avg": _fmt(summary["ppg"]) if summary else None,
+            "finish": (f"{position}{int(summary['pos_finish'])}"
+                       if summary and summary.get("pos_finish") is not None else None)}
+
+
+def _usage(payload: dict) -> dict | None:
+    """What the points were made of, season by season, and how big a share of
+    the offence they came off.
+
+    Share first, rates under it: a rate is what he did, a share is how much
+    of his offence he was, which is the half that survives a coaching change.
+    Three seasons of columns and the projection beside them -- what
+    `UsageLine` draws, at the same width and for the same reason.
+
+    A ROW NOTHING CAN ANSWER IS DROPPED, not dashed across, and a row of
+    genuine zeros goes the same way: a quarterback's target share is not
+    missing, it is 0.000 every season, and a flat row of noughts is a career
+    of facts that never happened. There is no `K` or `DST` entry in
+    `_USAGE_ROWS` and that is deliberate -- a kicker's season row carries no
+    skill columns, so the lookup falls through and the section is not drawn.
+    """
+    seasons = payload.get("seasons") or []
+    position = str(payload["header"].get("position") or "")
+    shown = list(reversed(seasons[:USAGE_SEASONS]))
+    if not shown:
+        return None
+    projected = (payload.get("summary") or {}).get("proj_usage")
+    printers = {"pct": _pct_str, "count": _count_str, "rate": lambda v: _fmt(v)}
+    rows = []
+    for label, of, proj_of, fmt, per_game, invert in (
+            tuple(_SHARE_ROWS) + tuple(_USAGE_ROWS.get(position, ()))):
+        values = [_usage_value(s, of, per_game) for s in shown]
+        proj = (_usage_value(projected, proj_of, False)
+                if proj_of and projected else None)
+        if not any(v not in (None, 0) for v in values) and proj in (None, 0):
+            continue
+        printer = printers[fmt]
+        cells, previous = [], None
+        for value in values:
+            cells.append({"text": "—" if value is None else printer(value),
+                          "tone": _move_tone(value, previous, invert),
+                          "blank": value is None})
+            if value is not None:
+                previous = value
+        last = next((v for v in reversed(values) if v is not None), None)
+        rows.append({
+            "label": label, "cells": cells, "share": of in (("snap_share",),
+                                                            ("target_share",)),
+            "proj": ({"text": "—" if proj is None else printer(proj),
+                      "tone": _move_tone(proj, last, invert),
+                      "blank": proj is None} if projected else None)})
+    if not rows:
+        return None
+    # The seam between the two shares and the rates under them, drawn only
+    # when there is a first half above it to be separated from.
+    first_rate = next((i for i, r in enumerate(rows) if not r["share"]), -1)
+    return {"head": [_year(s["season"]) for s in shown], "rows": rows,
+            "projected": projected is not None,
+            "seam": first_rate if first_rate > 0 else -1}
+
+
+def _schedule(payload: dict) -> dict | None:
+    """The season as eighteen weeks, ranked on how much the defence in front
+    of him gave up to his position last year.
+
+    THE DIRECTION IS INVERTED FROM INTUITION AND EVERY LABEL SAYS SO: rank 1
+    is the SOFTEST defence, and reading the strip as a difficulty ranking
+    turns the best week of the season into the worst. `ScheduleRanks` draws
+    the same weeks on the same ramp.
+    """
+    weeks = payload.get("schedule") or []
+    if not any(w.get("pct") is not None for w in weeks):
+        return None
+    teams = next((int(w["rank_n"]) for w in weeks if w.get("rank_n")), None)
+    sos = _num_or_none((payload.get("outlook") or {}).get("sos_pct"))
+    note = None
+    if sos is not None and teams:
+        # `softestRank`: `sos_pct` is a percentile rank over the 32 teams, so
+        # the place it came from is exact rather than reconstructed.
+        # `math.floor(x + 0.5)`, not `round`: Python rounds a half to even
+        # and JavaScript rounds it up, and this number has to be the one
+        # `softestRank` produces for the same percentile.
+        ascending = math.floor(sos / 100 * teams + 0.5)
+        note = f"{_ordinal(min(teams, max(1, teams - ascending + 1)))} easiest"
+    out = []
+    for w in weeks:
+        pct = _num_or_none(w.get("pct"))
+        level = _band_level(pct, (75, 60, 40, 25))
+        out.append({"week": w.get("week"),
+                    "opponent": w.get("opponent") or "bye",
+                    "away": w.get("home") is False,
+                    "rank": ("—" if w.get("rank") is None
+                             else f"{int(w['rank'])}/{int(w['rank_n'])}"),
+                    "fpa": _fmt(w.get("fpa_pg")),
+                    "cls": "" if level is None else _PANEL_RAMP[level - 1]})
+    return {"note": note, "weeks": out, "teams": teams}
+
+
+def _oline(payload: dict) -> dict | None:
+    """The line in front of him: where it places, what the place is made of,
+    and who is on it. Null for every defense by construction -- the o-line is
+    a fact about the eleven who leave the field when that unit comes on."""
+    oline = payload.get("oline")
+    if not oline:
+        return None
+    parts = []
+    for key, label in (("continuity", "Same five"), ("availability", "Available"),
+                       ("returning", "Returning")):
+        share = _num_or_none(oline.get(key))
+        if share is None:
+            continue
+        level = _band_level(share, (0.9, 0.8, 0.7, 0.6))
+        parts.append({"label": label, "fill": round(min(1.0, share) * 100),
+                      "value": _pct_str(share), "cls": _PANEL_RAMP[level - 1]})
+    years, years_pct = _num_or_none(oline.get("experience")), _num_or_none(
+        oline.get("experience_pct"))
+    if years is not None and years_pct is not None:
+        level = _band_level(years_pct, (80, 60, 40, 20))
+        parts.append({"label": "Experience", "fill": round(min(100.0, years_pct)),
+                      "value": f"{round(years)}yr", "cls": _PANEL_RAMP[level - 1]})
+    starters = []
+    for s in oline.get("starters") or []:
+        if not s.get("name"):
+            continue
+        rank, of = _num_or_none(s.get("avail_rank")), _num_or_none(s.get("avail_rank_of"))
+        level = None if rank is None or not of else _band_level(1 - rank / of,
+                                                                (0.8, 0.6, 0.4, 0.2))
+        starters.append({"position": s.get("position") or "—", "name": s["name"],
+                         "place": "—" if rank is None or not of else f"{int(rank)}/{int(of)}",
+                         "cls": "" if level is None else _PANEL_RAMP[level - 1]})
+    return {"team": oline.get("team"), "rank": _ordinal(int(oline["rank"])),
+            "teams": int(oline["teams"]), "parts": parts, "starters": starters}
+
+
+def _comparables(payload: dict, slugs: dict) -> dict | None:
+    """The seasons his looks like, and what they became.
+
+    `stat_twins` only. `value_neighbors` -- the fallback for a player with no
+    stat line to match, which is every defense and every rookie -- is a list
+    of board positions, not of seasons, and reading it under this heading
+    would be the page claiming a resemblance nobody measured.
+    """
+    similar = payload.get("similar") or {}
+    if similar.get("mode") != "stat_twins":
+        return None
+    rows = []
+    for p in similar.get("players") or []:
+        season, ppg = p.get("season"), _num_or_none(p.get("ppg"))
+        if season is None or ppg is None:
+            continue
+        move = (None if p.get("next_ppg") is None
+                else _num_or_none(p["next_ppg"]) - ppg)
+        rows.append({
+            "name": p.get("name"),
+            # Only a twin the board still knows has a page of his own: Todd
+            # Gurley's 2017 is not a player anybody can draft this year, and
+            # the payload marks those with a null rank.
+            "slug": slugs.get(p.get("player_id")) if p.get("rank") is not None else None,
+            "season": season, "ppg": _fmt(ppg),
+            "change": "—" if move is None else _signed(move, 1),
+            # Green up, red down, and nothing at all for a move that rounds
+            # to nothing: the same two tokens the rest of the page spends on
+            # "better" and "worse".
+            "tone": ("" if move is None else "up" if round(move, 1) > 0
+                     else "down" if round(move, 1) < 0 else ""),
+            "match": "—" if p.get("similarity") is None else f"{round(p['similarity'])}%",
+        })
+        if len(rows) >= PROFILE_COMPS:
+            break
+    if not rows:
+        return None
+    cohort = payload.get("cohort")
+    note = None
+    if cohort and cohort.get("n"):
+        changes = [_num_or_none(c.get("change")) for c in cohort.get("players") or []]
+        changes = [c for c in changes if c is not None]
+        avg = (sum(changes) / len(changes) if changes
+               else _num_or_none(cohort.get("median_change")))
+        if avg is not None:
+            note = {"value": _signed(avg, 1),
+                    "tone": "up" if round(avg, 1) > 0 else "down" if round(avg, 1) < 0 else "",
+                    "n": int(cohort["n"]), "declined": int(cohort.get("declined") or 0)}
+    return {"rows": rows, "note": note,
+            "age": (payload.get("similar") or {}).get("target_age")}
+
+
+def _peers(payload: dict, slugs: dict) -> list:
+    """Who else is on the shelf: the players on THIS year's board scored
+    against him, with what taking one instead would cost or buy per game."""
+    data = payload.get("similar_players") or {}
+    proj = _num_or_none((payload.get("summary") or {}).get("proj_ppg"))
+    out = []
+    for p in (data.get("players") or [])[:PROFILE_PEERS]:
+        points = _num_or_none(p.get("proj_points"))
+        per_game = None if points is None else points / SEASON_GAMES
+        gap = None if per_game is None or proj is None else per_game - proj
+        out.append({"name": p.get("name"), "slug": slugs.get(p.get("player_id")),
+                    "ppg": _fmt(per_game),
+                    "gap": "" if gap is None else _signed(gap, 1),
+                    # `SAME` in SimilarPlayers.tsx: half a point a game is
+                    # two players the same size, and colouring it would be
+                    # the card claiming a choice nobody has to make.
+                    "tone": ("" if gap is None or abs(gap) < 0.5
+                             else "up" if gap > 0 else "down")})
+    return out
+
+
+def _room(payload: dict) -> dict | None:
+    """His own place in his own position room, off the depth chart the
+    payload carries. `depthGroup` in profile/payload.ts: whichever group
+    actually holds him comes before the one his board position names -- a
+    receiver taking snaps at running back belongs in the room he is really
+    competing in."""
+    groups = payload.get("depth_chart") or []
+    position = str(payload["header"].get("position") or "")
+    mine = next((g for g in groups if any(p.get("is_me") for p in g.get("players") or [])),
+                None)
+    if mine is None:
+        mine = next((g for g in groups if g.get("position") == position), None)
+    if not mine or not mine.get("players"):
+        return None
+    return {"position": mine.get("position"), "team": payload["header"].get("team"),
+            "players": [{"name": p.get("name"), "rank": p.get("rank"),
+                         "me": bool(p.get("is_me"))} for p in mine["players"]]}
+
+
+def _market(payload: dict) -> dict:
+    """Where the market has him, as places among his own position as well as
+    overall: a roster is filled by position, so "WR7" is the number the row
+    is really about and the overall is the scale it sits on. `MarketRow`
+    prints the same rows off the same header."""
+    header = payload["header"]
+    position = str(header.get("position") or "")
+    places = header.get("market_pos") or {}
+
+    def place(key):
+        value = places.get(key)
+        return None if value is None else f"{position}{int(value)}"
+
+    edge = _num_or_none(header.get("edge"))
+    return {"rank": header.get("rank"), "board_pos": place("board"),
+            "consensus_pos": place("consensus"),
+            "spread": _num_or_none(header.get("market_spread")),
+            "pos": {key: place(key) for key, _ in _MARKET_SOURCES},
+            "edge": None if edge is None else round(edge),
+            "edge_text": None if edge is None else _signed(edge, 0),
+            # `edgeTone` in profile/payload.ts: under ten slots the board and
+            # the market take him in the same round of any league this tool
+            # supports, so there is no decision in the gap.
+            "edge_tone": ("" if edge is None else "up" if round(edge) >= 10
+                          else "accent" if round(edge) > 0
+                          else "" if round(edge) == 0 else "down")}
+
+
+def _profile_news(payload: dict) -> list:
+    """The feed's rows, shaped the way `scoring/adp_facts._news` shapes its
+    own, so the page's one news list can hold both without knowing which
+    filled it."""
+    out = []
+    for item in payload.get("news") or []:
+        published = item.get("published_at")
+        if isinstance(published, str):
+            try:
+                published = datetime.fromisoformat(published)
+            except ValueError:
+                published = None
+        out.append({"headline": item.get("headline"), "url": item.get("url"),
+                    "source": item.get("source"), "date": published})
+    return out
+
+
+def _merge_news(existing: list, extra: list) -> list:
+    """One list, newest first, with nothing said twice.
+
+    The two sources ARE the same table (`player_news`): `adp_facts` reads it
+    by id for the whole board in one pass and `scoring.profile.player_news`
+    reads it for one player. A page that printed both would print every
+    headline twice, and one that dropped either would lose the rows the other
+    matched -- so they are merged on the url, and on the headline for a row
+    that has none.
+    """
+    out, seen = [], set()
+    for item in list(existing or []) + list(extra or []):
+        key = (item.get("url") or "").strip() or (item.get("headline") or "").strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    # ON A COMMON TYPE. `adp_facts` hands over a `date` and the profile a
+    # `datetime`, which Python will not order against each other -- and the
+    # first merged page raised rather than sorted.
+    def when(item):
+        stamp = item.get("date")
+        if isinstance(stamp, datetime):
+            return stamp
+        if isinstance(stamp, date):
+            return datetime(stamp.year, stamp.month, stamp.day)
+        return datetime.min
+
+    out.sort(key=when, reverse=True)
+    return out
+
+
+def profile_view(conn, player: dict, slugs: dict, settings=None) -> dict | None:
+    """Everything the popup draws about one player, ready for the template.
+
+    `slugs` maps player_id -> the slug of his own page, so a comparable or a
+    board peer who is on this board becomes a link and one who is not stays
+    text. Returns None when there is no profile to draw -- an unknown id, or
+    a universal database that cannot answer.
+    """
+    payload = cached_profile_or_none(conn, player["player_id"], settings)
+    if payload is None:
+        return None
+    header = payload.get("header") or {}
+    status = payload.get("status") or {}
+    slot = status.get("depth_chart_order")
+    vegas = payload.get("vegas") or {}
+    summary = payload.get("summary") or {}
+    return {
+        "position": str(header.get("position") or ""),
+        "season": (payload.get("bio") or {}).get("season"),
+        "proj_ppg": _fmt(summary.get("proj_ppg")),
+        "proj_delta": (None if summary.get("proj_delta") is None
+                       else _signed(summary["proj_delta"], 1)),
+        "meters": _meters(payload),
+        "seasons": _season_rows(payload),
+        "weeks": _weeks(payload),
+        "usage": _usage(payload),
+        "schedule": _schedule(payload),
+        "room": _room(payload),
+        "oline": _oline(payload),
+        "vegas": ({"implied": _fmt(vegas.get("implied")),
+                   # A PLACE, spelled the way the O-line card's own lead
+                   # spells one, because the two cards are making the same
+                   # kind of statement out of the same thirty-two teams.
+                   "rank": (None if vegas.get("rank") is None
+                            else _ordinal(int(vegas["rank"]))),
+                   "teams": vegas.get("teams"), "priced": vegas.get("priced")}
+                  if _num_or_none(vegas.get("implied")) is not None else None),
+        "market": _market(payload),
+        "comps": _comparables(payload, slugs),
+        "peers": _peers(payload, slugs),
+        "news": _profile_news(payload),
+        "status": ({"injury": status.get("injury_status"),
+                    "body_part": status.get("injury_body_part"),
+                    "notes": status.get("injury_notes"),
+                    "slot": (None if not slot else
+                             f"{status.get('depth_chart_position') or header.get('position')}"
+                             f"{int(slot)}")}
+                   if status else None),
+    }
+
+
 def _provenance(data: dict) -> str:
     if not data["drafts"]:
         return "No drafts recorded yet."
@@ -1376,14 +2240,20 @@ def register_seo_routes(app, conn=None):
             rounds=d["rounds"], provenance=_provenance(d), positions=_present(d),
             breadcrumbs=_crumbs(("ADP", "/adp"), (f"Round {n}", f"/adp/round/{n}")))))
 
-    @app.api_route("/adp/{key}", methods=["GET", "HEAD"], response_class=HTMLResponse)
-    def adp_player(key: str):
-        if key.upper() in POSITIONS:
-            return index_page(key.upper())
-        d = data()
-        p = d["by_slug"].get(key)
-        if p is None:
-            return _missing(f"/adp/{key}")
+    def render_player(target, d: dict, p: dict) -> str:
+        """One player's page, built at most once per snapshot of the corpus.
+
+        `target` is the connection the PROFILE is built on, which is not
+        always the one the routes read: the keep-warm loop below renders the
+        first forty of these on its own cursor, for the reason its own
+        comment gives.
+
+        THE PROFILE IS BUILT INSIDE `build`, WHICH `rendered` CALLS WITH
+        NOTHING HELD. `cached_profile` costs ~250 ms on a first look at a
+        player and takes one of `scoring.board_cache`'s two build permits;
+        holding `_pages_lock` or `_adp_lock` across it would queue every
+        other reader of every other page behind one player's dossier.
+        """
         i = p["rank"] - 1
         near = [q for q in d["players"][max(0, i - 4): i + 5] if q is not p]
         pct = int(round(p["of_share"] * 100))
@@ -1404,18 +2274,40 @@ def register_seo_routes(app, conn=None):
         # which is what makes that possible here without carrying the
         # original around.
         social = thumb(p["headshot"], 320)
-        return page(rendered(d["stamp"], ("player", p["slug"]), lambda: render(
-            "adp_player.html",
-            title=_title(f"{p['name']} ADP – ESPN mock drafts "
-                         f"{d['updated'].year if d['updated'] else ''}".strip()),
-            description=desc, path=f"/adp/{p['slug']}", p=p, drafts=d["drafts"],
-            teams=d["teams"], rounds=d["rounds"], picks_total=d["teams"] * d["rounds"],
-            near=near, headshot=social, face=thumb(p["headshot"], 256),
-            round_min=ROUND_MIN_SHARE, pron=pron, mover_floor=MOVER_MIN_SHARE,
-            corpus_seconds=d["seconds"], curve_picks=CURVE_PICKS,
-            provenance=_provenance(d), person_schema=_person(p, social),
-            breadcrumbs=_crumbs(("ADP", "/adp"), (p["position"], f"/adp/{p['position'].lower()}"),
-                                (p["name"], f"/adp/{p['slug']}")))))
+
+        def build() -> str:
+            # Every player on this board, so a comparable season or a board
+            # peer who has a page of his own becomes a link and one who does
+            # not stays text.
+            slugs = {q["player_id"]: q["slug"] for q in d["players"]}
+            prof = profile_view(target, p, slugs)
+            return render(
+                "adp_player.html",
+                title=_title(f"{p['name']} ADP – ESPN mock drafts "
+                             f"{d['updated'].year if d['updated'] else ''}".strip()),
+                description=desc, path=f"/adp/{p['slug']}", p=p, drafts=d["drafts"],
+                teams=d["teams"], rounds=d["rounds"], picks_total=d["teams"] * d["rounds"],
+                near=near, headshot=social, face=thumb(p["headshot"], 256),
+                round_min=ROUND_MIN_SHARE, pron=pron, mover_floor=MOVER_MIN_SHARE,
+                corpus_seconds=d["seconds"], curve_picks=CURVE_PICKS,
+                prof=prof, news=_merge_news(p.get("news"),
+                                            prof["news"] if prof else []),
+                provenance=_provenance(d), person_schema=_person(p, social),
+                breadcrumbs=_crumbs(("ADP", "/adp"),
+                                    (p["position"], f"/adp/{p['position'].lower()}"),
+                                    (p["name"], f"/adp/{p['slug']}")))
+
+        return rendered(d["stamp"], ("player", p["slug"]), build)
+
+    @app.api_route("/adp/{key}", methods=["GET", "HEAD"], response_class=HTMLResponse)
+    def adp_player(key: str):
+        if key.upper() in POSITIONS:
+            return index_page(key.upper())
+        d = data()
+        p = d["by_slug"].get(key)
+        if p is None:
+            return _missing(f"/adp/{key}")
+        return page(render_player(conn, d, p))
 
     @app.api_route("/sitemap.xml", methods=["GET", "HEAD"])
     def sitemap():
@@ -1471,13 +2363,56 @@ def register_seo_routes(app, conn=None):
     # already use for a background thread next to request handlers.
     cur = conn.cursor() if conn is not None else None
 
+    def _warm_pages(d: dict) -> None:
+        """The first `PROFILE_WARM` player pages, rendered before anybody
+        asks for them.
+
+        THE PROFILE IS WHAT MAKES THIS WORTH DOING. Every other page here is
+        a template over an aggregate already in memory and renders in single
+        milliseconds; a player page now also calls `cached_profile`, which is
+        ~250 ms the first time a player is asked for and 20 ms after. Warming
+        the aggregate and leaving the profiles cold would move the stall from
+        `/adp` onto whichever player page a crawler happened to open first.
+
+        BY ESPN'S OWN RANK, not by this corpus's ADP: the pages a reader
+        arrives at from a search are the players a search engine has heard
+        of, and ESPN's cheat sheet is the closest thing here to that order.
+        Anybody it does not rank goes last, in board order.
+
+        SEQUENTIAL, ON THIS ONE THREAD. `cached_profile` single-flights and
+        `board_cache` hands out two build permits; forty of these in parallel
+        would be forty threads contending for two permits and one DuckDB
+        cursor, on a background job nobody is waiting for.
+
+        Renders that hit the page cache cost nothing -- `rendered` keys on
+        the same stamp `rebuild_adp` just computed, so a pass that finds the
+        corpus unchanged does forty dictionary lookups.
+        """
+        players = sorted(d.get("players") or [],
+                         key=lambda q: (q.get("espn_rank") is None,
+                                        q.get("espn_rank") or 0, q["rank"]))
+        started, done = time.time(), 0
+        for player in players[:PROFILE_WARM]:
+            try:
+                render_player(cur, d, player)
+                done += 1
+            except Exception:      # noqa: BLE001 -- one page that will not
+                # build is one page a reader pays for later, which is what
+                # every page cost before this loop existed. The others in
+                # the list are still worth warming.
+                pass
+        # One line a pass, not one a page: forty lines every four minutes
+        # would bury everything else in the log.
+        print(f"seo: warmed {done} of {min(len(players), PROFILE_WARM)} "
+              f"player pages in {time.time() - started:.1f}s", flush=True)
+
     def _warm():
         while True:
             try:
                 # `rebuild_adp` on every pass including the first, so the
                 # boot warm cannot be a no-op against an entry some other
                 # app object in this process left behind.
-                rebuild_adp(cur)
+                _warm_pages(rebuild_adp(cur))
             except Exception:      # noqa: BLE001 -- a failed warm just means
                 # the next request pays for `build_adp` itself, same as
                 # before this loop existed. Never fatal to the thread: a
