@@ -66,6 +66,13 @@ _PROJ_LINES = {
            ("proj_rec_yards", "Rec yards"), ("proj_rec_tds", "Rec TD")),
 }
 
+# What a season line looks like when only some of it is known. Two sources
+# fill this in -- `weekly`, which can see every week, and the board's own
+# summary, which cannot -- and both hand the page the same keys.
+_EMPTY_SEASON = {"season": None, "games": None, "points": None, "ppg": None,
+                 "best": None, "worst": None, "best_week": None,
+                 "best_opponent": None}
+
 # How a DraftKings futures market reads in a sentence.
 _FUTURES = {"mvp": "MVP", "opoy": "Offensive Player of the Year",
             "oroy": "Offensive Rookie of the Year",
@@ -175,12 +182,14 @@ def _from_board(player: dict, row) -> None:
 
     stats = getattr(row, "stats", None)
     if isinstance(stats, dict) and _int(stats.get("games")) and _num(stats.get("points")):
-        player["last_season"] = {
-            "season": _int(stats.get("season")),
-            "games": _int(stats.get("games")),
-            "ppg": _num(stats.get("ppg")),
-            "points": _num(stats.get("points")),
-        }
+        # THE SAME SHAPE `_last_season` PRODUCES, blanks and all. This is the
+        # fallback for a player `weekly` cannot answer for, and a template
+        # that has to know which of the two filled a field would be a
+        # template one edit away from a 500.
+        player["last_season"] = dict(
+            _EMPTY_SEASON,
+            season=_int(stats.get("season")), games=_int(stats.get("games")),
+            ppg=_num(stats.get("ppg")), points=_num(stats.get("points")))
 
 
 # ---------------------------------------------------------------------------

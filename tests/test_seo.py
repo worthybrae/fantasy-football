@@ -881,3 +881,23 @@ def test_every_published_player_carries_every_optional_field(corpus, board):
     for p in seo.build_adp(board)["players"]:
         for field in seo.BLANKS:
             assert field in p, f"{p['name']} has no {field}"
+
+
+def test_both_season_sources_hand_the_page_the_same_keys():
+    """THE BUG THIS CAUGHT. Two things fill in `last_season`: the week-by-week
+    table, which can see the best and worst week, and the board's own summary,
+    which cannot. The board path used to emit four keys of the eight, and the
+    player page -- which asks for `worst` without guarding, as it is entitled
+    to -- was a 500 for every player `weekly` had no row for."""
+    from scoring import adp_facts
+
+    class _Row:
+        player_id, bye, tier, market_rank, espn_ppr_rank = "x", 9, 2, 12.0, 11
+        proj_points, rookie, team, market_sources, espn_id = 210.0, False, "CHI", None, None
+        stats = {"season": 2025, "games": 17, "ppg": 12.4, "points": 210.8}
+
+    player = {"player_id": "x", "name": "Board Only", "position": "RB", "team": None}
+    adp_facts._from_board(player, _Row())
+    assert set(player["last_season"]) == set(adp_facts._EMPTY_SEASON)
+    assert player["last_season"]["points"] == 210.8
+    assert player["last_season"]["worst"] is None
