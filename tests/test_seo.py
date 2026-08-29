@@ -254,12 +254,14 @@ def test_the_index_lists_every_player_with_provenance(corpus, board):
     assert 'href="/adp/dandre-swift"' in body
     assert "Amon-Ra St. Brown" in html.unescape(body)
     assert '<link rel="canonical" href="https://espnfantasydraft.com/adp"' in body
-    # These pages carry no application JavaScript: nothing to hydrate, nothing
-    # the content waits on. What is allowed is structured data, which is not
-    # code, and the one analytics tag, which appends its own script node and
-    # blocks nothing. Anything else appearing here is a regression.
-    assert body.count("<script") == 3, "an unexpected script reached the page"
+    # Nothing on these pages is hydrated and nothing the content says waits
+    # on a script. Three are allowed here and no fourth: two blocks of
+    # structured data, which is not code; the analytics tag, which appends
+    # its own node and blocks nothing; and the table sorter, which is
+    # progressive enhancement over a table that is already in draft order.
+    assert body.count("<script") == 4, "an unexpected script reached the page"
     assert body.count('<script type="application/ld+json">') == 2
+    assert body.count("table.sortable") == 1, "the sort script is in twice"
 
 
 def test_a_player_page_states_his_figures(corpus, board):

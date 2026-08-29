@@ -1,33 +1,102 @@
 {# api/templates/adp_index.html #}
 {% extends "base.html" %}
+{% macro pct(x) %}{{ (x * 100) | round | int }}%{% endmacro %}
+{% macro mover(p) %}
+<li><span class="d big">{{ '%+.0f' % p.vs_espn }}</span>
+  <a class="nm" href="/adp/{{ p.slug }}">{{ p.name }}</a>
+  <span class="pos {{ p.position }}">{{ p.position }}</span>
+  <span class="d dim">{{ '%.1f' % p.adp }}</span></li>
+{% endmacro %}
 {% block body %}
 {% if position %}<div class="crumbs"><a href="/adp">ADP</a> › {{ position }}</div>{% endif %}
 <h1>{{ heading }}</h1>
 <p class="prov">{{ provenance }}</p>
 {% if intro %}<p class="intro">{{ intro }}</p>{% endif %}
+
+{% if players %}
+<h2>What these rooms do differently</h2>
+<div class="cols">
+  <div class="card">
+    <h3>Risers</h3>
+    <p class="note">Taken at least {{ move }} picks before ESPN's board would take them.</p>
+    {% if risers %}<ol>{% for p in risers %}{{ mover(p) }}{% endfor %}</ol>
+    {% else %}<p class="note">Nobody here moves up that far.</p>{% endif %}
+  </div>
+  <div class="card">
+    <h3>Fallers</h3>
+    <p class="note">Left on the board at least {{ move }} picks past where ESPN's would.</p>
+    {% if fallers %}<ol>{% for p in fallers %}{{ mover(p) }}{% endfor %}</ol>
+    {% else %}<p class="note">Nobody here falls that far.</p>{% endif %}
+  </div>
+  <div class="card">
+    <h3>When the runs start</h3>
+    <p class="note">The median pick the first player at each position comes off the board.</p>
+    <ol>{% for r in runs %}
+      <li><span class="pos {{ r.position }}">{{ r.position }}</span>
+        <span class="nm">{% if position == r.position %}<b>pick {{ r.pick }}</b>{% else %}pick {{ r.pick }}{% endif %}</span>
+        <span class="d dim">round {{ r.round }}</span></li>
+    {% endfor %}</ol>
+  </div>
+</div>
+{% endif %}
+
+{% if tiers %}
+<h2>By FantasyPros tier</h2>
+<div class="links">{% for t in tiers %}<a href="#tier{{ t.tier }}">Tier {{ t.tier }} · {{ t.count }} player{{ '' if t.count == 1 else 's' }} · picks {{ '%.0f' % t.first }}–{{ '%.0f' % t.last }}</a>{% endfor %}</div>
+<p class="note" style="margin-top:8px">A tier is FantasyPros saying the players in it are close enough to be interchangeable. The two numbers are the earliest and latest average pick in the tier.</p>
+{% endif %}
+
 {% if not players %}
 {% if position %}<p>No {{ position }} has gone in these drafts often enough to have a draft position yet.</p>
 {% else %}<p>No drafts recorded yet. The farm records ESPN mock drafts every day; check back tomorrow.</p>
 {% endif %}
 {% else %}
-<table>
-<thead><tr><th class="n">#</th><th>Player</th><th>Pos</th><th>Team</th><th class="n">ADP</th><th class="n">Range</th><th class="n">Drafted</th><th class="n">{{ 'Pos rank' }}</th></tr></thead>
+<h2>{% if position %}Every {{ position }}{% else %}Every player{% endif %} by average draft position</h2>
+<div class="scroll">
+<table class="sortable">
+<thead><tr>
+  <th class="n" data-k="n">#</th>
+  <th data-k="s">Player</th>
+  {% if not position %}<th data-k="s">Pos</th>{% else %}<th class="n" data-k="n">{{ position }} rank</th>{% endif %}
+  <th data-k="s">Team</th>
+  <th class="n" data-k="n">Bye</th>
+  <th class="n" data-k="n">ADP</th>
+  <th class="n" data-k="n">Range</th>
+  <th class="n" data-k="n">Rd</th>
+  <th class="n" data-k="n">ESPN</th>
+  <th class="n" data-k="n">Consensus</th>
+  <th class="n" data-k="n">vs ESPN</th>
+  <th class="n" data-k="n">Taken</th>
+  {% if position %}<th class="n" data-k="n">Tier</th>{% endif %}
+</tr></thead>
 <tbody>
+{% set ns = namespace(seen=[]) %}
 {% for p in players %}
-<tr>
+{% set anchor = position and p.fp_tier and p.fp_tier not in ns.seen %}
+{% if anchor %}{% set ns.seen = ns.seen + [p.fp_tier] %}{% endif %}
+<tr{% if anchor %} id="tier{{ p.fp_tier }}"{% endif %}>
   <td class="n">{{ p.rank }}</td>
-  <td><a href="/adp/{{ p.slug }}">{{ p.name }}</a></td>
-  <td><span class="pos">{{ p.position }}</span></td>
+  <td class="who">{% if p.headshot %}<img src="{{ p.headshot }}" alt="" width="24" height="24" loading="lazy">{% endif %}<a href="/adp/{{ p.slug }}">{{ p.name }}</a></td>
+  {% if not position %}<td><span class="pos {{ p.position }}">{{ p.position }}</span></td>
+  {% else %}<td class="n">{{ p.pos_rank }}</td>{% endif %}
   <td>{{ p.team or '—' }}</td>
+  <td class="n">{{ p.bye or '—' }}</td>
   <td class="n">{{ '%.1f' % p.adp }}</td>
   <td class="n">{{ p.p10 }}–{{ p.p90 }}</td>
-  <td class="n">{{ (p.share * 100) | round | int }}%</td>
-  <td class="n">{{ p.position }}{{ p.pos_rank }}</td>
+  <td class="n">{{ p.round_mode }}</td>
+  <td class="n">{% if p.espn_rank %}{{ p.espn_rank }}{% else %}—{% endif %}</td>
+  <td class="n">{% if p.consensus %}{{ '%g' % p.consensus }}{% else %}—{% endif %}</td>
+  <td class="n {% if p.vs_espn is not none %}{% if p.vs_espn >= 0.5 %}down{% elif p.vs_espn <= -0.5 %}up{% endif %}{% endif %}">{% if p.vs_espn is not none %}{{ '%+.0f' % p.vs_espn }}{% else %}—{% endif %}</td>
+  <td class="n">{{ pct(p.of_share) }}</td>
+  {% if position %}<td class="n">{{ p.fp_tier or '—' }}</td>{% endif %}
 </tr>
 {% endfor %}
 </tbody>
 </table>
+</div>
+<p class="note" style="margin-top:10px">Range is the 10th to the 90th percentile of his picks. ESPN is ESPN's own PPR rank; consensus is the median of five ranking sources. “vs ESPN” is the gap in picks between where these rooms take him and where ESPN's board would: a positive number means the rooms get to him first.</p>
 {% endif %}
+
 <h2>By round</h2>
 <div class="links">{% for n in range(1, rounds + 1) %}<a href="/adp/round/{{ n }}">Round {{ n }}</a>{% endfor %}</div>
 <h2>By position</h2>
@@ -39,5 +108,44 @@
 <details><summary>{{ question }}</summary><p>{{ answer }}</p></details>
 {% endfor %}
 </div>
+{% endif %}
+{% if players %}
+{# Sorting the table is the one thing a reader can do here that plain HTML
+   cannot, and it is worth a kilobyte. Progressive enhancement in the strict
+   sense: the table is already in draft order and fully readable with this
+   script blocked, and nothing on the page waits for it. Values are read out
+   of the cells rather than duplicated into data attributes -- 203 rows times
+   a dozen columns of those would cost twenty kilobytes to save a parseFloat. #}
+<script>
+document.querySelectorAll('table.sortable').forEach(function (table) {
+  var body = table.tBodies[0], head = table.tHead.rows[0]
+  head.querySelectorAll('th[data-k]').forEach(function (th) {
+    th.tabIndex = 0
+    th.setAttribute('role', 'button')
+    function sort() {
+      var up = th.getAttribute('aria-sort') !== 'ascending'
+      head.querySelectorAll('th[aria-sort]').forEach(function (other) {
+        other.removeAttribute('aria-sort')
+      })
+      th.setAttribute('aria-sort', up ? 'ascending' : 'descending')
+      var at = th.cellIndex, numeric = th.dataset.k === 'n', way = up ? 1 : -1
+      var rows = Array.prototype.slice.call(body.rows)
+      rows.sort(function (a, b) {
+        var x = a.cells[at].textContent.trim(), y = b.cells[at].textContent.trim()
+        if (!numeric) return x.localeCompare(y) * way
+        x = parseFloat(x); y = parseFloat(y)
+        if (isNaN(x)) return isNaN(y) ? 0 : 1
+        if (isNaN(y)) return -1
+        return (x - y) * way
+      })
+      rows.forEach(function (row) { body.appendChild(row) })
+    }
+    th.addEventListener('click', sort)
+    th.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); sort() }
+    })
+  })
+})
+</script>
 {% endif %}
 {% endblock %}

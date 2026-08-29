@@ -861,11 +861,45 @@ def _index_faq(data: dict) -> list:
          "can see where the two disagree. Mock drafters and league drafters "
          "do not behave the same way, and the gap is often the interesting "
          "part."),
+        ("Will he still be there when my turn comes?",
+         "Every player page answers that at picks 8, 16, 24, 36, 48, 60, 72 "
+         "and 96, and draws the whole curve to pick 100. The figure is "
+         "counted, not modelled: it is the share of the drafts he was on the "
+         "board for in which nobody had taken him yet."),
+        ("What makes a riser or a faller?",
+         "Both lists compare where these rooms take a player with where "
+         "ESPN's own board would. The two lists are put on one scale first "
+         "-- order the players ESPN's way and read this corpus's own ADP off "
+         "at each position -- because ESPN measures draft position over a "
+         "much larger player pool than an "
+         f"{teams}-team room ever reaches. A riser goes at least {MOVE_PICKS} "
+         "picks before ESPN's board would take him."),
         ("How often does this update?",
          "Daily. New mock drafts are recorded continuously and every page "
          "here is rebuilt from the full corpus, so the count in the line "
          "under the heading goes up over the course of a season."),
     ]
+
+
+def _tiers(players: list) -> list:
+    """FantasyPros' tiers over one position's players, in draft order.
+
+    A tier is the market saying "these are interchangeable, and the next
+    group is not" -- which is the one piece of grouping a position page can
+    show that a sorted list cannot. Only tiers with a player in them appear,
+    and a position nobody has tiered gets nothing.
+    """
+    groups: dict = {}
+    for p in players:
+        if p.get("fp_tier"):
+            groups.setdefault(int(p["fp_tier"]), []).append(p)
+    out = []
+    for tier in sorted(groups):
+        members = groups[tier]
+        out.append({"tier": tier, "players": members, "count": len(members),
+                    "first": min(p["adp"] for p in members),
+                    "last": max(p["adp"] for p in members)})
+    return out
 
 
 def _faq_schema(faq: list) -> dict:
@@ -964,11 +998,25 @@ def register_seo_routes(app, conn=None):
                 "column is the 10th to the 90th percentile of his picks."
                 if d["drafts"] else None)
             faq = None
+        # Risers and fallers are recomputed for a position page rather than
+        # filtered from the index's ten, or a page of tight ends would show
+        # whichever two of them happened to make the whole board's list.
+        if position is None:
+            risers, fallers = d["risers"], d["fallers"]
+        else:
+            moved = [p for p in players if p.get("vs_espn") is not None]
+            risers = sorted((p for p in moved if p["vs_espn"] >= MOVE_PICKS),
+                            key=lambda p: -p["vs_espn"])[:MOVERS]
+            fallers = sorted((p for p in moved if p["vs_espn"] <= -MOVE_PICKS),
+                             key=lambda p: p["vs_espn"])[:MOVERS]
         return page(rendered(d["stamp"], ("index", position), lambda: render(
             "adp_index.html", title=f"{heading} – ESPN Draft Assist", description=desc,
             path=path, heading=heading, provenance=_provenance(d), players=players,
-            rounds=d["rounds"], position=position, positions=present, breadcrumbs=crumbs,
-            intro=intro, faq=faq, faq_schema=_faq_schema(faq) if faq else None)))
+            rounds=d["rounds"], teams=d["teams"], position=position, positions=present,
+            breadcrumbs=crumbs, intro=intro, faq=faq,
+            faq_schema=_faq_schema(faq) if faq else None,
+            risers=risers, fallers=fallers, runs=d["runs"], move=MOVE_PICKS,
+            tiers=_tiers(players) if position else [])))
 
     @app.api_route("/adp", methods=["GET", "HEAD"], response_class=HTMLResponse)
     def adp_index():
