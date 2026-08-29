@@ -1080,7 +1080,7 @@ PROFILE_WARM = 40
 # These pages are read by a crawler working through a 228-URL sitemap in a
 # burst and by a person on a phone on a train. The profile sections roughly
 # doubled one -- the heaviest three measured against the real corpus (854
-# drafts, 203 pages) are 60.2 KB, against a 55.5 KB median and a 28.7 KB
+# drafts, 203 pages) are 61.2 KB, against a 56.5 KB median and a 29.6 KB
 # page for a player the board carries no profile for -- and this ceiling is
 # what stops the next section being added
 # without anybody measuring. Enforced by the suite, not at render time: a

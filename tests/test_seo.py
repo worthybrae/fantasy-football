@@ -1545,8 +1545,8 @@ def test_a_player_page_stays_inside_its_size_budget(corpus, profiled):
     section being added without anybody measuring.
 
     Measured against the real corpus (854 drafts, 203 pages) and the real
-    universal database, the heaviest player page is 60.2 KB and the median
-    is 55.5 KB. The fixture's pages are far smaller, so this is a guard rail
+    universal database, the heaviest player page is 61.2 KB and the median
+    is 56.5 KB. The fixture's pages are far smaller, so this is a guard rail
     rather than a measurement -- see the task report for the real figures."""
     client = _client(profiled)
     for player in seo.adp_data(profiled)["players"]:
