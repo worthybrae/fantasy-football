@@ -86,7 +86,7 @@
   <td class="n">{{ p.bye or '—' }}</td>
   <td class="n">{{ '%.1f' % p.adp }}</td>
   <td class="n">{{ p.p10 }}–{{ p.p90 }}</td>
-  <td class="n">{{ p.round_mode }}</td>
+  <td class="n">{{ p.usual_round }}</td>
   <td class="n">{% if p.espn_rank %}{{ p.espn_rank }}{% else %}—{% endif %}</td>
   <td class="n">{% if p.consensus %}{{ '%g' % p.consensus }}{% else %}—{% endif %}</td>
   <td class="n {% if p.vs_espn is not none %}{% if p.vs_espn >= 0.5 %}down{% elif p.vs_espn <= -0.5 %}up{% endif %}{% endif %}">{% if p.vs_espn is not none %}{{ '%+.0f' % p.vs_espn }}{% else %}—{% endif %}</td>

@@ -25,7 +25,7 @@
 <div class="figs">
   <div class="fig"><div class="k">ADP</div><div class="v">{{ '%.1f' % p.adp }}</div><div class="s">median {{ '%g' % p.median }}</div></div>
   <div class="fig"><div class="k">Usual picks</div><div class="v">{{ p.p10 }}<span class="dim">–</span>{{ p.p90 }}</div><div class="s">{{ p.low }} at the earliest, {{ p.high }} at the latest</div></div>
-  <div class="fig"><div class="k">Usual round</div><div class="v">{{ p.round_mode }}</div><div class="s">of {{ rounds }}</div></div>
+  <div class="fig"><div class="k">Usual round</div><div class="v">{{ p.usual_round }}</div><div class="s">{{ pct(p.usual_share) }} of his picks{% if p.usual_share < round_min %} · no round holds many{% endif %}</div></div>
   <div class="fig"><div class="k">Drafted in</div><div class="v">{{ pct(p.of_share) }}</div><div class="s">{{ p.taken }} of {{ p.of }}</div></div>
   <div class="fig"><div class="k">Position rank</div><div class="v">{{ p.position }}{{ p.pos_rank }}</div><div class="s">overall {{ p.rank }}{% if p.fp_tier %} · FP tier {{ p.fp_tier }}{% endif %}</div></div>
   <div class="fig"><div class="k">ESPN ADP</div><div class="v">{% if p.espn_adp is not none %}{{ '%.1f' % p.espn_adp }}{% else %}<span class="dim">—</span>{% endif %}</div><div class="s">{% if p.espn_rank %}cheat sheet {{ p.espn_rank }}{% else %}not published{% endif %}</div></div>
@@ -69,12 +69,12 @@
 <h2>Where the room takes him</h2>
 <figure class="chart" style="margin:0">
 <svg viewBox="0 0 {{ picks_total * 6 }} 124" role="img" aria-label="How many drafts took {{ p.name }} at each overall pick">
-  <rect x="{{ (p.round_mode - 1) * teams * 6 }}" y="0" width="{{ teams * 6 }}" height="104" fill="#ffb454" fill-opacity=".07"/>
+  <rect x="{{ (p.usual_round - 1) * teams * 6 }}" y="0" width="{{ teams * 6 }}" height="104" fill="#ffb454" fill-opacity=".07"/>
   <g fill="#ffb454">{% for count in p.hist %}{% if count %}<rect x="{{ loop.index0 * 6 }}" y="{{ 100 - (100 * count / p.hist_peak) | round | int }}" width="5" height="{{ (100 * count / p.hist_peak) | round | int }}"/>{% endif %}{% endfor %}</g>
   <line x1="0" y1="104" x2="{{ picks_total * 6 }}" y2="104" stroke="#262932"/>
   <g font-size="11" fill="#565b69" font-family="ui-monospace,monospace">{% for n in range(1, rounds + 1) %}<text x="{{ (n - 1) * teams * 6 + 3 }}" y="120">R{{ n }}</text>{% endfor %}</g>
 </svg>
-<figcaption>Every pick he was taken at, across {{ drafts }} drafts. The shaded round is the one he goes in most often.{% if p.seconds and corpus_seconds %} Rooms spend a median of {{ '%g' % p.seconds }} seconds on the pick that takes him, against {{ '%g' % corpus_seconds }} seconds for a pick in general.{% endif %}</figcaption>
+<figcaption>Every pick he was taken at, across {{ drafts }} drafts. The shaded round is round {{ p.usual_round }}, where the middle of his picks falls — {{ pct(p.usual_share) }} of them.{% if p.seconds and corpus_seconds %} Rooms spend a median of {{ '%g' % p.seconds }} seconds on the pick that takes him, against {{ '%g' % corpus_seconds }} seconds for a pick in general.{% endif %}</figcaption>
 </figure>
 
 {% if p.sources %}
@@ -181,7 +181,7 @@
 <h2>More</h2>
 <div class="links">
   <a href="/adp/{{ p.position | lower }}">Every {{ p.position }} by ADP</a>
-  <a href="/adp/round/{{ p.round_mode }}">Round {{ p.round_mode }}</a>
+  {% if p.usual_share >= round_min %}<a href="/adp/round/{{ p.usual_round }}">Round {{ p.usual_round }}</a>{% endif %}
   <a href="/adp">The whole board</a>
 </div>
 {% endblock %}

@@ -38,7 +38,7 @@
 {% if not rows %}<p>No player has gone in round {{ n }} often enough to say.</p>{% else %}
 <div class="scroll">
 <table>
-<thead><tr><th>Player</th><th>Pos</th><th>Team</th><th class="n">ADP</th><th class="n">Range</th><th class="n">In this round</th><th>How often</th></tr></thead>
+<thead><tr><th>Player</th><th>Pos</th><th>Team</th><th class="n">ADP</th><th class="n">Range</th><th class="n">Of his picks</th><th class="n">Of all drafts</th><th>How often</th></tr></thead>
 <tbody>
 {% for r in rows %}
 <tr>
@@ -47,14 +47,15 @@
   <td>{{ r.p.team or '—' }}</td>
   <td class="n">{{ '%.1f' % r.p.adp }}</td>
   <td class="n">{{ r.p.p10 }}–{{ r.p.p90 }}</td>
+  <td class="n">{{ pct(r.picks_share) }}</td>
   <td class="n">{{ pct(r.share) }}</td>
-  <td class="dim">{% if r.usual %}usually{% else %}sometimes{% endif %}</td>
+  <td>{% if r.usual %}usually{% else %}sometimes{% endif %}</td>
 </tr>
 {% endfor %}
 </tbody>
 </table>
 </div>
-<p class="note" style="margin-top:10px">“In this round” is the share of the drafts he was on the board for in which he went at one of picks {{ first }}–{{ last }}. “Usually” means this is the round he goes in most often.</p>
+<p class="note" style="margin-top:10px">“Of his picks” is the share of the times he came off the board that he came off it at one of picks {{ first }}–{{ last }}; a player is listed here when at least {{ pct(round_min) }} of his picks land in this round. “Of all drafts” is the same count against every draft he was on the board for, which is the smaller number for anybody the rooms often leave alone. “Usually” means this round holds the middle of his picks.</p>
 {% endif %}
 
 <h2>More</h2>

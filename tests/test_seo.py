@@ -205,7 +205,7 @@ def test_build_adp_places_every_player_by_average_pick(corpus, board):
     assert "ghost" not in ranked   # a row in `players`, but no resolved name
     star = data["by_slug"]["dandre-swift"]
     assert star["adp"] == 1.0 and star["taken"] == 10 and star["share"] == 1.0
-    assert star["round_mode"] == 1 and star["rank"] == 1 and star["pos_rank"] == 1
+    assert star["usual_round"] == 1 and star["rank"] == 1 and star["pos_rank"] == 1
     assert star["hist"][0] == 10 and len(star["hist"]) == 8
     mid = data["by_slug"]["amon-ra-st-brown"]
     assert mid["adp"] == 2.9 and mid["p10"] == 2 and mid["p90"] == 4

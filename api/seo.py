@@ -31,7 +31,7 @@ import unicodedata
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from statistics import mean, median
+from statistics import mean, median, median_low
 
 from fastapi import HTTPException
 
@@ -222,6 +222,14 @@ MOVERS = 10
 # real board is short, which is the honest answer.
 MOVER_MIN_SHARE = 0.25
 
+# How much of a player's own draft history a round has to hold before that
+# round's page names him. Five per cent of his picks -- one draft in twenty
+# that took him took him here. Below it the row was saying nothing: the round
+# pages listed anybody whose 10th-to-90th percentile crossed the round, which
+# for a player with a wide range is fourteen of the sixteen pages, printing
+# "0%" beside his name on most of them.
+ROUND_MIN_SHARE = 0.05
+
 # Every field a player MAY have, and what "we could not answer that" looks
 # like. Set on every player before a page is rendered, so a template can ask
 # for any of them without guarding, and so the shape of a player is written
@@ -350,6 +358,7 @@ def build_adp(conn) -> dict:
         # ever recorded understates how reliably rooms take him. Falls back
         # to the draft count for a corpus with no pool rows at all.
         of = pooled.get(pid) or total
+        usual_round, usual_share = _usual_round(ordered, teams, rounds, of)
         players.append({
             "player_id": pid,
             "name": name,
@@ -366,10 +375,11 @@ def build_adp(conn) -> dict:
             "share": round(share, 3),
             "of": of,
             "of_share": round(min(len(ordered) / of, 1.0), 3),
-            "round_mode": Counter((p - 1) // teams + 1 for p in ordered).most_common(1)[0][0],
             "round_low": (ordered[0] - 1) // teams + 1,
             "round_p10": (_percentile(ordered, 0.10) - 1) // teams + 1,
             "round_p90": (_percentile(ordered, 0.90) - 1) // teams + 1,
+            "usual_round": usual_round,
+            "usual_share": usual_share,
             "hist": hist,
             "seconds": clock.get(pid),
             "hist_peak": max(hist) or 1,
@@ -428,6 +438,41 @@ def build_adp(conn) -> dict:
             "round_mix": _round_mix(mix, rounds),
             "at_pick": _at_pick(players, teams, rounds),
             "seconds": corpus_clock}
+
+
+def _usual_round(ordered: list, teams: int, rounds: int, of: int) -> tuple:
+    """The round to call his usual one, and the share of his picks in it.
+
+    THE MODE OVER A FLAT DISTRIBUTION IS NOISE. `Counter(...).most_common(1)`
+    was what this used to be, and on the real board it was wrong on 61 pages
+    of 203: a player taken twenty times over a hundred and twenty picks has
+    no modal round worth the name, and whichever round happened to hold three
+    of the twenty won -- David Njoku's page said "Usual round 11" off three
+    picks of eight hundred and fifty, and round 11's page then listed him as
+    a player who "usually" goes there in 0% of drafts.
+
+    So the answer is the round holding the MEDIAN pick, which is where half
+    of them are on either side of, and a mode only overrules it when it is
+    actually a peak: at least twice the share a uniform spread would leave in
+    any one round. AGAINST THE DRAFTS HE WAS ON THE BOARD FOR, not against
+    his own picks -- three picks of twenty is 2.4 times uniform and still
+    three picks, which is how Njoku got round 11 in the first place. Where a
+    player's picks really are concentrated, the modal round is the median's
+    round anyway and this test never has to fire. Ties among modal rounds go
+    to the median's round, or to whichever tied round is nearest it --
+    fourteen of them resolved toward the earliest pick before, which is a
+    bias, not a tie-break.
+    """
+    per_round = Counter((pick - 1) // teams + 1 for pick in ordered)
+    middle = (median_low(ordered) - 1) // teams + 1
+    top = max(per_round.values())
+    if rounds and of and top / of >= 2.0 / rounds:
+        tied = [rnd for rnd, count in per_round.items() if count == top]
+        chosen = (middle if middle in tied
+                  else min(tied, key=lambda rnd: (abs(rnd - middle), rnd)))
+    else:
+        chosen = middle
+    return chosen, round(per_round[chosen] / len(ordered), 3)
 
 
 # ---------------------------------------------------------------------------
@@ -942,33 +987,42 @@ def _faq_schema(faq: list) -> dict:
                 for q, a in faq]}
 
 
-def round_players(data: dict, n: int) -> list:
-    """Who goes in round `n`: everyone whose usual range crosses it, most
-    often first, then by ADP."""
-    teams = data["teams"]
-    first, last = (n - 1) * teams + 1, n * teams
-    hits = [p for p in data["players"]
-            if p["round_mode"] == n or (p["p10"] <= last and p["p90"] >= first)]
-    return sorted(hits, key=lambda p: (p["round_mode"] != n, p["adp"]))
-
-
 def _round_rows(data: dict, n: int) -> list:
-    """The round's players, each with how often this round is where he went.
+    """Who goes in round `n`, with the two shares that mean different things.
 
-    Straight out of the histogram: the picks that make up round `n` are a
-    contiguous slice of it, and their sum over the drafts he was on the board
-    for is the share the page wants. No second query, and the same
-    denominator the rest of the site uses.
+    A ROUND HAS TO HOLD SOME OF HIM TO LIST HIM. Membership used to be
+    "his 10th-to-90th percentile crosses this round", which for a player
+    taken anywhere from pick 1 to pick 123 is most of the site -- and the
+    row it printed said 0%. Now a round lists him when at least
+    ROUND_MIN_SHARE of the picks that took him landed in it.
+
+    `picks_share` is that number: of the times he came off the board, how
+    often it was here. `share` is the other question -- of the drafts he was
+    on the board for, how often he went here -- and it is the smaller of the
+    two for anybody the rooms often leave alone. Both are printed, labelled
+    as what they are.
+
+    Straight out of the histogram either way: the picks that make up round
+    `n` are a contiguous slice of it. No second query.
     """
     teams = data["teams"]
     first, last = (n - 1) * teams + 1, n * teams
     rows = []
-    for p in round_players(data, n):
+    for p in data["players"]:
         count = sum(p["hist"][first - 1:last])
+        if not count or count / p["taken"] < ROUND_MIN_SHARE:
+            continue
         rows.append({"p": p, "count": count,
+                     "picks_share": round(count / p["taken"], 3),
                      "share": round(count / p["of"], 3) if p["of"] else 0.0,
-                     "usual": p["round_mode"] == n})
+                     "usual": p["usual_round"] == n})
+    rows.sort(key=lambda row: (not row["usual"], row["p"]["adp"]))
     return rows
+
+
+def round_players(data: dict, n: int) -> list:
+    """The players `_round_rows` lists, in the order it lists them."""
+    return [row["p"] for row in _round_rows(data, n)]
 
 
 def _present(data: dict) -> list:
@@ -1105,15 +1159,15 @@ def register_seo_routes(app, conn=None):
             return _missing(f"/adp/round/{n}")
         teams = d["teams"]
         first, last = (n - 1) * teams + 1, n * teams
-        players = round_players(d, n)
-        usual = [p["name"] for p in players if p["round_mode"] == n][:4]
+        rows = _round_rows(d, n)
+        usual = [row["p"]["name"] for row in rows if row["usual"]][:4]
         desc = (f"Who goes in round {n} (picks {first}–{last}) of an ESPN mock draft, "
                 f"from {d['drafts']} recorded drafts"
                 + (f": {', '.join(usual)}." if usual else "."))
         return page(rendered(d["stamp"], ("round", n), lambda: render(
             "adp_round.html", title=f"Round {n} of an ESPN mock draft – who goes there – ESPN Draft Assist",
             description=desc, path=f"/adp/round/{n}", n=n, first=first, last=last,
-            rows=_round_rows(d, n), mix=d["round_mix"].get(n, []),
+            rows=rows, mix=d["round_mix"].get(n, []), round_min=ROUND_MIN_SHARE,
             seats=_seats(d, n), drafts=d["drafts"], teams=teams,
             rounds=d["rounds"], provenance=_provenance(d), positions=_present(d),
             breadcrumbs=_crumbs(("ADP", "/adp"), (f"Round {n}", f"/adp/round/{n}")))))
@@ -1130,7 +1184,7 @@ def register_seo_routes(app, conn=None):
         near = [q for q in d["players"][max(0, i - 4): i + 5] if q is not p]
         pct = int(round(p["of_share"] * 100))
         desc = (f"{p['name']} ADP {p['adp']:.1f} in {d['drafts']} real ESPN mock drafts: "
-                f"usually picks {p['p10']}–{p['p90']}, round {p['round_mode']}, "
+                f"usually picks {p['p10']}–{p['p90']}, round {p['usual_round']}, "
                 f"taken in {pct}% of drafts, {p['position']}{p['pos_rank']}.")
         if p.get("vs_espn") and abs(p["vs_espn"]) >= 1:
             way = "earlier" if p["vs_espn"] > 0 else "later"
@@ -1147,6 +1201,7 @@ def register_seo_routes(app, conn=None):
             description=desc, path=f"/adp/{p['slug']}", p=p, drafts=d["drafts"],
             teams=d["teams"], rounds=d["rounds"], picks_total=d["teams"] * d["rounds"],
             near=near, headshot=social, face=thumb(p["headshot"], 256),
+            round_min=ROUND_MIN_SHARE,
             corpus_seconds=d["seconds"], curve_picks=CURVE_PICKS,
             provenance=_provenance(d), person_schema=_person(p, social),
             breadcrumbs=_crumbs(("ADP", "/adp"), (p["position"], f"/adp/{p['position'].lower()}"),
