@@ -1200,6 +1200,52 @@ export async function saveFavorites(players: string[]): Promise<string[]> {
   return Array.isArray(body.players) ? body.players.map(String) : players
 }
 
+/** One favourite, and how long he lasts. `avail` is a percentage per pick,
+ *  aligned with the outlook's `picks`; a null in it means the board can no
+ *  longer name him, which is not the same as "gone". */
+export interface OutlookPlayer {
+  player_id: string
+  name: string | null
+  position: string | null
+  team: string | null
+  headshot: string | null
+  espn_rank: number | null
+  espn_adp: number | null
+  market_rank: number | null
+  avail: (number | null)[]
+  /** The LAST pick he is still better than even to reach -- the turn to plan
+   *  on taking him at, rather than the one to reach at. Null when there is
+   *  none. */
+  best_pick: number | null
+}
+
+/** The saved list against one seat's first eight turns. */
+export interface FavoritesOutlook {
+  teams: number
+  slot: number
+  /** Overall pick numbers, snake, ascending. */
+  picks: number[]
+  /** In the saved order, which is the preference -- never sorted here. */
+  players: OutlookPlayer[]
+}
+
+/** How likely each favourite is to still be there at each of my picks.
+ *
+ *  `tag` is not sent anywhere. It is a cache discriminator: the server reads
+ *  the saved list off the session, so two different lists share a URL, and
+ *  without it a save would be followed by five seconds of the old answer.
+ *  The caller passes something that changes when the list does. */
+export function fetchFavoritesOutlook(
+  teams: number, slot: number, tag = '',
+): Promise<FavoritesOutlook> {
+  return cachedGet(`account/outlook/${teams}/${slot}/${tag}`, async () => {
+    const res = await fetch(
+      `/api/account/favorites/outlook?teams=${teams}&slot=${slot}`)
+    if (!res.ok) throw new Error(await detailText(res))
+    return res.json() as Promise<FavoritesOutlook>
+  })
+}
+
 // -- open ESPN mock rooms, and taking a seat in one ------------------------
 //
 // ESPN runs a public mock-draft lobby: a new room every few minutes, all
