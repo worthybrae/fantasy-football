@@ -1201,3 +1201,11 @@
   /* Without the hover lift the way in should just be visible. */
   .mkd-card-open { opacity: 1; }
 }
+
+/* Same ring as the room and the landing page (see index.css). A raw row is
+   a real control -- it opens the draft it names -- and had nothing to show
+   for it under a keyboard. */
+.mk-raw-row:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-offset);
+}

@@ -16,6 +16,34 @@
   border: 0;
 }
 
+/* -- ONE FOCUS RING, FOR EVERY CONTROL THAT DID NOT HAVE ONE --
+
+   An audit of the stylesheets turned up sixteen classes carrying
+   `cursor: pointer` and no `:focus-visible` rule at all, which on a control
+   whose only other state is a colour change means a keyboard user cannot
+   see where they are. The Draft button on every row of the available table
+   was one of them.
+
+   The value is `--focus-ring` (index.css) rather than a width and a colour
+   written out again here, so the ring is one edit everywhere and no control
+   can quietly pick its own. Rules that deliberately inset their ring -- the
+   top bar's tabs, which would otherwise cross the bar's own bottom border --
+   keep their offset and only take the width and colour. */
+.avail-draft-btn:focus-visible,
+.avail-pill:focus-visible,
+.avail-name-btn:focus-visible,
+.avail-th-btn:focus-visible,
+.confirm-btn-cancel:focus-visible,
+.confirm-btn-confirm:focus-visible,
+.cs-link:focus-visible,
+.drawer-draft-btn:focus-visible,
+.pick-ticker-pick:focus-visible,
+.player-page-back:focus-visible,
+button.plan-target:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-offset);
+}
+
 /* -- table -- */
 
 table {
@@ -1583,10 +1611,6 @@ button.plan-target:focus-visible .plan-name {
   color: var(--accent);
 }
 
-button.plan-target:focus-visible {
-  outline: 1px solid var(--accent-border);
-  outline-offset: 2px;
-}
 
 .plan-name {
   min-width: 0;
@@ -2079,10 +2103,6 @@ button.plan-target:focus-visible {
   color: var(--text-1);
 }
 
-.avail-th-btn:focus-visible {
-  outline: 1px solid var(--accent-border);
-  outline-offset: 2px;
-}
 
 /* The sorted column reads at full strength against the other headers'
    --text-2, so "what is this sorted by" is answerable from the column's
@@ -2207,10 +2227,6 @@ button.plan-target:focus-visible {
   text-decoration: underline;
 }
 
-.avail-name-btn:focus-visible {
-  outline: 1px solid var(--accent-border);
-  outline-offset: 2px;
-}
 
 .avail-meta {
   margin-left: 7px;

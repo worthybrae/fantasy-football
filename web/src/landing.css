@@ -499,8 +499,10 @@
               0 0 0 8px color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
+/* Offset further than the app's default: the chip carries an 8px accent
+   halo on hover, and a ring at the usual 2px would land inside it. */
 .wc-corner:focus-visible {
-  outline: 2px solid var(--accent-border);
+  outline: var(--focus-ring);
   outline-offset: 4px;
 }
 
@@ -3457,4 +3459,24 @@ button.wr-seat:focus-visible {
       "ask"
       "cta";
   }
+}
+
+/* -- the focus ring the landing page's controls were missing --------------
+   Eleven classes here carry `cursor: pointer` and had no `:focus-visible`
+   rule, the picker's own Save and Cancel among them -- a dialog whose only
+   two exits are invisible to a keyboard. One value, `--focus-ring`
+   (index.css), shared with the room's controls so a ring means the same
+   thing on both sides of the app. */
+.fav-cancel:focus-visible,
+.fav-chip:focus-visible,
+.fav-modal-close:focus-visible,
+.fav-row:focus-visible,
+.fav-save:focus-visible,
+.pw-pay:focus-visible,
+.pw-quiet:focus-visible,
+.wc-watch:focus-visible,
+.wc-x:focus-visible,
+.xp-q:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-offset);
 }
