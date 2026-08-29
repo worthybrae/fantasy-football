@@ -145,7 +145,7 @@ ADP_KEY = "seo-adp"
 BOARD_ATTEMPTS = 3
 BOARD_RETRY_SECONDS = 2.0
 
-# How many rendered pages to keep. The sitemap is 232 URLs and a crawler
+# How many rendered pages to keep. The sitemap is 228 URLs and a crawler
 # works through it in a burst, so this holds a whole crawl and then some.
 PAGE_CACHE_MAX = 400
 
@@ -349,7 +349,7 @@ def _stamp(conn, drafts: int, teams: int, rounds: int, updated) -> tuple:
 
     The point of a stamp rather than a timer is that the warm thread rebuilds
     the aggregate every few minutes and usually finds the same drafts in it.
-    An identical stamp means the 232 rendered pages hanging off the last one
+    An identical stamp means the 227 rendered pages hanging off the last one
     are still correct, and none of them has to be built again.
 
     Unreadable identity is its own answer, not a raised exception: the pages
@@ -993,7 +993,7 @@ def rendered(stamp, key, build) -> str:
     same bytes, every time. The aggregate is rebuilt on a timer by the warm
     thread and mostly comes back identical (`_stamp` says when it does), so
     holding the finished HTML costs one dict and saves rendering the same
-    232 pages for every crawl that walks the sitemap.
+    227 pages for every crawl that walks the sitemap.
 
     A stamp that does not match the one in hand empties the whole cache
     rather than ageing entries out one at a time: the pages are a set, they
@@ -1249,8 +1249,8 @@ def register_seo_routes(app, conn=None):
 
     # Five minutes. These pages are rendered from the same ADP aggregate the
     # archive is, they carry nobody's name, and a crawler working through a
-    # 232-URL sitemap does it in a burst -- which should be reading one build
-    # of that aggregate rather than asking this process for it 232 times.
+    # 228-URL sitemap does it in a burst -- which should be reading one build
+    # of that aggregate rather than asking this process for it 228 times.
     SHARED_CACHE_SECONDS = 300
 
     def page(html: str) -> HTMLResponse:
@@ -1419,7 +1419,7 @@ def register_seo_routes(app, conn=None):
         http_cache.public(res, SHARED_CACHE_SECONDS)
         return res
 
-    # A sitemap of 232 URLs does not get crawled one at a time -- it gets
+    # A sitemap of 228 URLs does not get crawled one at a time -- it gets
     # crawled in a burst, and a cold `build_adp` (0.9-2.8s, and it can
     # trigger a board build besides) must not be the price whichever request
     # in that burst happens to land first. Warm it off the request thread;

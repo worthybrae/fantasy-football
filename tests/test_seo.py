@@ -736,7 +736,7 @@ def test_analytics_does_not_fire_off_the_production_hostname(corpus, board):
 def test_the_second_render_of_a_page_is_the_first_ones_bytes(corpus, board):
     """`/adp` is a pure function of the ADP aggregate, so rendering it twice
     for one snapshot is work done twice for one answer. A crawler walking the
-    232-URL sitemap is the caller that makes this worth holding."""
+    228-URL sitemap is the caller that makes this worth holding."""
     c = _client(board)
     calls = []
     first = c.get("/adp").text
