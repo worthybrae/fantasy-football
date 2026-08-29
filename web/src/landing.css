@@ -171,276 +171,12 @@
   }
 }
 
-/* -- the welcome card (Welcome.tsx) -------------------------------------
-   The page's only branding, over a page that is otherwise the product. Two
-   states, one component: centred on arrival, and a corner chip forever after
-   -- so the way in is never more than one click away and never in the way. */
-
-.wc-scrim {
-  position: fixed;
-  inset: 0;
-  z-index: 60;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: var(--space-4);
-  /* NO FILL, AND NO POINTER EVENTS. This was a sheer dark scrim, which cost
-     more than it looked: `elementFromPoint` over any player row returned the
-     scrim, so a visitor's first click on the room -- the thing the card is
-     pointing at -- landed on the overlay and only dismissed the card. The
-     dim is gone with it; the card carries its own fill and a deep shadow,
-     which is what actually seated it in front anyway.
-
-     `pointer-events: none` here and `auto` on the card is the whole
-     mechanism: the wrapper still centres the card over the room, and the
-     room underneath stays live, scrollable and clickable. */
-  pointer-events: none;
-  animation: wc-in 200ms ease-out;
-}
-
-.wc-card {
-  position: relative;
-  /* The one thing in this layer that a pointer can reach. */
-  pointer-events: auto;
-  animation: wc-pop 320ms cubic-bezier(0.34, 1.4, 0.64, 1) both;
-  /* Composited: the animation touches only transform and opacity, so a card
-     over a live draft room does not force a paint of the board behind it on
-     every frame. */
-  will-change: transform, opacity;
-  /* Wider than a plain dialog, because it now carries a figure: at 430px the
-     schedule strip's seventeen weeks were three pixels each. */
-  width: min(468px, 100%);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
-  padding: 30px 30px 24px;
-  /* The card grew a figure and a rotating claim under it, which on a laptop
-     in a browser with a toolbar can reach the bottom of the viewport. It
-     scrolls inside itself rather than off the screen -- the button lives at
-     the end of it. */
-  max-height: 94svh;
-  overflow-y: auto;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-1);
-  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6);
-  text-align: center;
-}
-
-.wc-mark {
-  display: inline-flex;
-  padding: 10px;
-  border-radius: 50%;
-  background: var(--accent-bg);
-}
-
-.wc-title {
-  margin: 0;
-  font-size: 26px;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  color: var(--text-1);
-}
-
-/* Why this card is open, when it was raised by something else on the page
-   rather than by arriving. Above the pitch, because a reader who was just
-   turned away from the archive is owed the reason before the sales line. */
-.wc-why {
-  margin: 0;
-  padding: 8px 12px;
-  border: 1px solid var(--accent-border);
-  border-radius: var(--radius);
-  background: var(--accent-bg);
-  font-size: var(--text-sm);
-  line-height: 1.5;
-  text-align: center;
-  color: var(--text-1);
-}
-
-.wc-sub {
-  margin: 0;
-  max-width: 34ch;
-  font-size: var(--text-md);
-  line-height: 1.55;
-  color: var(--text-2);
-}
-
-.wc-start {
-  margin-top: 6px;
-  padding: 11px 26px;
-  border: 1px solid var(--accent-border);
-  border-radius: var(--radius);
-  background: var(--accent);
-  color: #10110f;
-  font-size: var(--text-md);
-  font-weight: 700;
-  cursor: pointer;
-}
-
-.wc-start:hover {
-  background: color-mix(in srgb, var(--accent) 85%, #ffffff);
-}
-
-/* -- what it knows, three lines at a time --------------------------------- */
-
-/* The showcase inside the card. Fixed height, both parts: a box that resized
-   with each slide would move the button under it every four seconds, and the
-   button is the only thing on this card that matters. */
-/* ONE HEIGHT, EVERY SLIDE. The six panels are different sizes -- a turn bar
-   is a third of what a recommendation card is -- and letting the card resize
-   under a reader every four seconds moved the button, the price line and the
-   dialog's own edges while they were reading. Fixed here, and the slide
-   centres itself in it, so the only thing that changes between claims is the
-   claim. */
-.wc-show {
-  width: 100%;
-  /* Set by the tallest slide once every panel is actually compacted: the
-     recommendation card at one column and no week chart is about 190px, and
-     the copy under it runs to three lines. 430 was sized around a card that
-     was wrapping into a column because its overrides were not applying. */
-  height: 330px;
-  margin-top: 8px;
-  display: flex;
-  flex-direction: column;
-  /* One height means one height: a panel that would overrun it is cropped
-     rather than allowed to move the button. */
-  overflow: hidden;
-}
-
-.wc-slide {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  /* Centred between the title above and the button below: a short panel
-     sits in the middle of the space rather than clinging to the top of it. */
-  justify-content: center;
-  gap: 10px;
-  animation: wc-slide-in 320ms ease both;
-}
-
-/* The figure box grows to its component; the slide's own min-height is what
-   keeps the copy and the button from moving between one claim and the next. */
-/* FULL BLEED. The art runs edge to edge of the card and is tall enough to be
-   art rather than a strip: negative margins take it out past the card's own
-   30px padding, and it is the widest thing in the dialog. */
-/* NO FRAME. The panel floats on the card and its own edges do the dividing:
-   a band with borders top and bottom put a second rectangle around something
-   that is already a card, and a rule above it made a third line in a stack
-   that only needed one. */
-.wc-slide-figure {
-  position: relative;
-  width: 100%;
-  /* Never the flex item that gives way. Without this a tall panel was
-     squashed by the fixed-height showcase instead of the copy wrapping. */
-  flex-shrink: 0;
-}
-
-.wc-slide-eyebrow {
-  margin: 0;
-  font-size: var(--text-xs);
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--accent);
-}
-
-.wc-slide-body {
-  margin: 0;
-  font-size: 12.5px;
-  line-height: 1.55;
-  text-align: center;
-  color: var(--text-2);
-}
-
-/* Pinned under the slide rather than floating after it, so the dots sit in
-   the same place on every claim. */
-.wc-dots {
-  flex-shrink: 0;
-  display: flex;
-  justify-content: center;
-  gap: 6px;
-  padding-top: 12px;
-}
-
-.wc-dot {
-  width: 6px;
-  height: 6px;
-  padding: 0;
-  border: 0;
-  border-radius: 50%;
-  background: var(--bg-2);
-  cursor: pointer;
-  transition: background 160ms ease, transform 160ms ease;
-}
-
-.wc-dot:hover {
-  background: var(--text-3);
-}
-
-.wc-dot.is-on {
-  background: var(--accent);
-  transform: scale(1.25);
-}
-
-.wc-dot:focus-visible {
-  outline: 2px solid var(--accent-border);
-  outline-offset: 3px;
-}
-
-@keyframes wc-slide-in {
-  from { opacity: 0; transform: translateY(6px); }
-  to { opacity: 1; transform: none; }
-}
-
-/* The price under the button. Quiet, but present: "free" alone is true of
-   the mocks and a surprise at the first real draft. */
-.wc-price {
-  margin: 10px 0 0;
-  font-size: var(--text-xs);
-  color: var(--text-3);
-}
-
-.wc-start:focus-visible {
-  outline: 2px solid var(--accent-border);
-  outline-offset: 3px;
-}
-
-/* The second choice, styled as text rather than as a button: it is the
-   alternative, not the action. */
-.wc-watch {
-  padding: 4px 8px;
-  border: 0;
-  background: none;
-  color: var(--text-3);
-  font-size: var(--text-sm);
-  cursor: pointer;
-}
-
-.wc-watch:hover {
-  color: var(--text-2);
-}
-
-.wc-x {
-  position: absolute;
-  top: 8px;
-  right: 10px;
-  width: 28px;
-  height: 28px;
-  border: 0;
-  border-radius: var(--radius);
-  background: none;
-  color: var(--text-3);
-  font-size: 20px;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.wc-x:hover {
-  color: var(--text-1);
-  background: var(--bg-2);
-}
+/* -- the dialogs' shared entrance ----------------------------------------
+   Two keyframes, kept from the welcome card that used to own them. That card
+   is gone -- the argument it made is now the page's own opening section (see
+   components/FrontDoor.tsx), and the full-page scrim it carried was
+   swallowing a visitor's first click on the very board it pointed at -- but
+   the setup wizard arrives the same way and these are how. */
 
 /* The scrim fades; the card arrives. Two animations rather than one so the
    card can overshoot without dragging the whole backdrop with it. */
@@ -458,123 +194,6 @@
   60% { opacity: 1; }
   70% { transform: scale(1.035) translateY(0); }
   100% { opacity: 1; transform: scale(1) translateY(0); }
-}
-
-/* Dismissed: the same offer, parked. */
-/* Bottom right, and deliberately ON TOP of the pick ticker rather than parked
-   above it. It used to clear the ticker by 78px, which is polite and wrong:
-   this is the only way in on a page whose entire job is to be the way in, and
-   the rail it was avoiding is a decorative strip of picks from somebody else's
-   draft. Overlapping costs a reader two of the eight last-drafted names and
-   buys the offer forty percent more area.
-
-   THE WHOLE PILL IS THE BUTTON -- mark, name and call to action -- so the hit
-   area is the thing a reader can see rather than a small rectangle inside it. */
-.wc-corner {
-  position: fixed;
-  right: 24px;
-  /* Above the pick ticker, not on top of it. The room behind this chip ends
-     in a rail of the last few picks, and at 24px the chip sat over its
-     right-hand end -- covering three or four picks of the very thing the
-     chip is inviting the reader into. The rail's height is `--ticker-h`
-     (index.css), which `.pick-ticker` in App.css sets itself from: the two
-     files were holding the same 52px separately, and a taller rail would
-     have put the chip back on top of it. */
-  bottom: calc(var(--ticker-h) + var(--space-4));
-  z-index: 65;
-  display: flex;
-  align-items: center;
-  gap: 18px;
-  padding: 10px 10px 10px 22px;
-  border: 1px solid var(--accent-border);
-  border-radius: 999px;
-  background: var(--bg-1);
-  /* Two shadows doing different jobs: the first seats the pill above the room
-     (a real drop shadow), the second is a soft accent halo that makes it the
-     brightest object in the corner without turning it into a glow effect. */
-  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.65),
-              0 0 0 6px color-mix(in srgb, var(--accent) 8%, transparent);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  animation: wc-park 200ms ease-out;
-}
-
-.wc-corner:hover {
-  border-color: var(--accent);
-  box-shadow: 0 20px 52px rgba(0, 0, 0, 0.7),
-              0 0 0 8px color-mix(in srgb, var(--accent) 14%, transparent);
-}
-
-/* Offset further than the app's default: the chip carries an 8px accent
-   halo on hover, and a ring at the usual 2px would land inside it. */
-.wc-corner:focus-visible {
-  outline: var(--focus-ring);
-  outline-offset: 4px;
-}
-
-.wc-corner-mark {
-  display: inline-flex;
-  align-items: center;
-  gap: 11px;
-  font-size: 17px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  color: var(--text-1);
-  white-space: nowrap;
-}
-
-/* A span, not a button (see Welcome.tsx) -- it carries the accent so the pill
-   reads as an offer rather than as a badge, and the outer element is what is
-   actually pressed. It BREATHES: one slow pulse, the same 2.4s the ranked
-   list's own rows use, which is the difference between a control a reader
-   notices in the corner of an eye and one they have to look for. */
-.wc-corner-go {
-  padding: 12px 26px;
-  border-radius: 999px;
-  background: var(--accent);
-  color: #10110f;
-  font-size: 17px;
-  font-weight: 700;
-  white-space: nowrap;
-  animation: wc-breathe 2.4s ease-in-out infinite;
-}
-
-.wc-corner:hover .wc-corner-go {
-  background: color-mix(in srgb, var(--accent) 85%, #ffffff);
-  animation: none;
-}
-
-@keyframes wc-breathe {
-  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent); }
-  70% { box-shadow: 0 0 0 12px color-mix(in srgb, var(--accent) 0%, transparent); }
-}
-
-/* It travels: the chip arrives rather than appearing, which is the same 200ms
-   it used when it was a dismissed card parking itself. */
-@keyframes wc-park {
-  from { opacity: 0; transform: translate(-10px, -14px) scale(0.96); }
-  to { opacity: 1; transform: none; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .wc-scrim, .wc-corner, .wc-card, .wc-corner-go, .wc-slide { animation: none; }
-}
-
-/* Full width on a phone, where a floating pill in a corner is both harder to
-   hit and more likely to sit on top of something. */
-@media (max-width: 620px) {
-  .wc-corner {
-    right: 12px;
-    left: 12px;
-    bottom: 12px;
-    gap: var(--space-3);
-    padding-left: 16px;
-    justify-content: space-between;
-  }
-
-  .wc-corner-mark { font-size: 15px; }
-  .wc-corner-go { padding: 11px 18px; font-size: 15px; }
 }
 
 /* THE PAGE'S ONE BUTTON, wherever it appears -- under the ask, at the foot of
@@ -1666,7 +1285,7 @@
    accent-tinted outline, which is the shape everything ELSE in this product
    uses for a secondary action -- so the one control this dialog exists to
    reach looked quieter than the "Join" on a lobby card. Same fill, same
-   weight and the same disabled treatment as `.db-go` and `.wc-start`. */
+   weight and the same disabled treatment as `.db-go`. */
 .fav-save {
   padding: 6px 14px;
   border: 1px solid var(--accent-border);
@@ -2476,368 +2095,9 @@ button.wr-seat:focus-visible {
   }
 }
 
-/* -- what it knows, drawn ------------------------------------------------- */
-/*
- * Six panels, each one a picture of the claim above it rather than a
- * paragraph about it. They arrive as they are scrolled to, once, and then
- * hold still: a page permanently in motion under a reader trying to read is
- * one step from this, and the stagger exists only to walk the eye down.
- */
-
-.ben {
-  padding: clamp(64px, 9vw, 120px) clamp(20px, 6vw, 88px);
-}
-
-.ben-lead {
-  max-width: 620px;
-  margin-bottom: clamp(32px, 4vw, 52px);
-}
-
-.ben-h2 {
-  margin: 10px 0 0;
-  font-size: clamp(26px, 3.4vw, 40px);
-  line-height: 1.1;
-  letter-spacing: -0.02em;
-  color: var(--text-1);
-}
-
-/* TWO COLUMNS OF THREE, DEALT BY SIZE. `columns: 2` flowed the panels in
-   order and filled the left column first, which put all three tall panels on
-   one side. The markup deals them instead (see Benefits.tsx), so each column
-   carries one tall panel and two shorter ones, and each card still ends where
-   its own content ends -- these are the product's real components and they
-   are honestly different heights. */
-.ben-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 18px;
-  align-items: start;
-}
-
-.ben-col {
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-  min-width: 0;
-}
-
-@media (max-width: 900px) {
-  .ben-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-.ben-panel {
-  padding: 20px 22px 24px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg-1);
-  /* The reveal. Transform and opacity only -- six panels animating layout
-     would cost a reflow each, on a page with a live draft room above them. */
-  opacity: 0;
-  transform: translateY(14px);
-  transition: opacity 460ms ease, transform 460ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-.ben-panel.is-in {
-  opacity: 1;
-  transform: none;
-}
-
-/* The figures SIT ON the line rather than being centred over it. Bottom
-   alignment is what makes the reserved box read as deliberate: a short figure
-   (the week strip is a third the height of the profile card) rests just above
-   its own eyebrow instead of floating in the middle of an obvious gap, and
-   every panel's text starts at the same place either way.
-
-   Scrolls rather than clips if a figure ever outgrows the box. Cutting the
-   top off a card to hold a line is the trade this section already refused
-   once -- see `.bf-stage`, which lost a fixed band for exactly that reason. */
-/* AS TALL AS WHAT IS IN IT. A reserved height (`--ben-figure-h`, which
-   nothing ever set) made every figure box the same size and every card the
-   same shape, which is the opposite of what these six are: the components
-   are honestly different heights and the cards should be too. */
-.ben-figure {
-  position: relative;
-  margin-bottom: 18px;
-}
-
-.ben-eyebrow {
-  margin: 0;
-  font-size: var(--text-xs);
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--accent);
-}
-
-.ben-title {
-  margin: 8px 0 0;
-  font-size: 17px;
-  line-height: 1.25;
-  letter-spacing: -0.01em;
-  color: var(--text-1);
-}
-
-.ben-body {
-  margin: 8px 0 0;
-  font-size: var(--text-sm);
-  line-height: 1.6;
-  color: var(--text-2);
-}
-
-/* THE REAL COMPONENT, ON THE FIELD.
- *
- *  Unmodified, unscaled, and AT ITS OWN HEIGHT: the same card the player
- *  profile draws. A previous version of this rule had it `position:
- *  absolute` inside a fixed band, which took it out of flow -- so the band
- *  never grew to it and every panel taller than the band was sliced off
- *  mid-row. Nothing here constrains the component now; the stage takes its
- *  height from what is in it and the card scrolls if that is tall.
- */
-.bf-stage {
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.bf-real {
-  position: relative;
-  z-index: 1;
-  width: 100%;
-  display: flex;
-  justify-content: center;
-  /* Nothing on this card is a control: the real thing is one click away
-     behind it, and a half-live panel that swallows a click on the way to
-     Get started is worse than a picture. */
-  pointer-events: none;
-}
-
-.bf-real > * {
-  width: 100%;
-  /* Nothing may be wider than the card holding it: these panels are built
-     for a profile column and will happily overflow a dialog. */
-  max-width: 100%;
-  min-width: 0;
-  /* The panels carry their own dark fill; over a lit field they have to sit
-     ON it rather than punch a hole in it. */
-  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.6);
-  border-radius: var(--radius);
-}
-
-/* THE TARGET CARD, COMPACTED FOR THIS SLOT.
- *
- *  It arrives inside the room's own section wrapper, which brings three
- *  things this slide has no use for: the "take one of these" header, the
- *  room's own padding (which made the card wider than the dialog holding it,
- *  so it bled off both edges), and the rule the room draws UNDER the cards to
- *  divide them from the table below. That rule was the stray bottom line.
- *
- *  Everything else is the card exactly as the room draws it: the same
- *  figures, the same meters, the same market row. */
-.bf-real .target {
-  padding: 0;
-}
-
-.bf-real .target-head {
-  display: none;
-}
-
-.bf-real .target-grid {
-  grid-template-columns: minmax(0, 1fr);
-  padding-bottom: 0;
-  border-bottom: none;
-}
-
-.bf-real .target-card {
-  padding: 14px;
-  /* A grid item's default `min-width: auto` lets it refuse to shrink below
-     its own content, so the card pushed its track wider than the dialog and
-     spilled off both edges of it. This is the one line that keeps a panel
-     built for a 1,500px room inside a 468px card. */
-  min-width: 0;
-}
-
-/* The card's own rows have the same problem one level down: a meters row of
-   four cells and a market pair will happily be wider than the card. */
-.bf-real .target-meters,
-.bf-real .target-figs {
-  min-width: 0;
-  flex-wrap: wrap;
-}
-
-.bf-real .target-fig-cap {
-  overflow-wrap: anywhere;
-}
-
-/* The hover panel, standing still. `.avail-cell-tip` is `position: fixed`
-   because in the table it is placed by measurement against a cell; here it
-   is the slide's content and sits in flow like every other panel. Everything
-   else about it -- fill, border, padding, the type -- is exactly what a
-   reader gets when they hover that column in the room. */
-.bf-real .bf-tip {
-  position: static;
-  /* SIZED BY ITS CONTENT, which is what it is in the table too: eight
-     seasons of dots is a narrow chart, and stretched to the card's full
-     width it put a hand's breadth of nothing between "GAMES PLAYED" and
-     "of 17". The stage centres it. */
-  width: max-content;
-  max-width: 100%;
-  max-height: none;
-  overflow: visible;
-  padding: 12px 14px;
-}
-
-/* The archive's turn, with its own caption above the bar. */
-.bf-turn {
-  width: 100%;
-  padding: 13px 15px 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: color-mix(in srgb, var(--bg-1) 88%, transparent);
-  backdrop-filter: blur(6px);
-}
-
-.bf-turn .mk-bar {
-  margin-top: 10px;
-}
-
-.bf-turn-names {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 3px 16px;
-  list-style: none;
-  margin: 11px 0 0;
-  padding: 0;
-  font-size: var(--text-sm);
-}
-
-.bf-turn-names li {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-}
-
-.bf-turn-name { color: var(--text-1); }
-
-.bf-turn-share {
-  font-size: var(--text-xs);
-  color: var(--text-3);
-}
-
-/* -- how much of this there is ------------------------------------------- */
-
-.ben-corpus {
-  margin-top: clamp(40px, 5vw, 68px);
-  padding-top: clamp(32px, 4vw, 48px);
-  border-top: 1px solid var(--border);
-}
-
-.ben-corpus-head {
-  max-width: 52ch;
-}
-
-.ben-corpus-h3 {
-  margin: 10px 0 0;
-  font-size: clamp(19px, 2.2vw, 26px);
-  line-height: 1.2;
-  letter-spacing: -0.015em;
-  color: var(--text-1);
-}
-
-/* ONE MARK PER DRAFT. Not a chart of the number -- the number, laid out.
-   Small enough that four hundred of them read as a mass rather than as
-   things to count. */
-.ben-corpus-wall {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin: 22px 0 0;
-}
-
-.ben-mark {
-  width: 7px;
-  height: 7px;
-  border-radius: 2px;
-  background: color-mix(in srgb, var(--accent) 55%, transparent);
-  opacity: 0;
-  animation: ben-mark-in 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-@keyframes ben-mark-in {
-  from { opacity: 0; transform: scale(0.4); }
-  to { opacity: 1; transform: none; }
-}
-
-.ben-corpus-facts {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 28px 44px;
-  margin: 26px 0 0;
-}
-
-.ben-corpus-facts div {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-
-.ben-corpus-facts dt {
-  font-size: var(--text-xs);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text-3);
-}
-
-.ben-corpus-facts dd {
-  margin: 0;
-  font-size: 26px;
-  line-height: 1;
-  color: var(--text-1);
-}
-
-.ben-corpus-cta {
-  display: inline-block;
-  margin-top: 26px;
-  text-decoration: none;
-}
-
-.ben-foot {
-  display: flex;
-  align-items: center;
-  gap: 18px;
-  flex-wrap: wrap;
-  margin-top: clamp(32px, 4vw, 48px);
-}
-
-.ben-foot-note {
-  font-size: var(--text-sm);
-  color: var(--text-3);
-}
-
-.ben-foot-note a {
-  color: var(--text-2);
-}
-
-/* The panels' reveal is the only motion left in this section, and a reader
-   who has asked for less does not need it: the panels are the content, not
-   the animation. */
-@media (prefers-reduced-motion: reduce) {
-  .ben-panel {
-    opacity: 1;
-    transform: none;
-    transition: none;
-  }
-
-  .ben-mark {
-    opacity: 1;
-    animation: none;
-  }
-}
-
 /* -- the guided setup wizard (components/SetupWizard.tsx) ----------------- */
-/* Over Welcome's scrim (60) and its corner chip (65): opening the wizard
-   from either must land in front of both. */
+/* z-index 70: above everything the page draws, since every call to action on
+   the landing page opens it. */
 
 .sw-scrim {
   position: fixed;
@@ -2847,8 +2107,8 @@ button.wr-seat:focus-visible {
   align-items: center;
   justify-content: center;
   padding: var(--space-4);
-  /* Same sheer sheet as .wc-scrim, same reason: the product behind is the
-     argument, and the card separates itself with its own fill and shadow. */
+  /* A sheer sheet, not a blackout: the product behind is the argument, and
+     the card separates itself with its own fill and shadow. */
   background: rgba(10, 11, 14, 0.34);
   animation: wc-in 200ms ease-out;
   overscroll-behavior: contain;
@@ -2858,8 +2118,8 @@ button.wr-seat:focus-visible {
   position: relative;
   animation: wc-pop 320ms cubic-bezier(0.34, 1.4, 0.64, 1) both;
   will-change: transform, opacity;
-  /* Wider than Welcome's card: each step now carries a recording, and a
-     recording of browser chrome has to be big enough to read the bar in. */
+  /* Wide: each step carries a recording, and a recording of browser chrome
+     has to be big enough to read the bar in. */
   width: min(820px, 100%);
   max-height: 94svh;
   overflow-y: auto;
@@ -3542,8 +2802,6 @@ button.wr-seat:focus-visible {
 .fav-save:focus-visible,
 .pw-pay:focus-visible,
 .pw-quiet:focus-visible,
-.wc-watch:focus-visible,
-.wc-x:focus-visible,
 .xp-q:focus-visible {
   outline: var(--focus-ring);
   outline-offset: var(--focus-offset);
@@ -3794,3 +3052,674 @@ button.wr-seat:focus-visible {
   border-radius: var(--radius);
   background: var(--bg-2);
 }
+
+/* ==========================================================================
+   THE FRONT DOOR (components/FrontDoor.tsx, PlanPreview.tsx, FounderBadge.tsx)
+   ==========================================================================
+
+   The page's argument, made once. It replaced three components that each made
+   it separately -- a welcome card over the room, a six-panel figure section
+   and the explainer -- and the rules for all three went with them, which is
+   why this file is 700 lines shorter than it was.
+
+   THE ONE PIECE OF ORNAMENT IS THE RULE (`.pr`). A snake seat is a measuring
+   stick: four fixed points down a 128-pick draft, spaced by where you sit.
+   That drawing belongs to this product and to nothing else, so it is the one
+   thing on the page allowed to be loud, and everything around it is set
+   quietly. No gradient, no glow, no second accent -- the palette is the
+   room's, because the page has to look like the tool it is selling.
+
+   THE TYPE IS THE PRODUCT'S OWN. Inter for the sentence, JetBrains Mono for
+   every number, and the numbers are what get display sizes: in a tool whose
+   entire subject is counting, a decorative headline over a small figure would
+   be two things competing to be the loud one. --text-* stops at 20px because
+   nothing inside the tool is bigger than a panel heading, so the display
+   sizes here are clamp() literals rather than a second scale to keep in sync.
+   ========================================================================== */
+
+/* -- the hero ------------------------------------------------------------ */
+
+.fd-hero {
+  padding: clamp(40px, 7vw, 96px) clamp(20px, 6vw, 88px) clamp(32px, 5vw, 64px);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-5);
+}
+
+.fd-mark {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-md);
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  color: var(--text-1);
+}
+
+/* The claim. Tight tracking and a short measure, so a long sentence reads as
+   three deliberate lines rather than as a paragraph that happens to be big. */
+.fd-h1 {
+  max-width: 20ch;
+  margin: 0;
+  font-size: clamp(30px, 5.4vw, 58px);
+  line-height: 1.06;
+  letter-spacing: -0.025em;
+  font-weight: 600;
+  color: var(--text-1);
+  text-wrap: balance;
+}
+
+.fd-sub {
+  max-width: 56ch;
+  font-size: clamp(14px, 1.5vw, 17px);
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
+/* Every figure on this page is mono and one step brighter than the sentence
+   around it -- the reading is the point, the sentence is the caption. */
+.fd-sub .mono {
+  color: var(--text-1);
+  font-weight: 500;
+}
+
+.fd-act {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+
+.fd-cta {
+  font-size: var(--text-lg);
+  padding: 14px 26px;
+  /* Two even lines rather than a stranded "100" when the label has to wrap
+     on a phone. */
+  text-wrap: balance;
+}
+
+.fd-alt {
+  font-size: var(--text-sm);
+  color: var(--text-3);
+  margin-top: calc(var(--space-4) * -1);
+}
+
+/* The room the hero links to. `scroll-margin-top` so the anchor lands with
+   the room's own top bar visible rather than flush against the viewport. */
+.lp-demo-anchor {
+  scroll-margin-top: var(--space-5);
+}
+
+/* -- the three steps ----------------------------------------------------- */
+
+.fd-h2 {
+  font-size: clamp(20px, 2.6vw, 28px);
+  line-height: 1.15;
+  letter-spacing: -0.015em;
+  color: var(--text-1);
+}
+
+.fd-steps {
+  padding: clamp(32px, 5vw, 64px) clamp(20px, 6vw, 88px);
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: clamp(24px, 3vw, 40px);
+  align-items: flex-start;
+}
+
+.fd-step-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: clamp(16px, 2.4vw, 32px);
+}
+
+.fd-step {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* The marker is a real ordinal -- these three happen in this order and cannot
+   happen in another -- so it is set as a number and not as a bullet. */
+.fd-step-no {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: 0.08em;
+}
+
+.fd-step-fig {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4);
+}
+
+.fd-step-fig svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.fd-svg-bar { fill: var(--bg-2); stroke: var(--border); stroke-width: 1; }
+.fd-svg-panel { fill: var(--bg-2); stroke: var(--border); stroke-width: 1; }
+.fd-svg-dim { fill: var(--text-3); opacity: 0.55; }
+.fd-svg-pos { fill: var(--text-3); opacity: 0.8; }
+.fd-svg-chip { fill: var(--accent); }
+.fd-svg-star { fill: var(--accent); }
+.fd-svg-drag { stroke: var(--accent); stroke-width: 1.6; fill: none; }
+.fd-svg-cell { fill: var(--bg-2); }
+.fd-svg-mine { fill: var(--accent); }
+.fd-svg-rule { stroke: var(--border); stroke-width: 1; }
+
+.fd-step-h {
+  font-size: var(--text-lg);
+  color: var(--text-1);
+}
+
+.fd-step-p {
+  font-size: var(--text-md);
+  line-height: 1.55;
+  color: var(--text-2);
+}
+
+.fd-steps-cta { align-self: flex-start; }
+
+/* -- what you get -------------------------------------------------------- */
+
+.fd-get {
+  padding: clamp(32px, 5vw, 64px) clamp(20px, 6vw, 88px);
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: clamp(20px, 3vw, 36px);
+}
+
+.fd-get-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+/* Hairline-separated rather than four floating cards: they are four readings
+   of one thing, and gaps between them would read as four unrelated claims. */
+.fd-get-card {
+  background: var(--bg-1);
+  padding: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* The number, at display size, because the number is the claim. */
+.fd-get-num {
+  font-size: clamp(24px, 3vw, 34px);
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  color: var(--text-1);
+  margin-top: var(--space-1);
+}
+
+.fd-get-h3 {
+  font-size: var(--text-md);
+  color: var(--text-1);
+}
+
+.fd-get-p {
+  font-size: var(--text-sm);
+  line-height: 1.55;
+  color: var(--text-2);
+}
+
+@media (max-width: 900px) {
+  .fd-step-list { grid-template-columns: 1fr; }
+}
+
+/* -- the founder badge (FounderBadge.tsx) -------------------------------- */
+
+.fb {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 5px 10px;
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius);
+  background: var(--accent-bg);
+  font-size: var(--text-sm);
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.fb-mark {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+/* In the top bar it sits beside the wordmark, so it takes the bar's own
+   height rather than the pill's. */
+.draft-topbar .fb {
+  padding: 3px 8px;
+  font-size: var(--text-xs);
+}
+
+/* ==========================================================================
+   THE SIGNED-IN PAGE'S NEW SECTIONS (components/Dashboard.tsx)
+   ========================================================================== */
+
+/* -- the next draft, alone ----------------------------------------------- */
+
+/* No card frame: this is not one item in a list, it is the answer to the
+   question the reader opened the page with, and a border would make it one
+   of several. */
+.db-next {
+  padding: clamp(24px, 4vw, 44px) clamp(16px, 4vw, 40px) clamp(16px, 2vw, 24px);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.db-next-clock {
+  font-size: clamp(38px, 7vw, 72px);
+  line-height: 1;
+  letter-spacing: -0.03em;
+  color: var(--text-1);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.db-next-clock.is-soon,
+.db-next-clock .db-dot ~ * { color: var(--accent); }
+
+.db-next-name {
+  font-size: var(--text-lg);
+  color: var(--text-1);
+}
+
+.db-next-team,
+.db-next-shape { color: var(--text-3); font-size: var(--text-md); }
+
+.db-next-join {
+  margin-top: var(--space-2);
+  padding: 10px 20px;
+  font-size: var(--text-md);
+}
+
+/* -- your guys, both halves under one heading ---------------------------- */
+
+.db-guys {
+  display: grid;
+  grid-template-columns: minmax(260px, 5fr) 7fr;
+  gap: var(--space-4);
+  align-items: start;
+}
+
+/* Nothing saved: the invitation is the whole section, and a column of it
+   beside an empty column would be a layout describing a card that is not
+   there. */
+.db-guys.is-empty { grid-template-columns: 1fr; }
+
+.db-guys-col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.db-guys-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  min-height: 26px;
+}
+
+/* A sub-heading under the section's own, so the two halves are named without
+   either of them claiming to be the section. */
+.db-guys-title {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-3);
+  margin-right: auto;
+}
+
+/* The league size, when the account already knows it: a label, not a select.
+   See YourGuysByPick.tsx for why it stops being a control. */
+.gbp-ctl-fixed { cursor: default; }
+
+.gbp-fixed {
+  color: var(--text-1);
+  font-size: var(--text-sm);
+}
+
+@media (max-width: 900px) {
+  .db-guys { grid-template-columns: 1fr; }
+}
+
+/* ==========================================================================
+   YOUR PLAN, BEFORE THE DRAFT (components/PlanPreview.tsx)
+   ========================================================================== */
+
+.pp-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: clamp(16px, 2.4vw, 28px);
+}
+
+/* -- the pick rule: the page's one signature ----------------------------- */
+
+/* The four turns at their REAL spacing along the draft, not spread evenly.
+   Seat 1 gets two picks almost together and then a long wait; seat 10 gets
+   the reverse. That asymmetry is the thing a drafter plans around, and evenly
+   spaced dots would draw every seat identically and say nothing. */
+.pr {
+  position: relative;
+  height: 74px;
+  margin: var(--space-2) 0 var(--space-4);
+}
+
+.pr-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 13px;
+  height: 1px;
+  background: linear-gradient(to right,
+    var(--border) 0%, var(--border) 92%, transparent 100%);
+}
+
+.pr-mark {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.pr-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--bg-0);
+  border: 2px solid var(--accent);
+  margin-top: 9px;
+}
+
+.pr-no {
+  font-size: clamp(15px, 2vw, 20px);
+  font-weight: 500;
+  color: var(--text-1);
+  letter-spacing: -0.01em;
+}
+
+.pr-pos { transform: scale(0.92); }
+
+/* -- what the seat usually does ------------------------------------------ */
+
+.pp-say {
+  font-size: var(--text-md);
+  line-height: 1.55;
+  color: var(--text-2);
+  max-width: 78ch;
+}
+
+.pp-say-2 { color: var(--text-3); }
+
+.pp-path {
+  color: var(--text-1);
+  font-family: var(--font-mono);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.pp-note {
+  font-size: var(--text-sm);
+  color: var(--text-3);
+  max-width: 78ch;
+}
+
+/* -- the three turns ----------------------------------------------------- */
+
+.pp-turns {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-3);
+}
+
+.pp-turn {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.pp-turn-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.pp-pick {
+  font-size: var(--text-lg);
+  font-weight: 500;
+  color: var(--text-1);
+}
+
+.pp-round {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-3);
+}
+
+.pp-who {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.pp-face {
+  border-radius: 50%;
+  background: var(--bg-1);
+  flex: 0 0 auto;
+  object-fit: cover;
+}
+
+.pp-who-in {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.pp-name {
+  font-size: var(--text-md);
+  color: var(--text-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pp-who-lead .pp-name { font-weight: 600; }
+
+.pp-star {
+  color: var(--accent);
+  margin-left: 5px;
+  font-size: var(--text-sm);
+}
+
+.pp-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.pp-team {
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+.pp-figs {
+  display: flex;
+  gap: var(--space-4);
+  margin: 0;
+  flex-wrap: wrap;
+}
+
+.pp-figs dt {
+  font-size: var(--text-xs);
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.pp-figs dd {
+  margin: 0;
+  font-size: var(--text-lg);
+  color: var(--text-1);
+}
+
+.pp-why {
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
+.pp-alts {
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.pp-alts-cap {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-3);
+}
+
+.pp-alts .pp-name { font-size: var(--text-sm); color: var(--text-2); }
+
+/* The skeleton holds the card's height, for the same reason the availability
+   grid's does: this section sits above the league list, and a card that grows
+   when its answer lands shoves everything under it down mid-read. */
+.pp-wait {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.pp-wait-rule,
+.pp-wait-row {
+  background: var(--bg-2);
+  border-radius: var(--radius-md);
+}
+
+.pp-wait-rule { height: 74px; }
+.pp-wait-row { height: 132px; }
+
+@media (max-width: 900px) {
+  .pp-turns { grid-template-columns: 1fr; }
+}
+
+/* -- the fixes the first screenshots asked for --------------------------- */
+
+/* THE HERO IS TWO COLUMNS ONCE THERE IS ROOM. Text alone left two thirds of
+   a 1280 fold empty, which reads as unfinished rather than as restraint --
+   and the thing that belongs in that space is the claim drawn rather than
+   said. One column below 1040px, where the drawing goes under the ask. */
+@media (min-width: 1040px) {
+  .fd-hero {
+    display: grid;
+    grid-template-columns: minmax(0, 1.15fr) minmax(340px, 0.85fr);
+    gap: clamp(32px, 4vw, 72px);
+    align-items: center;
+  }
+}
+
+.fd-hero-say {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-5);
+  min-width: 0;
+}
+
+.fd-seat {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-1);
+  padding: var(--space-5) var(--space-5) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: 100%;
+}
+
+.fd-seat-say {
+  font-size: var(--text-md);
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
+.fd-seat-say .mono {
+  color: var(--text-1);
+  font-size: var(--text-lg);
+  font-weight: 500;
+}
+
+/* The second choice under the ask. It was --text-3 at 12px, which is the
+   quietest thing this app has -- too quiet for the only other door on the
+   page. */
+.fd-alt {
+  font-size: var(--text-md);
+  color: var(--text-2);
+}
+
+/* A drawing that fills a phone's width is a poster. Capped, so the three
+   steps read as three steps rather than as three billboards. */
+@media (max-width: 620px) {
+  .fd-step-fig { max-width: 320px; }
+  /* The bar is already carrying a wordmark, three tabs and two counts at
+     this width; the badge is a reassurance, not a control, and it is the
+     thing that can wait for a wider screen. */
+  .draft-topbar .fb { display: none; }
+}
+
+/* A section heading and the line that qualifies it are a row until there is
+   no room for one, and then they are two. Without this the note squeezed
+   "Your guys" onto two lines on a phone. */
+@media (max-width: 700px) {
+  .db-sec-head { flex-wrap: wrap; }
+  .db-sec-note { width: 100%; margin-left: 0; }
+}
+
+/* Nothing saved: the invitation is the whole section, so "In your order" is
+   a label over an empty list. The section's own heading is enough. */
+.db-guys.is-empty .db-guys-head { display: none; }
