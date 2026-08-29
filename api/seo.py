@@ -230,6 +230,19 @@ MOVER_MIN_SHARE = 0.25
 # "0%" beside his name on most of them.
 ROUND_MIN_SHARE = 0.05
 
+# Where ESPN's published ADP stops being a draft position and becomes a
+# sentinel. ESPN publishes five hundred players and 329 of them sit between
+# 165 and 170 -- 106 at exactly 169.98 -- because a player its lobby never
+# drafts still needs a number, and that pile IS the number. Ordering on it
+# spreads ten players across eleven implied picks out of 0.73 ADP points,
+# which is not a ranking, and six of the ten risers this page used to print
+# came out of that band. Read as "unranked", and ESPN's own expert rank
+# stands in as far as it is worth reading -- three hundred is two and a half
+# times deeper than an 8-team room reaches, and past it the rank is as
+# uninformative as the ADP.
+ESPN_UNDRAFTED = 165.0
+ESPN_RANK_DEPTH = 300
+
 # Every field a player MAY have, and what "we could not answer that" looks
 # like. Set on every player before a page is rendered, so a template can ask
 # for any of them without guarding, and so the shape of a player is written
@@ -239,6 +252,7 @@ ROUND_MIN_SHARE = 0.05
 BLANKS = {
     "bye": None, "tier": None, "fp_tier": None, "consensus": None,
     "espn_rank": None, "espn_pick": None, "espn_order": None, "vs_espn": None,
+    "espn_undrafted": False,
     "proj_points": None, "rookie": False, "sources": [],
     "age": None, "rookie_season": None, "height": None, "weight": None,
     "seasons": [], "spark": None, "auction": None, "cheat_rank": None,
@@ -395,6 +409,10 @@ def build_adp(conn) -> dict:
         pos_seen[p["position"]] += 1
         p["pos_rank"] = pos_seen[p["position"]]
         p["espn_adp"] = espn.get(p["player_id"])
+        # The sentinel, named on the page rather than printed as a figure:
+        # "ESPN ADP 169.6" reads like a draft position and is not one.
+        p["espn_undrafted"] = (p["espn_adp"] is not None
+                               and p["espn_adp"] >= ESPN_UNDRAFTED)
         if not p["team"]:
             p["team"] = espn_team.get(p["player_id"])
 
@@ -615,21 +633,35 @@ def _espn_gap(players: list) -> None:
 
     ESPN'S PUBLISHED ADP IS THE ORDERING KEY where there is one, because it
     is drafting behaviour and so is the thing being compared; the expert PPR
-    rank stands in for the handful it does not reach.
+    rank stands in for the handful it does not reach. NEITHER OF THEM IS
+    READ PAST THE POINT WHERE IT STOPS SAYING ANYTHING -- see
+    `ESPN_UNDRAFTED`. A player ESPN's board does not rank at all has no
+    place on this scale, so he gets no `vs_espn` and his page drops the
+    sentence rather than comparing him with a placeholder.
     """
-    covered = [p for p in players
-               if p.get("espn_adp") is not None or p.get("espn_rank") is not None]
+    covered = [p for p in players if _espn_key(p) is not None]
     if len(covered) < 2:
         return
     # `players` is already in this corpus's own draft order, so the picks
     # come out ascending without another sort.
     picks = [p["adp"] for p in covered]
-    order = sorted(covered, key=lambda p: (p["espn_adp"] if p.get("espn_adp") is not None
-                                           else float(p["espn_rank"]), p["adp"]))
+    order = sorted(covered, key=lambda p: (_espn_key(p), p["adp"]))
     for i, p in enumerate(order):
         p["espn_pick"] = picks[i]
         p["espn_order"] = i + 1
         p["vs_espn"] = round(picks[i] - p["adp"], 1)
+
+
+def _espn_key(p: dict) -> float | None:
+    """Where ESPN's board puts him, on whichever of its two numbers still
+    means something -- or nothing at all, which is its own answer."""
+    adp = p.get("espn_adp")
+    if adp is not None and adp < ESPN_UNDRAFTED:
+        return float(adp)
+    rank = p.get("espn_rank")
+    if rank is not None and rank <= ESPN_RANK_DEPTH:
+        return float(rank)
+    return None
 
 
 def _movers(players: list) -> tuple:
