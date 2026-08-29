@@ -917,6 +917,13 @@ def create_app(db_path: str = DEFAULT_PATH) -> FastAPI:
     from api.account import register_account_routes
     register_account_routes(app, conn)
 
+    # The plan a seat would get before it has drafted anything -- the front
+    # door's own reading of the same `build_plan` the room runs. Beside the
+    # account routes because it reads the same favourites through the same
+    # account id, and given `conn` because the plan is the board.
+    from api.plan_preview import register_plan_preview_routes
+    register_plan_preview_routes(app, conn)
+
     # Upcoming drafts and server-side token minting. Registered after custody
     # because it reads through it: the session these routes act as is the one
     # `custody_for` resolves, and only in its total absence this machine's own
