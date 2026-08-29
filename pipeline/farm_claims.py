@@ -31,6 +31,12 @@ retire one: the pid it names is gone, or the claim is older than
 recycled onto some unrelated process, which is rare but not impossible on a
 machine that has been up for weeks.
 
+A LIVE CLAIM IS RE-STAMPED AFTER EVERY PICK (`touch`), so the TTL never has
+to cover a whole draft -- only the gap between two picks. That matters now
+that the farm joins 12-team rooms: 192 picks on a 30-second clock is 96
+minutes, and a TTL shorter than the draft would let a second process claim a
+room the first is still sitting in.
+
 A CLAIM IS EMPTY FOR AN INSTANT AFTER IT IS MADE, and that instant is the
 one thing an exclusive create does not cover. `os.open` with `O_CREAT |
 O_EXCL` publishes a zero-length file; the pid and timestamp land on the next
@@ -50,11 +56,21 @@ from pathlib import Path
 
 CLAIM_DIR = os.environ.get("FARM_CLAIM_DIR", "data/farm-claims")
 
-# Longer than any draft can run. A 128-pick room on ESPN's slowest clock is
-# well under an hour; 90 minutes means a live draft is never retired out
-# from under itself, while a crashed process's room is reusable the same
-# morning rather than never.
-CLAIM_TTL_SECONDS = 90 * 60
+# Longer than any draft can run -- and "any draft" got longer when the farm
+# started joining 12-team rooms. 192 picks on ESPN's 30-second clock is 96
+# minutes of picking alone, before the up-to-15-minute lead the seat is held
+# for and before a room that pauses. The old 90 minutes was under that, which
+# would have let a LIVE draft's claim age out and its room be handed to
+# another farm process mid-draft -- two of our seats in one room, which is
+# the whole failure this module exists to prevent.
+#
+# Three hours covers a 12x16 room at the slowest clock with room to spare,
+# and `touch` refreshes the stamp on every pick anyway, so the TTL only ever
+# has to cover the gap between two picks rather than a whole draft. What it
+# costs is how long a crashed process fences its room off, and that is
+# bounded by the pid check long before the TTL matters: the TTL is the
+# backstop for a recycled pid, not the ordinary path.
+CLAIM_TTL_SECONDS = 3 * 60 * 60
 
 # How long an unreadable claim file is given the benefit of the doubt before
 # it is swept. Only ever compared against mtime, and only for a file whose
@@ -153,6 +169,44 @@ def claim(league_id, now: float | None = None) -> bool:
         return False
     with os.fdopen(fd, "w") as fh:
         fh.write(f"{os.getpid()} {now}")
+    return True
+
+
+def touch(league_id, now: float | None = None) -> bool:
+    """Say the room is still ours. Called after every pick.
+
+    A claim is stamped once, when it is taken, and a draft is long: without
+    this the TTL alone has to cover the whole room, and a room that runs
+    longer than the TTL is a room another farm process may claim while we are
+    still sitting in it. Refreshing per pick turns the TTL into a bound on
+    the gap between two picks -- a minute or two -- rather than on a draft.
+
+    ONLY OUR OWN CLAIM. Same ownership check as `release`, and for the same
+    reason from the other side: a claim naming another pid is that process's
+    room, and one naming nobody at all is either a corrupt file or another
+    process's claim in the microsecond between its exclusive create and its
+    write (see the module docstring). Neither is ours to stamp. A claim that
+    has VANISHED is re-created, because we are demonstrably still in that
+    room.
+
+    Never raises, and returns whether the stamp landed. A refresh that fails
+    is not a reason to stop drafting: the worst case is the claim ageing out,
+    which is where we were before this existed.
+    """
+    now = time.time() if now is None else now
+    path = _dir() / str(league_id)
+    if path.exists():
+        pid, _stamp = _read(path)
+        if pid != os.getpid():
+            return False
+    try:
+        # Truncate-and-write, not a rename: a reader catching the empty
+        # instant sees an unreadable claim, which `_is_stale` already ages
+        # off its (freshly bumped) mtime rather than sweeping.
+        with open(path, "w") as fh:
+            fh.write(f"{os.getpid()} {now}")
+    except OSError:
+        return False
     return True
 
 

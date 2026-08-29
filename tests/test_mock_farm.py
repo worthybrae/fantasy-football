@@ -2263,3 +2263,37 @@ def test_the_gate_reads_the_same_rule_the_corpus_files_the_draft_under(
     # 12:half is not farmed by default, 12:std and 12:ppr are.
     assert (12, "half") not in lobby.FARM_SHAPES
     assert (12, "std") in lobby.FARM_SHAPES
+
+
+def test_every_pick_holds_the_room_before_it_publishes(monkeypatch, tmp_path):
+    """The claim is refreshed on every pick, so `CLAIM_TTL_SECONDS` bounds
+    the gap between two picks rather than a whole 12x16 draft -- and it is
+    refreshed BEFORE the live write, which is allowed to fail."""
+    monkeypatch.setattr(mf.claims, "CLAIM_DIR", str(tmp_path / "claims"))
+    mf.claims.claim(77)
+    written = []
+    monkeypatch.setattr(mf, "write_live", written.append)
+
+    stamped = (tmp_path / "claims" / "77").read_text()
+    assert mf.publish_pick(77, lambda: {"board": 1}, False,
+                           lambda *a: None) is False
+    assert written == [{"board": 1}]
+    assert (tmp_path / "claims" / "77").read_text() != stamped
+
+
+def test_a_live_file_that_will_not_write_does_not_stop_the_draft(monkeypatch,
+                                                                 tmp_path):
+    """Said once per room, not once per pick, and never raised."""
+    monkeypatch.setattr(mf.claims, "CLAIM_DIR", str(tmp_path / "claims"))
+
+    def _boom():
+        raise OSError("read-only filesystem")
+
+    said = []
+    assert mf.publish_pick(77, _boom, False, said.append) is True
+    assert len(said) == 1 and "could not publish" in said[0]
+    # Already warned: the next pick says nothing.
+    assert mf.publish_pick(77, _boom, True, said.append) is True
+    assert len(said) == 1
+    # And the room was still held, both times.
+    assert mf.claims.claimed() == {"77"}

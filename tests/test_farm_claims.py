@@ -135,3 +135,71 @@ def _exists(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+# ---------------------------------------------------------------------------
+# Refreshing a claim: a draft can outlast any fixed TTL.
+# ---------------------------------------------------------------------------
+
+
+def test_the_ttl_covers_the_longest_room_the_farm_now_joins():
+    """192 picks on ESPN's 30-second clock is 96 minutes of picking, plus up
+    to 15 minutes holding the seat before the room starts. The old 90-minute
+    TTL was under that, which would have let a live draft's claim age out."""
+    twelve_by_sixteen = 12 * 16 * 30 + 15 * 60
+    assert fc.CLAIM_TTL_SECONDS > twelve_by_sixteen
+
+
+def test_a_touched_claim_does_not_age_out_under_a_long_draft():
+    """The point of the refresh: the TTL then bounds the gap between two
+    picks rather than the whole draft."""
+    now = time.time()
+    assert fc.claim(1234, now=now - fc.CLAIM_TTL_SECONDS + 60) is True
+    assert fc.touch(1234, now=now) is True
+    later = now + fc.CLAIM_TTL_SECONDS - 60
+    assert fc.claimed(now=later) == {"1234"}
+    # And without the refresh it would have gone.
+    assert fc.claimed(now=now + fc.CLAIM_TTL_SECONDS + 60) == set()
+
+
+def test_touching_somebody_elses_claim_does_nothing(claim_dir):
+    """Same rule as `release`, from the other side: a claim naming another
+    pid is that process's room, and stamping it would keep another farm's
+    room alive (or worse, hand it to us)."""
+    claim_dir.mkdir(parents=True, exist_ok=True)
+    other = claim_dir / "1234"
+    other.write_text(f"{os.getpid() + 1} {time.time()}")
+
+    assert fc.touch(1234) is False
+    assert other.read_text().startswith(str(os.getpid() + 1))
+
+
+def test_touching_an_unreadable_claim_does_nothing(claim_dir):
+    """A claim that will not parse is either corrupt or another process's, in
+    the microsecond between its exclusive create and its write. Neither is
+    ours to stamp."""
+    claim_dir.mkdir(parents=True, exist_ok=True)
+    (claim_dir / "1234").write_text("")
+
+    assert fc.touch(1234) is False
+
+
+def test_touching_a_room_whose_claim_vanished_puts_it_back():
+    """We are demonstrably still in that room -- we just made a pick in it."""
+    assert fc.touch(1234) is True
+    assert fc.claimed() == {"1234"}
+    assert fc.claim(1234) is False      # and it is ours, so nobody else's
+
+
+def test_a_refresh_that_cannot_write_is_not_an_error(monkeypatch, tmp_path):
+    """A failed refresh must not end a night's farming: the worst case is the
+    claim ageing out, which is where we were before it existed."""
+    monkeypatch.setattr(fc, "CLAIM_DIR", str(tmp_path / "nope" / "claims"))
+    fc.claim(1234)
+    monkeypatch.setattr("builtins.open", _refuse)
+
+    assert fc.touch(1234) is False
+
+
+def _refuse(*a, **k):
+    raise OSError("read-only filesystem")

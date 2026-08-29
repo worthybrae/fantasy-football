@@ -989,6 +989,35 @@ def live_payload(timeline, tool, league_id, season, teams, rounds, my_slot,
     }
 
 
+def publish_pick(league_id, build, warned: bool, out) -> bool:
+    """A pick has landed: hold the room, then publish the board.
+
+    THE CLAIM COMES FIRST AND IS NOT BEST-EFFORT. A claim is stamped once,
+    when the room is taken, and a 12x16 room on a 30-second clock runs for 96
+    minutes of picking -- longer than any TTL that also lets a crashed
+    process's room be reused the same morning. Refreshing the stamp on every
+    pick turns `CLAIM_TTL_SECONDS` into a bound on the gap between two picks
+    instead, so a live draft can never be swept out from under itself and
+    handed to a second farm process (see `pipeline.farm_claims`).
+
+    THE LIVE FILE IS best-effort, and stays that way. A board the page cannot
+    draw is not a reason to stop drafting: the draft is recorded from this
+    process's own memory at the end regardless. `build` is a callable rather
+    than a payload so that building one is inside the guard too. `warned` is
+    said ONCE per room and returned so the caller can carry it -- an
+    unwritable directory would otherwise fill an overnight log with 128
+    copies of one line.
+    """
+    claims.touch(league_id)
+    try:
+        write_live(build())
+    except Exception as exc:                    # noqa: BLE001 -- see above
+        if not warned:
+            out(f"  could not publish live progress: {exc}")
+            return True
+    return warned
+
+
 def write_live(payload: dict, now: float | None = None) -> Path:
     """Publish one room's progress, atomically.
 
@@ -1589,21 +1618,12 @@ def play_draft(conn, corpus_path, cookies, room, rng,
             # a draft about to happen rather than as nothing at all.
             if n != published:
                 published = n
-                try:
-                    write_live(live_payload(
-                        timeline, tool, league_id, season, teams, rounds,
-                        my_slot, started_at, owners=owners,
-                        my_team_id=team_id))
-                except Exception as exc:        # noqa: BLE001 -- a board the
-                    # page cannot draw is not a reason to stop drafting. The
-                    # draft is recorded from this process's own memory at the
-                    # end regardless, so nothing here is on the path that
-                    # matters. Said ONCE rather than once per pick: an
-                    # unwritable directory would otherwise fill an overnight
-                    # log with 128 copies of one line.
-                    if not live_published_warning:
-                        live_published_warning = True
-                        out(f"  could not publish live progress: {exc}")
+                live_published_warning = publish_pick(
+                    league_id,
+                    lambda: live_payload(timeline, tool, league_id, season,
+                                         teams, rounds, my_slot, started_at,
+                                         owners=owners, my_team_id=team_id),
+                    live_published_warning, out)
 
             # ESPN flips a team onto autodraft the moment it misses a pick,
             # and never flips it back on its own. Left alone, one missed
