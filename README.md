@@ -373,6 +373,7 @@ volume Railway attaches by default is enough for a season, not for several.
 | `STRIPE_PRICE_ID` | `price_…` | The $9.99 price, made in the Stripe Dashboard |
 | `STRIPE_WEBHOOK_SECRET` | `whsec_…` | Required with the key. Without it the webhook refuses everything |
 | `PUBLIC_BASE_URL` | `https://…` | Where Stripe sends a buyer back to. Behind a proxy the app cannot work this out itself |
+| `FOUNDERS_LIMIT` | `100` | How many accounts draft free forever — see Founders. The list is open or closed in code (`billing.FOUNDERS_OPEN`); this is only how many seats it has |
 | `SUPABASE_DB_URL` | `postgresql://postgres.<ref>:…@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require` | **Off by default.** A Supabase Postgres DSN via the **session** pooler, port 5432, `sslmode=require`. Not the 6543 transaction pooler: psycopg's prepared statements break there. Only a `postgresql://` or `postgres://` value is used: anything else — the `https://<ref>.supabase.co` project URL the dashboard shows first, most likely — is ignored with one warning line and never reaches the driver, though with the password below it composes the DSN just as the next row does. Absent, custody, billing and the live session records stay in DuckDB files on the volume |
 | `SUPABASE_URL` | `https://<ref>.supabase.co` | The project URL, the second way to say the row above. Set with the password below and the pooler DSN is composed from it, so the two values the Supabase dashboard hands you are enough |
 | `SUPABASE_DB_PASSWORD` | — | The database password, shown once when the project is created. Nothing is composed without it. URL-encoded on the way in, so a generated password full of punctuation is safe |
@@ -421,6 +422,30 @@ is for, are in `docs/superpowers/reference/cloudflare-runbook.md`.
 Off unless `STRIPE_SECRET_KEY` is set. Without it every draft is free, the
 gate is a no-op and no billing database is ever created — which is what every
 local checkout and the whole test suite runs as.
+
+**Founders, and why nobody is being charged today.** The first
+`FOUNDERS_LIMIT` accounts (100) to connect an ESPN account draft free forever
+— not for a season, and not until payment is switched on. While
+`billing.FOUNDERS_OPEN` is `True` the gate charges nobody at all and every
+connected account that asks this server anything takes the next seat, on the
+first request that already has the account in hand: the gate itself,
+`GET /api/account/me`, or the favourites read. A seat is a row in `founder`
+beside the entitlement it stands in for, keyed by the same custody account id,
+carrying the ordinal it was given, and read across key versions like
+everything else there — a rotation cannot lose somebody their seat or spend a
+second one on them. `GET /api/account/me` answers `{founder, ordinal,
+founders_left, connected}` to anybody, signed in or not, which is what lets
+the landing page offer the remaining seats.
+
+Flipping `FOUNDERS_OPEN` to `False` closes the list and turns the price back
+on for everybody except the accounts already in that table, who keep what they
+were promised. It is a constant rather than a variable on purpose: changing
+what the product costs is a decision with a date attached and a landing page
+to match, and it belongs in a commit somebody can read. The one guarantee that
+depends on the deployment shape is the count — the claim counts and inserts in
+one statement under a process lock, so the hundredth seat is the hundredth on
+the single replica this service runs as, and a second worker sharing a
+Postgres could slip an extra seat or two past it.
 
 With it, one real league's draft costs $9.99 for the season. Mock drafts stay
 free: they are the trial, and charging for the trial is charging for the sales
