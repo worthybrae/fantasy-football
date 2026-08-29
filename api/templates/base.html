@@ -299,7 +299,13 @@ table.sched td,table.sched th{white-space:nowrap}
 @media (max-width:720px){
   main{padding:20px 16px 44px}
   .scroll{margin:0 -16px;padding:0 16px}
-  .scroll table{min-width:660px}
+  /* ONLY THE TABLES THAT REALLY ARE WIDE. Blanket `.scroll table` gave
+     a 660px floor to every table in a scrollport, including the four
+     narrow ones the profile added -- usage, the ranking sources,
+     season by season, the comparable seasons -- which fit a phone at
+     their natural width and were made to scroll for nothing. `.sched`
+     keeps its own 840px floor above; `.wide` is for the rest. */
+  .scroll table.wide{min-width:660px}
   .hero img{width:88px;height:88px}
   .bar{padding:10px 16px}
   .bar .cta{margin-left:0;order:3;width:100%;text-align:center}

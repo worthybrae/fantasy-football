@@ -1143,7 +1143,10 @@ def test_the_index_leads_with_risers_fallers_and_the_runs(corpus, board, monkeyp
 def test_the_index_table_sorts_and_says_so_once(corpus, board):
     body = _client(board).get("/adp").text
     assert body.count("table.sortable") == 1
-    assert body.count('class="sortable"') == 1
+    # `sortable` is one class on the table, not the whole attribute -- the
+    # index's table also carries `wide`, which is what gives it its phone
+    # scroll floor.
+    assert len(re.findall(r'<table[^>]*\bclass="[^"]*\bsortable\b', body)) == 1
     assert 'data-k="n"' in body and 'aria-sort' in body
     # ...and nowhere else. A player page has no table to sort.
     assert "table.sortable" not in _client(board).get("/adp/dandre-swift").text
@@ -1592,10 +1595,37 @@ def test_nothing_on_a_player_page_can_push_it_sideways():
     css = (Path(seo.TEMPLATES) / "base.html").read_text(encoding="utf-8")
     assert ".scroll{overflow-x:auto" in css
     assert ".xscroll{overflow-x:auto" in css
+
+    # STRUCTURAL, NOT LITERAL. This used to assert two exact strings with the
+    # newline between the div and the tag baked in, which is a test of where
+    # somebody pressed return: reflowing one line of the template broke it,
+    # and adding a ninth table it had never heard of did not.
     page = (Path(seo.TEMPLATES) / "adp_player.html").read_text(encoding="utf-8")
-    # Every wide thing the profile sections add is inside one of the two.
-    assert '<div class="scroll">\n<table class="sched">' in page
-    assert '<div class="xscroll">\n<svg viewBox="0 0 720 128"' in page
+    stack, loose = [], []
+    for m in re.finditer(r"<(/?)(div|table)\b([^>]*)>", page):
+        closing, tag, attrs = m.groups()
+        if tag == "div":
+            if closing:
+                if stack:
+                    stack.pop()
+            else:
+                found = re.search(r'class="([^"]*)"', attrs)
+                stack.append((found.group(1) if found else "").split())
+        elif not closing and not any(
+                "scroll" in cls or "xscroll" in cls for cls in stack):
+            loose.append(page[:m.start()].count("\n") + 1)
+    assert not loose, f"tables outside a scrollport, at lines {loose}"
+
+    # And nothing is given a floor wide enough to matter outside one. Every
+    # min-width big enough to overflow a phone -- the week chart's 640, the
+    # schedule's 840, the wide tables' 660 -- has to be written as a
+    # descendant of a scrollport, which is what makes the check above
+    # sufficient rather than a spot check on one template.
+    for selector, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
+        for floor in re.findall(r"min-width:\s*(\d+)px", body):
+            assert int(floor) <= 400 or "scroll" in selector, (
+                f"{selector.strip()} sets min-width:{floor}px outside a "
+                "scrollport")
 
 
 def test_six_player_pages_at_once_each_get_their_whole_page(corpus, profiled):

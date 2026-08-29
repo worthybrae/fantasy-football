@@ -115,7 +115,7 @@
 {% if prof.seasons %}
 <h2>Every season {{ pron.s }} has played</h2>
 <div class="scroll">
-<table>
+<table class="wide">
 <thead><tr><th>Season</th><th class="n">Age</th><th class="n">NFL yr</th><th class="n">Games</th><th class="n">Points / g</th><th class="n">{{ prof.seasons.position }} finish</th><th class="n">By points / g</th><th class="n">Steadiness</th></tr></thead>
 <tbody>
 {% for s in prof.seasons.rows %}
@@ -166,7 +166,7 @@
 <figcaption>Every week of {{ prof.weeks.season }}, scored under this league's own rules{% if prof.weeks.avg %} — {{ prof.weeks.avg }} a game{% if prof.weeks.finish %}, which finished {{ pron.o }} {{ prof.weeks.finish }}{% endif %}{% endif %}. A mark on the baseline is a week with no game; the scale is the same for every player, so a good week is the same height on every page.</figcaption>
 </figure>
 <div class="scroll">
-<table>
+<table class="wide">
 <thead><tr><th class="n">Wk</th><th>Opp</th>{% for h in prof.weeks.heads %}<th class="n">{{ h }}</th>{% endfor %}<th class="n">Pts</th></tr></thead>
 <tbody>
 {% for g in prof.weeks.lines %}
