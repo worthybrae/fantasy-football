@@ -11,6 +11,12 @@ import { forgetRequests } from '../api'
 // say which drafts it counted and the round has to be the round of THOSE
 // drafts. A true number in a false sentence is the failure this card is one
 // careless edit away from.
+//
+// The same fault in a picture, which is the other half of this file: the rule
+// at the top used to hang the CORPUS's opening path under the picks while the
+// cards below named the plan's own players, so a reader saw WR-RB-RB-WR over
+// three cards reading RB-QB-TE. Two answers to one question, and the numbers
+// on both were true.
 
 const { fetchPlanPreview } = vi.hoisted(() => ({ fetchPlanPreview: vi.fn() }))
 
@@ -68,7 +74,7 @@ afterEach(cleanup)
 
 async function draw(props = {}) {
   const view = render(<PlanPreview teams={8} slot={6} {...props} />)
-  await screen.findByText(/usually opens/)
+  await screen.findByText(/usually open/)
   return view
 }
 
@@ -81,26 +87,36 @@ test('the seat’s own picks are drawn on the rule', async () => {
   }
 })
 
-test('the rule hangs the opening path under the picks it belongs to',
+test('the rule badges each pick with the card that is drawn for it',
      async () => {
        await draw()
 
        const rule = screen.getByRole('img', { name: /^Picks/ })
-       // Four marks, four positions -- the fifth round of the path has no
-       // pick on this rule and must not be drawn against one that is not its.
+       // The plan's own three targets -- RB, QB, TE -- and NOT the corpus's
+       // opening path (RB-WR-WR-RB), which is what this used to draw over
+       // cards naming somebody else. The fourth mark has no card, so it
+       // carries no badge rather than borrowing the third one's.
        expect(within(rule).getAllByText(/^(RB|WR|TE|QB|K|DST)$/)
-         .map((el) => el.textContent)).toEqual(['RB', 'WR', 'WR', 'RB'])
+         .map((el) => el.textContent)).toEqual(['RB', 'QB', 'TE'])
      })
 
-test('the opening sentence names the share and the drafts it counted',
+test('the section says what its numbers are before showing any', async () => {
+  await draw()
+
+  expect(screen.getByText(
+    /ESPN’s order, adjusted for who lasts to your next pick/)).toBeTruthy()
+})
+
+test('what rooms usually do is one muted sentence, with its drafts named',
      async () => {
        await draw()
 
-       const said = screen.getByText(/usually opens/)
-       expect(said.textContent).toMatch(/6th seat of 8/)
+       const said = screen.getByText(/usually open/)
        expect(said.textContent).toMatch(/RB–WR–WR–RB–TE/)
-       expect(said.textContent).toMatch(/31%/)
-       expect(said.textContent).toMatch(/854 recorded 8-team PPR ESPN drafts/)
+       expect(said.textContent).toMatch(/31 % of 854 recorded 8-team PPR drafts/)
+       // Background, not the answer: it is set in the note register rather
+       // than as the card's own claim, which is what it was read as.
+       expect(said.className).toContain('pp-note')
      })
 
 test('the runs are quoted in the round of the drafts they were counted in',
@@ -119,14 +135,14 @@ test('a seat asking about a shape the archive has not recorded is told so',
        fetchPlanPreview.mockResolvedValue({ ...PLAN, teams: 12, slot: 6 })
        render(<PlanPreview teams={12} slot={6} />)
 
-       await screen.findByText(/usually opens/)
+       await screen.findByText(/usually open/)
        expect(screen.getByText(
          /Counted in 8-team PPR drafts — the shape with the most on record; your 12-team league will get its own numbers once enough are recorded/))
          .toBeTruthy()
-       // And the sentence stops claiming the seat is "of 12", since the path
-       // it is about was not walked in a twelve-team room.
-       expect(screen.getByText(/usually opens/).textContent)
-         .not.toMatch(/seat of 12/)
+       // And the sentence itself names the shape it counted, so the caveat
+       // is a second reading of the same fact rather than the only one.
+       expect(screen.getByText(/usually open/).textContent)
+         .toMatch(/8-team PPR drafts/)
      })
 
 test('an empty archive costs the opening and not the plan', async () => {
@@ -153,15 +169,44 @@ test('one card a turn, each naming its pick and round', async () => {
   expect(screen.getByText('Pick 22')).toBeTruthy()
 })
 
-test('the target carries the plan’s two numbers and its first reason',
+test('the target’s two numbers each say which pick they are about',
      async () => {
        await draw()
 
-       expect(screen.getByText('41%')).toBeTruthy()
+       // "Still there · 41 %" is a claim about pick 6 and nothing else, and
+       // read as a fact about the player it is how somebody comes to plan on
+       // 41 % at a turn where it is 90.
+       expect(screen.getByText('Still there at pick 6')).toBeTruthy()
+       expect(screen.getByText('41 %')).toBeTruthy()
+       expect(screen.getByText('vs waiting to 11')).toBeTruthy()
        expect(screen.getByText('+19 pts')).toBeTruthy()
-       expect(screen.getByText('Over waiting to 11')).toBeTruthy()
+       // ESPN's own rank on him, which is the plan's first reason.
        expect(screen.getByText('likely gone before your next pick (72 %)'))
          .toBeTruthy()
+     })
+
+test('an edge of nothing is said in words rather than as a minus sign',
+     async () => {
+       // The plan pricing a turn at or below zero is not a penalty on the
+       // player -- it is "nobody better is going anywhere, so he keeps". A
+       // bare "−3 pts" beside a name says the opposite.
+       fetchPlanPreview.mockResolvedValue({
+         ...PLAN,
+         targets: [{
+           ...PLAN.targets[0],
+           target: player('Bijan Robinson', 'RB',
+                          { lasts_pct: 41.2, edge_pts: -3.4, edge_at_pick: 21 }),
+         }],
+       })
+       render(<PlanPreview teams={8} slot={6} />)
+
+       expect(await screen.findByText(
+         /No better RB is likely gone by 21 — take him only if nothing above falls/))
+         .toBeTruthy()
+       expect(screen.queryByText(/-3 pts|−3 pts/)).toBeNull()
+       expect(screen.queryByText(/vs waiting to 21/)).toBeNull()
+       // The turn's other number is untouched: it is about a different thing.
+       expect(screen.getByText('41 %')).toBeTruthy()
      })
 
 test('the alternates are named under the target, not ranked beside it',
@@ -206,8 +251,18 @@ test('a new seat asks a new question', async () => {
 })
 
 test('the heading and the note are the caller’s to write', async () => {
-  await draw({ heading: 'Your plan', note: 'For Sunday Money — 8 teams, seat 6' })
+  await draw({ heading: 'Your plan', note: 'For Sunday Money — 8 teams' })
 
   expect(screen.getByRole('heading', { name: 'Your plan' })).toBeTruthy()
-  expect(screen.getByText('For Sunday Money — 8 teams, seat 6')).toBeTruthy()
+  expect(screen.getByText('For Sunday Money — 8 teams')).toBeTruthy()
+})
+
+test('the caller’s seat control sits in the section’s head', async () => {
+  // The seat is what the section is about, so the control for it belongs
+  // beside the heading rather than in a card somewhere below the answer.
+  await draw({ control: <button type="button">Seat</button> })
+
+  const head = document.querySelector('.db-sec-head')
+  expect(within(head as HTMLElement).getByRole('button', { name: 'Seat' }))
+    .toBeTruthy()
 })

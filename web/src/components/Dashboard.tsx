@@ -1,4 +1,4 @@
-import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import {
   buildLeagueReport, fetchFavorites, fetchLeagueReports, mintDraftToken,
@@ -12,8 +12,8 @@ import MockLobby from './MockLobby'
 import PlanPreview from './PlanPreview'
 import { PickerBoundary, PickerFallback } from './PickerBoundary'
 import YourGuys from './YourGuys'
-import YourGuysByPick, { MAX_TEAMS, MIN_TEAMS, readSeat, type Seat }
-  from './YourGuysByPick'
+import YourGuysByPick, { MAX_TEAMS, MIN_TEAMS, ordinal, readSeat, writeSeat,
+                         type Seat } from './YourGuysByPick'
 
 // THE PICKER IS NOT IN THIS PAGE'S BUNDLE. It is a 250-row board with a photo
 // per row, opened by a fraction of the readers who load this page and never
@@ -117,6 +117,57 @@ function PlanUnavailable({ teams }: { teams: number }) {
   )
 }
 
+/** WHICH SEAT THE PLAN IS FOR, AND WHERE THAT CAME FROM.
+ *
+ *  THE BUG THIS EXISTS TO END. The plan used to be built for whatever seat
+ *  the reader had last set in a select -- a number this page invented a
+ *  default for and then never revisited -- so an owner ESPN has sitting sixth
+ *  was reading a plan for the fifth seat, under a heading that named their
+ *  real league. Every pick number in it was wrong by one turn and nothing on
+ *  the page said where the number had come from.
+ *
+ *  So the seat is now attributed, always. ESPN's own published order is the
+ *  answer when there is one and it says so; before the commissioner sets one
+ *  there is no answer, and the honest thing is to say THAT and let the reader
+ *  choose. The control stays either way -- a reader who is between leagues,
+ *  or curious about the seat next to theirs, is entitled to ask -- and when
+ *  they do, the page keeps saying what ESPN's answer was.
+ */
+function SeatChoice({ teams, slot, espnSlot, onPick }: {
+  teams: number
+  slot: number
+  /** ESPN's own answer, or null before the draft order is published. */
+  espnSlot: number | null
+  onPick: (slot: number) => void
+}) {
+  const overridden = espnSlot !== null && slot !== espnSlot
+  return (
+    <span className="db-seat">
+      <label className="db-seat-lab" htmlFor="db-seat-slot">Seat</label>
+      <select id="db-seat-slot" className="db-seat-select"
+              aria-label="Seat to preview" value={slot}
+              onChange={(event) => onPick(Number(event.target.value))}>
+        {Array.from({ length: teams }, (_, i) => i + 1).map((n) => (
+          <option key={n} value={n}>{ordinal(n)}</option>
+        ))}
+      </select>
+      {espnSlot !== null && !overridden && (
+        <span className="db-seat-from">seat {espnSlot} · from ESPN</span>
+      )}
+      {overridden && (
+        <span className="db-seat-say">
+          previewing seat {slot} (ESPN has you at {espnSlot})
+        </span>
+      )}
+      {espnSlot === null && (
+        <span className="db-seat-say">
+          ESPN hasn&rsquo;t set the draft order yet — choose a seat to preview
+        </span>
+      )}
+    </span>
+  )
+}
+
 export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
   leagues: UpcomingDraft[]
   onJoin: (params: TokenConnectParams) => void
@@ -151,16 +202,23 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
   // `closePicker`. It is a cache-busting counter, not a piece of state
   // anything reads for its value.
   const [namesAt, setNamesAt] = useState(0)
-  // WHICH SEAT THE PLAN IS FOR. One value, reported up by the availability
-  // grid, so the plan and the grid cannot describe two different drafts. The
-  // grid owns the controls (it is where a reader is already looking when they
-  // think about their seat); this page owns the answer they both read.
+  // THE SEAT THIS BROWSER REMEMBERS, which is the LAST of the three answers
+  // to "which seat" and not the first -- see `planSeat`. One value, written
+  // by both of the page's seat controls and reported up by the availability
+  // grid, so the plan and the grid cannot describe two different drafts.
   //
   // Seeded from the same store the grid seeds from, so the plan is requested
   // once with the right seat rather than once with a default and again a beat
   // later. The league SIZE is overridden below when the account actually names
   // one.
   const [seat, setSeat] = useState<Seat>(readSeat)
+  // THE SEAT THIS READER ASKED FOR, as opposed to the one they were given.
+  // Null until somebody actually moves a control in this session, which is
+  // what keeps a seat remembered from last August from quietly outranking
+  // the order ESPN has published since. Not stored under its own key: the
+  // change is written straight to the seat store below, so the two cards and
+  // the next visit all read one value.
+  const [chosen, setChosen] = useState<number | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -234,17 +292,35 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
   // alone rather than guessing at ten.
   const planTeams = next?.teams ?? null
 
-  // THE SEAT THE PLAN IS ACTUALLY ASKED ABOUT, assembled in the one place
-  // that holds both halves of it.
+  // ESPN'S OWN ANSWER ABOUT THE SEAT, when it has one. `my_slot` is this
+  // account's place in the league's published `draftSettings.pickOrder`
+  // (api/drafts.py), so it is the seat rather than a guess at one -- and it
+  // outranks anything this browser remembers, because a stored seat is a
+  // number the reader typed once and ESPN's is the draft they are actually
+  // in. Null before the commissioner sets an order, which is the ordinary
+  // state in August.
   //
-  // The size comes from the league and the slot comes from the reader's own
-  // stored setting, and those are answers to two different questions: a
-  // reader who last set the twelfth seat, whose next draft holds ten teams,
-  // asks `/api/plan/preview?teams=10&slot=12`. That is a 422, and because
-  // nothing on this page ever asks again, it is a 422 sitting in the card for
-  // as long as the page is open. The grid clamps its own copy the same way,
-  // but the grid is only mounted when there are favourites -- so the clamp
-  // cannot live there.
+  // Checked against the league's own size as well: an order that disagreed
+  // with the team count is two ESPN answers contradicting each other, and
+  // the seat is the one to drop.
+  const espnSlot = useMemo<number | null>(() => {
+    const mine = next?.my_slot ?? null
+    if (mine === null || !Number.isInteger(mine) || mine < 1) return null
+    if (planTeams !== null && mine > planTeams) return null
+    return mine
+  }, [next, planTeams])
+
+  // THE SEAT THE PLAN IS ACTUALLY ASKED ABOUT, assembled in the one place
+  // that holds every half of it.
+  //
+  // THE SIZE IS THE LEAGUE'S AND THE SLOT IS WHOEVER ANSWERED LAST, and those
+  // are answers to different questions: a reader who last set the twelfth
+  // seat, whose next draft holds ten teams, asks
+  // `/api/plan/preview?teams=10&slot=12`. That is a 422, and because nothing
+  // on this page ever asks again, it is a 422 sitting in the card for as long
+  // as the page is open. The grid clamps its own copy the same way, but the
+  // grid is only mounted when there are favourites -- so the clamp cannot
+  // live there.
   //
   // Null is "not a shape we can ask about": ESPN will not host more than
   // sixteen teams and neither endpoint answers about one. The card says that
@@ -255,8 +331,47 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
     if (!Number.isInteger(teams) || teams < MIN_TEAMS || teams > MAX_TEAMS) {
       return null
     }
-    return { teams, slot: Math.min(Math.max(1, Math.round(seat.slot)), teams) }
-  }, [planTeams, seat])
+    // The order of precedence, and it is the whole fix: what the reader just
+    // asked for, then what ESPN says, then what this browser remembers.
+    const slot = chosen ?? espnSlot ?? seat.slot
+    return { teams, slot: Math.min(Math.max(1, Math.round(slot)), teams) }
+  }, [planTeams, seat, espnSlot, chosen])
+
+  // The seat both cards are currently drawn for, readable by the two
+  // callbacks below without making either of them depend on it -- they are
+  // props of memoized children, and a handler rebuilt on every render is a
+  // memo written in vain. See `takeSeat`.
+  const shown = useRef<Seat | null>(null)
+  shown.current = planSeat
+
+  /** The grid reporting the seat it holds.
+   *
+   *  ONE SEAT FOR TWO CARDS, because the availability grid has a seat select
+   *  of its own and a page where the two disagreed would be answering "your
+   *  next draft" twice with different drafts. The grid reports every seat it
+   *  holds, including the one this page just handed it -- so a report that
+   *  MATCHES what is already on screen is an echo, not a choice, and only a
+   *  different number counts as the reader overriding ESPN.
+   */
+  const takeSeat = useCallback((reported: Seat) => {
+    setSeat(reported)
+    if (shown.current !== null && reported.slot !== shown.current.slot) {
+      setChosen(reported.slot)
+    }
+  }, [])
+
+  /** The plan's own picker. Written to the seat store here because the grid,
+   *  which is the page's other writer of it, is only mounted once there are
+   *  favourites -- and a seat chosen on a page with none should still be
+   *  there tomorrow. */
+  const pickSeat = useCallback((slot: number) => {
+    setChosen(slot)
+    setSeat((s) => {
+      const picked = { teams: shown.current?.teams ?? s.teams, slot }
+      writeSeat(picked)
+      return picked
+    })
+  }, [])
 
   // Stable identities, because YourGuys is memoized and a fresh closure per
   // render would make that memo a comment.
@@ -413,7 +528,8 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
                   invitation beside it is the whole section then. */}
               {favorites.length > 0 && (
                 <YourGuysByPick players={favorites} teams={planTeams}
-                                onSeat={setSeat} />
+                                slot={planSeat?.slot ?? null}
+                                onSeat={takeSeat} />
               )}
             </div>
           </section>
@@ -429,14 +545,18 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
             teams={planSeat.teams}
             slot={planSeat.slot}
             tag={(favorites ?? []).join(',')}
-            // WHERE THE SEAT CAME FROM, said out loud. A plan for the wrong
-            // seat is a plan for somebody else's draft, and the reader is the
-            // only one who can catch that.
+            // WHICH DRAFT THIS IS, said out loud. A plan for the wrong league
+            // is a plan for somebody else's draft, and the reader is the only
+            // one who can catch that. The SEAT is attributed beside the
+            // control instead, because where it came from is the half of the
+            // sentence a reader has to be able to argue with.
             note={next !== null && planTeams !== null
-              ? `For ${next.name ?? 'your next draft'} — ${planTeams} teams, seat ${planSeat.slot}`
-              : (favorites !== null && favorites.length > 0
-                ? `Seat ${planSeat.slot} of ${planSeat.teams} — set it under Your guys`
-                : `Seat ${planSeat.slot} of ${planSeat.teams}`)}
+              ? `For ${next.name ?? 'your next draft'} — ${planTeams} teams`
+              : `Seat ${planSeat.slot} of ${planSeat.teams}`}
+            control={
+              <SeatChoice teams={planSeat.teams} slot={planSeat.slot}
+                          espnSlot={espnSlot} onPick={pickSeat} />
+            }
           />
         )}
 

@@ -3414,6 +3414,58 @@ button.wr-seat:focus-visible {
    YOUR PLAN, BEFORE THE DRAFT (components/PlanPreview.tsx)
    ========================================================================== */
 
+/* -- the seat, and where it came from (Dashboard.tsx: SeatChoice) --------- */
+
+/* In the section's own head, next to the heading, because the seat is what
+   the section is about: a reader who disagrees with it has to be able to say
+   so where they read it, not in a card further down the page. */
+.db-seat {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-left: 6px;
+}
+
+.db-seat-lab {
+  font-size: var(--text-xs);
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* The availability grid's own select, restated rather than shared: the two
+   controls sit in different furniture (a card head and a section head) and
+   only the paint is the same. */
+.db-seat-select {
+  padding: 2px 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  font: var(--text-sm) / 1.4 var(--font-mono);
+  color: var(--text-1);
+}
+
+.db-seat-select:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ESPN answered. The accent is the page's "this is real data" colour, and
+   this is the one label on the page that says a number was not guessed. */
+.db-seat-from {
+  font-size: var(--text-xs);
+  color: var(--accent);
+  letter-spacing: 0.02em;
+}
+
+/* Everything else the seat has to say -- no order published yet, or a
+   preview of a seat that is not the reader's. Both are asides. */
+.db-seat-say {
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
 .pp-card {
   display: flex;
   flex-direction: column;
@@ -3470,6 +3522,17 @@ button.wr-seat:focus-visible {
 }
 
 .pr-pos { transform: scale(0.92); }
+
+/* THE ONE LINE THAT SAYS WHAT THE NUMBERS ARE. Above the rule, quiet, and
+   the width of a sentence: the section is two things folded together (ESPN's
+   order, and how long each player lasts against this seat's real turns) and
+   neither is legible from a picture of the result. */
+.pp-lede {
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--text-2);
+  max-width: 78ch;
+}
 
 /* -- what the seat usually does ------------------------------------------ */
 
@@ -3609,6 +3672,17 @@ button.wr-seat:focus-visible {
   font-size: var(--text-sm);
   line-height: 1.5;
   color: var(--text-2);
+}
+
+/* A NEGATIVE EDGE, SAID RATHER THAN PRINTED. "−3 pts" beside a name reads as
+   a penalty on the player; what it means is that nobody better at his
+   position is expected to be gone by the next turn. That is a sentence about
+   waiting, so it is set as one -- in the figures' own quiet register, where
+   the number it replaces used to sit. */
+.pp-keeps {
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--text-3);
 }
 
 .pp-alts {

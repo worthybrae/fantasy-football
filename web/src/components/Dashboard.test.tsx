@@ -79,6 +79,9 @@ const SOON: UpcomingDraft = {
   league_id: 'L1', name: 'Sunday Money', team_id: '7', team_name: 'My Team',
   season: 2026, teams: 12, draft_type: 'Snake', live: false,
   draft_at: new Date(Date.now() + 3_600_000).toISOString(),
+  // ESPN has published no draft order for it, which is the ordinary state
+  // in August. The seat-aware tests at the bottom of this file hand it one.
+  my_slot: null,
 }
 
 beforeEach(() => {
@@ -87,8 +90,10 @@ beforeEach(() => {
   // dialog, which asks for it.
   vi.clearAllMocks()
   // The board cache is module-level and outlives a test's mocks, which is the
-  // point of it in a browser and a trap in a file like this one.
+  // point of it in a browser and a trap in a file like this one. So is the
+  // stored seat, which this page and the availability grid both write.
   forgetBoard()
+  window.localStorage.clear()
   fetchLeagueReports.mockResolvedValue([])
   fetchMockRooms.mockResolvedValue({ rooms: [], next: null })
   fetchRoomProgress.mockResolvedValue([])
@@ -325,8 +330,8 @@ test('a saved seat the next draft does not have is pulled inside it',
 
        await waitFor(() => expect(fetchPlanPreview).toHaveBeenCalled())
        expect(fetchPlanPreview.mock.calls.at(-1)?.slice(0, 2)).toEqual([10, 10])
-       expect(screen.getByText(/10 teams, seat 10/)).toBeTruthy()
-       window.localStorage.clear()
+       expect(screen.getByText(/For Sunday Money — 10 teams/)).toBeTruthy()
+       expect(seatPicker().value).toBe('10')
      })
 
 test('a league of a shape the plan cannot read says so in its own words',
@@ -342,4 +347,79 @@ test('a league of a shape the plan cannot read says so in its own words',
        expect(screen.getByText(
          /A 24-team draft is not a shape this plan covers yet/)).toBeTruthy()
        expect(fetchPlanPreview).not.toHaveBeenCalled()
+     })
+
+
+// -- whose seat the plan is for -----------------------------------------------
+//
+// THE BUG. The owner sits sixth in an eight-team league and the dashboard was
+// planning for the fifth seat -- a number this page had defaulted to once and
+// then remembered forever -- under a heading naming their real league. Every
+// pick number in that plan was a turn out, and nothing on the page said where
+// the seat had come from, so there was nothing for the reader to disagree
+// with. ESPN publishes the order; when it has, that is the answer.
+
+function seatPicker(): HTMLSelectElement {
+  return screen.getByLabelText('Seat to preview') as HTMLSelectElement
+}
+
+test('ESPN’s own seat beats the one this browser remembers', async () => {
+  window.localStorage.setItem('guys-outlook',
+                              JSON.stringify({ teams: 12, slot: 3 }))
+  fetchFavorites.mockResolvedValue([])
+  draw([{ ...SOON, my_slot: 6 }])
+
+  await waitFor(() => expect(fetchPlanPreview).toHaveBeenCalled())
+  expect(fetchPlanPreview.mock.calls.at(-1)?.slice(0, 2)).toEqual([12, 6])
+  // And it says so, because a seat is the one thing in this section only the
+  // reader can check.
+  expect(screen.getByText('seat 6 · from ESPN')).toBeTruthy()
+  expect(seatPicker().value).toBe('6')
+})
+
+test('no published order is said plainly, with the seat left to the reader',
+     async () => {
+       fetchFavorites.mockResolvedValue([])
+       draw([SOON])
+
+       expect(await screen.findByText(
+         /ESPN hasn’t set the draft order yet — choose a seat to preview/))
+         .toBeTruthy()
+       expect(screen.queryByText(/from ESPN/)).toBeNull()
+     })
+
+test('a reader may preview another seat, and is told whose it is not',
+     async () => {
+       fetchFavorites.mockResolvedValue([])
+       draw([{ ...SOON, my_slot: 6 }])
+       await waitFor(() => expect(fetchPlanPreview).toHaveBeenCalled())
+
+       fireEvent.change(seatPicker(), { target: { value: '3' } })
+
+       await waitFor(() => expect(fetchPlanPreview.mock.calls.at(-1)?.slice(0, 2))
+         .toEqual([12, 3]))
+       expect(screen.getByText('previewing seat 3 (ESPN has you at 6)'))
+         .toBeTruthy()
+       expect(screen.queryByText('seat 6 · from ESPN')).toBeNull()
+     })
+
+test('the availability grid is asked about the same seat as the plan',
+     async () => {
+       // Two cards about "your next draft" that disagreed about which seat it
+       // was would be worse than one, and the grid is the page's other reader
+       // of the stored seat.
+       window.localStorage.setItem('guys-outlook',
+                                   JSON.stringify({ teams: 12, slot: 3 }))
+       fetchFavorites.mockResolvedValue(['p1', 'p2'])
+       draw([{ ...SOON, my_slot: 6 }])
+
+       await waitFor(() => expect(fetchFavoritesOutlook).toHaveBeenCalled())
+       expect(fetchFavoritesOutlook.mock.calls.at(-1)?.slice(0, 2))
+         .toEqual([12, 6])
+
+       fireEvent.change(seatPicker(), { target: { value: '9' } })
+
+       await waitFor(() => expect(fetchFavoritesOutlook.mock.calls.at(-1)
+         ?.slice(0, 2)).toEqual([12, 9]))
+       expect(fetchPlanPreview.mock.calls.at(-1)?.slice(0, 2)).toEqual([12, 9])
      })

@@ -48,8 +48,11 @@ const MAYBE = 40
 
 /** "5th", for the seat select. The controls carry no bare numbers on
  *  purpose -- a select of ten options labelled 1 to 10 puts ten loose digits
- *  into a page whose other cards are counting things. */
-function ordinal(n: number): string {
+ *  into a page whose other cards are counting things.
+ *
+ *  Exported for the plan section's own seat picker, which offers the same
+ *  seats of the same league and must not word them differently. */
+export function ordinal(n: number): string {
   if (n % 100 >= 11 && n % 100 <= 13) return `${n}th`
   return `${n}${({ 1: 'st', 2: 'nd', 3: 'rd' } as Record<number, string>)[n % 10] ?? 'th'}`
 }
@@ -73,6 +76,16 @@ function clampSeat(teams: unknown, slot: unknown): Seat {
     slot: Number.isInteger(seat) && seat >= 1 && seat <= size
       ? seat : Math.min(DEFAULT_SLOT, size),
   }
+}
+
+/** Remember this seat for next time. Exported because the dashboard's own
+ *  seat picker writes the same key: two stores of "which seat am I" would be
+ *  two answers, and the one that lost would be whichever card the reader
+ *  happened to touch last. */
+export function writeSeat(seat: Seat): void {
+  try {
+    window.localStorage.setItem(STORE_KEY, JSON.stringify(seat))
+  } catch { /* private window: the seat is just not remembered */ }
 }
 
 export function readSeat(): Seat {
@@ -101,7 +114,8 @@ export function tintFor(chance: number | null): string {
   return 'gbp-thin'
 }
 
-export default function YourGuysByPick({ players, teams = null, onSeat }: {
+export default function YourGuysByPick({ players, teams = null, slot = null,
+                                        onSeat }: {
   /** The saved ids. Not rendered -- the server sends its own rows -- but a
    *  changed list is a changed answer, and it is what keeps the five-second
    *  request cache from serving the pre-save one. */
@@ -113,6 +127,15 @@ export default function YourGuysByPick({ players, teams = null, onSeat }: {
    *  to the wrong answer is a control that will be. Null leaves the reader to
    *  say, which is the pre-draft case this card was built for. */
   teams?: number | null
+  /** The seat, when the page has a better answer than this card's memory --
+   *  ESPN's own published draft order, or the picker in the plan section
+   *  above. Null leaves the stored seat alone, which is the pre-draft case.
+   *
+   *  Not a lock, unlike `teams`: the select stays a select, because the
+   *  reader is entitled to ask this card about a seat they might be in. It
+   *  is reported straight back up (`onSeat`), so the plan follows rather
+   *  than disagreeing. */
+  slot?: number | null
   /** Told whenever the seat changes, including once on mount. The plan
    *  section above reads the same seat, and two answers about "your next
    *  draft" that disagreed about which seat it was would be worse than one. */
@@ -125,8 +148,13 @@ export default function YourGuysByPick({ players, teams = null, onSeat }: {
   // which is visibly their choice rather than a claim about their league.
   const known = teams !== null && Number.isInteger(teams)
     && teams >= MIN_TEAMS && teams <= MAX_TEAMS ? teams : null
-  const [seat, setSeat] = useState<Seat>(
-    () => (known === null ? readSeat() : clampSeat(known, readSeat().slot)))
+  // Seeded from whatever the page already knows, so the first request is the
+  // right one rather than the stored one followed by a correction: the size
+  // from the league, the slot from ESPN's order if the page has it.
+  const [seat, setSeat] = useState<Seat>(() => {
+    const saved = readSeat()
+    return clampSeat(known ?? saved.teams, slot ?? saved.slot)
+  })
   const [outlook, setOutlook] = useState<FavoritesOutlook | null>(null)
   const [error, setError] = useState<string | null>(null)
   const tag = useMemo(() => players.join(','), [players])
@@ -147,10 +175,16 @@ export default function YourGuysByPick({ players, teams = null, onSeat }: {
     setSeat((s) => (s.teams === known ? s : clampSeat(known, s.slot)))
   }, [known])
 
+  // The same for the slot, which arrives with the league list rather than at
+  // mount: ESPN publishing the draft order moves this card onto the seat it
+  // names, and so does the picker in the plan section.
   useEffect(() => {
-    try {
-      window.localStorage.setItem(STORE_KEY, JSON.stringify(seat))
-    } catch { /* private window: the seat is just not remembered */ }
+    if (slot === null) return
+    setSeat((s) => (s.slot === slot ? s : clampSeat(s.teams, slot)))
+  }, [slot])
+
+  useEffect(() => {
+    writeSeat(seat)
     onSeat?.(seat)
     // `onSeat` is deliberately not a dependency: the parent hands a fresh
     // closure on every render, and depending on it would report the seat

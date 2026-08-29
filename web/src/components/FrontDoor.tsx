@@ -136,7 +136,7 @@ export function Hero({ onStart }: { onStart: () => void }) {
           <p className="lp-cap">
             Seat {plan.slot} of {plan.teams} · every turn you own
           </p>
-          <PickRule picks={plan.picks} path={opening.path} />
+          <PickRule picks={plan.picks} positions={opening.path} />
           <p className="fd-seat-say">
             <strong className="mono">{Math.round(opening.share * 100)}%</strong>
             {' '}of {plan.corpus.drafts.toLocaleString()} recorded

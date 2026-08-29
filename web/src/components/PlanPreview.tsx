@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { fetchPlanPreview, type PlanPreview as Preview, type PreviewPlayer } from '../api'
 
 // YOUR PLAN, BEFORE THE DRAFT.
@@ -18,18 +18,21 @@ import { fetchPlanPreview, type PlanPreview as Preview, type PreviewPlayer } fro
 // THE SIGNATURE IS THE RULE. A snake seat is a measuring stick -- four fixed
 // points down a 128-pick draft, spaced by where you sit -- and that is the one
 // picture in this product that could not belong to anything else. So the
-// section opens with the picks laid along a rule at their real spacing, the
-// opening path's positions hung under them, and everything else on the page
-// stays quiet around it.
+// section opens with the picks laid along a rule at their real spacing, THE
+// PLAN'S OWN positions hung under them, and everything else on the page stays
+// quiet around it.
+//
+// THE RULE DRAWS THE PLAN, NOT THE CORPUS. It used to hang the most-walked
+// opening path under the picks while the cards below named somebody else --
+// a timeline reading WR-RB-RB-WR over cards reading RB-QB-TE, which is two
+// answers to one question on one screen. The badges are the cards' own
+// positions now, and what rooms in this seat USUALLY do is a muted sentence
+// underneath, where a piece of background belongs.
 
-/** "6th", for the seat line. */
-function ordinal(n: number): string {
-  if (n % 100 >= 11 && n % 100 <= 13) return `${n}th`
-  return `${n}${({ 1: 'st', 2: 'nd', 3: 'rd' } as Record<number, string>)[n % 10] ?? 'th'}`
-}
-
+/** "31 %". Spaced, the way `scoring/plan.py` writes the percentages it puts
+ *  in its own reasons, so the two halves of a card agree about typography. */
 function pct(share: number): string {
-  return `${Math.round(share * 100)}%`
+  return `${Math.round(share * 100)} %`
 }
 
 function posBadge(position: string | null) {
@@ -57,7 +60,16 @@ function roundOf(pick: number, teams: number): number {
  *  is planning around. Evenly spaced dots would draw every seat the same and
  *  say nothing.
  */
-export function PickRule({ picks, path }: { picks: number[]; path: string[] }) {
+export function PickRule({ picks, positions }: {
+  picks: number[]
+  /** One position per pick, in the same order -- what to expect AT that
+   *  turn. The dashboard hands it the plan's own targets and the landing
+   *  page hands it the corpus's opening path; either way the badge under a
+   *  mark has to be about the pick it is drawn on, which is why this is
+   *  indexed against `picks` rather than being a path of its own. Short
+   *  entries and nulls simply draw no badge. */
+  positions: (string | null)[]
+}) {
   if (picks.length === 0) return null
   const last = picks[picks.length - 1]
   return (
@@ -71,9 +83,10 @@ export function PickRule({ picks, path }: { picks: number[]; path: string[] }) {
              style={{ left: `${2 + (pick / last) * 92}%` }}>
           <span className="pr-dot" aria-hidden="true" />
           <span className="pr-no mono">{pick}</span>
-          {path[i] && (
-            <span className={`pr-pos pos-badge pos-badge-${path[i].toLowerCase()}`}>
-              {path[i]}
+          {positions[i] && (
+            <span className={
+              `pr-pos pos-badge pos-badge-${positions[i]!.toLowerCase()}`}>
+              {positions[i]}
             </span>
           )}
         </div>
@@ -135,14 +148,20 @@ export function CorpusNote({ corpus, readerTeams, ownPicks = false }: {
   )
 }
 
-/** The opening, said in one sentence, with the drafts it was counted from
- *  named in it. */
+/** WHAT ROOMS IN THIS SEAT USUALLY DO -- background, and printed as such.
+ *
+ *  This was the loudest sentence in the section and it is not the answer: it
+ *  is what OTHER people did from this seat, in drafts that are probably not
+ *  the reader's shape, and it was being read as the plan. The plan is the
+ *  cards. So this is a muted line under them, and it names the corpus it
+ *  counted in the same breath rather than in a caveat below.
+ */
 function Opening({ plan }: { plan: Preview }) {
   const top = plan.opening[0]
   const corpus = plan.corpus
   if (!top || !corpus) {
     return (
-      <p className="pp-say">
+      <p className="pp-note">
         Nobody has drafted from this seat in the recorded archive yet. The
         plan below is still this board&rsquo;s answer for it.
       </p>
@@ -158,17 +177,14 @@ function Opening({ plan }: { plan: Preview }) {
 
   return (
     <>
-      <p className="pp-say">
-        {sameShape
-          ? `The ${ordinal(plan.slot)} seat of ${plan.teams} usually opens `
-          : `The ${ordinal(plan.slot)} seat usually opens `}
+      <p className="pp-note">
+        Rooms in this seat usually open{' '}
         <strong className="pp-path">{top.path.join('–')}</strong>
-        {' — '}
-        {pct(top.share)} of {corpus.drafts.toLocaleString()} recorded
-        {' '}{shapeLabel(corpus.teams, corpus.format)} ESPN drafts.
+        {' ('}{pct(top.share)} of {corpus.drafts.toLocaleString()} recorded
+        {' '}{shapeLabel(corpus.teams, corpus.format)} drafts).
       </p>
       {runs.length > 0 && (
-        <p className="pp-say pp-say-2">
+        <p className="pp-note pp-say-2">
           In those drafts the board empties in this order: {runs.join(', and ')}.
         </p>
       )}
@@ -208,16 +224,32 @@ function PlayerRow({ player, lead = false }: {
   )
 }
 
-/** One turn: what to take, what else, and why. */
+/** One turn: what to take, what else, and why.
+ *
+ *  THE TWO FIGURES ARE ONLY TRUE ABOUT A PICK, so each says which one. "Still
+ *  there · 85 %" is a claim about pick 5 and "+56 pts" is a comparison with
+ *  pick 12, and printed as bare labels they read as facts about the player --
+ *  which is how somebody comes to plan on 85 % at a turn where it is 40.
+ *
+ *  AND A NEGATIVE EDGE IS NOT A NUMBER TO PRINT. "−3 pts" against a name is
+ *  read as a penalty, or as a mistake in the plan; what it actually says is
+ *  that nobody better at this position is expected to be gone by the next
+ *  turn, which is a sentence about waiting. So it is said as one.
+ */
 function Turn({ turn }: {
   turn: Preview['targets'][number]
 }) {
   const target = turn.target
   if (!target) return null
-  // The plan's own reason, at most one. The room prints the whole list beside
-  // a live board; here it is a card in a column and the first reason is the
-  // one the plan led with.
+  // The plan's own reason, at most one -- ESPN's rank on him, most often.
+  // The room prints the whole list beside a live board; here it is a card in
+  // a column and the first reason is the one the plan led with.
   const why = target.pros[0] ?? target.cons[0] ?? null
+  const priced = target.edge_pts !== null && target.edge_at_pick !== null
+  // Worth taking early, and by how much. At or below zero the plan is saying
+  // "he keeps", which the sentence under the card says in words.
+  const gains = priced && (target.edge_pts as number) > 0
+  const keeps = priced && !gains
   return (
     <article className="pp-turn">
       <header className="pp-turn-head">
@@ -225,23 +257,27 @@ function Turn({ turn }: {
         <span className="pp-round">Round {turn.round}</span>
       </header>
       <PlayerRow player={target} lead />
-      {(target.edge_pts !== null || target.lasts_pct !== null) && (
+      {(gains || target.lasts_pct !== null) && (
         <dl className="pp-figs">
           {target.lasts_pct !== null && (
             <div>
-              <dt>Still there</dt>
-              <dd className="mono">{Math.round(target.lasts_pct)}%</dd>
+              <dt>Still there at pick {turn.pick_no}</dt>
+              <dd className="mono">{Math.round(target.lasts_pct)} %</dd>
             </div>
           )}
-          {target.edge_pts !== null && target.edge_at_pick !== null && (
+          {gains && (
             <div>
-              <dt>Over waiting to {target.edge_at_pick}</dt>
-              <dd className="mono">
-                {target.edge_pts > 0 ? '+' : ''}{Math.round(target.edge_pts)} pts
-              </dd>
+              <dt>vs waiting to {target.edge_at_pick}</dt>
+              <dd className="mono">+{Math.round(target.edge_pts as number)} pts</dd>
             </div>
           )}
         </dl>
+      )}
+      {keeps && (
+        <p className="pp-keeps">
+          No better {target.position ?? 'player'} is likely gone by
+          {' '}{target.edge_at_pick} — take him only if nothing above falls
+        </p>
       )}
       {why && <p className="pp-why">{why}</p>}
       {turn.alternates.length > 0 && (
@@ -256,8 +292,20 @@ function Turn({ turn }: {
   )
 }
 
+/** THE BADGE UNDER EACH MARK IS THE CARD AT THAT PICK.
+ *
+ *  Indexed by pick number rather than by position in the list, because the
+ *  plan names three turns and the rule draws four: the fourth mark has no
+ *  card and must be left bare rather than borrowing the third one's badge.
+ */
+function planPositions(plan: Preview): (string | null)[] {
+  const atPick = new Map(
+    plan.targets.map((turn) => [turn.pick_no, turn.target?.position ?? null]))
+  return plan.picks.map((pick) => atPick.get(pick) ?? null)
+}
+
 export default function PlanPreview({ teams, slot, tag = '', heading = 'Your plan',
-                                      note = null }: {
+                                      note = null, control = null }: {
   teams: number
   slot: number
   /** Bumped by the caller when something might have changed the answer -- a
@@ -269,6 +317,11 @@ export default function PlanPreview({ teams, slot, tag = '', heading = 'Your pla
    *  knows whether it read the seat off a real upcoming draft or off the
    *  reader's own controls, and that is worth saying. */
   note?: string | null
+  /** The seat control, when the caller has one. It belongs in this section's
+   *  head rather than in a card of its own: the seat is what the whole
+   *  section is about, and a reader who disagrees with the seat we chose
+   *  should be able to fix it where they read it. */
+  control?: ReactNode
 }) {
   const [plan, setPlan] = useState<Preview | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -287,10 +340,21 @@ export default function PlanPreview({ teams, slot, tag = '', heading = 'Your pla
     <section className="db-sec pp">
       <div className="db-sec-head">
         <h2 className="db-sec-title">{heading}</h2>
+        {control}
         {note && <span className="db-sec-note">{note}</span>}
       </div>
 
       <div className="db-card pp-card">
+        {/* WHAT THE READER IS LOOKING AT, in one line. Everything below is
+            two things folded together and neither is obvious from a picture
+            of it: ESPN's own ranking, and how long each of those players is
+            expected to last against the seat's real turns. Said once, at the
+            top, so the numbers underneath are read as an answer rather than
+            as a scoreboard. */}
+        <p className="pp-lede">
+          ESPN&rsquo;s order, adjusted for who lasts to your next pick — and
+          for your guys.
+        </p>
         {error !== null && <p className="db-error">{error}</p>}
 
         {/* THE SKELETON KEEPS THE CARD'S HEIGHT, for the same reason the
@@ -307,7 +371,7 @@ export default function PlanPreview({ teams, slot, tag = '', heading = 'Your pla
 
         {plan !== null && (
           <>
-            <PickRule picks={plan.picks} path={plan.opening[0]?.path ?? []} />
+            <PickRule picks={plan.picks} positions={planPositions(plan)} />
             <Opening plan={plan} />
             <div className="pp-turns">
               {plan.targets.map((turn) => (

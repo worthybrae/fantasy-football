@@ -1078,6 +1078,12 @@ export interface UpcomingDraft {
   /** The room is open now: ESPN says the draft is in progress, or its hour
    *  has passed and it has not finished. */
   live: boolean
+  /** The seat this account drafts from, 1-based, out of ESPN's own published
+   *  pick order. Null until the commissioner sets one -- which is the
+   *  ordinary state in August -- and null for a league whose settings could
+   *  not be read. Never a guess: the page offers the reader a seat picker
+   *  rather than planning for a seat nobody has been given. */
+  my_slot: number | null
 }
 
 /** `connected: false` is the ordinary answer, not an error -- most visitors
