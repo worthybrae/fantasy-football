@@ -68,14 +68,20 @@ export default memo(function YourGuys({ players, onOpen, refresh = 0 }: {
         <div className="db-fav-foot">
           <p className="db-fav-note">
             {players.length === 0
-              ? 'The players you want on your team this year. Pick five to '
-                + 'twenty-five, and the draft room stars them while the plan '
-                + 'reaches for them a round earlier than it would reach for '
-                + 'anybody else.'
-              : 'The draft room stars them, and the plan reaches for them a '
-                + 'round earlier than it would reach for anybody else.'}
+              ? 'Nobody saved yet. Pick five to twenty-five players you want '
+                + 'this year — the draft room stars them, and the plan reaches '
+                + 'for them a round earlier than it would for anybody else.'
+              : 'Starred in the draft room, and the plan reaches for them a '
+                + 'round earlier than it would for anybody else. In your '
+                + 'order: the plan starts at the top.'}
           </p>
-          <button type="button" className="db-go db-league-go db-go-view"
+          {/* `db-fav-go`, not `db-league-go`. It wore the league card's own
+              button, which carries `flex: 1 1 auto` so it can stretch across
+              the foot of a card that has nothing else in it -- in this card
+              it has a paragraph beside it, and the result was a 500px slab
+              reading "Edit". Same quiet fill, sized to its own label, and
+              the same button in both of this card's states. */}
+          <button type="button" className="db-go db-go-view db-fav-go"
                   onClick={onOpen}>
             {players.length === 0 ? 'Pick your guys' : 'Edit'}
           </button>

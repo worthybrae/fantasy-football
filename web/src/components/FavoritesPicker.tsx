@@ -78,6 +78,7 @@ export default function FavoritesPicker({
   // server enforces it too (422), and the counter exists so nobody has to
   // meet that refusal to learn the rule.
   const ready = chosen.length >= FAVORITES_MIN && chosen.length <= FAVORITES_MAX
+  const shortBy = FAVORITES_MIN - chosen.length
 
   return (
     <div className="fav">
@@ -93,10 +94,22 @@ export default function FavoritesPicker({
         <div className="fav-actions">
           {/* The count and the rule in one place, and the only thing between
               a reader and the Save button. A bare "Save" that refuses to
-              work teaches nothing; this says what it is waiting for. */}
+              work teaches nothing; this says what it is waiting for.
+
+              The ratio alone still made the reader do the arithmetic, so
+              the sentence beside it does it for them: how many more before
+              Save turns on, or that the list is full and a name has to come
+              off before another goes on. Nothing at all in between, where
+              the ratio is the whole story. */}
           <span className={`fav-count mono${ready ? ' is-ready' : ''}`}>
             {chosen.length} / {FAVORITES_MIN}-{FAVORITES_MAX}
           </span>
+          {shortBy > 0 && (
+            <span className="fav-need">
+              {shortBy} more to save
+            </span>
+          )}
+          {full && <span className="fav-need">Full — drop one to add another</span>}
           {onCancel && (
             <button type="button" className="fav-cancel" onClick={onCancel}
                     disabled={saving}>
@@ -198,8 +211,15 @@ export default function FavoritesPicker({
             </li>
           )
         })}
+        {/* Named, so the reader can see WHICH of the two filters emptied the
+            board and undo that one. "No players match that" was true of a
+            search, a position pill and both at once. */}
         {shown.length === 0 && (
-          <li className="fav-empty">No players match that.</li>
+          <li className="fav-empty">
+            {q
+              ? `Nobody on the board matches “${search.trim()}”${pos === 'ALL' ? '' : ` at ${pos}`}.`
+              : `No ${pos} on the board.`}
+          </li>
         )}
       </ul>
     </div>
