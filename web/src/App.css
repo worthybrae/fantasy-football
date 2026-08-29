@@ -395,7 +395,46 @@ td:first-child {
   background: var(--accent-border);
 }
 
-.rail-empty { font-size: 0.8rem; color: var(--text-3); }
+.rail-empty {
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+
+/* -- WAITING LOOKS THE SAME EVERYWHERE --
+
+   Six places in this app said "Loading..." and nothing else, in four
+   different components, and three of them said it forever if the fetch
+   behind them never came back. The word is also the least useful thing a
+   wait can say: the reader can see that something is not there yet, and
+   what they cannot see is WHAT.
+
+   So the copy at each of those six now names the thing being waited for,
+   and this class gives them all the same mark -- the room's own spinner,
+   the one the recompute notice and the connect screen already use, so a
+   wait is one idiom in this product rather than four. Marked
+   `aria-hidden` by construction: it is a `::before`, and the sentence
+   after it is the whole message. */
+.is-waiting::before {
+  content: '';
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: var(--space-2);
+  vertical-align: -1px;
+  border: 1.5px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: landing-spin 0.8s linear infinite;
+}
+
+/* Asked for stillness, given a static ring rather than nothing at all: the
+   mark is what separates "still working" from "there is nothing here". */
+@media (prefers-reduced-motion: reduce) {
+  .is-waiting::before {
+    animation: none;
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+}
 
 /* -- draft room (/draft) -- */
 

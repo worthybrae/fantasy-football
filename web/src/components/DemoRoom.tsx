@@ -485,7 +485,7 @@ export default function DemoRoom({ onMode, live = false, site = false }: {
               )}
             </>
           ) : (
-            <p className="rail-empty draft-rail-loading">Loading…</p>
+            <p className="rail-empty draft-rail-loading is-waiting">Reading the draft room…</p>
           )}
         </aside>
       </div>

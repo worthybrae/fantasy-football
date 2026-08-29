@@ -147,7 +147,7 @@ export default function FavoritesModal({ initial, onSaved, onClose }: {
             from. Close this and try again.
           </p>
         ) : (
-          <p className="fav-modal-loading">Loading the board…</p>
+          <p className="fav-modal-loading is-waiting">Reading the board…</p>
         )}
       </div>
     </div>

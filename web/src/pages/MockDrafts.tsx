@@ -442,7 +442,11 @@ export default function MockDrafts() {
 
       <div className="mocks-body">
         <aside className="mocks-list" aria-label="Mock drafts">
-          {drafts === null && !listError && <p className="rail-empty mocks-empty">Loading…</p>}
+          {drafts === null && !listError && (
+            <p className="rail-empty mocks-empty is-waiting">
+              Looking for rooms the farm has joined…
+            </p>
+          )}
           {drafts === null && listError && (
             <p className="rail-empty mocks-empty">
               No list to show. The farm's API has to be up for this page to have
@@ -481,7 +485,7 @@ export default function MockDrafts() {
             <p className="rail-empty mocks-empty">Pick a room on the left to see its board.</p>
           )}
           {selectedId && !gridBoard && !boardError && (
-            <p className="rail-empty mocks-empty">Loading the board…</p>
+            <p className="rail-empty mocks-empty is-waiting">Reading that room's board…</p>
           )}
           {gridBoard && (
             <>

@@ -1032,7 +1032,13 @@ export default function DraftRoom() {
               )}
             </>
           ) : (
-            <p className="rail-empty draft-rail-loading">{error ?? 'Loading…'}</p>
+            // Not "Loading...". This is the wait for /api/live/state, which is
+            // the room itself -- the clock, the roster and the plan all come
+            // down in it -- so the line says what has not arrived rather than
+            // that something, somewhere, is happening.
+            <p className={`rail-empty draft-rail-loading${error ? '' : ' is-waiting'}`}>
+              {error ?? 'Reading the draft room…'}
+            </p>
           )}
         </aside>
       </div>
