@@ -208,6 +208,20 @@ MOVE_PICKS = 8
 # How many of them either list holds.
 MOVERS = 10
 
+# How often the rooms have to take a player before "he is a riser" is about
+# him at all.
+#
+# WITHOUT THIS THE LIST IS 100% ARTEFACT. Measured on the real corpus, every
+# one of the thirty-two names that cleared MOVE_PICKS was taken in under a
+# tenth of the drafts he was on the board for -- David Njoku "+61" is twenty
+# drafts out of eight hundred and fifty-four. Twenty rooms reaching for a
+# tight end is twenty rooms, not a market: the other 834 left him there, and
+# the ADP those twenty picks average to is not a draft position anybody would
+# plan around. A quarter is the floor at which the mean is describing the
+# room rather than the tail of it -- and at that floor the riser list on the
+# real board is short, which is the honest answer.
+MOVER_MIN_SHARE = 0.25
+
 # Every field a player MAY have, and what "we could not answer that" looks
 # like. Set on every player before a page is rendered, so a template can ask
 # for any of them without guarding, and so the shape of a player is written
@@ -393,10 +407,7 @@ def build_adp(conn) -> dict:
     for p in players:
         for field, blank in BLANKS.items():
             p.setdefault(field, blank)
-    risers = sorted((p for p in players if (p.get("vs_espn") or 0) >= MOVE_PICKS),
-                    key=lambda p: -p["vs_espn"])[:MOVERS]
-    fallers = sorted((p for p in players if (p.get("vs_espn") or 0) <= -MOVE_PICKS),
-                     key=lambda p: p["vs_espn"])[:MOVERS]
+    risers, fallers = _movers(players)
 
     # Slugs: a collision takes -2, -3 in player_id order, so two players
     # with one name keep the same addresses from one snapshot to the next.
@@ -574,6 +585,26 @@ def _espn_gap(players: list) -> None:
         p["espn_pick"] = picks[i]
         p["espn_order"] = i + 1
         p["vs_espn"] = round(picks[i] - p["adp"], 1)
+
+
+def _movers(players: list) -> tuple:
+    """The risers and the fallers, out of the players rooms actually take.
+
+    TWO FILTERS, AND THE SECOND ONE IS THE IMPORTANT ONE. The gap against
+    ESPN has to clear MOVE_PICKS -- a full turn in an 8-team room -- and the
+    player has to be one this corpus can speak for at all: taken in at least
+    MOVER_MIN_SHARE of the drafts he was on the board for. An ADP over twenty
+    picks out of eight hundred drafts is the average of the rooms that
+    reached, and the rooms that reached are the only rooms in it.
+    """
+    moved = [p for p in players
+             if p.get("vs_espn") is not None
+             and (p.get("of_share") or 0) >= MOVER_MIN_SHARE]
+    risers = sorted((p for p in moved if p["vs_espn"] >= MOVE_PICKS),
+                    key=lambda p: -p["vs_espn"])[:MOVERS]
+    fallers = sorted((p for p in moved if p["vs_espn"] <= -MOVE_PICKS),
+                     key=lambda p: p["vs_espn"])[:MOVERS]
+    return risers, fallers
 
 
 # ---------------------------------------------------------------------------
@@ -1052,11 +1083,7 @@ def register_seo_routes(app, conn=None):
         if position is None:
             risers, fallers = d["risers"], d["fallers"]
         else:
-            moved = [p for p in players if p.get("vs_espn") is not None]
-            risers = sorted((p for p in moved if p["vs_espn"] >= MOVE_PICKS),
-                            key=lambda p: -p["vs_espn"])[:MOVERS]
-            fallers = sorted((p for p in moved if p["vs_espn"] <= -MOVE_PICKS),
-                             key=lambda p: p["vs_espn"])[:MOVERS]
+            risers, fallers = _movers(players)
         return page(rendered(d["stamp"], ("index", position), lambda: render(
             "adp_index.html", title=f"{heading} – ESPN Draft Assist", description=desc,
             path=path, heading=heading, provenance=_provenance(d), players=players,
@@ -1064,6 +1091,7 @@ def register_seo_routes(app, conn=None):
             breadcrumbs=crumbs, intro=intro, faq=faq,
             faq_schema=_faq_schema(faq) if faq else None,
             risers=risers, fallers=fallers, runs=d["runs"], move=MOVE_PICKS,
+            mover_floor=MOVER_MIN_SHARE,
             tiers=_tiers(players) if position else [])))
 
     @app.api_route("/adp", methods=["GET", "HEAD"], response_class=HTMLResponse)

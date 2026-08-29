@@ -1,11 +1,14 @@
 {# api/templates/adp_index.html #}
 {% extends "base.html" %}
 {% macro pct(x) %}{{ (x * 100) | round | int }}%{% endmacro %}
+{# Every mover carries its own take rate. A gap against ESPN's board is only
+   as good as the ADP it is measured from, and an ADP over a fifth of the
+   drafts is a different kind of number from an ADP over all of them. #}
 {% macro mover(p) %}
 <li><span class="d big">{{ '%+.0f' % p.vs_espn }}</span>
   <a class="nm" href="/adp/{{ p.slug }}">{{ p.name }}</a>
   <span class="pos {{ p.position }}">{{ p.position }}</span>
-  <span class="d dim">{{ '%.1f' % p.adp }}</span></li>
+  <span class="d">taken in {{ pct(p.of_share) }}</span></li>
 {% endmacro %}
 {% block body %}
 {% if position %}<div class="crumbs"><a href="/adp">ADP</a> › {{ position }}</div>{% endif %}
@@ -18,15 +21,15 @@
 <div class="cols">
   <div class="card">
     <h3>Risers</h3>
-    <p class="note">Taken at least {{ move }} picks before ESPN's board would take them.</p>
+    <p class="note">Taken at least {{ move }} picks before ESPN's board would take them, out of the players these rooms take in at least {{ pct(mover_floor) }} of the drafts they were on the board for.</p>
     {% if risers %}<ol>{% for p in risers %}{{ mover(p) }}{% endfor %}</ol>
-    {% else %}<p class="note">Nobody here moves up that far.</p>{% endif %}
+    {% else %}<p class="note">Nobody these rooms reliably take moves up that far. The names that do move up that far are taken in fewer than {{ pct(mover_floor) }} of their drafts, which is too few rooms to call a market.</p>{% endif %}
   </div>
   <div class="card">
     <h3>Fallers</h3>
-    <p class="note">Left on the board at least {{ move }} picks past where ESPN's would.</p>
+    <p class="note">Left on the board at least {{ move }} picks past where ESPN's would, on the same footing.</p>
     {% if fallers %}<ol>{% for p in fallers %}{{ mover(p) }}{% endfor %}</ol>
-    {% else %}<p class="note">Nobody here falls that far.</p>{% endif %}
+    {% else %}<p class="note">Nobody these rooms reliably take falls that far.</p>{% endif %}
   </div>
   <div class="card">
     <h3>When the runs start</h3>
