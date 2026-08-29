@@ -168,23 +168,67 @@ def _corpus():
                    "a moment.") from exc
 
 
-def _shape(conn) -> tuple:
-    """The league shape the archive is about.
+# The order formats are preferred in when two shapes are equally recorded.
+# Full PPR first because it is what most leagues play and what every source
+# this project reads publishes by default, then half, then standard.
+_FORMAT_ORDER = ("ppr", "half", "std")
 
-    Every mock the farm plays is the same shape today (8 teams, 16 rounds),
-    and mixing shapes would be the one thing that makes every number here
-    meaningless -- pick 14 is round 2 in an 8-team draft and round 1 in a
-    16-team one. So one shape is chosen, the most recorded, and it is stated
-    in every answer rather than assumed by the page.
+
+def shape_filter(alias: str = "d") -> str:
+    """SQL for "this draft is the one the archive is about".
+
+    `_shape` leaves the chosen shape's draft ids in a temp table on the same
+    connection, and every query here filters through it rather than
+    restating columns. That is not tidiness: the shape is `(teams, rounds,
+    format)` and the format lives in a JSON blob, so a `WHERE teams = ? AND
+    rounds = ?` cannot express it -- and a 10-team PPR archive quietly
+    including 10-team standard drafts is a page of numbers about two
+    different games.
     """
-    row = conn.execute(
-        "SELECT teams, rounds, count(*) FROM draft_log"
-        " WHERE teams > 0 AND rounds > 0 GROUP BY 1, 2"
-        " ORDER BY 3 DESC LIMIT 1").fetchone()
-    if not row:
+    return (f"{alias + '.' if alias else ''}draft_id IN "
+            "(SELECT draft_id FROM shape_draft)")
+
+
+def _shape(conn) -> tuple:
+    """The league shape the archive is about: `(teams, rounds, format)`.
+
+    Mixing shapes is the one thing that makes every number here meaningless.
+    Pick 14 is round 2 in an 8-team draft and round 1 in a 16-team one; and
+    in PPR a receiver goes a round before the same receiver in standard. So
+    ONE shape is chosen -- the most recorded -- and it is stated in every
+    answer rather than assumed by the page.
+
+    THE TIE-BREAK IS TOTAL AND DETERMINISTIC: most drafts first, then the
+    fewest teams, then PPR before half before standard. Two shapes with the
+    same count is not a hypothetical while the farm is rotating over five of
+    them, and a page whose shape flipped between requests -- because DuckDB
+    is free to return equal groups in any order -- would serve two different
+    archives under one URL and cache whichever it saw first.
+
+    Leaves that shape's draft ids in a temp table (`shape_draft`) on this
+    connection, which is what `shape_filter` reads. Temp, so it belongs to
+    this request's connection and cannot outlive it; a read-only DuckDB
+    connection allows it because nothing is written to the file.
+    """
+    rows = conn.execute(
+        "SELECT draft_id, teams, rounds,"
+        " coalesce(scoring_json, settings_json) AS scoring"
+        " FROM draft_log WHERE teams > 0 AND rounds > 0"
+        " ORDER BY draft_id").fetchall()
+    counts: dict = {}
+    for draft_id, teams, rounds, scoring in rows:
+        shape = (int(teams), int(rounds), dl.draft_format(scoring))
+        counts.setdefault(shape, []).append(str(draft_id))
+    if not counts:
         raise HTTPException(status_code=404,
                             detail="No drafts have been recorded yet.")
-    return int(row[0]), int(row[1])
+    teams, rounds, fmt = min(
+        counts, key=lambda s: (-len(counts[s]), s[0], s[1],
+                               _FORMAT_ORDER.index(s[2])))
+    conn.execute("CREATE OR REPLACE TEMP TABLE shape_draft AS "
+                 "SELECT unnest(?::VARCHAR[]) AS draft_id",
+                 [counts[(teams, rounds, fmt)]])
+    return teams, rounds, fmt
 
 
 def _human_picks_sql() -> str:
@@ -201,19 +245,18 @@ def _human_picks_sql() -> str:
 def _overview_payload() -> dict:
     conn = _corpus()
     try:
-        teams, rounds = _shape(conn)
+        teams, rounds, fmt = _shape(conn)
         row = conn.execute(
             "SELECT count(*), min(recorded_at), max(recorded_at),"
-            " median(human_seats) FROM draft_log WHERE teams = ? AND rounds = ?",
-            [teams, rounds]).fetchone()
+            f" median(human_seats) FROM draft_log WHERE {shape_filter('')}"
+        ).fetchone()
         picks = conn.execute(
             "SELECT count(*) FROM draft_log_pick pk JOIN draft_log d"
-            " USING (draft_id) WHERE d.teams = ? AND d.rounds = ?",
-            [teams, rounds]).fetchone()[0]
+            f" USING (draft_id) WHERE {shape_filter()}").fetchone()[0]
         human = conn.execute(
             f"SELECT count(*) FROM draft_log_pick pk JOIN draft_log d"
-            f" USING (draft_id) WHERE d.teams = ? AND d.rounds = ?"
-            f" AND {_human_picks_sql()}", [teams, rounds]).fetchone()[0]
+            f" USING (draft_id) WHERE {shape_filter()}"
+            f" AND {_human_picks_sql()}").fetchone()[0]
     finally:
         conn.close()
     return {
@@ -222,6 +265,11 @@ def _overview_payload() -> dict:
         "human_picks": int(human),
         "teams": teams,
         "rounds": rounds,
+        # The archive's own shape, said rather than implied. Every count
+        # above is over drafts of exactly this size AND this scoring, so a
+        # page that printed "PPR" over a standard-scoring archive would be
+        # attributing the numbers to a game nobody played.
+        "format": fmt,
         "from": None if row[1] is None else str(row[1]),
         "to": None if row[2] is None else str(row[2]),
         "median_humans": None if row[3] is None else float(row[3]),
@@ -370,7 +418,7 @@ def _turn_picks(teams: int, slot: int) -> list:
 def _slot_payload(slot: int, board_conn) -> dict:
     conn = _corpus()
     try:
-        teams, rounds = _shape(conn)
+        teams, rounds, fmt = _shape(conn)
         if not 1 <= slot <= teams:
             raise HTTPException(status_code=404,
                                 detail=f"This archive has seats 1 to {teams}.")
@@ -382,7 +430,7 @@ def _slot_payload(slot: int, board_conn) -> dict:
             WITH mine AS (
                 SELECT pk.pick_no, pk.round, pk.player_id, pk.position
                 FROM draft_log_pick pk JOIN draft_log d USING (draft_id)
-                WHERE d.teams = ? AND d.rounds = ? AND pk.slot = ? AND {human}
+                WHERE {shape_filter()} AND pk.slot = ? AND {human}
             ),
             counted AS (
                 SELECT pick_no, round, player_id, position, count(*) AS n
@@ -398,14 +446,14 @@ def _slot_payload(slot: int, board_conn) -> dict:
             QUALIFY row_number() OVER (
                 PARTITION BY c.pick_no ORDER BY c.n DESC, c.player_id) <= ?
             ORDER BY c.pick_no, c.n DESC
-        """, [teams, rounds, slot, TOP_PER_TURN]).fetchall()
+        """, [slot, TOP_PER_TURN]).fetchall()
 
         mix = conn.execute(f"""
             SELECT pk.pick_no, pk.position, count(*) AS n
             FROM draft_log_pick pk JOIN draft_log d USING (draft_id)
-            WHERE d.teams = ? AND d.rounds = ? AND pk.slot = ? AND {human}
+            WHERE {shape_filter()} AND pk.slot = ? AND {human}
             GROUP BY 1, 2 ORDER BY 1, 3 DESC
-        """, [teams, rounds, slot]).fetchall()
+        """, [slot]).fetchall()
 
         # THE PATHS PEOPLE WALK. One string per draft -- this seat's first
         # five positions in order -- then grouped. A draft where this seat
@@ -417,11 +465,11 @@ def _slot_payload(slot: int, board_conn) -> dict:
                 SELECT pk.draft_id,
                        string_agg(pk.position, '-' ORDER BY pk.round) AS path
                 FROM draft_log_pick pk JOIN draft_log d USING (draft_id)
-                WHERE d.teams = ? AND d.rounds = ? AND pk.slot = ?
+                WHERE {shape_filter()} AND pk.slot = ?
                   AND pk.round <= ? AND {human}
                 GROUP BY 1 HAVING count(*) = ?
             ) GROUP BY 1 ORDER BY 2 DESC LIMIT 8
-        """, [teams, rounds, slot, SEQUENCE_ROUNDS, SEQUENCE_ROUNDS]).fetchall()
+        """, [slot, SEQUENCE_ROUNDS, SEQUENCE_ROUNDS]).fetchall()
         walked = sum(n for _path, n in paths)
     finally:
         conn.close()
@@ -474,6 +522,7 @@ def _slot_payload(slot: int, board_conn) -> dict:
         "slot": slot,
         "teams": teams,
         "rounds": rounds,
+        "format": fmt,
         "turns": [turns[p] for p in sorted(turns)],
         "sequences": [{
             "path": str(path).split("-"),
@@ -488,7 +537,7 @@ def _slot_payload(slot: int, board_conn) -> dict:
 def _players_payload(slot: int, board_conn) -> dict:
     conn = _corpus()
     try:
-        teams, rounds = _shape(conn)
+        teams, rounds, fmt = _shape(conn)
         if not 1 <= slot <= teams:
             raise HTTPException(status_code=404,
                                 detail=f"This archive has seats 1 to {teams}.")
@@ -496,10 +545,10 @@ def _players_payload(slot: int, board_conn) -> dict:
         # board" does not care who took him. `draft_log_pool` is what makes
         # the denominator honest -- a player who was not in a draft's pool at
         # all must not count as having lasted through it.
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             WITH d AS (
                 SELECT draft_id, my_slot FROM draft_log
-                WHERE teams = ? AND rounds = ?
+                WHERE {shape_filter('')}
             ),
             pool AS (
                 SELECT pl.draft_id, pl.player_id, pl.position, pl.team,
@@ -517,7 +566,7 @@ def _players_payload(slot: int, board_conn) -> dict:
                    avg(p.espn_rank), avg(p.adp_rank)
             FROM pool p LEFT JOIN taken t USING (draft_id, player_id)
             GROUP BY 1
-        """, [teams, rounds]).fetchall()
+        """).fetchall()
     finally:
         conn.close()
 
@@ -566,7 +615,7 @@ def _players_payload(slot: int, board_conn) -> dict:
             "survive": survive,
         })
     players.sort(key=lambda row: (row["median"] is None, row["median"] or 0))
-    return {"slot": slot, "teams": teams, "rounds": rounds,
+    return {"slot": slot, "teams": teams, "rounds": rounds, "format": fmt,
             "turns": turns, "bins": HIST_BINS, "picks_total": total_picks,
             "players": players}
 
@@ -630,7 +679,7 @@ def _at_picks_payload(picks: tuple, board_conn) -> dict:
                 PARTITION BY c.pick_no ORDER BY c.n DESC, c.player_id) <= ?
             ORDER BY c.pick_no, c.n DESC
         """, [*picks, TOP_AT_PICK]).fetchall()
-        teams, rounds = _shape(conn)
+        teams, rounds, fmt = _shape(conn)
         drafts = int(conn.execute("SELECT count(*) FROM draft_log").fetchone()[0])
     finally:
         conn.close()
@@ -655,7 +704,8 @@ def _at_picks_payload(picks: tuple, board_conn) -> dict:
             "proj_change": (proj.get(str(player_id)) or {}).get("change"),
         })
     return {"picks": [out[p] for p in picks],
-            "drafts": drafts, "teams": teams, "rounds": rounds}
+            "drafts": drafts, "teams": teams, "rounds": rounds,
+            "format": fmt}
 
 
 def _parse_picks(raw: str) -> tuple:
@@ -689,22 +739,21 @@ def _export_zip(names: dict) -> bytes:
     """
     conn = _corpus()
     try:
-        teams, rounds = _shape(conn)
+        teams, rounds, fmt = _shape(conn)
         draft_rows = conn.execute(
             "SELECT d.draft_id, d.source, d.league_id, d.season,"
             " d.recorded_at, d.teams, d.rounds, d.my_slot, d.human_seats,"
             " count(pk.pick_no) AS picks_made"
             " FROM draft_log d LEFT JOIN draft_log_pick pk USING (draft_id)"
-            " WHERE d.teams = ? AND d.rounds = ?"
-            " GROUP BY ALL ORDER BY d.recorded_at DESC",
-            [teams, rounds]).fetchall()
+            f" WHERE {shape_filter()}"
+            " GROUP BY ALL ORDER BY d.recorded_at DESC").fetchall()
         pick_rows = conn.execute(
             "SELECT pk.draft_id, pk.pick_no, pk.round, pk.slot, pk.player_id,"
             " pk.position, pk.adp_rank, pk.proj_points, pk.autodrafted,"
             " pk.had_owner, pk.seconds_to_pick"
             " FROM draft_log_pick pk JOIN draft_log d USING (draft_id)"
-            " WHERE d.teams = ? AND d.rounds = ?"
-            " ORDER BY pk.draft_id, pk.pick_no", [teams, rounds]).fetchall()
+            f" WHERE {shape_filter()}"
+            " ORDER BY pk.draft_id, pk.pick_no").fetchall()
     finally:
         conn.close()
 

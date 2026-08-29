@@ -342,6 +342,19 @@ PPR_RECEPTION_POINTS = 0.75
 HALF_RECEPTION_POINTS = 0.25
 
 
+# The words a page prints for each format. One map, because the draft room's
+# header, the ADP pages and their FAQ all name the same thing, and "standard"
+# spelled three ways in three places is how a reader ends up unsure whether
+# they are looking at one archive or three.
+SCORING_LABELS = {"ppr": "PPR", "half": "half-PPR", "std": "standard"}
+
+
+def format_label(fmt) -> str:
+    """`'ppr'` -> `"PPR"`. Unknown reads as PPR, the same assumption
+    `scoring_format` makes about a league it cannot see."""
+    return SCORING_LABELS.get(str(fmt or "ppr").strip().lower(), "PPR")
+
+
 def format_for_receptions(points) -> str:
     """`'ppr'` | `'half'` | `'std'` from what one reception is worth.
 

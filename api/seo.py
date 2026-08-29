@@ -39,6 +39,7 @@ from fastapi import HTTPException
 from api import http_cache
 from api import market
 from pipeline.db import read_table
+from scoring import league
 from scoring.headshot import thumb
 
 SITE = "https://espnfantasydraft.com"
@@ -342,11 +343,13 @@ BLANKS = {
 
 def _empty() -> dict:
     return {"players": [], "by_slug": {}, "drafts": 0, "teams": 0, "rounds": 0,
-            "updated": None, "stamp": ("empty",), "risers": [], "fallers": [],
-            "runs": [], "round_mix": {}, "at_pick": {}, "seconds": None}
+            "format": None, "updated": None, "stamp": ("empty",),
+            "risers": [], "fallers": [], "runs": [], "round_mix": {},
+            "at_pick": {}, "seconds": None}
 
 
-def _stamp(conn, drafts: int, teams: int, rounds: int, updated) -> tuple:
+def _stamp(conn, drafts: int, teams: int, rounds: int, fmt, updated
+           ) -> tuple:
     """What this snapshot of the ADP aggregate IS, for the page cache.
 
     Two halves, because these pages are built out of two databases. The
@@ -371,7 +374,8 @@ def _stamp(conn, drafts: int, teams: int, rounds: int, updated) -> tuple:
         universal = _identity_key(conn) if conn is not None else ()
     except Exception:      # noqa: BLE001 -- see the docstring
         universal = ()
-    return (int(drafts), int(teams), int(rounds), str(updated), universal)
+    return (int(drafts), int(teams), int(rounds), str(fmt), str(updated),
+            universal)
 
 
 _last_board_facts: dict = {}
@@ -469,21 +473,21 @@ def build_adp(conn) -> dict:
     corpus = market._corpus()
     try:
         try:
-            teams, rounds = market._shape(corpus)
+            teams, rounds, fmt = market._shape(corpus)
         except HTTPException:
             return _empty()
         total, latest = corpus.execute(
             "SELECT count(*), max(recorded_at) FROM draft_log"
-            " WHERE teams = ? AND rounds = ?", [teams, rounds]).fetchone()
+            f" WHERE {market.shape_filter('')}").fetchone()
         rows = corpus.execute(
             "SELECT pk.player_id, pk.position, pk.pick_no"
             " FROM draft_log_pick pk JOIN draft_log d USING (draft_id)"
-            " WHERE d.teams = ? AND d.rounds = ? AND pk.player_id IS NOT NULL"
+            f" WHERE {market.shape_filter()} AND pk.player_id IS NOT NULL"
             " AND pk.pick_no BETWEEN 1 AND ?",
-            [teams, rounds, teams * rounds]).fetchall()
-        pooled = _pooled(corpus, teams, rounds)
-        clock, corpus_clock = _clock(corpus, teams, rounds)
-        runs = _runs(corpus, teams, rounds)
+            [teams * rounds]).fetchall()
+        pooled = _pooled(corpus)
+        clock, corpus_clock = _clock(corpus)
+        runs = _runs(corpus, teams)
     finally:
         corpus.close()
     total = int(total or 0)
@@ -611,8 +615,9 @@ def build_adp(conn) -> dict:
 
     updated = latest.date() if isinstance(latest, datetime) else None
     return {"players": players, "by_slug": by_slug, "drafts": total,
-            "teams": teams, "rounds": rounds, "updated": updated,
-            "stamp": _stamp(conn, total, teams, rounds, updated),
+            "teams": teams, "rounds": rounds, "format": fmt,
+            "updated": updated,
+            "stamp": _stamp(conn, total, teams, rounds, fmt, updated),
             "risers": risers, "fallers": fallers, "runs": runs,
             "round_mix": _round_mix(mix, rounds),
             "at_pick": _at_pick(players, teams, rounds),
@@ -658,7 +663,7 @@ def _usual_round(ordered: list, teams: int, rounds: int, of: int) -> tuple:
 # The corpus, past the picks themselves
 # ---------------------------------------------------------------------------
 
-def _pooled(corpus, teams: int, rounds: int) -> dict:
+def _pooled(corpus) -> dict:
     """player_id -> how many of these drafts he was on the board for.
 
     An older corpus, or a fixture that only ever wrote picks, has no pool
@@ -669,14 +674,14 @@ def _pooled(corpus, teams: int, rounds: int) -> dict:
         rows = corpus.execute(
             "SELECT pl.player_id, count(DISTINCT pl.draft_id)"
             " FROM draft_log_pool pl JOIN draft_log d USING (draft_id)"
-            " WHERE d.teams = ? AND d.rounds = ? AND pl.player_id IS NOT NULL"
-            " GROUP BY 1", [teams, rounds]).fetchall()
+            f" WHERE {market.shape_filter()} AND pl.player_id IS NOT NULL"
+            " GROUP BY 1").fetchall()
     except Exception:      # noqa: BLE001 -- no pool table on this corpus
         return {}
     return {str(pid): int(n) for pid, n in rows if n}
 
 
-def _clock(corpus, teams: int, rounds: int) -> tuple:
+def _clock(corpus) -> tuple:
     """How long a room takes over him, and how long it takes over anybody.
 
     HUMAN PICKS ONLY, unlike everything else on these pages. Where a player
@@ -686,18 +691,18 @@ def _clock(corpus, teams: int, rounds: int) -> tuple:
     the median over every pick in the corpus is 1.4 seconds, which is not a
     fact about anybody's deliberation.
     """
-    where = ("d.teams = ? AND d.rounds = ? AND pk.seconds_to_pick IS NOT NULL"
+    where = (f"{market.shape_filter()} AND pk.seconds_to_pick IS NOT NULL"
              " AND COALESCE(pk.autodrafted, FALSE) = FALSE"
              " AND (d.my_slot IS NULL OR pk.slot <> d.my_slot)")
     try:
         rows = corpus.execute(
             "SELECT pk.player_id, median(pk.seconds_to_pick), count(*)"
             " FROM draft_log_pick pk JOIN draft_log d USING (draft_id)"
-            f" WHERE {where} GROUP BY 1", [teams, rounds]).fetchall()
+            f" WHERE {where} GROUP BY 1").fetchall()
         overall = corpus.execute(
             "SELECT median(pk.seconds_to_pick)"
             " FROM draft_log_pick pk JOIN draft_log d USING (draft_id)"
-            f" WHERE {where}", [teams, rounds]).fetchone()
+            f" WHERE {where}").fetchone()
     except Exception:      # noqa: BLE001 -- an older corpus without a clock
         return {}, None
     # Ten is enough for a median to be about him rather than about one
@@ -708,7 +713,7 @@ def _clock(corpus, teams: int, rounds: int) -> tuple:
     return per_player, median_all
 
 
-def _runs(corpus, teams: int, rounds: int) -> list:
+def _runs(corpus, teams: int) -> list:
     """When the first player at each position comes off the board.
 
     The median over every draft, not the average: the question a reader has
@@ -720,10 +725,10 @@ def _runs(corpus, teams: int, rounds: int) -> list:
             "WITH firsts AS ("
             "  SELECT pk.draft_id, pk.position, min(pk.pick_no) AS first_pick"
             "  FROM draft_log_pick pk JOIN draft_log d USING (draft_id)"
-            "  WHERE d.teams = ? AND d.rounds = ? AND pk.position IS NOT NULL"
+            f"  WHERE {market.shape_filter()} AND pk.position IS NOT NULL"
             "  GROUP BY 1, 2)"
             " SELECT position, median(first_pick), count(*) FROM firsts"
-            " GROUP BY 1 ORDER BY 2", [teams, rounds]).fetchall()
+            " GROUP BY 1 ORDER BY 2").fetchall()
     except Exception:      # noqa: BLE001
         return []
     out = []
@@ -1918,8 +1923,12 @@ def _provenance(data: dict) -> str:
     if not data["drafts"]:
         return "No drafts recorded yet."
     when = data["updated"].strftime("%b %-d, %Y") if data["updated"] else "today"
+    # The archive's real format, never the word PPR by habit: the farm
+    # rotates over standard-scoring rooms too, and the shape with the most
+    # recorded drafts is what these pages are built from (`market._shape`).
     return (f"From {data['drafts']} real ESPN mock drafts "
-            f"({data['teams']}-team PPR, {data['rounds']} rounds), updated {when}.")
+            f"({data['teams']}-team {league.format_label(data.get('format'))}, "
+            f"{data['rounds']} rounds), updated {when}.")
 
 
 def _person(p: dict, image: str | None) -> dict:
@@ -1971,6 +1980,7 @@ def _index_faq(data: dict) -> list:
     against on the player pages."""
     drafts = data["drafts"]
     teams, rounds = data["teams"], data["rounds"]
+    scoring = league.format_label(data.get("format"))
     corpus = (f"{drafts} ESPN mock drafts this site recorded"
               if drafts else "the ESPN mock drafts this site records")
     return [
@@ -1988,11 +1998,13 @@ def _index_faq(data: dict) -> list:
          "took him somewhere between those two numbers. A narrow range means "
          "the room agrees on him; a wide one means he is a reach for some "
          "drafters and a steal for others."),
-        (f"Why {teams}-team PPR?" if drafts else "Which league shape is this?",
-         f"That is the shape ESPN's public mock draft lobby runs: {teams} "
-         f"teams, {rounds} rounds, PPR scoring. Draft position moves with "
-         "league size, so mixing shapes into one number would blur all of "
-         "them. Every figure on these pages comes from that one shape."),
+        (f"Why {teams}-team {scoring}?" if drafts
+         else "Which league shape is this?",
+         f"That is the shape most of the drafts we have recorded were played "
+         f"at: {teams} teams, {rounds} rounds, {scoring} scoring. Draft "
+         "position moves with league size and with scoring, so mixing shapes "
+         "into one number would blur all of them. Every figure on these "
+         "pages comes from that one shape."),
         ("Is this ESPN's own ADP?",
          "No. ESPN publishes its own average draft position, drawn from real "
          "leagues; each player page shows it beside the mock figure so you "
@@ -2161,7 +2173,8 @@ def register_seo_routes(app, conn=None):
             p for p in d["players"] if p["position"] == position]
         present = _present(d)
         season = d["updated"].year if d["updated"] else datetime.now().year
-        shape = f"{d['teams']}-team PPR" if d["drafts"] else "PPR"
+        scoring = league.format_label(d.get("format"))
+        shape = f"{d['teams']}-team {scoring}" if d["drafts"] else scoring
         if position is None:
             heading = f"ESPN Mock Draft ADP {season} ({shape})"
             path = "/adp"

@@ -406,3 +406,101 @@ def test_the_export_is_a_zip_of_the_whole_corpus(corpus, client):
 
     overview = json.loads(zf.read("overview.json"))
     assert overview["drafts"] == 2
+
+
+# ---------------------------------------------------------------------------
+# One shape, and the shape is (teams, rounds, format).
+# ---------------------------------------------------------------------------
+
+
+def _mixed(path, shapes):
+    """A corpus of `{(teams, rounds, receptions): drafts}`, one pick each."""
+    conn = duckdb.connect(str(path))
+    conn.execute("""CREATE TABLE draft_log (
+        draft_id VARCHAR, source VARCHAR, league_id VARCHAR, season INTEGER,
+        recorded_at TIMESTAMP, teams INTEGER, rounds INTEGER, my_slot INTEGER,
+        scoring_json VARCHAR, settings_json VARCHAR, human_seats INTEGER)""")
+    conn.execute("""CREATE TABLE draft_log_pick (
+        draft_id VARCHAR, pick_no INTEGER, round INTEGER, slot INTEGER,
+        owner_key VARCHAR, is_anonymous BOOLEAN, player_id VARCHAR,
+        position VARCHAR, adp_rank DOUBLE, proj_points DOUBLE,
+        autodrafted BOOLEAN, had_owner BOOLEAN, seconds_to_pick DOUBLE,
+        clock_seconds DOUBLE)""")
+    conn.execute("""CREATE TABLE draft_log_pool (
+        draft_id VARCHAR, player_id VARCHAR, position VARCHAR, team VARCHAR,
+        adp_rank DOUBLE, proj_points DOUBLE, espn_rank DOUBLE,
+        espn_proj DOUBLE, bye INTEGER)""")
+    n = 0
+    for (teams, rounds, receptions), drafts in shapes.items():
+        for _ in range(drafts):
+            n += 1
+            conn.execute(
+                "INSERT INTO draft_log VALUES (?, 'mock', '1', 2026,"
+                " TIMESTAMP '2026-08-24 12:00:00', ?, ?, NULL, ?, NULL, 3)",
+                [f"d{n}", teams, rounds, f'{{"receptions": {receptions}}}'])
+            conn.execute("INSERT INTO draft_log_pick VALUES"
+                         " (?, 1, 1, 1, 'o', FALSE, 'star', 'RB', 1, 1,"
+                         " FALSE, TRUE, 5.0, 30.0)", [f"d{n}"])
+    conn.close()
+    return str(path)
+
+
+def _shape_of(path):
+    conn = duckdb.connect(path, read_only=True)
+    try:
+        return market._shape(conn)
+    finally:
+        conn.close()
+
+
+def test_the_archive_is_one_scoring_format_as_well_as_one_size():
+    """8-team PPR and 8-team standard are the same size and different games:
+    in PPR a receiver goes a round earlier. Counting them together would
+    build a page of numbers about neither."""
+    import tempfile
+    import os
+
+    path = _mixed(os.path.join(tempfile.mkdtemp(), "c.duckdb"),
+                  {(8, 16, 1.0): 3, (8, 16, 0.0): 5})
+
+    assert _shape_of(path) == (8, 16, "std")
+
+
+@pytest.mark.parametrize("shapes,expected", [
+    # Most drafts wins, whatever else is true.
+    ({(8, 16, 1.0): 2, (12, 16, 0.0): 5}, (12, 16, "std")),
+    # Tied on count: fewest teams first.
+    ({(12, 16, 1.0): 4, (8, 16, 1.0): 4}, (8, 16, "ppr")),
+    # Tied on count and teams: fewest rounds, then PPR before half before
+    # standard.
+    ({(10, 16, 0.0): 4, (10, 16, 1.0): 4}, (10, 16, "ppr")),
+    ({(10, 16, 0.5): 4, (10, 16, 0.0): 4}, (10, 16, "half")),
+    ({(10, 15, 1.0): 4, (10, 16, 1.0): 4}, (10, 15, "ppr")),
+])
+def test_the_tie_break_is_total_and_deterministic(shapes, expected):
+    """A page whose shape flipped between requests would serve two archives
+    under one URL and cache whichever it saw first -- and DuckDB is free to
+    return equally-sized groups in any order."""
+    import tempfile
+    import os
+
+    path = _mixed(os.path.join(tempfile.mkdtemp(), "c.duckdb"), shapes)
+
+    assert _shape_of(path) == expected
+    # Same answer every time, on a fresh connection each time.
+    assert {_shape_of(path) for _ in range(5)} == {expected}
+
+
+def test_the_overview_counts_only_that_shapes_drafts(tmp_path, monkeypatch):
+    """The filter, not just the label: a standard-scoring draft must not be
+    counted into a PPR archive's numbers."""
+    path = _mixed(tmp_path / "c.duckdb",
+                  {(8, 16, 1.0): 4, (8, 16, 0.0): 1, (12, 16, 1.0): 2})
+    monkeypatch.setattr(market.dl, "CORPUS_PATH", path)
+    market._CACHE.clear()
+
+    body = TestClient(_app()).get("/api/market/overview").json()
+
+    assert (body["teams"], body["rounds"], body["format"]) == (8, 16, "ppr")
+    assert body["drafts"] == 4
+    assert body["picks"] == 4

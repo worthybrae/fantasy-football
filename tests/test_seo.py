@@ -1587,3 +1587,45 @@ def test_nothing_on_a_player_page_can_push_it_sideways():
     # Every wide thing the profile sections add is inside one of the two.
     assert '<div class="scroll">\n<table class="sched">' in page
     assert '<div class="xscroll">\n<svg viewBox="0 0 720 128"' in page
+
+
+# ---------------------------------------------------------------------------
+# The pages name the archive's real scoring, not the word PPR by habit.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def standard_corpus(corpus, monkeypatch):
+    """The same ten drafts, scored without receptions.
+
+    Written onto the corpus the other tests use rather than built again: the
+    only thing under test here is what the pages CALL the shape, and every
+    figure on them should be identical."""
+    conn = dl.corpus_conn(str(corpus))
+    try:
+        conn.execute("UPDATE draft_log SET scoring_json = ?",
+                     ['{"receptions": 0.0}'])
+    finally:
+        conn.close()
+    market._CACHE.clear()
+    return corpus
+
+
+def test_the_pages_say_the_archives_real_format(standard_corpus, board):
+    """The farm records standard-scoring rooms now, so the most-recorded
+    shape can be a standard one -- and a page that printed PPR over it would
+    be attributing its numbers to a game nobody in it played."""
+    body = _client(board).get("/adp").text
+
+    assert "<title>ESPN Mock Draft ADP 2026 (4-team standard)" in body
+    assert "(4-team standard, 6 rounds)" in body
+    assert "Why 4-team standard?" in html.unescape(body)
+    assert "4-team PPR" not in body
+
+
+def test_the_ppr_wording_is_still_there_when_the_archive_is_ppr(corpus, board):
+    """The other half of the same claim: nothing about the default changed."""
+    body = _client(board).get("/adp").text
+
+    assert "<title>ESPN Mock Draft ADP 2026 (4-team PPR)" in body
+    assert "4-team standard" not in body
