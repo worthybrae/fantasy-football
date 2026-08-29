@@ -1363,6 +1363,20 @@ def _move_tone(now, prev, invert: bool = False) -> str:
 _profile_failed = False
 
 
+def _profile_unavailable(exc: BaseException) -> None:
+    """Say once per process that the profile could not be had.
+
+    ONCE, because a profile failing on all 203 pages of a crawl is one fact
+    about the database, not two hundred -- and a log that repeats it two
+    hundred times is a log nobody reads the second line of.
+    """
+    global _profile_failed
+    if not _profile_failed:
+        _profile_failed = True
+        print(f"seo: profile enrichment unavailable, pages render "
+              f"without it: {exc!r}", flush=True)
+
+
 def cached_profile_or_none(conn, player_id: str, settings=None):
     """`scoring.profile_cache.cached_profile`, or None however it fails.
 
@@ -1370,9 +1384,7 @@ def cached_profile_or_none(conn, player_id: str, settings=None):
     of the corpus and needs nothing from the universal database; the profile
     is an enrichment on top, exactly like `scoring/adp_facts.attach`, and a
     universal database that cannot answer must cost the enrichment rather
-    than the page. So this swallows -- and says so once per process, because
-    a profile failing on all 203 pages of a crawl is one fact about the
-    database, not two hundred.
+    than the page. So this swallows -- and says so once per process.
 
     NOTHING IS HELD WHILE THIS RUNS. `cached_profile` single-flights on its
     own lock and takes one of `scoring.board_cache.BUILD_SLOTS`' two build
@@ -1381,7 +1393,6 @@ def cached_profile_or_none(conn, player_id: str, settings=None):
     neither `_pages_lock` nor `_adp_lock` held -- see `rendered` for why the
     page cache is written after the build rather than around it.
     """
-    global _profile_failed
     if conn is None:
         return None
     try:
@@ -1389,10 +1400,7 @@ def cached_profile_or_none(conn, player_id: str, settings=None):
         from scoring.profile_cache import cached_profile
         return cached_profile(conn, player_id, None, settings or league.load(conn))
     except Exception as exc:      # noqa: BLE001 -- see the docstring
-        if not _profile_failed:
-            _profile_failed = True
-            print(f"seo: profile enrichment unavailable, pages render "
-                  f"without it: {exc!r}", flush=True)
+        _profile_unavailable(exc)
         return None
 
 
@@ -1868,12 +1876,32 @@ def profile_view(conn, player: dict, slugs: dict, settings=None) -> dict | None:
 
     `slugs` maps player_id -> the slug of his own page, so a comparable or a
     board peer who is on this board becomes a link and one who is not stays
-    text. Returns None when there is no profile to draw -- an unknown id, or
-    a universal database that cannot answer.
+    text. Returns None when there is no profile to draw -- an unknown id, a
+    universal database that cannot answer, or a payload the shapers below
+    cannot make a section out of.
+
+    THE GUARD COVERS THE SHAPING, NOT ONLY THE FETCH. `cached_profile_or_none`
+    swallows everything the database can do wrong and then hands the payload
+    to fifteen shapers that swallow nothing: `_meters` and `_season_rows`
+    read `payload["header"]` and `payload["bio"]` by subscript, `_oline`
+    reads `int(oline["rank"])`, `_weeks` reads `int(g["week"])`. Every one of
+    those is a key the profile builder is entitled to leave null, and a null
+    in any of them used to be a 500 on a page that needs none of it. Same
+    bargain as the fetch, then, and the same one line per process.
     """
     payload = cached_profile_or_none(conn, player["player_id"], settings)
     if payload is None:
         return None
+    try:
+        return _profile_view(payload, slugs)
+    except Exception as exc:      # noqa: BLE001 -- see the docstring
+        _profile_unavailable(exc)
+        return None
+
+
+def _profile_view(payload: dict, slugs: dict) -> dict:
+    """`profile_view`'s shaping, split out so its guard can be one `try`
+    around the lot rather than fifteen."""
     header = payload.get("header") or {}
     status = payload.get("status") or {}
     slot = status.get("depth_chart_order")

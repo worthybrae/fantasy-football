@@ -1657,3 +1657,51 @@ def test_six_player_pages_at_once_each_get_their_whole_page(corpus, profiled):
         body = html.unescape(got[slug])
         for heading in ("How he grades", "Every season he has played"):
             assert heading in body, f"{slug} lost {heading!r} to the race"
+
+
+@pytest.mark.parametrize("payload,broke", [
+    # A LINE WITH NO PLACE. `int(oline["rank"])` was unguarded, and a team
+    # whose line ranks nowhere -- an expansion week, a season the source has
+    # not graded yet -- is a null in that column, not an absent card.
+    ({"header": {"position": "RB", "career_games_pg": 15.0},
+      "oline": {"team": "CHI", "rank": None, "teams": 32}}, "a null o-line rank"),
+    # A PAYLOAD WITH NO `bio`. `_season_rows` reads `payload["bio"]` by
+    # subscript to date the projection row, and `.get("bio")` is a key the
+    # builder is free to stop filling.
+    ({"header": {"position": "RB", "proj_pos_finish": 8},
+      "seasons": [{"season": 2025, "games": 16, "ppg": 14.0, "pos_finish": 9}],
+      "summary": {"proj_ppg": 15.0}}, "no bio"),
+])
+def test_a_shaper_that_raises_costs_the_sections_not_the_page(
+        corpus, profiled, monkeypatch, capsys, payload, broke):
+    """THE GUARD HAS TO COVER THE SHAPING, NOT ONLY THE FETCH.
+
+    `cached_profile_or_none` swallowed everything the universal database
+    could do wrong and then handed the payload to fifteen shapers that
+    swallowed nothing -- `_meters`, `_season_rows`, `_weeks`, `_usage`,
+    `_schedule`, `_oline`, and the `payload["header"]` / `payload["bio"]` /
+    `int(g["week"])` subscripts inside them. A payload the builder is
+    entitled to produce therefore turned a 200 into a 500 on a page that
+    needs none of it.
+    """
+    from scoring import profile_cache
+    monkeypatch.setattr(profile_cache, "cached_profile",
+                        lambda *a, **k: dict(payload))
+    monkeypatch.setattr(seo, "_profile_failed", False)
+    seo.clear_pages()
+    capsys.readouterr()
+    client = _client(profiled)
+    res = client.get("/adp/dandre-swift")
+    assert res.status_code == 200, broke
+    body = html.unescape(res.text)
+    # The corpus's own page, whole.
+    assert "D'Andre Swift ADP" in body and "Where the room takes him" in body
+    # And not one section that would have needed the payload.
+    for heading in ("How he grades", "Every season he has played",
+                    "What his points are made of", "The team around him"):
+        assert heading not in body, heading
+    # Said once for the process, not once per page of a crawl.
+    client.get("/adp/amon-ra-st-brown")
+    said = [line for line in capsys.readouterr().out.splitlines()
+            if "profile enrichment unavailable" in line]
+    assert len(said) == 1, said
