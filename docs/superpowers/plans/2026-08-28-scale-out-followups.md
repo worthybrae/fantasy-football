@@ -74,3 +74,10 @@ These are the deferred / parked findings the final whole-branch review should tr
 - Availability: K/DST have no fitted fallback buckets (own ADP + 12-pick sigma past the corpus depth); a lone K/DST left at exactly one waits for the last turn; a field where every other player is ~0 % puts the candidate's whole projection on the score scale.
 - Live rooms: a retiring room's stop-timeout path re-adopts the orphan under a `sid~token` key; `readopt` orphans keep touching `last_activity` from socket frames, so the reaper cannot fire while ESPN still sends.
 - `live_session` ciphertext rows never age out (`saved_at` unread); token restore is limited to configured custody key versions.
+
+## Carried out of the 2026-08-29 afternoon reviews (not blocking)
+
+- ADP: with the 25 % take-rate floor the Risers card is empty on the real board — consider one "movers" list; `--text-3` (2.9:1) is still the app-wide tertiary token; `_last_board_facts` serves a ≤ 24 h old bye/tier during a board outage; the "still on the board" strip is eight 0 % chips for top-20 players (start the strip at pick 4 for early picks).
+- Room table: compact tiers key on viewport width (container queries if the rail ever resizes); an active sort survives its column being hidden (falls back to ESPN); below 1120 px the table still overflows ~38 px.
+- "Your guys by pick": the card is eagerly imported (lazy-loading it made the Dashboard perf test flaky); `best_pick` lands on the eighth pick for a favourite nobody drafts; no ETag on the outlook endpoint.
+- Countdown store ticks every second even for drafts days away; `.wc-corner` now shares `--ticker-h` with the ticker.
