@@ -110,3 +110,70 @@ def test_a_favourites_list_round_trips_and_replaces_in_one_transaction():
             billing._db().execute(
                 "DELETE FROM favorite_player WHERE account_id = ?", [name])
         billing.reset_for_tests(None)
+
+
+def test_a_founder_seat_is_claimed_once_and_survives_a_key_rotation(monkeypatch):
+    """The founder claim over the other backend.
+
+    Here rather than only in tests/test_billing.py because this is the one
+    statement in the module that counts and inserts in the same breath --
+    `INSERT INTO founder ... SELECT ?, (SELECT count(*) FROM founder) + 1, ?
+    WHERE (SELECT count(*) FROM founder) < ?` -- and a placeholder in a SELECT
+    list is exactly where the `?` -> `%s` rewrite and psycopg's parameter
+    typing can part company with DuckDB. A fake would not notice.
+
+    A LIMIT NOBODY CAN REACH, because this table is shared: the database may
+    already hold rows from another run, and asserting "ordinal 1" against it
+    would be asserting on somebody else's history. What is asserted is what
+    the shape of the statement decides -- one seat per account however many
+    times it asks, and the older id's seat found from the newer one.
+    """
+    new = "pg-test-" + uuid.uuid4().hex
+    old = "pg-test-" + uuid.uuid4().hex
+    monkeypatch.setenv(billing.FOUNDERS_LIMIT_ENV, str(10 ** 9))
+    billing.reset_for_tests(None)
+    try:
+        assert billing.is_founder([new]) is False
+
+        ordinal = billing.claim_founder([old])
+        assert ordinal is not None and ordinal >= 1
+        # Idempotent, because every caller is a route that runs on every page
+        # load...
+        assert billing.claim_founder([old]) == ordinal
+        # ...and a rotated key finds the same row rather than spending a
+        # second seat on the same person.
+        assert billing.claim_founder([new, old]) == ordinal
+        assert billing.is_founder([new, old]) is True
+        assert billing.founder_ordinal([new]) is None
+    finally:
+        for name in (new, old):
+            billing._db().execute("DELETE FROM founder WHERE account_id = ?",
+                                  [name])
+        billing.reset_for_tests(None)
+
+
+def test_a_full_list_hands_out_nothing_here_either(monkeypatch):
+    """The `WHERE` that stops the hundred and first, over the backend where it
+    is a different planner's problem.
+
+    The limit is set to whatever the table already holds rather than to zero:
+    zero is refused in Python before the statement is sent, which would leave
+    the guard itself untested.
+    """
+    seed = "pg-test-" + uuid.uuid4().hex
+    latecomer = "pg-test-" + uuid.uuid4().hex
+    monkeypatch.setenv(billing.FOUNDERS_LIMIT_ENV, str(10 ** 9))
+    billing.reset_for_tests(None)
+    try:
+        assert billing.claim_founder([seed]) is not None
+        full = billing.founders_taken()
+        monkeypatch.setenv(billing.FOUNDERS_LIMIT_ENV, str(full))
+
+        assert billing.claim_founder([latecomer]) is None
+        assert billing.founders_taken() == full
+        assert billing.founders_left() == 0
+    finally:
+        for name in (seed, latecomer):
+            billing._db().execute("DELETE FROM founder WHERE account_id = ?",
+                                  [name])
+        billing.reset_for_tests(None)

@@ -900,3 +900,127 @@ def test_a_store_that_cannot_answer_is_a_503_here_too(client, monkeypatch,
     monkeypatch.setattr(billing, "_db", _broken)
 
     assert _outlook(client).status_code == 503
+
+
+# -- founders, over the same routes -------------------------------------------
+#
+# `GET /api/account/me` is the one route in this file that answers an
+# anonymous browser, and the reason is the landing page: "N founder spots
+# left -- connect ESPN to claim one" is an offer, and an offer that 401s is a
+# page that cannot make it. Everything else here is the claim itself, which is
+# a side effect of routes that exist to answer other questions (see
+# `billing.claim_founder`) rather than an endpoint of its own -- so the tests
+# below make ordinary requests and then ask what happened.
+
+SEATS = 5
+
+
+@pytest.fixture
+def seats(monkeypatch):
+    """A small, known number of founder seats.
+
+    Set rather than left to the default: the real one is a hundred, and a test
+    that filled it would be a hundred claims to prove one rule.
+    """
+    monkeypatch.setenv(billing.FOUNDERS_LIMIT_ENV, str(SEATS))
+    return SEATS
+
+
+def test_a_signed_out_browser_is_told_how_many_seats_are_left(
+        client, monkeypatch, seats):
+    """200, not 401. The reader of this answer has not connected anything yet
+    -- that is the entire point of showing it to them."""
+    _signed_out(monkeypatch)
+
+    res = client.get("/api/account/me")
+
+    assert res.status_code == 200
+    assert res.json() == {"connected": False, "founder": False,
+                          "ordinal": None, "founders_left": SEATS}
+    # One person's answer, and never in a shared cache: two browsers get
+    # different bodies from this URL with no query string between them.
+    assert res.headers["cache-control"] == "private, no-store"
+
+
+def test_asking_who_i_am_claims_a_seat(client, monkeypatch, seats):
+    """The dashboard makes this request on every load, so it is the one that
+    covers somebody who never opens a real league's draft at all."""
+    _sign_in(monkeypatch)
+
+    body = client.get("/api/account/me").json()
+
+    assert body == {"connected": True, "founder": True, "ordinal": 1,
+                    "founders_left": SEATS - 1}
+
+
+def test_asking_twice_is_the_same_seat(client, monkeypatch, seats):
+    """A hundred pageviews must not be a hundred founders."""
+    _sign_in(monkeypatch)
+    first = client.get("/api/account/me").json()
+
+    assert client.get("/api/account/me").json() == first
+    assert billing.founders_taken() == 1
+
+
+def test_a_rotated_key_keeps_the_seat_it_already_has(client, monkeypatch,
+                                                     seats):
+    """Rotation changes the id and does not change who the person is. A read
+    that only looked at the newest would lose them their seat and spend
+    another one on them."""
+    _sign_in(monkeypatch, ids=(OLD_ID,))
+    assert client.get("/api/account/me").json()["ordinal"] == 1
+
+    _sign_in(monkeypatch, ids=(NEW_ID, OLD_ID))
+    after = client.get("/api/account/me").json()
+
+    assert after["ordinal"] == 1
+    assert after["founders_left"] == SEATS - 1
+
+
+def test_reading_the_favourites_claims_a_seat_too(client, monkeypatch, seats):
+    """The other authenticated read this app makes on a dashboard load. It
+    claims for the same reason: the account is already in hand."""
+    _sign_in(monkeypatch)
+
+    assert client.get("/api/account/favorites").status_code == 200
+
+    body = client.get("/api/account/me").json()
+    assert body["ordinal"] == 1
+    assert body["founders_left"] == SEATS - 1
+
+
+def test_the_favourites_read_survives_a_billing_store_that_cannot_claim(
+        client, monkeypatch, seats):
+    """The claim is a side effect. A store that is briefly away is a reason to
+    serve the list without a founder badge, not a reason to refuse the list."""
+    _sign_in(monkeypatch)
+    monkeypatch.setattr(billing, "claim_founder",
+                        lambda ids: (_ for _ in ()).throw(
+                            billing.StoreError("gone")))
+
+    assert client.get("/api/account/favorites").json() == {"players": []}
+
+
+def test_a_latecomer_is_told_the_seats_are_gone(client, monkeypatch, seats):
+    """Zero left, and no invented ordinal for somebody who has none."""
+    for i in range(SEATS):
+        billing.claim_founder([f"earlier-{i}"])
+    _sign_in(monkeypatch)
+
+    body = client.get("/api/account/me").json()
+
+    assert body == {"connected": True, "founder": False, "ordinal": None,
+                    "founders_left": 0}
+
+
+def test_me_is_a_503_when_the_store_cannot_answer(client, monkeypatch, seats):
+    """The count is the answer here, so an unreadable store has nothing
+    honest to say -- 503, like every other route in this file."""
+    _sign_in(monkeypatch)
+
+    def _broken(*_a, **_k):
+        raise billing.StoreError("gone")
+
+    monkeypatch.setattr(billing, "_db", _broken)
+
+    assert client.get("/api/account/me").status_code == 503

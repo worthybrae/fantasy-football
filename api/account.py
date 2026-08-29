@@ -19,6 +19,12 @@ shape:
     the custody key changes the id and does not change who the person is;
   * a write goes to the newest.
 
+THE ONE EXCEPTION TO THE 401 is `GET /api/account/me`, which answers a
+question an anonymous browser is allowed to ask: how many founder seats are
+left, and does this browser hold one. It writes nothing under an invented id
+-- with no session there is nothing to write -- and the page that reads it is
+the landing page, where every reader is signed out by definition.
+
 WHY THE IDS ARE CHECKED AGAINST THE BOARD. A favourite id travels into the
 draft plan and comes back out as a star beside a row. An id that names nobody
 would be a star beside a blank, or an entry the plan silently drops -- a bug
@@ -318,7 +324,7 @@ def _outlook_players(board, saved: list, picks: list) -> list:
 
 
 def register_account_routes(app, conn, store=None):
-    """`GET`/`PUT /api/account/favorites`.
+    """`GET /api/account/me`, and `GET`/`PUT /api/account/favorites`.
 
     `conn` is the board's connection, and it is REQUIRED rather than optional
     like the connection every other router here takes: the write's only real
@@ -386,10 +392,53 @@ def register_account_routes(app, conn, store=None):
             cur.close()
         return {str(player_id) for player_id in board["player_id"]}
 
+    @app.get("/api/account/me")
+    def account_me(request: Request, response: Response):
+        """Who this browser is to us, which today is one question: founder?
+
+        200 WITHOUT A SESSION, and that is the whole reason this route reads
+        the account the quiet way rather than through the `_account_ids` above.
+        The landing page is the main caller and its reader is by definition not
+        connected yet -- "N founder spots left, connect to claim one" is an
+        offer, and an offer that 401s is a page that cannot make it. So an
+        anonymous caller gets `connected: false`, `founder: false`, and the
+        same honest count of seats as everybody else.
+
+        PRIVATE, said out loud rather than left to `DefaultPrivate`. Two
+        readers get different bodies from the same URL with no query string
+        between them, so this is the exact shape a shared cache serves to the
+        wrong person. The seat count alone would be cacheable; the sentence
+        above it is not.
+
+        AND THE SEAT IS CLAIMED HERE. This is the request the dashboard makes
+        on every load, so it is the one that covers somebody who never opens a
+        real league's draft at all -- see `billing.claim_founder` for why the
+        claim is a side effect of routes that already hold the account rather
+        than an endpoint of its own.
+        """
+        http_cache.private(response)
+        ids = billing._account_ids(request, store)
+        try:
+            # Ordered: the claim first, so a seat taken by THIS request is
+            # already out of the count the same response reports.
+            ordinal = billing.claim_founder(ids) if ids else None
+            left = billing.founders_left()
+        except StoreError as exc:
+            raise billing._unavailable(exc) from None
+        return {"connected": bool(ids),
+                "founder": ordinal is not None,
+                "ordinal": ordinal,
+                "founders_left": left}
+
     @app.get("/api/account/favorites")
     def account_favorites(request: Request):
         """This account's list, in its own order. Empty until it saves one."""
         ids = _account_ids(request)
+        # A founder's seat, taken on the way past. Quietly: this route exists
+        # to answer a different question, and a billing store that is briefly
+        # away is not a reason to refuse somebody their own list. The seat is
+        # still there on the next request.
+        billing.claim_founder_quietly(ids)
         try:
             return {"players": billing.favorites(ids)}
         except StoreError as exc:

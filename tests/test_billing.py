@@ -218,12 +218,24 @@ class _Request:
     cookies: dict = {}
 
 
-def _gate(monkeypatch, ids, free=False):
+def _gate(monkeypatch, ids, free=False, open_founders=False):
+    """The gate with its two lookups faked, and THE FOUNDING PERIOD CLOSED by
+    default.
+
+    That last part is why this helper takes a keyword nothing passed before.
+    While `FOUNDERS_OPEN` is True every draft is free, so a gate test that
+    left it alone would pass whatever the rest of the function did -- the
+    price, the entitlement and the 402 would all be dead code under it. The
+    tests that are ABOUT the open period say so explicitly.
+    """
+    monkeypatch.setattr(billing, "FOUNDERS_OPEN", open_founders)
     monkeypatch.setattr(billing, "_account_ids", lambda request, store=None: ids)
     monkeypatch.setattr(billing, "is_free_draft", lambda league_id: free)
 
 
 def test_an_unpaid_real_draft_is_refused_with_the_price(monkeypatch):
+    """Once the founding period is over. `acct-hmac` never claimed a seat and
+    the list is closed, so this is the paywall doing its job."""
     from fastapi import HTTPException
 
     _gate(monkeypatch, ["acct-hmac"])
@@ -518,3 +530,218 @@ def test_two_accounts_read_from_four_threads_never_come_back_empty():
         thread.join()
 
     assert wrong == []
+
+
+# -- founders -----------------------------------------------------------------
+#
+# THE PROMISE UNDER TEST. The first `FOUNDERS_LIMIT` accounts to connect draft
+# free forever. Three ways to break it, and each has a test below: handing out
+# a hundred and first seat (a promise made to somebody it was not meant for,
+# which cannot be withdrawn), losing a seat somebody already holds (a promise
+# broken), and letting the founder clause be tidied underneath the
+# open-period one, which would take every founder's seat away on the day the
+# paywall comes back and on no day before it.
+
+
+def _limit(monkeypatch, seats: int) -> None:
+    monkeypatch.setenv(billing.FOUNDERS_LIMIT_ENV, str(seats))
+
+
+def test_the_default_limit_is_a_hundred(monkeypatch):
+    monkeypatch.delenv(billing.FOUNDERS_LIMIT_ENV, raising=False)
+    assert billing.founders_limit() == 100
+    _limit(monkeypatch, 7)
+    assert billing.founders_limit() == 7
+
+
+def test_a_nonsense_limit_is_the_default_rather_than_a_crash(monkeypatch):
+    """This is read on the path that opens a draft room. A typo in a
+    deployment variable must not be able to take that down."""
+    monkeypatch.setenv(billing.FOUNDERS_LIMIT_ENV, "one hundred")
+    assert billing.founders_limit() == 100
+
+
+def test_the_first_account_is_founder_one(monkeypatch):
+    _limit(monkeypatch, 3)
+    assert billing.claim_founder(["acct-one"]) == 1
+    assert billing.is_founder(["acct-one"]) is True
+    assert billing.founders_left() == 2
+
+
+def test_claiming_twice_is_the_same_seat(monkeypatch):
+    """Every caller is a route that runs on every page load. A second visit
+    must not be a second row, or a hundred pageviews would be a hundred
+    founders."""
+    _limit(monkeypatch, 3)
+    first = billing.claim_founder(["acct-one"])
+
+    assert billing.claim_founder(["acct-one"]) == first
+    assert billing.founders_taken() == 1
+
+
+def test_seats_are_handed_out_in_order_and_then_run_out(monkeypatch):
+    _limit(monkeypatch, 3)
+    ordinals = [billing.claim_founder([f"acct-{i}"]) for i in range(5)]
+
+    assert ordinals == [1, 2, 3, None, None]
+    assert billing.founders_taken() == 3
+    assert billing.founders_left() == 0
+    # And the two who missed out are not founders by any other route.
+    assert billing.is_founder(["acct-3"]) is False
+    assert billing.founder_ordinal(["acct-4"]) is None
+
+
+def test_an_unconnected_browser_claims_nothing(monkeypatch):
+    """The empty list is somebody who has not connected, not a wildcard --
+    the same rule `entitled` follows. A seat handed to nobody is a seat
+    nobody can ever be given."""
+    _limit(monkeypatch, 3)
+    assert billing.claim_founder([]) is None
+    assert billing.founders_taken() == 0
+
+
+def test_a_rotated_key_finds_its_seat_and_does_not_take_a_second(monkeypatch):
+    """Rotating the custody key computes a different id for the same person.
+    The row keeps the id it was written under, so a read that only looked at
+    the newest would both lose the founder his seat AND spend another one on
+    him."""
+    _limit(monkeypatch, 3)
+    billing.claim_founder(["old-key-id"])
+
+    assert billing.claim_founder(["new-key-id", "old-key-id"]) == 1
+    assert billing.founders_taken() == 1
+    assert billing.is_founder(["new-key-id", "old-key-id"]) is True
+
+
+def test_a_closed_list_hands_out_nothing_more(monkeypatch):
+    _limit(monkeypatch, 100)
+    monkeypatch.setattr(billing, "FOUNDERS_OPEN", False)
+
+    assert billing.claim_founder(["latecomer"]) is None
+    assert billing.founders_taken() == 0
+
+
+def test_a_limit_of_zero_sells_nothing_for_free(monkeypatch):
+    """The switch that turns the offer off without a deploy."""
+    _limit(monkeypatch, 0)
+    assert billing.claim_founder(["acct-one"]) is None
+    assert billing.founders_left() == 0
+
+
+def test_a_store_that_cannot_be_written_costs_the_request_nothing(monkeypatch):
+    """`claim_founder_quietly` is what the routes call. The claim is a side
+    effect of requests that exist to answer other questions, and a billing
+    store that is briefly away is not a reason to fail one of them."""
+    def broken():
+        raise billing.StoreError("the entitlement store is not usable")
+
+    monkeypatch.setattr(billing, "_db", broken)
+    assert billing.claim_founder_quietly(["acct-one"]) is None
+
+
+# -- founders at the gate ------------------------------------------------------
+
+
+def test_while_the_founding_period_is_open_nobody_pays(monkeypatch):
+    """The paywall is off. A real league, an account that has bought nothing,
+    and no refusal."""
+    _gate(monkeypatch, ["acct-hmac"], open_founders=True)
+    billing.require_paid(_Request(), "999", "2026")      # does not raise
+
+
+def test_opening_a_real_draft_takes_a_seat(monkeypatch):
+    _limit(monkeypatch, 3)
+    _gate(monkeypatch, ["acct-hmac"], open_founders=True)
+
+    billing.require_paid(_Request(), "999", "2026")
+
+    assert billing.founder_ordinal(["acct-hmac"]) == 1
+
+
+def test_a_founder_still_drafts_free_after_the_paywall_comes_back(monkeypatch):
+    """THE ORDERING THIS WHOLE FEATURE RESTS ON.
+
+    Billing on, the founding period over, nothing bought -- which is a 402 for
+    everybody else in this file. The founder clause sits above the
+    open-period one in `require_paid` precisely so that it is still there on
+    the day that constant flips, and this is the test that notices if it is
+    ever tidied below it.
+    """
+    _limit(monkeypatch, 3)
+    billing.claim_founder(["acct-founder"])
+    _gate(monkeypatch, ["acct-founder"])                 # FOUNDERS_OPEN False
+
+    assert billing.enabled() is True
+    assert billing.entitled(["acct-founder"], "999", 2026) is False
+    billing.require_paid(_Request(), "999", "2026")      # does not raise
+
+
+def test_a_stranger_pays_once_the_period_is_over(monkeypatch):
+    """The same request from somebody who never claimed a seat, so the two
+    tests differ by one row in one table."""
+    from fastapi import HTTPException
+
+    _limit(monkeypatch, 3)
+    billing.claim_founder(["acct-founder"])
+    _gate(monkeypatch, ["acct-stranger"])
+
+    with pytest.raises(HTTPException) as caught:
+        billing.require_paid(_Request(), "999", "2026")
+    assert caught.value.status_code == 402
+
+
+def test_a_closed_list_does_not_let_the_gate_hand_out_a_seat(monkeypatch):
+    """The gate claims, so it is also a way to get one. It must stop being
+    one at the same moment every other caller does."""
+    from fastapi import HTTPException
+
+    _limit(monkeypatch, 3)
+    _gate(monkeypatch, ["acct-stranger"])
+
+    with pytest.raises(HTTPException):
+        billing.require_paid(_Request(), "999", "2026")
+    assert billing.founders_taken() == 0
+
+
+# -- the hundred and first ----------------------------------------------------
+
+# Enough threads and enough accounts that the interleaving actually happens.
+# The window is one statement wide, so a serial run of this test proves
+# nothing; twelve threads racing for eight seats is where a count taken before
+# somebody else's insert would show up.
+CLAIM_THREADS = 12
+CLAIM_SEATS = 8
+
+
+def test_a_dozen_threads_racing_cannot_overfill_the_list(monkeypatch):
+    """THE FAILURE THIS PINS: TWO PEOPLE COUNT 99 AND BOTH INSERT.
+
+    FastAPI runs every sync handler in a threadpool, so two people connecting
+    in the same millisecond is the ordinary case rather than a rare one. A
+    count read before somebody else's insert lands is a hundred and first
+    founder -- a promise made to somebody it was not meant for, which cannot
+    be taken back afterwards, which is why this is worth a dozen threads in
+    the suite.
+    """
+    from threading import Barrier, Thread
+
+    _limit(monkeypatch, CLAIM_SEATS)
+    start = Barrier(CLAIM_THREADS)
+    got: list = []
+
+    def claim(n):
+        start.wait()
+        got.append(billing.claim_founder([f"racer-{n}"]))
+
+    threads = [Thread(target=claim, args=(n,)) for n in range(CLAIM_THREADS)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    seats = sorted(o for o in got if o is not None)
+    # Exactly the seats there were, each handed out once, and nobody else got
+    # anything at all.
+    assert seats == list(range(1, CLAIM_SEATS + 1))
+    assert billing.founders_taken() == CLAIM_SEATS
+    assert billing.founders_left() == 0
