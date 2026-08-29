@@ -1,6 +1,7 @@
 # tests/test_seo.py
 """The pages a search engine reads: ADP from the corpus, rendered as HTML."""
 import html
+import re
 import threading
 import time
 import xml.etree.ElementTree as ET
@@ -238,6 +239,9 @@ def board():
                      " ?, ?, NULL, ?)", [
         ("star", "D'Andre Swift", "Questionable", "hamstring", 1),
         ("mid", "Amon-Ra St. Brown", "None", None, None),
+        # THE OTHER SCALE. This feed has sent participation as a share and as
+        # a percentage; 60 here means 60%, not 6000%.
+        ("swing", "Swing Guy", "Questionable", "knee", 60),
     ])
     conn.execute("CREATE TABLE depth_charts (dt DATE, gsis_id VARCHAR, team VARCHAR)")
     conn.executemany("INSERT INTO depth_charts VALUES (?, ?, ?)", [
@@ -1039,7 +1043,9 @@ def test_the_player_pages_structured_data_parses_and_names_a_person(corpus, boar
     person = kinds["Person"]
     assert person["name"] == "D'Andre Swift"
     assert person["url"] == "https://espnfantasydraft.com/adp/dandre-swift"
-    assert person["affiliation"]["name"] == "CHI"
+    # The name a person says out loud, not the abbreviation: this node is
+    # read by something that has never seen a depth chart.
+    assert person["affiliation"]["name"] == "Chicago Bears"
     assert person["image"].startswith("https://")
 
 
@@ -1063,8 +1069,11 @@ def test_the_index_leads_with_risers_fallers_and_the_runs(corpus, board, monkeyp
     # `star` is taken at 1.0 and ESPN's board would reach him at 2.9, so he
     # rises two picks and `mid` falls two. Matched on the mover markup, not
     # on the bare digits -- "-2" is also the tail of the `josh-allen-2` slug.
-    assert '<span class="d big">+2</span>' in body
-    assert '<span class="d big">-2</span>' in body
+    # Green for the rooms getting there first, amber for them waiting.
+    assert '<span class="d big early">+2</span>' in body
+    assert '<span class="d big late">-2</span>' in body
+    # ...and every mover says how often the rooms take him at all.
+    assert "taken in 100%" in body
     # The runs: the first RB goes at pick 1 and the first tight end at pick 8.
     assert "<b>pick 1</b>" in body or '<span class="nm">pick 1</span>' in body
     assert '<span class="nm">pick 8</span>' in body
@@ -1094,6 +1103,104 @@ def test_the_round_page_shows_the_mix_and_what_each_seat_sees(corpus, board):
     assert "Seat 1 — pick 1" in body
     assert '<span class="d big">100%</span>' in body
     assert "Who goes in round 1" in body
+
+
+# -- what a page says, and how it reads --------------------------------------
+
+def test_every_title_and_description_fits_a_search_result(corpus, board):
+    """A title past sixty characters is cut off, and on these pages the half
+    that would be cut is the half that says which player it is about."""
+    c = _client(board)
+    for path in ("/adp", "/adp/rb", "/adp/qb", "/adp/round/1", "/adp/round/6",
+                 "/adp/dandre-swift", "/adp/amon-ra-st-brown", "/adp/swing-guy",
+                 "/adp/late-guy"):
+        body = c.get(path).text
+        title = html.unescape(re.search(r"<title>(.*?)</title>", body).group(1))
+        desc = html.unescape(
+            re.search(r'<meta name="description" content="(.*?)">', body).group(1))
+        assert len(title) <= seo.TITLE_MAX, (path, len(title), title)
+        assert len(desc) <= seo.DESC_MAX, (path, len(desc), desc)
+        assert title and desc
+
+
+def test_the_brand_is_the_part_of_a_title_that_gives_way():
+    short = "Round 11 of an ESPN mock draft"
+    assert seo._title(short).endswith("ESPN Draft Assist")
+    long = "Jacory Croskey-Merritt ADP – ESPN mock drafts 2026"
+    assert seo._title(long) == long
+    assert len(seo._title(long)) <= seo.TITLE_MAX
+
+
+def test_a_gap_that_rounds_to_nothing_does_not_print_minus_zero(corpus, board):
+    """`'%+.0f' % -0.4` is "-0", which reads as a negative quantity of
+    nothing."""
+    assert seo._signed(-0.4) == "0" and seo._signed(-0.04, 1) == "0.0"
+    assert seo._signed(2.0) == "+2" and seo._signed(-8.0) == "-8"
+    assert seo._signed(-8.25, 1) == "-8.2"
+    body = _client(board).get("/adp").text
+    assert ">-0<" not in body and ">+0<" not in body
+
+
+def test_the_prose_on_these_pages_clears_the_contrast_floor(corpus, board):
+    """--text-3 is #565b69 on #0a0b0e: 2.9 to 1, against the 4.5 small text
+    needs. Prose and labels take --text-2, which is 7.4 to 1."""
+    body = _client(board).get("/adp").text
+    assert "color:var(--text-3)" not in body
+    assert "--text-2:#98a0b0" in body
+
+
+def test_the_vs_espn_column_is_green_for_early_and_amber_for_late(corpus, board,
+                                                                 monkeypatch):
+    """Colour is never the only carrier -- the sign is in the cell and the
+    legend is under the table -- but the two directions must not be the wrong
+    way round: getting to him first is the good news."""
+    monkeypatch.setattr(seo, "MOVE_PICKS", 1)
+    seo.clear_pages()
+    market._CACHE.clear()
+    body = _client(board).get("/adp").text
+    assert ".early,.fig .v.early{color:var(--ok)}" in body
+    assert ".late,.fig .v.late{color:var(--accent)}" in body
+    assert "before ESPN&#39;s board would" in body or "before ESPN's board would" in body
+    # ...and the ESPN column is a different number from the vs-ESPN one.
+    assert "published average draft position" in body
+
+
+def test_a_defense_is_not_a_he(corpus, board, monkeypatch):
+    """Twenty-three of the two hundred published players are defenses, and
+    the copy on this page is written in sentences."""
+    from scoring import board_cache
+    monkeypatch.setattr(board_cache, "cached_build_board",
+                        lambda conn, *a, **k: _board_frame())
+    raw = _client(board).get("/adp/seattle-defense").text
+    # The prose only: the shared stylesheet and the analytics tag are not
+    # sentences anybody reads.
+    body = html.unescape(re.sub(r"<(style|script)\b.*?</\1>", "", raw, flags=re.S)).lower()
+    for pronoun in (" he ", " him ", " his "):
+        assert pronoun not in body, pronoun
+    assert "rooms take it at pick" in body
+    kinds = {block["@type"] for block in _ld_json(raw)}
+    assert "SportsTeam" in kinds and "Person" not in kinds
+
+
+def test_practice_participation_reads_on_either_scale(corpus, board):
+    """The feed has sent this as a share and as a percentage. 1 is a full
+    week; 60 is 60% of one, not 6000%."""
+    d = seo.build_adp(board)
+    assert d["by_slug"]["dandre-swift"]["status"]["practice"] == 1.0
+    assert d["by_slug"]["swing-guy"]["status"]["practice"] == 0.6
+    assert "practice participation 60%" in _client(board).get("/adp/swing-guy").text
+
+
+def test_the_season_sparkline_is_spaced_by_year(corpus, board):
+    """MUTATION: x = i * step. Two of these seasons are four years apart and
+    two are two, and a line that draws both gaps the same width is a line
+    about a career this player did not have."""
+    from scoring.adp_facts import sparkline
+    rows = [{"season": 2020, "adp": 10, "cheat": None},
+            {"season": 2024, "adp": 20, "cheat": None},
+            {"season": 2026, "adp": 30, "cheat": None}]
+    xs = [float(point.split(",")[0]) for point in sparkline(rows, width=120).split()]
+    assert xs == [0.0, 80.0, 120.0]
 
 
 def test_the_sitemap_holds_one_url_per_page_that_exists(corpus, board):

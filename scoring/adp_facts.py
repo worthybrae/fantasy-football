@@ -482,6 +482,14 @@ def _status(conn, ids: list) -> dict:
         if designation and designation.lower() in ("none", "active", "healthy"):
             designation = None
         share = _num(practice)
+        if share is not None:
+            # TWO SCALES, ONE COLUMN. The feed has sent this as a share (0.6)
+            # and as a percentage (60) at different times, and the page
+            # multiplies by a hundred. A 60 printed as 6000% is the kind of
+            # wrong a reader stops reading over, so anything above 1 is read
+            # as the percentage it must be.
+            share = share / 100.0 if share > 1 else share
+            share = min(max(share, 0.0), 1.0)
         if designation is None and share is None:
             continue
         out[str(pid)] = {"injury": designation, "body_part": _text(body_part),
@@ -602,6 +610,12 @@ def sparkline(seasons: list, width: int = 140, height: int = 34) -> str | None:
     Y IS INVERTED: rank 1 is the top of the box. Ranks are a scale where
     smaller is better and a chart that draws them the other way up says the
     opposite of what it means.
+
+    X IS THE YEAR, not the row number. Neither source has an opinion in
+    every season -- 2020 and 2021 are missing for most players and one of
+    them reaches this season -- so spacing the points evenly drew a four
+    year gap and a one year gap the same width, which is a line about a
+    different player's career.
     """
     points = [(row["season"], row["adp"] if row["adp"] is not None else row["cheat"])
               for row in seasons or []]
@@ -611,7 +625,10 @@ def sparkline(seasons: list, width: int = 140, height: int = 34) -> str | None:
     ranks = [rank for _season, rank in points]
     low, high = min(ranks), max(ranks)
     span = (high - low) or 1
-    step = width / (len(points) - 1)
+    seasons = [season for season, _rank in points]
+    first, last = min(seasons), max(seasons)
+    years = (last - first) or 1
     return " ".join(
-        f"{round(i * step, 1)},{round((rank - low) / span * (height - 6) + 3, 1)}"
-        for i, (_season, rank) in enumerate(points))
+        f"{round((season - first) / years * width, 1)},"
+        f"{round((rank - low) / span * (height - 6) + 3, 1)}"
+        for season, rank in points)

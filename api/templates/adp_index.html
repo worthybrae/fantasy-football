@@ -5,7 +5,7 @@
    as good as the ADP it is measured from, and an ADP over a fifth of the
    drafts is a different kind of number from an ADP over all of them. #}
 {% macro mover(p) %}
-<li><span class="d big">{{ '%+.0f' % p.vs_espn }}</span>
+<li><span class="d big {% if p.vs_espn >= 0.5 %}early{% elif p.vs_espn <= -0.5 %}late{% endif %}">{{ p.vs_espn | signed }}</span>
   <a class="nm" href="/adp/{{ p.slug }}">{{ p.name }}</a>
   <span class="pos {{ p.position }}">{{ p.position }}</span>
   <span class="d">taken in {{ pct(p.of_share) }}</span></li>
@@ -89,7 +89,7 @@
   <td class="n">{{ p.usual_round }}</td>
   <td class="n">{% if p.espn_rank %}{{ p.espn_rank }}{% else %}—{% endif %}</td>
   <td class="n">{% if p.consensus %}{{ '%g' % p.consensus }}{% else %}—{% endif %}</td>
-  <td class="n {% if p.vs_espn is not none %}{% if p.vs_espn >= 0.5 %}down{% elif p.vs_espn <= -0.5 %}up{% endif %}{% endif %}">{% if p.vs_espn is not none %}{{ '%+.0f' % p.vs_espn }}{% else %}—{% endif %}</td>
+  <td class="n {% if p.vs_espn is not none %}{% if p.vs_espn >= 0.5 %}early{% elif p.vs_espn <= -0.5 %}late{% endif %}{% endif %}">{% if p.vs_espn is not none %}{{ p.vs_espn | signed }}{% else %}—{% endif %}</td>
   <td class="n">{{ pct(p.of_share) }}</td>
   {% if position %}<td class="n">{{ p.fp_tier or '—' }}</td>{% endif %}
 </tr>
@@ -97,7 +97,7 @@
 </tbody>
 </table>
 </div>
-<p class="note" style="margin-top:10px">Range is the 10th to the 90th percentile of his picks. ESPN is ESPN's own PPR rank; consensus is the median of five ranking sources. “vs ESPN” is the gap in picks between where these rooms take him and where ESPN's board would: a positive number means the rooms get to him first.</p>
+<p class="note" style="margin-top:10px">Range is the 10th to the 90th percentile of his picks. <b>ESPN</b> is his rank on ESPN's own published board — the order its draft lobby puts players in — while <b>vs ESPN</b> is built from a different ESPN number, its published average draft position, put on this corpus's scale. Consensus is the median of five ranking sources. A <span class="early">positive, green</span> gap means these rooms take him before ESPN's board would; an <span class="late">amber</span> one means they leave him longer. A player ESPN's board does not rank at all has no gap.</p>
 {% endif %}
 
 <h2>By round</h2>

@@ -50,6 +50,68 @@ MIN_SHARE = 0.02
 
 TEMPLATES = Path(__file__).resolve().parent / "templates"
 
+# What a search result actually shows. Google renders about 600 pixels of
+# title and 920 of description, which is roughly this many characters at the
+# sizes it uses; past them the tail is replaced by an ellipsis, and a title
+# whose distinguishing half is in the tail is a title that reads the same as
+# the other two hundred. The brand suffix is what gives way -- see `_title`.
+TITLE_MAX = 60
+DESC_MAX = 160
+BRAND = " – ESPN Draft Assist"
+
+# Abbreviation to the name a person says out loud, for the one place the
+# abbreviation is not good enough: `Person.affiliation.name` in the
+# structured data, which is read by machines that have never seen a depth
+# chart. Relocations map to the current name; an abbreviation not in here
+# (an expansion team, a feed that says WSH) falls back to itself, which is
+# what the visible pages print anyway.
+TEAM_NAMES = {
+    "ARI": "Arizona Cardinals", "ATL": "Atlanta Falcons", "BAL": "Baltimore Ravens",
+    "BUF": "Buffalo Bills", "CAR": "Carolina Panthers", "CHI": "Chicago Bears",
+    "CIN": "Cincinnati Bengals", "CLE": "Cleveland Browns", "DAL": "Dallas Cowboys",
+    "DEN": "Denver Broncos", "DET": "Detroit Lions", "GB": "Green Bay Packers",
+    "HOU": "Houston Texans", "IND": "Indianapolis Colts", "JAX": "Jacksonville Jaguars",
+    "JAC": "Jacksonville Jaguars", "KC": "Kansas City Chiefs", "LV": "Las Vegas Raiders",
+    "OAK": "Las Vegas Raiders", "LAC": "Los Angeles Chargers", "SD": "Los Angeles Chargers",
+    "LA": "Los Angeles Rams", "LAR": "Los Angeles Rams", "STL": "Los Angeles Rams",
+    "MIA": "Miami Dolphins", "MIN": "Minnesota Vikings", "NE": "New England Patriots",
+    "NO": "New Orleans Saints", "NYG": "New York Giants", "NYJ": "New York Jets",
+    "PHI": "Philadelphia Eagles", "PIT": "Pittsburgh Steelers",
+    "SF": "San Francisco 49ers", "SEA": "Seattle Seahawks",
+    "TB": "Tampa Bay Buccaneers", "TEN": "Tennessee Titans",
+    "WAS": "Washington Commanders", "WSH": "Washington Commanders",
+}
+
+
+def _title(core: str) -> str:
+    """`core`, with the brand on the end when the two of them still fit.
+
+    THE BRAND IS THE PART WORTH LOSING. Every page here wants the same three
+    things in its title -- who or what it is about, that it is ESPN mock
+    draft ADP, and the year -- and on a long name that is already most of
+    sixty characters. A title cut off mid-suffix looks broken; a title
+    without the suffix reads fine.
+    """
+    return core + BRAND if len(core) + len(BRAND) <= TITLE_MAX else core
+
+
+def _clip(text: str, extra: str) -> str:
+    """`text`, plus `extra` if the two of them fit a search result."""
+    return text + extra if len(text) + len(extra) <= DESC_MAX else text
+
+
+def _signed(value, digits: int = 0) -> str:
+    """A signed number that never says "-0".
+
+    `'%+.0f' % -0.4` is "-0", which reads as a negative quantity of nothing
+    and is the sort of thing a reader notices instead of the number beside
+    it. Anything that rounds to zero IS zero, and prints without a sign.
+    """
+    rounded = round(float(value), digits)
+    if rounded == 0:
+        return f"{0:.{digits}f}"
+    return f"{rounded:+.{digits}f}"
+
 # Whether registering the routes also warms the ADP cache. On in a server,
 # and worth an off switch for the one caller that does not want a
 # background build the moment an app object exists: the test suite, which
@@ -909,6 +971,7 @@ def _templates():
             from jinja2 import Environment, FileSystemLoader, select_autoescape
             _env = Environment(loader=FileSystemLoader(str(TEMPLATES)),
                                autoescape=select_autoescape(["html", "xml"]))
+            _env.filters["signed"] = _signed
         return _env
 
 
@@ -991,8 +1054,13 @@ def _person(p: dict, image: str | None) -> dict:
                 "name": p["name"], "url": url,
                 "jobTitle": f"{p['position']}, American football"}
         if p.get("team"):
-            node["affiliation"] = {"@type": "SportsTeam", "name": p["team"],
-                                   "sport": "American football"}
+            # THE NAME, NOT THE ABBREVIATION. `affiliation.name` is read by
+            # something that has never seen a depth chart, and "CHI" is not
+            # the name of a team to anybody but us.
+            node["affiliation"] = {
+                "@type": "SportsTeam",
+                "name": TEAM_NAMES.get(p["team"].upper(), p["team"]),
+                "sport": "American football"}
     if image:
         node["image"] = image
     return node
@@ -1247,7 +1315,7 @@ def register_seo_routes(app, conn=None):
         else:
             risers, fallers = _movers(players)
         return page(rendered(d["stamp"], ("index", position), lambda: render(
-            "adp_index.html", title=f"{heading} – ESPN Draft Assist", description=desc,
+            "adp_index.html", title=_title(heading), description=desc,
             path=path, heading=heading, provenance=_provenance(d), players=players,
             rounds=d["rounds"], teams=d["teams"], position=position, positions=present,
             breadcrumbs=crumbs, intro=intro, faq=faq,
@@ -1268,12 +1336,18 @@ def register_seo_routes(app, conn=None):
         teams = d["teams"]
         first, last = (n - 1) * teams + 1, n * teams
         rows = _round_rows(d, n)
-        usual = [row["p"]["name"] for row in rows if row["usual"]][:4]
         desc = (f"Who goes in round {n} (picks {first}–{last}) of an ESPN mock draft, "
-                f"from {d['drafts']} recorded drafts"
-                + (f": {', '.join(usual)}." if usual else "."))
+                f"from {d['drafts']} recorded drafts")
+        # The names, one at a time, for as many as the result will show.
+        named: list = []
+        for row in rows[:4]:
+            if not row["usual"]:
+                continue
+            if len(_clip(desc, f": {', '.join(named + [row['p']['name']])}.")) > len(desc):
+                named.append(row["p"]["name"])
+        desc += f": {', '.join(named)}." if named else "."
         return page(rendered(d["stamp"], ("round", n), lambda: render(
-            "adp_round.html", title=f"Round {n} of an ESPN mock draft – who goes there – ESPN Draft Assist",
+            "adp_round.html", title=_title(f"Round {n} of an ESPN mock draft"),
             description=desc, path=f"/adp/round/{n}", n=n, first=first, last=last,
             rows=rows, mix=d["round_mix"].get(n, []), round_min=ROUND_MIN_SHARE,
             seats=_seats(d, n), drafts=d["drafts"], teams=teams,
@@ -1296,7 +1370,11 @@ def register_seo_routes(app, conn=None):
                 f"taken in {pct}% of drafts, {p['position']}{p['pos_rank']}.")
         if p.get("vs_espn") and abs(p["vs_espn"]) >= 1:
             way = "earlier" if p["vs_espn"] > 0 else "later"
-            desc += f" {abs(p['vs_espn']):.0f} picks {way} than ESPN's board."
+            desc = _clip(desc, f" {abs(p['vs_espn']):.0f} picks {way} than ESPN's board.")
+        # A DEFENSE IS NOT A HE. Every sentence on this page that would have
+        # said "he" asks for one of these instead.
+        pron = ({"s": "it", "o": "it", "p": "its"} if p["position"] == "DST"
+                else {"s": "he", "o": "him", "p": "his"})
         # base.html hangs `og:image` on this, and a card image has to be at
         # least 200px square to be shown at all -- so the social tag asks for
         # a bigger one than the 128-pixel `img` on the page, off the same
@@ -1305,11 +1383,13 @@ def register_seo_routes(app, conn=None):
         # original around.
         social = thumb(p["headshot"], 320)
         return page(rendered(d["stamp"], ("player", p["slug"]), lambda: render(
-            "adp_player.html", title=f"{p['name']} ADP – ESPN mock drafts {d['updated'].year if d['updated'] else ''} – ESPN Draft Assist",
+            "adp_player.html",
+            title=_title(f"{p['name']} ADP – ESPN mock drafts "
+                         f"{d['updated'].year if d['updated'] else ''}".strip()),
             description=desc, path=f"/adp/{p['slug']}", p=p, drafts=d["drafts"],
             teams=d["teams"], rounds=d["rounds"], picks_total=d["teams"] * d["rounds"],
             near=near, headshot=social, face=thumb(p["headshot"], 256),
-            round_min=ROUND_MIN_SHARE,
+            round_min=ROUND_MIN_SHARE, pron=pron,
             corpus_seconds=d["seconds"], curve_picks=CURVE_PICKS,
             provenance=_provenance(d), person_schema=_person(p, social),
             breadcrumbs=_crumbs(("ADP", "/adp"), (p["position"], f"/adp/{p['position'].lower()}"),

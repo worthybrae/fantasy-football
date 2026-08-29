@@ -17,7 +17,7 @@
       {% if p.rookie_season %}<li>{% if p.rookie %}Rookie{% else %}NFL since <b>{{ p.rookie_season }}</b>{% endif %}</li>{% endif %}
       {% if p.tier %}<li>Board tier <b>{{ p.tier }}</b></li>{% endif %}
     </ul>
-    <p class="lede">Rooms take him at pick <b>{{ '%.1f' % p.adp }}</b> on average — round {{ p.round_p10 }}{% if p.round_p90 != p.round_p10 %} to round {{ p.round_p90 }}{% endif %}. Taken in {{ pct(p.of_share) }} of the {{ p.of }} drafts he was on the board for.</p>
+    <p class="lede">Rooms take {{ pron.o }} at pick <b>{{ '%.1f' % p.adp }}</b> on average — round {{ p.round_p10 }}{% if p.round_p90 != p.round_p10 %} to round {{ p.round_p90 }}{% endif %}. Taken in {{ pct(p.of_share) }} of the {{ p.of }} drafts {{ pron.s }} was on the board for.</p>
     {% if p.status %}<p class="note">{% if p.status.injury %}Listed <b class="down">{{ p.status.injury }}</b>{% if p.status.body_part %} ({{ p.status.body_part | lower }}){% endif %}{% if p.status.practice is not none %}, {% endif %}{% endif %}{% if p.status.practice is not none %}practice participation {{ pct(p.status.practice) }}{% endif %}.</p>{% endif %}
   </div>
 </div>
@@ -25,18 +25,18 @@
 <div class="figs">
   <div class="fig"><div class="k">ADP</div><div class="v">{{ '%.1f' % p.adp }}</div><div class="s">median {{ '%g' % p.median }}</div></div>
   <div class="fig"><div class="k">Usual picks</div><div class="v">{{ p.p10 }}<span class="dim">–</span>{{ p.p90 }}</div><div class="s">{{ p.low }} at the earliest, {{ p.high }} at the latest</div></div>
-  <div class="fig"><div class="k">Usual round</div><div class="v">{{ p.usual_round }}</div><div class="s">{{ pct(p.usual_share) }} of his picks{% if p.usual_share < round_min %} · no round holds many{% endif %}</div></div>
+  <div class="fig"><div class="k">Usual round</div><div class="v">{{ p.usual_round }}</div><div class="s">{{ pct(p.usual_share) }} of {{ pron.p }} picks{% if p.usual_share < round_min %} · no round holds many{% endif %}</div></div>
   <div class="fig"><div class="k">Drafted in</div><div class="v">{{ pct(p.of_share) }}</div><div class="s">{{ p.taken }} of {{ p.of }}</div></div>
   <div class="fig"><div class="k">Position rank</div><div class="v">{{ p.position }}{{ p.pos_rank }}</div><div class="s">overall {{ p.rank }}{% if p.fp_tier %} · FP tier {{ p.fp_tier }}{% endif %}</div></div>
   <div class="fig"><div class="k">ESPN ADP</div><div class="v">{% if p.espn_adp is not none and not p.espn_undrafted %}{{ '%.1f' % p.espn_adp }}{% else %}<span class="dim">—</span>{% endif %}</div><div class="s">{% if p.espn_undrafted %}undrafted on ESPN's board{% elif p.espn_rank %}cheat sheet {{ p.espn_rank }}{% else %}not published{% endif %}</div></div>
   <div class="fig"><div class="k">Consensus</div><div class="v">{% if p.consensus %}{{ '%g' % p.consensus }}{% else %}<span class="dim">—</span>{% endif %}</div><div class="s">median of {{ p.sources | length }} source{{ '' if p.sources | length == 1 else 's' }}</div></div>
   {% if p.vs_espn is not none %}
-  <div class="fig"><div class="k">vs ESPN</div><div class="v {% if p.vs_espn >= 0.5 %}down{% elif p.vs_espn <= -0.5 %}up{% endif %}">{{ '%+.1f' % p.vs_espn }}</div><div class="s">{% if p.vs_espn >= 0.5 %}picks earlier{% elif p.vs_espn <= -0.5 %}picks later{% else %}same pick{% endif %}</div></div>
+  <div class="fig"><div class="k">vs ESPN</div><div class="v {% if p.vs_espn >= 0.5 %}early{% elif p.vs_espn <= -0.5 %}late{% endif %}">{{ p.vs_espn | signed(1) }}</div><div class="s">{% if p.vs_espn >= 0.5 %}picks earlier{% elif p.vs_espn <= -0.5 %}picks later{% else %}same pick{% endif %}</div></div>
   {% endif %}
 </div>
 
 {% if p.vs_espn is not none %}
-<p>Draft straight down ESPN's board and {{ p.name }} comes off it around pick {{ '%.0f' % p.espn_pick }}. These rooms {% if p.vs_espn >= 1 %}take him {{ '%.0f' % p.vs_espn }} picks earlier, at {{ '%.1f' % p.adp }}{% elif p.vs_espn <= -1 %}leave him until {{ '%.1f' % p.adp }}, {{ '%.0f' % (-p.vs_espn) }} picks later{% else %}take him at {{ '%.1f' % p.adp }}, which is the same pick{% endif %}.</p>
+<p>{% if p.espn_undrafted %}ESPN's published ADP does not rank {{ p.name }} at all; by its expert board {{ pron.s }} comes off around pick {{ '%.0f' % p.espn_pick }}.{% else %}Draft straight down ESPN's board and {{ p.name }} comes off it around pick {{ '%.0f' % p.espn_pick }}.{% endif %} These rooms {% if p.vs_espn >= 1 %}take {{ pron.o }} {{ '%.0f' % p.vs_espn }} picks earlier, at {{ '%.1f' % p.adp }}{% elif p.vs_espn <= -1 %}leave {{ pron.o }} until {{ '%.1f' % p.adp }}, {{ '%.0f' % (-p.vs_espn) }} picks later{% else %}take {{ pron.o }} at {{ '%.1f' % p.adp }}, which is the same pick{% endif %}. <span class="dim">A <span class="early">green</span> gap is the rooms getting there first; an <span class="late">amber</span> one is them waiting.</span></p>
 {% endif %}
 
 {% if p.still_there %}
@@ -58,23 +58,23 @@
   <path d="{{ p.curve }}" fill="none" stroke="#ffb454" stroke-width="2.5" stroke-linejoin="round"/>
   <line x1="0" y1="50" x2="960" y2="50" stroke="#262932" stroke-width="1" stroke-dasharray="4 6"/>
   <line x1="0" y1="100" x2="960" y2="100" stroke="#262932" stroke-width="2"/>
-  <g font-size="13" fill="#565b69" font-family="ui-monospace,monospace"><text x="4" y="14">100%</text><text x="4" y="46">50%</text></g>
-  {% for n in [25, 50, 75, 100] %}<text x="{{ '%.1f' % (n * 960 / curve_picks) }}" y="115" font-size="13" fill="#565b69" font-family="ui-monospace,monospace" text-anchor="end">{{ n }}</text>{% endfor %}
+  <g font-size="13" fill="#98a0b0" font-family="ui-monospace,monospace"><text x="4" y="14">100%</text><text x="4" y="46">50%</text></g>
+  {% for n in [25, 50, 75, 100] %}<text x="{{ '%.1f' % (n * 960 / curve_picks) }}" y="115" font-size="13" fill="#98a0b0" font-family="ui-monospace,monospace" text-anchor="end">{{ n }}</text>{% endfor %}
 </svg>
-<figcaption>Share of the drafts he was on the board for in which he was still available, pick 1 to {{ curve_picks }}. Counted, not modelled — every vertical line is one round.</figcaption>
+<figcaption>Share of the drafts {{ pron.s }} was on the board for in which {{ pron.s }} was still available, pick 1 to {{ curve_picks }}. Counted, not modelled — every vertical line is one round.</figcaption>
 </figure>
 {% endif %}
 {% endif %}
 
-<h2>Where the room takes him</h2>
+<h2>Where the room takes {{ pron.o }}</h2>
 <figure class="chart" style="margin:0">
 <svg viewBox="0 0 {{ picks_total * 6 }} 124" role="img" aria-label="How many drafts took {{ p.name }} at each overall pick">
   <rect x="{{ (p.usual_round - 1) * teams * 6 }}" y="0" width="{{ teams * 6 }}" height="104" fill="#ffb454" fill-opacity=".07"/>
   <g fill="#ffb454">{% for count in p.hist %}{% if count %}<rect x="{{ loop.index0 * 6 }}" y="{{ 100 - (100 * count / p.hist_peak) | round | int }}" width="5" height="{{ (100 * count / p.hist_peak) | round | int }}"/>{% endif %}{% endfor %}</g>
   <line x1="0" y1="104" x2="{{ picks_total * 6 }}" y2="104" stroke="#262932"/>
-  <g font-size="11" fill="#565b69" font-family="ui-monospace,monospace">{% for n in range(1, rounds + 1) %}<text x="{{ (n - 1) * teams * 6 + 3 }}" y="120">R{{ n }}</text>{% endfor %}</g>
+  <g font-size="11" fill="#98a0b0" font-family="ui-monospace,monospace">{% for n in range(1, rounds + 1) %}<text x="{{ (n - 1) * teams * 6 + 3 }}" y="120">R{{ n }}</text>{% endfor %}</g>
 </svg>
-<figcaption>Every pick he was taken at, across {{ drafts }} drafts. The shaded round is round {{ p.usual_round }}, where the middle of his picks falls — {{ pct(p.usual_share) }} of them.{% if p.seconds and corpus_seconds %} Rooms spend a median of {{ '%g' % p.seconds }} seconds on the pick that takes him, against {{ '%g' % corpus_seconds }} seconds for a pick in general.{% endif %}</figcaption>
+<figcaption>Every pick {{ pron.s }} was taken at, across {{ drafts }} drafts. The shaded round is round {{ p.usual_round }}, where the middle of {{ pron.p }} picks falls — {{ pct(p.usual_share) }} of them.{% if p.seconds and corpus_seconds %} Rooms spend a median of {{ '%g' % p.seconds }} seconds on the pick that takes {{ pron.o }}, against {{ '%g' % corpus_seconds }} seconds for a pick in general.{% endif %}</figcaption>
 </figure>
 
 {% if p.sources %}
@@ -119,14 +119,14 @@
 <svg viewBox="0 0 140 34" role="img" aria-label="{{ p.name }}'s draft rank by season, best year at the top">
   <polyline points="{{ p.spark }}" fill="none" stroke="#ffb454" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
 </svg>
-<figcaption>{{ p.seasons[0].season }} to {{ p.seasons[-1].season }}. Higher on the chart is drafted earlier.</figcaption>
+<figcaption>{{ p.seasons[0].season }} to {{ p.seasons[-1].season }}, spaced by year. Higher on the chart is drafted earlier.</figcaption>
 </figure>
 {% endif %}
 </div>
 {% endif %}
 
 {% if p.last_season or p.projection or p.futures %}
-<h2>What he did, and what he is projected for</h2>
+<h2>What {{ pron.s }} did, and what {{ pron.s }} is projected for</h2>
 <div class="cols">
 {% if p.last_season %}
 <div class="card">

@@ -1,6 +1,10 @@
 {# api/templates/adp_round.html #}
 {% extends "base.html" %}
 {% macro pct(x) %}{{ (x * 100) | round | int }}%{% endmacro %}
+{# A share that is not zero does not get to print 0%: on a round page most
+   of the "of all drafts" column is a fraction of one per cent, and rounding
+   it down to nothing says he never went here. #}
+{% macro share(x) %}{% if x > 0 and ((x * 100) | round | int) == 0 %}&lt;1%{% else %}{{ (x * 100) | round | int }}%{% endif %}{% endmacro %}
 {% block body %}
 <div class="crumbs"><a href="/adp">ADP</a> › Round {{ n }}</div>
 <h1>Round {{ n }} of an ESPN mock draft</h1>
@@ -47,8 +51,8 @@
   <td>{{ r.p.team or '—' }}</td>
   <td class="n">{{ '%.1f' % r.p.adp }}</td>
   <td class="n">{{ r.p.p10 }}–{{ r.p.p90 }}</td>
-  <td class="n">{{ pct(r.picks_share) }}</td>
-  <td class="n">{{ pct(r.share) }}</td>
+  <td class="n">{{ share(r.picks_share) }}</td>
+  <td class="n">{{ share(r.share) }}</td>
   <td>{% if r.usual %}usually{% else %}sometimes{% endif %}</td>
 </tr>
 {% endfor %}

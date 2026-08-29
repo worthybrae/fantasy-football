@@ -30,7 +30,7 @@
    connections, and a face nobody has installed is not worth a round trip. */
 :root{
 --bg-0:#0a0b0e;--bg-1:#121319;--bg-2:#1b1d25;--border:#262932;
---text-1:#e8eaef;--text-2:#98a0b0;--text-3:#565b69;
+--text-1:#e8eaef;--text-2:#98a0b0;--text-3:#565b69;  /* --text-3 is 2.9:1 on --bg-0: never prose, never a label */
 --accent:#ffb454;--accent-bg:rgba(255,180,84,.12);--accent-border:rgba(255,180,84,.5);
 --ok:#4eb850;--fail:#d56262;
 --qb:#3987e5;--rb:#d95926;--wr:#199e70;--te:#c98500;--k:#d55181;--dst:#9085e9;
@@ -61,7 +61,7 @@ a:hover{color:var(--accent)}
 .cta:hover{color:#1a1200;filter:brightness(1.08)}
 .bar .cta{margin-left:auto}
 main{max-width:1040px;margin:0 auto;padding:26px 20px 56px}
-footer{max-width:1040px;margin:0 auto;padding:0 20px 40px;font-size:var(--t-sm);color:var(--text-3)}
+footer{max-width:1040px;margin:0 auto;padding:0 20px 40px;font-size:var(--t-sm);color:var(--text-2)}
 footer a{color:var(--text-2)}
 
 /* -- type ----------------------------------------------------------------- */
@@ -69,15 +69,15 @@ h1{margin:0 0 4px;font-size:clamp(24px,5vw,34px);line-height:1.15;color:var(--te
  letter-spacing:-.02em;font-weight:650}
 h2{display:flex;align-items:center;gap:12px;margin:38px 0 12px;
  font-family:var(--mono);font-size:var(--t-xs);font-weight:500;letter-spacing:.12em;
- text-transform:uppercase;color:var(--text-3)}
+ text-transform:uppercase;color:var(--text-2)}
 h2::after{content:"";flex:1;height:1px;background:var(--border)}
 h3{margin:0 0 8px;font-size:var(--t-base);color:var(--text-1);font-weight:600}
 p{margin:0 0 12px}
-.prov{margin:0;font-family:var(--mono);font-size:var(--t-sm);color:var(--text-3)}
-.crumbs{font-family:var(--mono);font-size:var(--t-sm);color:var(--text-3);margin:0 0 16px}
+.prov{margin:0;font-family:var(--mono);font-size:var(--t-sm);color:var(--text-2)}
+.crumbs{font-family:var(--mono);font-size:var(--t-sm);color:var(--text-2);margin:0 0 16px}
 .crumbs a{color:var(--text-2)}
 .intro{max-width:68ch;margin:14px 0 4px;color:var(--text-2)}
-.note{font-size:var(--t-sm);color:var(--text-3);max-width:68ch}
+.note{font-size:var(--t-sm);color:var(--text-2);max-width:68ch}
 .mono{font-family:var(--mono)}
 
 /* -- tables --------------------------------------------------------------- */
@@ -88,7 +88,7 @@ p{margin:0 0 12px}
 table{width:100%;border-collapse:collapse;font-size:var(--t-base)}
 th{position:sticky;top:0;z-index:1;text-align:left;background:var(--bg-1);
  font-family:var(--mono);font-weight:500;font-size:var(--t-micro);letter-spacing:.09em;
- text-transform:uppercase;color:var(--text-3);padding:8px;border-bottom:1px solid var(--border);
+ text-transform:uppercase;color:var(--text-2);padding:8px;border-bottom:1px solid var(--border);
  white-space:nowrap}
 td{padding:7px 8px;border-bottom:1px solid var(--border);vertical-align:middle}
 tbody tr:hover{background:var(--bg-1)}
@@ -97,7 +97,7 @@ td.who{white-space:nowrap}
 td.who img{width:24px;height:24px;border-radius:50%;object-fit:cover;
  background:var(--bg-2);vertical-align:middle;margin-right:8px}
 .sortable th[data-k]{cursor:pointer;user-select:none}
-.sortable th[data-k]:hover{color:var(--text-2)}
+.sortable th[data-k]:hover{color:var(--text-1)}
 .sortable th[aria-sort]{color:var(--accent)}
 .sortable th[aria-sort="ascending"]::after{content:" \2191"}
 .sortable th[aria-sort="descending"]::after{content:" \2193"}
@@ -108,19 +108,25 @@ td.who img{width:24px;height:24px;border-radius:50%;object-fit:cover;
  background:var(--bg-2);border:1px solid var(--border);color:var(--text-2)}
 .pos.QB{color:var(--qb)}.pos.RB{color:var(--rb)}.pos.WR{color:var(--wr)}
 .pos.TE{color:var(--te)}.pos.K{color:var(--k)}.pos.DST{color:var(--dst)}
-.up,.fig .v.up{color:var(--ok)}
-.down,.fig .v.down{color:var(--fail)}
-.dim{color:var(--text-3)}
+.down{color:var(--fail)}
+/* THE ONE PAIR THAT MEANS SOMETHING. Positive is a room reaching a player
+   before ESPN's board would, which is the thing a drafter has to act on, so
+   it is the green one; negative is amber rather than red, because being left
+   on the board a while is not a failure. Both are named in a legend beside
+   the number -- colour is never the only carrier, and the sign is there. */
+.early,.fig .v.early{color:var(--ok)}
+.late,.fig .v.late{color:var(--accent)}
+.dim{color:var(--text-2)}
 
 /* -- cards ---------------------------------------------------------------- */
 .figs{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:8px;margin:18px 0}
 .fig{background:var(--bg-1);border:1px solid var(--border);border-radius:var(--r);padding:11px 13px}
 .fig .k{font-family:var(--mono);font-size:var(--t-micro);letter-spacing:.09em;
- text-transform:uppercase;color:var(--text-3)}
+ text-transform:uppercase;color:var(--text-2)}
 .fig .v{font-family:var(--mono);font-size:var(--t-xl);color:var(--text-1);
  margin-top:3px;line-height:1.15;white-space:nowrap}
-.fig .v small{font-size:var(--t-base);color:var(--text-3)}
-.fig .s{font-size:var(--t-sm);color:var(--text-3);margin-top:2px}
+.fig .v small{font-size:var(--t-base);color:var(--text-2)}
+.fig .s{font-size:var(--t-sm);color:var(--text-2);margin-top:2px}
 .card{background:var(--bg-1);border:1px solid var(--border);border-radius:var(--r);padding:14px 16px}
 .cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px}
 .cols ol{margin:0;padding:0;list-style:none;font-size:var(--t-base)}
@@ -130,6 +136,9 @@ td.who img{width:24px;height:24px;border-radius:50%;object-fit:cover;
 .cols li .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cols li .d{font-family:var(--mono);font-size:var(--t-sm)}
 .cols li .big{color:var(--text-1);font-size:var(--t-base);min-width:34px}
+/* ...and the mover's own colour still wins over that, which it did not. */
+.cols li .big.early{color:var(--ok)}
+.cols li .big.late{color:var(--accent)}
 
 /* -- the hero ------------------------------------------------------------- */
 .hero{display:flex;align-items:flex-start;gap:18px;flex-wrap:wrap}
@@ -137,8 +146,8 @@ td.who img{width:24px;height:24px;border-radius:50%;object-fit:cover;
  background:var(--bg-2);border:1px solid var(--border)}
 .hero .who{flex:1;min-width:min(100%,260px)}
 .facts{display:flex;flex-wrap:wrap;gap:6px 14px;margin:8px 0 0;padding:0;list-style:none;
- font-family:var(--mono);font-size:var(--t-sm);color:var(--text-3)}
-.facts b{color:var(--text-2);font-weight:500}
+ font-family:var(--mono);font-size:var(--t-sm);color:var(--text-2)}
+.facts b{color:var(--text-1);font-weight:500}
 .lede{max-width:64ch;margin:16px 0 0;font-size:var(--t-lg);line-height:1.5;color:var(--text-1)}
 .lede b{color:var(--accent);font-weight:650;font-family:var(--mono)}
 
@@ -146,20 +155,20 @@ td.who img{width:24px;height:24px;border-radius:50%;object-fit:cover;
 .chips{display:grid;grid-template-columns:repeat(auto-fit,minmax(78px,1fr));gap:6px;margin:0 0 10px}
 .chip{background:var(--bg-1);border:1px solid var(--border);border-radius:var(--r);
  padding:8px 9px 7px}
-.chip .k{font-family:var(--mono);font-size:var(--t-micro);color:var(--text-3);
+.chip .k{font-family:var(--mono);font-size:var(--t-micro);color:var(--text-2);
  letter-spacing:.06em;text-transform:uppercase}
 .chip .v{font-family:var(--mono);font-size:var(--t-lg);color:var(--text-1);line-height:1.2}
 .chip .track{height:3px;margin-top:6px;background:var(--bg-2);border-radius:2px;overflow:hidden}
 .chip .track i{display:block;height:100%;background:var(--accent)}
 .chart{background:var(--bg-1);border:1px solid var(--border);border-radius:var(--r);padding:12px}
 .chart svg{display:block;width:100%;height:auto}
-.chart figcaption{font-size:var(--t-sm);color:var(--text-3);margin-top:8px}
+.chart figcaption{font-size:var(--t-sm);color:var(--text-2);margin-top:8px}
 .mix{display:flex;height:24px;border-radius:var(--r);overflow:hidden;border:1px solid var(--border)}
 .mix i{display:block;height:100%}
 .mix .QB{background:var(--qb)}.mix .RB{background:var(--rb)}.mix .WR{background:var(--wr)}
 .mix .TE{background:var(--te)}.mix .K{background:var(--k)}.mix .DST{background:var(--dst)}
 .key{display:flex;flex-wrap:wrap;gap:6px 14px;margin:8px 0 0;padding:0;list-style:none;
- font-family:var(--mono);font-size:var(--t-sm);color:var(--text-3)}
+ font-family:var(--mono);font-size:var(--t-sm);color:var(--text-2)}
 
 /* -- lists ---------------------------------------------------------------- */
 .near{display:flex;flex-wrap:wrap;gap:6px}
@@ -173,7 +182,7 @@ td.who img{width:24px;height:24px;border-radius:50%;object-fit:cover;
 .news{margin:0;padding:0;list-style:none}
 .news li{padding:9px 0;border-bottom:1px solid var(--border);font-size:var(--t-base)}
 .news li:last-child{border-bottom:0}
-.news .meta{font-family:var(--mono);font-size:var(--t-sm);color:var(--text-3);display:block}
+.news .meta{font-family:var(--mono);font-size:var(--t-sm);color:var(--text-2);display:block}
 
 /* -- faq and cta ---------------------------------------------------------- */
 .faq{max-width:68ch}
