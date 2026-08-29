@@ -367,6 +367,28 @@ def test_no_archive_at_all_is_not_a_failure(client, tmp_path, monkeypatch):
     assert len(body["targets"]) == 3
 
 
+def test_a_corpus_that_breaks_mid_read_costs_the_cards_and_not_the_plan(
+        client, corpus, monkeypatch):
+    """The four counted reads run against a file the farm rewrites under us.
+
+    A DuckDB error there -- a table this build has not got, a column renamed,
+    the file swapped between the open and the query -- used to escape as a 500
+    on the whole endpoint, which is the dashboard's plan card and the landing
+    page's hero at once. The opening cards are allowed to be missing; the plan
+    is built from the board and is not.
+    """
+    _signed_out(monkeypatch)
+    monkeypatch.setattr(market, "_human_picks_sql", lambda: "nonesuch = 1")
+
+    res = client.get("/api/plan/preview?teams=6&slot=3")
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["opening"] == [] and body["corpus"] is None
+    assert body["position_runs"] == {}
+    assert len(body["targets"]) == 3
+
+
 # -- favourites ---------------------------------------------------------------
 
 

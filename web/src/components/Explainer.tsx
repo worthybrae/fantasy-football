@@ -31,7 +31,7 @@ const FAQ: { q: string; a: string; more?: { text: string; href: string; link: st
   },
   {
     q: 'What does it cost?',
-    a: 'Mock drafts are free, as many as you like. A real draft is $9.99, once, paid when you connect the league that is about to draft.',
+    a: 'Free for the first 100 accounts, for good. After that a real draft is $9.99 a season; mock drafts stay free.',
   },
   {
     q: 'Where do the rankings come from?',
@@ -89,7 +89,8 @@ export default function Explainer({ onStart }: { onStart: () => void }) {
           <p>
             Setup is a bookmark. Drag it to your bar, click it once on ESPN, and your
             leagues appear here with a button to open the board when your draft starts.
-            Mock drafts are free; a real draft is $9.99, once.
+            Free for the first 100 accounts, for good. After that a real draft is
+            $9.99 a season; mock drafts stay free.
           </p>
         </div>
       </div>

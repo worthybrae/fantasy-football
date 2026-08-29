@@ -39,7 +39,12 @@ function player(name: string, position: string, extra = {}) {
   }
 }
 
-const PLAN: PlanPreview = {
+// TWO ANSWERS, BECAUSE THE PAGE ASKS TWICE. It opens by asking about the seat
+// a visitor is most likely to recognise -- six of ten -- and the endpoint
+// answers with ten-team pick numbers over paths counted in the only shape the
+// farm has recorded, which is eight. That answer is a mismatch, and the page
+// throws it away: it asks again for the corpus's own shape and draws THAT.
+const ASKED: PlanPreview = {
   teams: 10, slot: 6,
   picks: [6, 15, 26, 35],
   opening: [{ path: ['RB', 'WR', 'WR', 'RB', 'TE'], count: 265, share: 0.31 }],
@@ -58,10 +63,33 @@ const PLAN: PlanPreview = {
   ],
 }
 
+/** The one the page ends up with: seat 6 of an eight-team draft, whose turns
+ *  really are 6, 11, 22 and 27 -- the same drafts the paths were counted in,
+ *  so every number on the page belongs to one league shape. */
+const PLAN: PlanPreview = {
+  ...ASKED,
+  teams: 8,
+  picks: [6, 11, 22, 27],
+  targets: [
+    { pick_no: 6, round: 1, target: player('Bijan Robinson', 'RB'),
+      alternates: [player('Ja’Marr Chase', 'WR')] },
+    { pick_no: 11, round: 2,
+      target: player('Puka Nacua', 'WR', { lasts_pct: 38.4 }),
+      alternates: [] },
+    { pick_no: 22, round: 3, target: player('Trey McBride', 'TE'),
+      alternates: [] },
+  ],
+}
+
 beforeEach(() => {
   forgetRequests()
+  // Call counts, not just implementations: the hero asks the plan endpoint
+  // twice on purpose, and a history that carried over from the test above
+  // would make "twice" unreadable.
+  vi.clearAllMocks()
   fetchMarketOverview.mockResolvedValue(OVERVIEW)
-  fetchPlanPreview.mockResolvedValue(PLAN)
+  fetchPlanPreview.mockImplementation(
+    async (teams: number) => (teams === PLAN.teams ? PLAN : ASKED))
   // FounderBadge asks for /api/account/me directly. Absent on a deployment
   // that predates the founders work, which is the case these tests run in.
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
@@ -87,12 +115,58 @@ test('the hero draws the seat it is talking about', async () => {
   render(<Hero onStart={() => {}} />)
 
   const seat = await screen.findByLabelText('One seat, drawn')
-  expect(within(seat).getByText('Seat 6 of 10 · every turn you own')).toBeTruthy()
-  const rule = within(seat).getByRole('img', { name: 'Picks 6, 15, 26, 35' })
-  expect(within(rule).getByText('35')).toBeTruthy()
+  expect(within(seat).getByText('Seat 6 of 8 · every turn you own')).toBeTruthy()
+  const rule = within(seat).getByRole('img', { name: 'Picks 6, 11, 22, 27' })
+  expect(within(rule).getByText('27')).toBeTruthy()
   expect(within(seat).getByText(/854 recorded 8-team drafts open this way/))
     .toBeTruthy()
 })
+
+test('the seat drawn is the shape the paths were counted in, not the one asked',
+     async () => {
+       // The bug this replaces: an eight-team room's opening hung under a
+       // ten-team seat's pick numbers, drawn as though it were one draft.
+       render(<Hero onStart={() => {}} />)
+
+       await screen.findByLabelText('One seat, drawn')
+       expect(fetchPlanPreview.mock.calls.map((c) => c.slice(0, 2)))
+         .toEqual([[10, 6], [8, 6]])
+     })
+
+test('the seat drawn names the drafts it came out of, being nobody\u2019s league',
+     async () => {
+       render(<Hero onStart={() => {}} />)
+
+       const seat = await screen.findByLabelText('One seat, drawn')
+       expect(within(seat).getByText(
+         /Counted in 8-team drafts, the only shape recorded so far/))
+         .toBeTruthy()
+     })
+
+test('an archive already of the shape asked about is asked once, and unqualified',
+     async () => {
+       fetchPlanPreview.mockResolvedValue(
+         { ...ASKED, corpus: { teams: 10, rounds: 16, drafts: 412 } })
+       render(<Hero onStart={() => {}} />)
+
+       const seat = await screen.findByLabelText('One seat, drawn')
+       expect(within(seat).getByText('Seat 6 of 10 · every turn you own'))
+         .toBeTruthy()
+       expect(fetchPlanPreview).toHaveBeenCalledTimes(1)
+       expect(screen.queryByText(/Counted in/)).toBeNull()
+     })
+
+test('a second read that fails draws no seat rather than the mismatched one',
+     async () => {
+       fetchPlanPreview.mockImplementation(async (teams: number) => {
+         if (teams === 10) return ASKED
+         throw new Error('the corpus went away')
+       })
+       render(<Hero onStart={() => {}} />)
+
+       await waitFor(() => expect(fetchPlanPreview).toHaveBeenCalledTimes(2))
+       expect(screen.queryByLabelText('One seat, drawn')).toBeNull()
+     })
 
 test('with no plan to read, the hero draws no seat rather than a made-up one',
      async () => {
@@ -173,7 +247,7 @@ test('the lasts figure is the plan’s own, for a named player and pick',
        render(<WhatYouGet />)
 
        expect(await screen.findByText('38%')).toBeTruthy()
-       expect(screen.getByText(/Puka Nacua.s chance of reaching pick 15/)).toBeTruthy()
+       expect(screen.getByText(/Puka Nacua.s chance of reaching pick 11/)).toBeTruthy()
      })
 
 test('the plan card names the seat’s first pick and who it opens with',
@@ -190,8 +264,8 @@ test('the by-pick card names the seat, and its turns in the sentence',
 
        // The seat, not its picks: the hero's rule already draws those, and
        // the page's one memorable figure should not be printed twice.
-       expect(await screen.findByText('6 of 10')).toBeTruthy()
-       expect(screen.getByText(/seat 6 of 10.s turns — 6, 15, 26, 35/))
+       expect(await screen.findByText('6 of 8')).toBeTruthy()
+       expect(screen.getByText(/the turns seat 6 of 8 owns — 6, 11, 22, 27/))
          .toBeTruthy()
      })
 

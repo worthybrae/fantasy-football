@@ -155,6 +155,50 @@ test('a slot that the new league size does not have is pulled back inside it',
   })
 })
 
+test('a sixteen-team league is asked about as sixteen, and labelled as sixteen',
+     async () => {
+  // The card used to snap any size that was not one of its four menu options
+  // to ten, so a sixteen-team league got a ten-team answer under a heading
+  // that said sixteen. The league is the authority on how many teams it has.
+  render(<YourGuysByPick players={IDS} teams={16} />)
+  await screen.findByRole('table')
+
+  expect(fetchFavoritesOutlook).toHaveBeenCalledWith(16, 5, IDS.join(','))
+  expect(screen.getByText('16 teams')).toBeTruthy()
+  // The size is the league's, so it is stated rather than offered...
+  expect(screen.queryByLabelText('League')).toBeNull()
+  // ...and the seat is still the reader's to choose, all sixteen of them.
+  expect(within(screen.getByLabelText('Seat')).getAllByRole('option'))
+    .toHaveLength(16)
+})
+
+test('a size the menu does not offer is still what the select says', async () => {
+  // No league to read a size off, and a seat remembered from one that had
+  // sixteen. A select whose value matches none of its options renders as the
+  // first option, which is a control lying about what was asked for.
+  window.localStorage.setItem('guys-outlook',
+                              JSON.stringify({ teams: 16, slot: 9 }))
+  await draw()
+
+  expect(fetchFavoritesOutlook).toHaveBeenCalledWith(16, 9, IDS.join(','))
+  const league = screen.getByLabelText('League') as HTMLSelectElement
+  expect(league.value).toBe('16')
+  expect(within(league).getByRole('option', { name: '16 teams' })).toBeTruthy()
+})
+
+test('a size neither endpoint answers about hands the reader the control back',
+     async () => {
+  render(<YourGuysByPick players={IDS} teams={24} />)
+  await screen.findByRole('table')
+
+  // Not "10 teams" over a twenty-four-team league: the card cannot answer
+  // about that shape, so it asks about one it can and says, by showing the
+  // select, that the shape is the reader's choice.
+  expect(fetchFavoritesOutlook).toHaveBeenCalledWith(10, 5, IDS.join(','))
+  expect(screen.getByLabelText('League')).toBeTruthy()
+  expect(screen.queryByText('24 teams')).toBeNull()
+})
+
 test('a refusal is said in the card rather than thrown at the page', async () => {
   fetchFavoritesOutlook.mockRejectedValue(new Error('Slot 11 does not exist'))
 

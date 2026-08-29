@@ -310,3 +310,36 @@ test('with no draft to read a size off, the plan uses the saved seat',
        expect(screen.getByText(/Seat 3 of 14/)).toBeTruthy()
        window.localStorage.clear()
      })
+
+test('a saved seat the next draft does not have is pulled inside it',
+     async () => {
+       // The seat is the reader's own setting and the size is the league's,
+       // and unpaired they ask about seat 12 of a ten-team draft -- a 422
+       // that would sit in the card for as long as the page stayed open.
+       // Nothing else clamps it here: with no favourites the grid, which
+       // clamps its own copy, is not on the page at all.
+       window.localStorage.setItem('guys-outlook',
+                                   JSON.stringify({ teams: 12, slot: 12 }))
+       fetchFavorites.mockResolvedValue([])
+       draw([{ ...SOON, teams: 10 }])
+
+       await waitFor(() => expect(fetchPlanPreview).toHaveBeenCalled())
+       expect(fetchPlanPreview.mock.calls.at(-1)?.slice(0, 2)).toEqual([10, 10])
+       expect(screen.getByText(/10 teams, seat 10/)).toBeTruthy()
+       window.localStorage.clear()
+     })
+
+test('a league of a shape the plan cannot read says so in its own words',
+     async () => {
+       fetchFavorites.mockResolvedValue([])
+       draw([{ ...SOON, teams: 24 }])
+
+       await waitFor(() => expect(fetchFavorites).toHaveBeenCalled())
+       // The section stays -- a reader does not lose a heading because of
+       // what their league is -- and the endpoint is never asked, so there
+       // is no refusal to print.
+       expect(sections()).toContain('Your plan')
+       expect(screen.getByText(
+         /A 24-team draft is not a shape this plan covers yet/)).toBeTruthy()
+       expect(fetchPlanPreview).not.toHaveBeenCalled()
+     })

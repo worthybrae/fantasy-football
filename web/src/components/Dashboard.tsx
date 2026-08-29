@@ -12,7 +12,8 @@ import MockLobby from './MockLobby'
 import PlanPreview from './PlanPreview'
 import { PickerBoundary, PickerFallback } from './PickerBoundary'
 import YourGuys from './YourGuys'
-import YourGuysByPick, { readSeat, type Seat } from './YourGuysByPick'
+import YourGuysByPick, { MAX_TEAMS, MIN_TEAMS, readSeat, type Seat }
+  from './YourGuysByPick'
 
 // THE PICKER IS NOT IN THIS PAGE'S BUNDLE. It is a 250-row board with a photo
 // per row, opened by a fraction of the readers who load this page and never
@@ -90,6 +91,30 @@ function isMock(league: UpcomingDraft): boolean {
  *  date is never "next": there is nothing to be next before. */
 function nextDraft(live: UpcomingDraft[], upcoming: UpcomingDraft[]) {
   return live[0] ?? upcoming.find((l) => l.draft_at !== null) ?? null
+}
+
+/** THE PLAN'S SECTION WITH NO PLAN IN IT, for a league of a shape neither the
+ *  planner nor the archive answers about -- a twenty-team keeper dynasty, say.
+ *
+ *  It keeps the section, because the reader's page should not lose a heading
+ *  because of what their league is, and it says the one true thing there is
+ *  to say. What it must never do is print the endpoint's 422: "slot 12 is not
+ *  in a 10-team league" is a sentence about a request nobody made. */
+function PlanUnavailable({ teams }: { teams: number }) {
+  return (
+    <section className="db-sec pp">
+      <div className="db-sec-head">
+        <h2 className="db-sec-title">Your plan</h2>
+      </div>
+      <div className="db-card pp-card">
+        <p className="pp-note">
+          A {teams}-team draft is not a shape this plan covers yet — it reads
+          leagues of {MIN_TEAMS} to {MAX_TEAMS} teams. The draft room itself is
+          unaffected.
+        </p>
+      </div>
+    </section>
+  )
 }
 
 export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
@@ -208,6 +233,30 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
   // that has not said how many teams it holds leaves the reader's own setting
   // alone rather than guessing at ten.
   const planTeams = next?.teams ?? null
+
+  // THE SEAT THE PLAN IS ACTUALLY ASKED ABOUT, assembled in the one place
+  // that holds both halves of it.
+  //
+  // The size comes from the league and the slot comes from the reader's own
+  // stored setting, and those are answers to two different questions: a
+  // reader who last set the twelfth seat, whose next draft holds ten teams,
+  // asks `/api/plan/preview?teams=10&slot=12`. That is a 422, and because
+  // nothing on this page ever asks again, it is a 422 sitting in the card for
+  // as long as the page is open. The grid clamps its own copy the same way,
+  // but the grid is only mounted when there are favourites -- so the clamp
+  // cannot live there.
+  //
+  // Null is "not a shape we can ask about": ESPN will not host more than
+  // sixteen teams and neither endpoint answers about one. The card says that
+  // in its own words below rather than printing the server's refusal at a
+  // reader who did not ask the question.
+  const planSeat = useMemo<Seat | null>(() => {
+    const teams = planTeams ?? seat.teams
+    if (!Number.isInteger(teams) || teams < MIN_TEAMS || teams > MAX_TEAMS) {
+      return null
+    }
+    return { teams, slot: Math.min(Math.max(1, Math.round(seat.slot)), teams) }
+  }, [planTeams, seat])
 
   // Stable identities, because YourGuys is memoized and a fresh closure per
   // render would make that memo a comment.
@@ -373,19 +422,23 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
         {/* YOUR PLAN. The room's own planner, run against an empty board for
             this seat -- so the best thing this product does is readable on
             the Sunday before the draft rather than only during it. */}
-        <PlanPreview
-          teams={planTeams ?? seat.teams}
-          slot={seat.slot}
-          tag={(favorites ?? []).join(',')}
-          // WHERE THE SEAT CAME FROM, said out loud. A plan for the wrong
-          // seat is a plan for somebody else's draft, and the reader is the
-          // only one who can catch that.
-          note={next !== null && planTeams !== null
-            ? `For ${next.name ?? 'your next draft'} — ${planTeams} teams, seat ${seat.slot}`
-            : (favorites !== null && favorites.length > 0
-              ? `Seat ${seat.slot} of ${seat.teams} — set it under Your guys`
-              : `Seat ${seat.slot} of ${seat.teams}`)}
-        />
+        {planSeat === null ? (
+          <PlanUnavailable teams={planTeams ?? seat.teams} />
+        ) : (
+          <PlanPreview
+            teams={planSeat.teams}
+            slot={planSeat.slot}
+            tag={(favorites ?? []).join(',')}
+            // WHERE THE SEAT CAME FROM, said out loud. A plan for the wrong
+            // seat is a plan for somebody else's draft, and the reader is the
+            // only one who can catch that.
+            note={next !== null && planTeams !== null
+              ? `For ${next.name ?? 'your next draft'} — ${planTeams} teams, seat ${planSeat.slot}`
+              : (favorites !== null && favorites.length > 0
+                ? `Seat ${planSeat.slot} of ${planSeat.teams} — set it under Your guys`
+                : `Seat ${planSeat.slot} of ${planSeat.teams}`)}
+          />
+        )}
 
         {/* EVERYTHING ELSE ON THE ACCOUNT. The next draft is above; this is
             the rest, soonest first, with its report cards.

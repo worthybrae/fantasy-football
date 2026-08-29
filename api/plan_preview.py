@@ -50,6 +50,7 @@ from __future__ import annotations
 import threading
 import time
 
+import duckdb
 from fastapi import HTTPException, Request, Response
 
 from api import billing, http_cache
@@ -167,14 +168,14 @@ def _openings(slot: int) -> dict:
              "opening_rounds": market.SEQUENCE_ROUNDS, "opening_observed": 0}
     try:
         conn = market._corpus()
-    except HTTPException:
+    except (HTTPException, duckdb.Error):
         # No corpus at all, or one the farm is mid-write on. Neither is a
         # reason to refuse a plan.
         return empty
     try:
         try:
             teams, rounds = market._shape(conn)
-        except HTTPException:
+        except (HTTPException, duckdb.Error):
             return empty
         drafts = conn.execute(
             "SELECT count(*) FROM draft_log WHERE teams = ? AND rounds = ?",
@@ -226,6 +227,15 @@ def _openings(slot: int) -> dict:
                 GROUP BY 1, 2
             ) GROUP BY 1
         """, [teams, rounds, list(RUN_POSITIONS)]).fetchall()
+    except duckdb.Error:
+        # THE FOUR READS ABOVE ARE THE OPENING CARDS AND NOTHING ELSE. A
+        # corpus that opened and then failed mid-read -- the farm swapping the
+        # file under us, a table this build does not have yet, a column
+        # renamed -- costs the same as one that would not open at all: the
+        # counted cards, and not the plan, which is built from the board.
+        # Without this a `duckdb.Error` here is a 500 on the whole endpoint,
+        # which is the dashboard and the landing page both.
+        return empty
     finally:
         conn.close()
 

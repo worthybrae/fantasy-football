@@ -3342,8 +3342,7 @@ button.wr-seat:focus-visible {
   gap: var(--space-3);
 }
 
-.db-next-clock.is-soon,
-.db-next-clock .db-dot ~ * { color: var(--accent); }
+.db-next-clock.is-soon { color: var(--accent); }
 
 .db-next-name {
   font-size: var(--text-lg);
@@ -3481,7 +3480,7 @@ button.wr-seat:focus-visible {
   max-width: 78ch;
 }
 
-.pp-say-2 { color: var(--text-3); }
+.pp-say-2 { color: var(--text-2); }
 
 .pp-path {
   color: var(--text-1);
@@ -3490,9 +3489,12 @@ button.wr-seat:focus-visible {
   letter-spacing: 0.02em;
 }
 
+/* A caveat on the page's most prominent claim, so it is read at the size of
+   a note and the contrast of a sentence -- --text-3 is the tone for a label
+   nobody has to read. */
 .pp-note {
   font-size: var(--text-sm);
-  color: var(--text-3);
+  color: var(--text-2);
   max-width: 78ch;
 }
 

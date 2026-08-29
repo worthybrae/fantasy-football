@@ -82,6 +82,27 @@ export function PickRule({ picks, path }: { picks: number[]; path: string[] }) {
   )
 }
 
+/** WHICH DRAFTS THE PICTURE WAS COUNTED IN, when that is not the shape the
+ *  reader is looking at their own league through.
+ *
+ *  One sentence, in one place, because both surfaces need it and two
+ *  wordings of the same caveat is how one of them quietly goes stale. The
+ *  landing page draws the corpus's own shape and stops there; the dashboard
+ *  is drawing the reader's league with the corpus's paths on it, so it adds
+ *  the half that matters there -- the pick numbers are still theirs.
+ */
+export function CorpusNote({ teams, ownPicks = false }: {
+  teams: number
+  ownPicks?: boolean
+}) {
+  return (
+    <p className="pp-note">
+      Counted in {teams}-team drafts, the only shape recorded so far.
+      {ownPicks && <> Your pick numbers above are your own league&rsquo;s.</>}
+    </p>
+  )
+}
+
 /** The opening, said in one sentence, with the drafts it was counted from
  *  named in it. */
 function Opening({ plan }: { plan: Preview }) {
@@ -119,12 +140,7 @@ function Opening({ plan }: { plan: Preview }) {
           In those drafts the board empties in this order: {runs.join(', and ')}.
         </p>
       )}
-      {!sameShape && (
-        <p className="pp-note">
-          Counted in {corpus.teams}-team drafts, the only shape recorded so
-          far. Your pick numbers above are your own league&rsquo;s.
-        </p>
-      )}
+      {!sameShape && <CorpusNote teams={corpus.teams} ownPicks />}
     </>
   )
 }

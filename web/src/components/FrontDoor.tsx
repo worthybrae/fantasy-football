@@ -3,7 +3,7 @@ import { fetchMarketOverview, fetchPlanPreview,
          type MarketOverview, type PlanPreview } from '../api'
 import FounderBadge from './FounderBadge'
 import { Logo } from './Logo'
-import { PickRule } from './PlanPreview'
+import { CorpusNote, PickRule } from './PlanPreview'
 
 // THE FRONT DOOR, for somebody who has connected nothing.
 //
@@ -28,15 +28,25 @@ import { PickRule } from './PlanPreview'
 // figure that has quietly gone stale is worse than a weaker claim that is
 // still true, so nothing on this page is a literal.
 //
-// THE SEAT THE PAGE READS FROM. Six of ten: the most common league size and a
-// middle seat, which is the one a visitor is most likely to recognise as
-// theirs. Named here rather than buried in three call sites.
+// THE SEAT THE PAGE READS FROM. Six of ten to start with: the most common
+// league size and a middle seat, which is the one a visitor is most likely to
+// recognise as theirs. Named here rather than buried in three call sites.
+//
+// THE SIZE IS A FIRST GUESS, NOT THE ANSWER. The archive is one league size at
+// a time -- whatever the farm has played most -- and the endpoint answers a
+// ten-team question with eight-team paths, saying so in `corpus`. That is the
+// right call for a signed-in reader, whose league really is ten teams. It is
+// the wrong one here: this page has no reader's league to be faithful to, and
+// a ten-team snake drawn with an eight-team room's opening on it is a picture
+// of a draft that never happened. So the shape the corpus names is asked for
+// second, and it is that answer the page draws.
 const DEMO_TEAMS = 10
 const DEMO_SLOT = 6
 
 /** The shared read. Both sections below want the same two answers and mount
  *  together, so they ask through the same deduplicated cache (see
- *  `cachedGet`) and neither owns the other's state. */
+ *  `cachedGet`) -- the second request is one round trip for the page, not one
+ *  per section -- and neither owns the other's state. */
 function useFrontDoorFigures() {
   const [overview, setOverview] = useState<MarketOverview | null>(null)
   const [plan, setPlan] = useState<PlanPreview | null>(null)
@@ -46,7 +56,23 @@ function useFrontDoorFigures() {
       .then((body) => { if (!cancelled) setOverview(body) })
       .catch(() => { /* the line says less, and still says something true */ })
     fetchPlanPreview(DEMO_TEAMS, DEMO_SLOT)
-      .then((body) => { if (!cancelled) setPlan(body) })
+      .then((body) => {
+        if (cancelled) return
+        const shape = body.corpus?.teams ?? null
+        // Already the counted shape, or nothing counted at all: this is the
+        // answer. With no corpus the hero draws no seat anyway, and the cards
+        // below still have a plan to read.
+        if (shape === null || shape === body.teams) {
+          setPlan(body)
+          return
+        }
+        // Ask again for the drafts the numbers came out of. Not a fallback to
+        // the first answer if it fails: the first answer is the mismatch, and
+        // this page would rather draw nothing than draw one draft's picks
+        // under another draft's positions.
+        return fetchPlanPreview(shape, Math.min(DEMO_SLOT, shape))
+          .then((counted) => { if (!cancelled) setPlan(counted) })
+      })
       .catch(() => { /* the cards fall back to what they can say without it */ })
     return () => { cancelled = true }
   }, [])
@@ -116,6 +142,13 @@ export function Hero({ onStart }: { onStart: () => void }) {
             {' '}of {plan.corpus.drafts.toLocaleString()} recorded
             {' '}{plan.corpus.teams}-team drafts open this way from here.
           </p>
+          {/* The seat drawn is the corpus's own, so the picks and the
+              positions under them are one draft. The visitor's league is
+              probably a different size, and the page says which size this
+              one is in the same words the dashboard uses. */}
+          {plan.corpus.teams !== DEMO_TEAMS && (
+            <CorpusNote teams={plan.corpus.teams} />
+          )}
         </aside>
       )}
     </section>
@@ -272,7 +305,7 @@ export function WhatYouGet() {
           <h3 className="fd-get-h3">Which of your players you can have</h3>
           <p className="fd-get-p">
             {plan
-              ? `Star five to twenty-five players and the grid says which of them reach each of seat ${seat}'s turns — ${plan.picks.slice(0, 4).join(', ')}.`
+              ? `Star five to twenty-five players and the grid says which of them reach the turns seat ${seat} owns — ${plan.picks.slice(0, 4).join(', ')}.`
               : 'Star the players you want and the grid says which of them reach each of your turns.'}
           </p>
         </li>
