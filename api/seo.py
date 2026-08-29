@@ -921,6 +921,54 @@ def round_players(data: dict, n: int) -> list:
     return sorted(hits, key=lambda p: (p["round_mode"] != n, p["adp"]))
 
 
+def _round_rows(data: dict, n: int) -> list:
+    """The round's players, each with how often this round is where he went.
+
+    Straight out of the histogram: the picks that make up round `n` are a
+    contiguous slice of it, and their sum over the drafts he was on the board
+    for is the share the page wants. No second query, and the same
+    denominator the rest of the site uses.
+    """
+    teams = data["teams"]
+    first, last = (n - 1) * teams + 1, n * teams
+    rows = []
+    for p in round_players(data, n):
+        count = sum(p["hist"][first - 1:last])
+        rows.append({"p": p, "count": count,
+                     "share": round(count / p["of"], 3) if p["of"] else 0.0,
+                     "usual": p["round_mode"] == n})
+    return rows
+
+
+def _present(data: dict) -> list:
+    """The positions somebody actually went at in this corpus, in board
+    order. A page must not link to a position page with nobody on it."""
+    seen = {p["position"] for p in data["players"]}
+    return [pos for pos in POSITIONS if pos in seen]
+
+
+def _seats(data: dict, n: int) -> list:
+    """What the first, middle and last seat of the draft see in round `n`.
+
+    CHOOSING A SEAT IS CHOOSING A LIST OF PICK NUMBERS -- that is the whole
+    of what a snake draft does to you -- and the only way to compare two
+    seats is to look at who is on the board when each comes round. Three
+    seats rather than all of them: the two ends and the middle are the shape
+    of the answer, and eight columns of three names would be a table nobody
+    reads.
+
+    The snake, stated once: odd rounds run out from slot 1, even rounds run
+    back from the last slot.
+    """
+    teams = data["teams"]
+    out = []
+    for slot in sorted({1, (teams + 1) // 2, teams}):
+        pick = (n - 1) * teams + (slot if n % 2 else teams - slot + 1)
+        out.append({"slot": slot, "pick": pick,
+                    "top": data["at_pick"].get(pick, [])})
+    return out
+
+
 def _missing(path: str):
     from fastapi.responses import HTMLResponse
     return HTMLResponse(render("adp_missing.html", title="Not found – ESPN Draft Assist",
@@ -964,7 +1012,7 @@ def register_seo_routes(app, conn=None):
         d = data()
         players = d["players"] if position is None else [
             p for p in d["players"] if p["position"] == position]
-        present = [pos for pos in POSITIONS if pos in {p["position"] for p in d["players"]}]
+        present = _present(d)
         season = d["updated"].year if d["updated"] else datetime.now().year
         shape = f"{d['teams']}-team PPR" if d["drafts"] else "PPR"
         if position is None:
@@ -1037,7 +1085,9 @@ def register_seo_routes(app, conn=None):
         return page(rendered(d["stamp"], ("round", n), lambda: render(
             "adp_round.html", title=f"Round {n} of an ESPN mock draft – who goes there – ESPN Draft Assist",
             description=desc, path=f"/adp/round/{n}", n=n, first=first, last=last,
-            players=players, rounds=d["rounds"], provenance=_provenance(d),
+            rows=_round_rows(d, n), mix=d["round_mix"].get(n, []),
+            seats=_seats(d, n), drafts=d["drafts"], teams=teams,
+            rounds=d["rounds"], provenance=_provenance(d), positions=_present(d),
             breadcrumbs=_crumbs(("ADP", "/adp"), (f"Round {n}", f"/adp/round/{n}")))))
 
     @app.api_route("/adp/{key}", methods=["GET", "HEAD"], response_class=HTMLResponse)
@@ -1082,9 +1132,7 @@ def register_seo_routes(app, conn=None):
             lastmod = d["updated"].isoformat() if d["updated"] else None
             urls = ["/", "/mocks", "/adp"]
             if d["drafts"]:
-                present = [pos for pos in POSITIONS
-                           if pos in {p["position"] for p in d["players"]}]
-                urls += [f"/adp/{pos.lower()}" for pos in present]
+                urls += [f"/adp/{pos.lower()}" for pos in _present(d)]
                 urls += [f"/adp/round/{n}" for n in range(1, d["rounds"] + 1)]
                 urls += [f"/adp/{p['slug']}" for p in d["players"]]
             body = ['<?xml version="1.0" encoding="UTF-8"?>',

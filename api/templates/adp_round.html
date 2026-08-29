@@ -1,24 +1,67 @@
 {# api/templates/adp_round.html #}
 {% extends "base.html" %}
+{% macro pct(x) %}{{ (x * 100) | round | int }}%{% endmacro %}
 {% block body %}
 <div class="crumbs"><a href="/adp">ADP</a> › Round {{ n }}</div>
 <h1>Round {{ n }} of an ESPN mock draft</h1>
 <p class="prov">Picks {{ first }}–{{ last }} · {{ provenance }}</p>
-{% if not players %}<p>No player has gone in round {{ n }} often enough to say.</p>{% else %}
+{% if mix %}
+<p class="intro">Round {{ n }} is picks {{ first }} to {{ last }}. Across {{ drafts }} recorded drafts it goes {{ '%g' % mix[0].pct }}% {{ mix[0].position }}{% if mix | length > 1 %} and {{ '%g' % mix[1].pct }}% {{ mix[1].position }}{% endif %}{% if mix | length > 2 %}, with the rest split between {% for m in mix[2:] %}{{ m.position }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}.</p>
+
+<h2>What this round is made of</h2>
+<div class="mix" role="img" aria-label="Share of round {{ n }} picks by position">
+{% for m in mix %}<i class="{{ m.position }}" style="width:{{ m.pct }}%"></i>{% endfor %}
+</div>
+<ul class="key">{% for m in mix %}<li><span class="pos {{ m.position }}">{{ m.position }}</span> {{ '%g' % m.pct }}%</li>{% endfor %}</ul>
+{% endif %}
+
+{% if seats %}
+<h2>What a seat sees</h2>
+<div class="cols">
+{% for s in seats %}
+<div class="card">
+  <h3>Seat {{ s.slot }} — pick {{ s.pick }}</h3>
+  {% if s.top %}
+  <ol>{% for t in s.top %}
+    <li><span class="d big">{{ t.pct }}%</span>
+      <a class="nm" href="/adp/{{ t.slug }}">{{ t.name }}</a>
+      <span class="pos {{ t.position }}">{{ t.position }}</span></li>
+  {% endfor %}</ol>
+  {% else %}<p class="note">No player was taken here often enough to name.</p>{% endif %}
+</div>
+{% endfor %}
+</div>
+<p class="note" style="margin-top:10px">The names most often taken at each seat's pick in this round, and how often. Odd rounds run out from seat 1 and even rounds run back, so seat 1's pick moves to the end of the round every other time.</p>
+{% endif %}
+
+<h2>Who goes in round {{ n }}</h2>
+{% if not rows %}<p>No player has gone in round {{ n }} often enough to say.</p>{% else %}
+<div class="scroll">
 <table>
-<thead><tr><th>Player</th><th>Pos</th><th class="n">ADP</th><th class="n">Range</th><th>In this round</th></tr></thead>
+<thead><tr><th>Player</th><th>Pos</th><th>Team</th><th class="n">ADP</th><th class="n">Range</th><th class="n">In this round</th><th>How often</th></tr></thead>
 <tbody>
-{% for p in players %}
+{% for r in rows %}
 <tr>
-  <td><a href="/adp/{{ p.slug }}">{{ p.name }}</a></td>
-  <td><span class="pos">{{ p.position }}</span></td>
-  <td class="n">{{ '%.1f' % p.adp }}</td>
-  <td class="n">{{ p.p10 }}–{{ p.p90 }}</td>
-  <td>{% if p.round_mode == n %}usually{% else %}sometimes{% endif %}</td>
+  <td class="who">{% if r.p.headshot %}<img src="{{ r.p.headshot }}" alt="" width="24" height="24" loading="lazy">{% endif %}<a href="/adp/{{ r.p.slug }}">{{ r.p.name }}</a></td>
+  <td><span class="pos {{ r.p.position }}">{{ r.p.position }}</span></td>
+  <td>{{ r.p.team or '—' }}</td>
+  <td class="n">{{ '%.1f' % r.p.adp }}</td>
+  <td class="n">{{ r.p.p10 }}–{{ r.p.p90 }}</td>
+  <td class="n">{{ pct(r.share) }}</td>
+  <td class="dim">{% if r.usual %}usually{% else %}sometimes{% endif %}</td>
 </tr>
 {% endfor %}
 </tbody>
 </table>
+</div>
+<p class="note" style="margin-top:10px">“In this round” is the share of the drafts he was on the board for in which he went at one of picks {{ first }}–{{ last }}. “Usually” means this is the round he goes in most often.</p>
 {% endif %}
-<div class="links">{% if n > 1 %}<a href="/adp/round/{{ n - 1 }}">← Round {{ n - 1 }}</a>{% endif %}{% if n < rounds %}<a href="/adp/round/{{ n + 1 }}">Round {{ n + 1 }} →</a>{% endif %}</div>
+
+<h2>More</h2>
+<div class="links">
+  {% if n > 1 %}<a href="/adp/round/{{ n - 1 }}">← Round {{ n - 1 }}</a>{% endif %}
+  {% if n < rounds %}<a href="/adp/round/{{ n + 1 }}">Round {{ n + 1 }} →</a>{% endif %}
+  <a href="/adp">The whole board</a>
+  {% for pos in positions %}<a href="/adp/{{ pos | lower }}">{{ pos }}</a>{% endfor %}
+</div>
 {% endblock %}
