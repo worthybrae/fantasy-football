@@ -588,9 +588,13 @@ td:first-child {
   flex-shrink: 0;
   margin: 0;
   padding: var(--space-2) var(--space-4);
-  background: color-mix(in srgb, var(--fail) 10%, var(--bg-1));
+  background: var(--fail-bg);
   border-bottom: 1px solid var(--fail);
   font-size: var(--text-sm);
+  /* Stated, because two of the three places that render this banner also
+     put `.error` on it and one does not -- so the same strip came out red
+     text in the room and muted grey under the recompute notice. */
+  color: var(--text-1);
 }
 
 /* One tier below the error banner, sharing its geometry so a stack of the
@@ -608,7 +612,7 @@ td:first-child {
   flex-shrink: 0;
   margin: 0;
   padding: var(--space-2) var(--space-4);
-  background: color-mix(in srgb, var(--fail) 10%, var(--bg-1));
+  background: var(--fail-bg);
   border-bottom: 1px solid var(--fail);
   font-size: var(--text-sm);
   color: var(--text-1);
@@ -2943,12 +2947,12 @@ button.plan-target:focus-visible .plan-name {
    states. */
 .confirm-error {
   margin: var(--space-3) 0 0;
-  padding: var(--space-2);
-  border: 1px solid var(--fail);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--fail-line);
   border-radius: var(--radius);
-  font-size: var(--text-xs);
+  background: var(--fail-bg);
   color: var(--text-1);
-  background: color-mix(in srgb, var(--fail) 10%, transparent);
+  font-size: var(--text-sm);
   line-height: 1.5;
 }
 
@@ -7016,10 +7020,12 @@ button.pp-pop-comp:focus-visible {
 .mocks-board-error {
   margin: var(--space-3) var(--space-4) 0;
   padding: var(--space-2) var(--space-3);
-  background: color-mix(in srgb, var(--fail) 10%, var(--bg-1));
-  border: 1px solid var(--fail);
+  border: 1px solid var(--fail-line);
   border-radius: var(--radius);
+  background: var(--fail-bg);
+  color: var(--text-1);
   font-size: var(--text-sm);
+  line-height: 1.5;
 }
 
 .mocks-grid {

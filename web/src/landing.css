@@ -711,6 +711,20 @@
    below), which is a different page rather than a panel on this one. Same
    margin as the bands under it, because it is the same kind of object -- a
    line about YOU, above the pitch made to everybody. */
+/* This had no rule of its own, so a refused connect rendered as ordinary
+   body copy in the middle of a list of drafts -- an error that did not look
+   like one. */
+.lp-drafts-error {
+  margin: var(--space-3) 0 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--fail-line);
+  border-radius: var(--radius);
+  background: var(--fail-bg);
+  color: var(--text-1);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
 .lp-drafts {
   margin: var(--space-4) clamp(20px, 6vw, 88px) 0;
   padding: var(--space-3) var(--space-4);
@@ -1665,10 +1679,19 @@
   cursor: pointer;
 }
 
+/* One inline-error shape, shared with the paywall, the pick dialog, the
+   mock board and the archive -- see `--fail-bg`/`--fail-line` in index.css.
+   Before it, a refused save in this dialog was a line of red text while the
+   same refusal one screen over was a bordered panel. */
 .fav-error {
   margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--fail-line);
+  border-radius: var(--radius);
+  background: var(--fail-bg);
+  color: var(--text-1);
   font-size: var(--text-sm);
-  color: var(--fail);
+  line-height: 1.5;
 }
 
 /* THE LIST BEING BUILT, above the board it is built from. */
@@ -1851,7 +1874,7 @@
   margin: 0;
   padding: var(--space-2) var(--space-4);
   border-bottom: 1px solid var(--fail);
-  background: color-mix(in srgb, var(--fail) 10%, var(--bg-1));
+  background: var(--fail-bg);
   font-size: var(--text-sm);
   color: var(--text-1);
 }
@@ -1904,7 +1927,7 @@
   margin: 0;
   padding: var(--space-2) var(--space-4);
   border-bottom: 1px solid var(--fail);
-  background: color-mix(in srgb, var(--fail) 10%, var(--bg-1));
+  background: var(--fail-bg);
   font-size: var(--text-sm);
   color: var(--text-1);
 }
@@ -3337,12 +3360,14 @@ button.wr-seat:focus-visible {
 }
 
 .pw-error {
-  margin: 0 0 12px;
-  padding: 8px 10px;
-  border: 1px solid var(--fail);
+  margin: 0 0 var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--fail-line);
   border-radius: var(--radius);
+  background: var(--fail-bg);
+  color: var(--text-1);
   font-size: var(--text-sm);
-  color: var(--fail);
+  line-height: 1.5;
 }
 
 /* Said once, small, and true: the card never touches this server, because

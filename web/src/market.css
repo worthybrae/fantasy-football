@@ -224,14 +224,18 @@
 }
 
 .mk-loading,
+/* Was two rules for one class, the second overriding the first's colour --
+   and even then it was a muted line of prose. Same panel as every other
+   inline error in the app now. */
 .mk-error {
-  margin: 16px 0 0;
+  margin: var(--space-4) 0 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--fail-line);
+  border-radius: var(--radius);
+  background: var(--fail-bg);
+  color: var(--text-1);
   font-size: var(--text-sm);
-  color: var(--text-3);
-}
-
-.mk-error {
-  color: var(--fail-soft);
+  line-height: 1.5;
 }
 
 /* -- your turns ---------------------------------------------------------- */
