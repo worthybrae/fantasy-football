@@ -1705,3 +1705,62 @@ def test_a_shaper_that_raises_costs_the_sections_not_the_page(
     said = [line for line in capsys.readouterr().out.splitlines()
             if "profile enrichment unavailable" in line]
     assert len(said) == 1, said
+
+
+def _steady_cls(rank, pool):
+    """The steadiness column of a season, off `seo._season_rows`."""
+    rows = seo._season_rows({
+        "header": {"position": "RB"},
+        "bio": {"season": 2026},
+        "seasons": [{"season": 2025, "games": 16, "ppg": 12.0, "pos_finish": 10,
+                     "pos_rank_ppg": 10, "pos_rank_ppg_n": 40,
+                     "cv_rank": rank, "cv_rank_n": pool}]})["rows"]
+    return rows[0]["steady_cls"]
+
+
+def _place_cls(rank, of):
+    """The place a single o-line starter is painted on, off `seo._oline`."""
+    card = seo._oline({"oline": {
+        "team": "CHI", "rank": 12, "teams": 32,
+        "starters": [{"name": "Braxton Jones", "position": "LT",
+                      "avail_rank": rank, "avail_rank_of": of}]}})
+    return card["starters"][0]["cls"]
+
+
+def test_a_place_on_the_boundary_is_painted_the_app_s_own_step():
+    """`1 - rank / pool` IS NOT `rank / pool` IN BINARY, and the app cuts on
+    the second one.
+
+    `steadyTone` (web/src/components/draft/panels.ts) and `placeTone`
+    (web/src/components/profile/LineQuality.tsx) both ask "is this place
+    inside the top fifth / quarter / half of its field" as
+    `rank / pool <= ceiling`. Turned into `1 - rank / pool >= floor` -- the
+    same statement in exact arithmetic -- it stops being the same statement
+    in floating point: 1 - 24/30 is 0.19999999999999996, under the 0.2 floor
+    that 24/30 is exactly on, so a lineman placed 24th of 30 was painted the
+    worst step here and the second-worst in the room. Every exact boundary
+    was one step dark.
+    """
+    # The app's two functions, transcribed. Ceilings, ascending, best first.
+    def steady_tone(rank, pool):
+        p = rank / pool
+        return (5 if p <= 0.25 else 4 if p <= 0.5 else 3 if p <= 0.75
+                else 2 if p <= 0.9 else 1)
+
+    def place_tone(rank, of):
+        p = rank / of
+        return (5 if p <= 0.2 else 4 if p <= 0.4 else 3 if p <= 0.6
+                else 2 if p <= 0.8 else 1)
+
+    # The case the review named, spelled out before the sweep so a failure
+    # says which one.
+    assert _place_cls(24, 30) == seo._PANEL_RAMP[1]
+    assert _steady_cls(9, 10) == seo._PANEL_RAMP[1]
+    assert _steady_cls(18, 20) == seo._PANEL_RAMP[1]
+
+    for pool in range(2, 41):
+        for rank in range(1, pool + 1):
+            assert _steady_cls(rank, pool) == seo._PANEL_RAMP[
+                steady_tone(rank, pool) - 1], f"steady {rank}/{pool}"
+            assert _place_cls(rank, pool) == seo._PANEL_RAMP[
+                place_tone(rank, pool) - 1], f"o-line {rank}/{pool}"

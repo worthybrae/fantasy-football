@@ -1279,6 +1279,30 @@ def _band_level(value, cuts) -> int | None:
     return 1
 
 
+def _place_level(rank, pool, ceils) -> int | None:
+    """The step a PLACE takes: `rank / pool` against ceilings, best first.
+
+    NOT `_band_level(1 - rank / pool, floors)`, WHICH IS THE SAME STATEMENT
+    ONLY IN EXACT ARITHMETIC. The app asks "is this place inside the top
+    fifth / quarter / half of its field" and asks it as `rank / pool <=
+    ceiling` -- `steadyTone` in web/src/components/draft/panels.ts and
+    `placeTone` in web/src/components/profile/LineQuality.tsx. Subtracted
+    from one and compared against the complement it stops agreeing at every
+    exact boundary: 1 - 24/30 is 0.19999999999999996, which is under a 0.2
+    floor that 24/30 sits exactly on. 24/30, 9/10, 18/20 and every other
+    place that lands on a cut were painted one step darker here than in the
+    room. Same rank, same pool, two colours.
+    """
+    rank, pool = _num_or_none(rank), _num_or_none(pool)
+    if rank is None or pool is None or pool <= 0:
+        return None
+    place = rank / pool
+    for i, ceiling in enumerate(ceils):
+        if place <= ceiling:
+            return 5 - i
+    return 1
+
+
 _ORDINALS = {1: "st", 2: "nd", 3: "rd"}
 
 
@@ -1484,9 +1508,10 @@ def _season_rows(payload: dict) -> dict | None:
                          else f"{int(s['pos_rank_ppg'])} of {int(s['pos_rank_ppg_n'])}"),
             "steady": ("—" if cv_rank is None or not cv_of
                        else f"{int(cv_rank)} of {int(cv_of)}"),
+            # `steadyTone`'s own ceilings, in its own order.
             "steady_cls": ("" if cv_rank is None or not cv_of else
-                           _PANEL_RAMP[_band_level(1 - cv_rank / cv_of,
-                                                   (0.75, 0.5, 0.25, 0.1)) - 1]),
+                           _PANEL_RAMP[_place_level(cv_rank, cv_of,
+                                                    (0.25, 0.5, 0.75, 0.9)) - 1]),
         })
     proj_ppg = _num_or_none((payload.get("summary") or {}).get("proj_ppg"))
     proj_finish = _num_or_none(payload["header"].get("proj_pos_finish"))
@@ -1693,8 +1718,8 @@ def _oline(payload: dict) -> dict | None:
         if not s.get("name"):
             continue
         rank, of = _num_or_none(s.get("avail_rank")), _num_or_none(s.get("avail_rank_of"))
-        level = None if rank is None or not of else _band_level(1 - rank / of,
-                                                                (0.8, 0.6, 0.4, 0.2))
+        # `placeTone`'s own ceilings: top fifth, top two fifths, and down.
+        level = _place_level(rank, of, (0.2, 0.4, 0.6, 0.8))
         starters.append({"position": s.get("position") or "—", "name": s["name"],
                          "place": "—" if rank is None or not of else f"{int(rank)}/{int(of)}",
                          "cls": "" if level is None else _PANEL_RAMP[level - 1]})
