@@ -237,11 +237,12 @@ def test_reasons_come_in_the_order_the_spec_fixes():
         position="RB", slot="RB1", espn_rank=10.0, espn_adp=12.0,
         bye=7, health=5, bye_mates=[])
     # The rank comes first after the star because it is the first thing the
-    # order is built from; the cap at four is what drops "fills RB1".
+    # order is built from, and five pros is room for the slot as well.
     assert pros == ["★ favourite",
                     "ESPN's #10 overall",
                     "82% still there at pick 11",
-                    "+12.0 pts over the next RB you'd get at pick 22"]
+                    "+12.0 pts over the next RB you'd get at pick 22",
+                    "fills RB1"]
     assert cons == []
 
 
@@ -282,13 +283,29 @@ def test_one_team_mate_on_the_bye_is_not_a_stack():
     assert cons == []
 
 
-def test_no_list_runs_past_four_reasons():
+def test_no_list_runs_past_its_cap():
     pros, cons = pl.reasons_for(
         favourite=True, lasts=0.82, at_pick=11, edge=12.0, next_pick=22,
         position="RB", slot="RB1", espn_rank=20.0, espn_adp=40.0,
         bye=7, health=1, bye_mates=["A", "B"])
-    assert len(pros) == pl.MAX_REASONS
-    assert 0 < len(cons) <= pl.MAX_REASONS
+    assert len(pros) == pl.MAX_PROS == 5
+    assert 0 < len(cons) <= pl.MAX_CONS == 4
+
+
+def test_a_starred_target_keeps_the_two_reasons_that_explain_the_pick():
+    """Five pros, because four was one short. A favourite spent his four on
+    the star, the rank, the chance and the edge -- and dropped the slot he
+    fills and the drop-off that says why he was taken over a higher-ranked
+    name, which is the pair that explains the pick."""
+    pros, _cons = pl.reasons_for(
+        favourite=True, lasts=0.65, at_pick=6, edge=53.7, next_pick=11,
+        position="RB", slot="RB2", espn_rank=7.0, espn_adp=7.0,
+        bye=None, health=5, drop_off=True)
+    assert pros == ["★ favourite",
+                    "ESPN's #7 overall",
+                    "65% still there at pick 6",
+                    "+53.7 pts over the next RB you'd get at pick 11",
+                    "biggest drop-off at RB before pick 11"]
 
 
 def test_the_plan_names_the_roster_mate_a_bye_would_stack_with():

@@ -171,7 +171,9 @@ edge_at_pick, pros, cons}, ...]}`. `lasts_pct` is the chance at THIS turn's
 pick; `edge_pts` is priced at `edge_at_pick`, the turn after it (null on the
 last turn, where there is nothing left to wait for).
 
-Reasons are rule-derived strings, at most four pros and four cons, in this order:
+Reasons are rule-derived strings, at most five pros and four cons (the
+fifth pro is what the rank and the drop-off cost a starred target), in
+this order:
 
 - `"★ favourite"` when in the favourites set.
 - `"ESPN's #{rank} overall"` — the first thing the order is built from, so

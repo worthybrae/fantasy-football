@@ -106,13 +106,21 @@ THRESHOLD = 0.50
 # is the whole point of having asked.
 FAVOURITE_THRESHOLD = 0.35
 
-# At most four reasons per list. More than four bullets on a card is not read
-# -- and the ORDER below is the priority, so the four that survive are the
-# four that matter most. Pros and cons are capped separately, deliberately:
-# capping the combined list would let four pros bury the one con (a bye
-# stack, a health meter at 1) that the card exists to warn about, since every
-# pro sorts ahead of every con in the spec's order.
-MAX_REASONS = 4
+# How many reasons a card prints, per list. The ORDER below is the priority,
+# so what survives the cap is what matters most.
+#
+# PROS ARE FIVE AND CONS ARE FOUR. Pros and cons are capped separately,
+# deliberately: capping the combined list would let the pros bury the one con
+# (a bye stack, a health meter at 1) that the card exists to warn about,
+# since every pro sorts ahead of every con in the spec's order. Four pros was
+# one short once the rank became a reason -- a starred target spent its four
+# on the star, the rank, the chance and the edge, and dropped both the slot
+# it fills and the drop-off line that says why it was taken over a
+# higher-ranked name, which is to say it dropped the two that explain the
+# pick. Five is the room's own limit on a card that is still read at a
+# glance; the cons stay at four, where nothing has ever been cut.
+MAX_PROS = 5
+MAX_CONS = 4
 
 # How far ESPN's ADP has to sit from ESPN's own rank before it is worth
 # saying. Inside six picks the two lists are telling the same story.
@@ -327,7 +335,7 @@ def reasons_for(*, favourite: bool, lasts, at_pick, edge, next_pick,
     if health is not None and health <= HEALTH_CON:
         cons.append(f"health {health:.0f}/5")
 
-    return pros[:MAX_REASONS], cons[:MAX_REASONS]
+    return pros[:MAX_PROS], cons[:MAX_CONS]
 
 
 class _Board:
