@@ -110,6 +110,15 @@
   </div>
 {% endfor %}
 </div>
+{# WHAT FINISH IS A FINISH AMONG, on the one page that has nowhere else to
+   say it. A defense gets no season table, and the note under that table was
+   the only place the yardstick was stated -- so its page showed "DST7" on a
+   five-step bar and never said seventh of what, or that the twelve is an
+   assumption these pages make because they have no league to ask. #}
+{% if not prof.seasons %}
+{% set fin = prof.meters | selectattr('label', 'equalto', 'Finish') | list | first %}
+{% if fin %}<p class="note">Finish is a place among {{ fin.of }} startable {{ prof.position }}s — a twelve-team league's shape, assumed because these pages have no league to ask. These drafts are {{ teams }}-team.</p>{% endif %}
+{% endif %}
 {% endif %}
 
 {% if prof.seasons %}
@@ -145,7 +154,7 @@
 </tbody>
 </table>
 </div>
-<p class="note">Finish is a place among {{ prof.seasons.starters }} startable {{ prof.seasons.position }}s, which is a twelve-team league's shape. Steadiness is {{ pron.p }} place on week-to-week swing among everyone measured at {{ pron.p }} position that season — lower is steadier.</p>
+<p class="note">Finish is a place among {{ prof.seasons.starters }} startable {{ prof.seasons.position }}s, which is a twelve-team league's shape — assumed, because these pages have no league to ask, while these drafts are {{ teams }}-team. Steadiness is {{ pron.p }} place on week-to-week swing among everyone measured at {{ pron.p }} position that season — lower is steadier.</p>
 {% endif %}
 
 {% if prof.weeks %}
@@ -293,7 +302,7 @@
 {% if prof and prof.market.edge is not none and p.consensus %}
 {# The gap between the first two rows, stated. It is arithmetic a reader
    could do, and doing it is the whole question the table exists to answer. #}
-<tr><td><b>vs consensus</b></td><td class="n {{ prof.market.edge_tone }}"><b>{{ prof.market.edge_text }}</b></td><td class="n"></td><td class="dim">Slots between this board and the consensus. Positive is the market leaving {{ pron.o }} later than the model would take {{ pron.o }}{% if prof.market.edge_tone == 'up' %} — a whole round in any league this tool supports{% endif %}</td></tr>
+<tr><td><b>vs consensus</b></td><td class="n {{ prof.market.edge_tone }}"><b>{{ prof.market.edge_text }}</b></td><td class="n"></td><td class="dim">Slots between this board and the consensus. Positive is the market leaving {{ pron.o }} later than the model would take {{ pron.o }}{% if prof.market.edge_tone == 'pf-up' %} — a whole round in any league this tool supports{% endif %}</td></tr>
 {% endif %}
 </tbody>
 </table>

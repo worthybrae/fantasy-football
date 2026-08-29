@@ -1544,11 +1544,10 @@ def test_a_player_page_stays_inside_its_size_budget(corpus, profiled):
     sections roughly doubled one, and the ceiling is what stops the next
     section being added without anybody measuring.
 
-    Measured against the real corpus and the real universal database, the
-    heaviest player page is 56 KB (a tight end: five cards of history, a
-    full game log and eight news items). The fixture's pages are far
-    smaller, so this is a guard rail rather than a measurement -- see the
-    task report for the real figures."""
+    Measured against the real corpus (854 drafts, 203 pages) and the real
+    universal database, the heaviest player page is 60.2 KB and the median
+    is 55.5 KB. The fixture's pages are far smaller, so this is a guard rail
+    rather than a measurement -- see the task report for the real figures."""
     client = _client(profiled)
     for player in seo.adp_data(profiled)["players"]:
         body = client.get(f"/adp/{player['slug']}").text
@@ -1794,3 +1793,60 @@ def test_a_place_on_the_boundary_is_painted_the_app_s_own_step():
                 steady_tone(rank, pool) - 1], f"steady {rank}/{pool}"
             assert _place_cls(rank, pool) == seo._PANEL_RAMP[
                 place_tone(rank, pool) - 1], f"o-line {rank}/{pool}"
+
+
+def test_a_news_row_is_a_link_only_when_its_url_is_one():
+    """`player_news.url` IS WHATEVER THE FEED PUT THERE. The page renders an
+    `<a href>` straight off that column, so a `javascript:` row would be a
+    script handed to a reader on a click and a bare path would be a link
+    into this site that goes nowhere. The headline is the thing worth
+    reading either way, so the row stays and only the link goes."""
+    rows = seo._merge_news([
+        {"headline": "Real", "url": "https://espn.com/a", "date": None},
+        {"headline": "Plain http", "url": "http://wire.example/b", "date": None},
+        {"headline": "Script", "url": "javascript:alert(1)", "date": None},
+        {"headline": "Data", "url": "data:text/html,<b>x</b>", "date": None},
+        {"headline": "Bare path", "url": "/adp/somebody", "date": None},
+        {"headline": "Protocol relative", "url": "//evil.example/c", "date": None},
+        {"headline": "Nothing at all", "url": "", "date": None},
+    ], [])
+    by_headline = {r["headline"]: r["url"] for r in rows}
+    assert by_headline["Real"] == "https://espn.com/a"
+    assert by_headline["Plain http"] == "http://wire.example/b"
+    for headline in ("Script", "Data", "Bare path", "Protocol relative",
+                     "Nothing at all"):
+        assert by_headline[headline] is None, headline
+    # And every one of them is still a row: the headline is the news.
+    assert len(rows) == 7
+
+
+def test_a_page_with_no_season_table_still_says_what_finish_is_among(
+        corpus, profiled, monkeypatch):
+    """A DEFENSE HAS NOWHERE ELSE TO SAY IT. The twelve-team yardstick was
+    stated once, in the note under the season table -- and a defense gets no
+    season table, so its page showed a finish on a five-step bar and never
+    said seventh of what, nor that the twelve is an assumption these pages
+    make because they have no league to ask."""
+    from scoring import profile_cache
+    monkeypatch.setattr(profile_cache, "cached_profile", lambda *a, **k: {
+        "header": {"position": "DST", "proj_pos_finish": 7}, "seasons": []})
+    seo.clear_pages()
+    body = html.unescape(_client(profiled).get("/adp/dandre-swift").text)
+    assert "How he grades" in body and "Every season he has played" not in body
+    assert "a place among 12 startable DSTs" in body
+    assert "twelve-team league's shape" in body
+    # ...and what shape these drafts really are, which is the corpus fixture's
+    # own four teams.
+    assert "4-team" in body
+
+
+def test_the_profile_s_own_colour_classes_are_not_bare_globals():
+    """`.bar` ALREADY DID THIS ONCE. A one-word class in a stylesheet every
+    page on the site loads collided with the page header's own and pushed
+    the call to action 88px off the right of every page. `.up` and `.accent`
+    were the same shape of trap; `.down` keeps its name because it predates
+    these sections and the pages above them use it."""
+    css = (Path(seo.TEMPLATES) / "base.html").read_text(encoding="utf-8")
+    assert ".pf-up{" in css and ".pf-accent{" in css
+    assert not re.search(r"(^|[\s,}])\.up\s*[{,]", css)
+    assert not re.search(r"(^|[\s,}])\.accent\s*[{,]", css)

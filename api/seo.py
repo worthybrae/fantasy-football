@@ -1079,9 +1079,10 @@ PROFILE_WARM = 40
 #
 # These pages are read by a crawler working through a 228-URL sitemap in a
 # burst and by a person on a phone on a train. The profile sections roughly
-# doubled one -- the heaviest measured against the real corpus is 56 KB, a
-# tight end with five seasons of history, a full game log and eight news
-# items -- and this ceiling is what stops the next section being added
+# doubled one -- the heaviest three measured against the real corpus (854
+# drafts, 203 pages) are 60.2 KB, against a 55.5 KB median and a 28.7 KB
+# page for a player the board carries no profile for -- and this ceiling is
+# what stops the next section being added
 # without anybody measuring. Enforced by the suite, not at render time: a
 # page that has grown past it is a thing to go and look at, not a thing to
 # truncate under a reader.
@@ -1378,7 +1379,7 @@ def _move_tone(now, prev, invert: bool = False) -> str:
         return ""
     move = ((now - prev) / abs(prev)) * (-1 if invert else 1)
     if move >= _USAGE_MOVE:
-        return "up"
+        return "pf-up"
     if move <= -_USAGE_MOVE:
         return "down"
     return ""
@@ -1458,8 +1459,13 @@ def _meters(payload: dict) -> list:
             note = f"{played[0]['season']} finish, of {starters} starters"
     level = _finish_level(finish, starters)
     if level is not None:
+        # `of` so the page can say what the place is a place among. A
+        # DEFENSE HAS NOTHING ELSE THAT SAYS IT: it gets no season table, so
+        # the twelve-team caveat under that table -- the only place the
+        # yardstick was ever stated -- never renders on its page.
         out.append({"label": "Finish", "level": level, "cls": _PANEL_RAMP[level - 1],
-                    "value": f"{position}{int(finish)}", "note": note})
+                    "value": f"{position}{int(finish)}", "note": note,
+                    "of": starters})
 
     pct = _num_or_none(header.get("consistency_pct"))
     if pct is not None:
@@ -1756,7 +1762,7 @@ def _comparables(payload: dict, slugs: dict) -> dict | None:
             # Green up, red down, and nothing at all for a move that rounds
             # to nothing: the same two tokens the rest of the page spends on
             # "better" and "worse".
-            "tone": ("" if move is None else "up" if round(move, 1) > 0
+            "tone": ("" if move is None else "pf-up" if round(move, 1) > 0
                      else "down" if round(move, 1) < 0 else ""),
             "match": "—" if p.get("similarity") is None else f"{round(p['similarity'])}%",
         })
@@ -1773,7 +1779,8 @@ def _comparables(payload: dict, slugs: dict) -> dict | None:
                else _num_or_none(cohort.get("median_change")))
         if avg is not None:
             note = {"value": _signed(avg, 1),
-                    "tone": "up" if round(avg, 1) > 0 else "down" if round(avg, 1) < 0 else "",
+                    "tone": ("pf-up" if round(avg, 1) > 0
+                             else "down" if round(avg, 1) < 0 else ""),
                     "n": int(cohort["n"]), "declined": int(cohort.get("declined") or 0)}
     return {"rows": rows, "note": note,
             "age": (payload.get("similar") or {}).get("target_age")}
@@ -1796,7 +1803,7 @@ def _peers(payload: dict, slugs: dict) -> list:
                     # two players the same size, and colouring it would be
                     # the card claiming a choice nobody has to make.
                     "tone": ("" if gap is None or abs(gap) < 0.5
-                             else "up" if gap > 0 else "down")})
+                             else "pf-up" if gap > 0 else "down")})
     return out
 
 
@@ -1842,8 +1849,8 @@ def _market(payload: dict) -> dict:
             # `edgeTone` in profile/payload.ts: under ten slots the board and
             # the market take him in the same round of any league this tool
             # supports, so there is no decision in the gap.
-            "edge_tone": ("" if edge is None else "up" if round(edge) >= 10
-                          else "accent" if round(edge) > 0
+            "edge_tone": ("" if edge is None else "pf-up" if round(edge) >= 10
+                          else "pf-accent" if round(edge) > 0
                           else "" if round(edge) == 0 else "down")}
 
 
@@ -1864,6 +1871,20 @@ def _profile_news(payload: dict) -> list:
     return out
 
 
+def _link_or_none(url) -> str | None:
+    """A news url this page will hang an `<a href>` on, or None.
+
+    `player_news.url` is whatever the feed that filled the row put there,
+    and the page has no say in it. Anything that is not plain http(s) is
+    printed as text instead: `javascript:` and `data:` are a script the
+    page would be handing a reader on a click, and a bare path or an empty
+    string is a link into this site that goes nowhere. The headline is the
+    thing worth reading either way, so a row never disappears over its url.
+    """
+    url = (url or "").strip()
+    return url if url.lower().startswith(("http://", "https://")) else None
+
+
 def _merge_news(existing: list, extra: list) -> list:
     """One list, newest first, with nothing said twice.
 
@@ -1880,7 +1901,9 @@ def _merge_news(existing: list, extra: list) -> list:
         if not key or key in seen:
             continue
         seen.add(key)
-        out.append(item)
+        # Deduplicated on the url the feed gave, printed with the one the
+        # page is willing to link: a `javascript:` row is still that row.
+        out.append({**item, "url": _link_or_none(item.get("url"))})
     # ON A COMMON TYPE. `adp_facts` hands over a `date` and the profile a
     # `datetime`, which Python will not order against each other -- and the
     # first merged page raised rather than sorted.
