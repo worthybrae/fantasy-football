@@ -21,14 +21,28 @@ of guessing each and are worth restating where the code is:
     wrong. The body is also a JSON ARRAY, `[{"teamId": -1}]`, not an object,
     and `-1` means "any open seat".
 
-ROOM SELECTION IS A POLICY, NOT A PREFERENCE. `pick_room` filters to 8-team
-PPR snake rooms and nothing else. That is the owner's explicit instruction
-(2026-08-23) and it is load-bearing for the corpus: `scoring.config.
-LEAGUE_TEAMS` is 8, every draft Task 1 harvested is 8x16, and a prior fitted
-over a mixture of 8-, 12- and 20-team rooms is averaging over league shapes
-this tool is never used on. Team count changes who is on the clock at pick
-k, which changes every reach/fall feature the model reads; it is not a
-nuisance parameter.
+ROOM SELECTION IS A POLICY, NOT A PREFERENCE, and the policy is now a LIST
+of shapes rather than one. `pick_room` filters to snake rooms whose
+`(leagueSize, format)` is one of `FARM_SHAPES` -- 8-, 10- and 12-team PPR
+plus 10- and 12-team standard by default, `FARM_SHAPES` in the environment
+to change it.
+
+The original policy was 8-team PPR and nothing else (the owner's
+instruction, 2026-08-23), for a reason that has not gone away: team count
+changes who is on the clock at pick k and scoring changes who is worth
+taking there, so a corpus that averages over shapes is answering a question
+nobody asked. What changed is that the corpus is no longer one number per
+player -- `scoring.availability` now counts each shape separately and only
+uses a shape's own counts once it holds MIN_SHAPE_DRAFTS of them (60),
+falling back to the pooled counts until then. So a 12-team room is no longer
+contamination; it is the beginning of the table a 12-team league reads.
+
+Which shape gets joined is decided by what the corpus is SHORTEST of, not by
+preference order: `rank_rooms` takes the per-shape draft counts, puts the
+least-recorded shape that has a joinable room first, and ranks within that
+shape exactly as it always did (fullest room, then experience, then soonest
+start). Ties go to the order the shapes are listed in, so two farm processes
+polling the same lobby still agree.
 
 WHAT THE RANKING IS ACTUALLY FOR. Survivors are ordered by `teamsJoined`
 descending before anything else. A room at 6/8 is six humans waiting for a
@@ -60,6 +74,7 @@ where a pick wrongly excluded can be included again by changing a query and a
 room we declined to join is gone forever.
 """
 import json
+import os
 import time
 from urllib.parse import quote
 
@@ -76,20 +91,119 @@ WRITES_BASE = "https://lm-api-writes.fantasy.espn.com/apis/v3/games/ffl"
 # (4) does not work in this path position.
 MOCK_SUBTYPE = "MOCKDRAFT_LOBBY"
 
-# The room shape the corpus is being built out of. See the module docstring
-# for why this is a policy rather than a default -- changing either number
-# means the drafts recorded after the change are not comparable with the ones
-# recorded before it.
-FARM_LEAGUE_SIZE = 8
 FARM_DRAFT_TYPE = "SNAKE"
-FARM_RANK_TYPE = "PPR"
-# ESPN stat id 53 is receptions. A room's `rankType` says "PPR" and its
+
+# ESPN stat id 53 is receptions. A room's `rankType` NAMES a format and its
 # `scoringItemStatIds` says whether receptions are actually scored, and both
-# are checked rather than either alone: they agreed in every one of the 234
-# rows observed, which is exactly why disagreement would be worth hearing
-# about, and a room whose name says PPR while its scoring omits receptions
-# would fill the corpus with standard-scoring behaviour under a PPR label.
+# are read rather than either alone: they agreed in every one of the 234 rows
+# observed, which is exactly why disagreement would be worth hearing about. A
+# room whose name says PPR while its scoring omits receptions would fill the
+# corpus with standard-scoring behaviour under a PPR label -- and now that
+# standard rooms are farmed too, the mirror image (a STANDARD room that does
+# score receptions) would do the same thing in the other direction. Either
+# way the row is skipped rather than guessed at.
 RECEPTION_STAT_ID = 53
+
+# ESPN's word for a format, in the directory row, mapped to this project's
+# (`scoring.league.scoring_format`). Only PPR and STANDARD have been observed
+# in the wild; the half-PPR spellings are here because the directory has a
+# field for the format and this is the list of what it could say, and a room
+# ESPN labels in a way we do not recognise is skipped rather than assumed.
+#
+# HALF CANNOT BE CONFIRMED THE WAY THE OTHER TWO CAN: the directory publishes
+# stat IDS, not point values, so "receptions are scored" is all it can tell
+# us and 0.5 looks exactly like 1.0 from here. The room's own settings are
+# read before a single pick is recorded (`mock_farm.play_draft`), and THAT is
+# what the draft is filed under -- so a room mislabelled in the directory
+# costs one join, not a wrong row in the corpus.
+_ROW_FORMATS = {"PPR": "ppr", "HALF_PPR": "half", "HALF": "half",
+                "STANDARD": "std", "STD": "std", "NON_PPR": "std"}
+
+# The shapes the farm is building the corpus out of, as `(teams, format)`.
+# The default is the owner's list (spec 2026-08-29 section 2): the three PPR
+# sizes people actually play, plus standard at 10 and 12 -- 8-team standard
+# is left out because it is the rarest room in the lobby and the corpus
+# already holds 854 8-team PPR drafts.
+#
+# Read from the environment ONCE, at import, and parsed strictly: a typo in
+# `FARM_SHAPES` should stop the process before it takes a seat in anybody's
+# room, not silently narrow the rotation to whatever parsed.
+FARM_SHAPES_ENV = "FARM_SHAPES"
+DEFAULT_FARM_SHAPES = "8:ppr,10:ppr,12:ppr,10:std,12:std"
+
+
+def parse_shapes(text: str) -> tuple:
+    """`"8:ppr,10:std"` -> `((8, "ppr"), (10, "std"))`, in the order given.
+
+    The order is kept because it is the tie-break in `rank_rooms`: two shapes
+    the corpus holds equally little of are joined in the order they were
+    listed, which keeps two farm processes reading the same lobby in
+    agreement about what to take.
+
+    Raises on anything it cannot read -- an unknown format word, a
+    non-numeric size, an entry with no colon in it. A farm that quietly
+    dropped the half of `FARM_SHAPES` it could not parse would spend the
+    night recording a corpus nobody asked for.
+    """
+    shapes = []
+    for entry in str(text or "").split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        size, _, fmt = entry.partition(":")
+        fmt = fmt.strip().lower()
+        if fmt not in ("ppr", "half", "std"):
+            raise ValueError(
+                f"{FARM_SHAPES_ENV}: {entry!r} does not name a scoring "
+                "format -- expected teams:ppr, teams:half or teams:std")
+        try:
+            teams = int(size.strip())
+        except ValueError:
+            raise ValueError(
+                f"{FARM_SHAPES_ENV}: {entry!r} does not start with a team "
+                "count") from None
+        shape = (teams, fmt)
+        if shape not in shapes:
+            shapes.append(shape)
+    if not shapes:
+        raise ValueError(f"{FARM_SHAPES_ENV} is empty -- the farm would have "
+                         "no room it is allowed to join")
+    return tuple(shapes)
+
+
+FARM_SHAPES = parse_shapes(os.environ.get(FARM_SHAPES_ENV)
+                           or DEFAULT_FARM_SHAPES)
+
+
+def row_format(row: dict) -> str | None:
+    """The scoring format of one directory row, or None if it will not say.
+
+    Two independent signals, both required to agree -- see
+    `RECEPTION_STAT_ID` above. None means "this room is not one of the
+    formats we can name", which every caller treats as a room to skip: a
+    corpus row filed under a guessed format is worse than a room not played.
+    """
+    fmt = _ROW_FORMATS.get(str(row.get("rankType") or "").strip().upper())
+    if fmt is None:
+        return None
+    scored = RECEPTION_STAT_ID in (row.get("scoringItemStatIds") or [])
+    if scored != (fmt in ("ppr", "half")):
+        return None
+    return fmt
+
+
+def shape_of(row: dict) -> tuple | None:
+    """`(leagueSize, format)` for a directory row, or None when either half
+    is missing or unreadable."""
+    size = row.get("leagueSize")
+    fmt = row_format(row)
+    if size is None or fmt is None:
+        return None
+    try:
+        return (int(size), fmt)
+    except (TypeError, ValueError):
+        return None
+
 
 # How far ahead of `draftDate` a room has to be to be worth joining, and how
 # far ahead is too far.
@@ -189,22 +303,24 @@ def list_mock_leagues(fetch, season: int) -> list:
 def is_farmable(row: dict, now_ms: float,
                 min_lead_seconds: float = MIN_LEAD_SECONDS,
                 max_lead_seconds: float = MAX_LEAD_SECONDS,
-                min_teams_joined: int = MIN_TEAMS_JOINED) -> bool:
+                min_teams_joined: int = MIN_TEAMS_JOINED,
+                shapes=None) -> bool:
     """Whether one directory row is a room this farm should play.
 
     Every clause is required; see the module docstring for the reasoning
-    behind the shape filters and the two lead-time bounds. `.get` throughout
+    behind the shape filter and the two lead-time bounds. `.get` throughout
     rather than `[]`: a row missing a field it has always carried is a room
     we know less about than the policy requires, which is a reason to skip
     it, not to raise out of a filter.
+
+    `shapes` is the allowed `(teams, format)` list, `FARM_SHAPES` by default.
+    A room of ANY other shape is skipped exactly as a full one is -- which
+    shape to prefer among the allowed ones is a ranking question, not this
+    one (see `rank_rooms`).
     """
-    if row.get("leagueSize") != FARM_LEAGUE_SIZE:
+    if shape_of(row) not in (FARM_SHAPES if shapes is None else tuple(shapes)):
         return False
     if row.get("draftType") != FARM_DRAFT_TYPE:
-        return False
-    if row.get("rankType") != FARM_RANK_TYPE:
-        return False
-    if RECEPTION_STAT_ID not in (row.get("scoringItemStatIds") or []):
         return False
     if row.get("full"):
         return False
@@ -245,7 +361,8 @@ def _rank_key(row: dict) -> tuple:
 def rank_rooms(rows, now_ms: float | None = None, exclude=(),
                min_lead_seconds: float = MIN_LEAD_SECONDS,
                max_lead_seconds: float = MAX_LEAD_SECONDS,
-               min_teams_joined: int = MIN_TEAMS_JOINED) -> list:
+               min_teams_joined: int = MIN_TEAMS_JOINED,
+               shapes=None, counts=None) -> list:
     """The farmable rooms among `rows`, best first.
 
     `exclude` is the set of league ids this process has already tried and
@@ -253,20 +370,52 @@ def rank_rooms(rows, now_ms: float | None = None, exclude=(),
     ESPN keeps a room in the directory after we have taken a seat in it, so
     without this the loop would rank its own room top (its `teamsJoined` just
     went up by one) and try to join it a second time.
+
+    `counts` is `{(teams, format): drafts already recorded}` -- what
+    `pipeline.draft_log.shape_counts` reads out of the corpus. WITH IT the
+    ranking is a rotation: the shape the corpus is shortest of comes first,
+    and the fullest-room ordering decides only within a shape. WITHOUT it
+    (None) every room is ranked purely on how full it is, which is what a
+    caller asking "what could I join right now" wants and what every reader
+    of this function meant before shapes existed.
+
+    The whole list is returned in that order rather than the best of the best
+    shape, so a caller whose first choice is claimed by another process (see
+    `mock_farm.farm`) falls to the next room down and only then to the next
+    shape -- one poll, not two.
     """
     now_ms = time.time() * 1000 if now_ms is None else now_ms
     skip = {str(x) for x in exclude}
+    allowed = FARM_SHAPES if shapes is None else tuple(shapes)
     keep = [r for r in rows
             if str(r.get("leagueId")) not in skip
             and is_farmable(r, now_ms, min_lead_seconds, max_lead_seconds,
-                            min_teams_joined)]
-    return sorted(keep, key=_rank_key)
+                            min_teams_joined, allowed)]
+    if counts is None:
+        return sorted(keep, key=_rank_key)
+    return sorted(keep, key=lambda row: (_shape_key(shape_of(row), counts,
+                                                    allowed), _rank_key(row)))
+
+
+def _shape_key(shape, counts, allowed) -> tuple:
+    """Sort key for a shape, lowest first: fewest recorded drafts, then the
+    order `FARM_SHAPES` lists it in.
+
+    The list order is a real tie-break, not decoration. Every shape starts at
+    zero recorded drafts, and two farm processes that broke that tie on
+    anything unstable (dict order, room id) would rank differently, both join,
+    and put two bot seats in one room -- the exact failure `farm_claims`
+    exists to prevent, arrived at from the other side.
+    """
+    return (int(counts.get(shape, 0)),
+            allowed.index(shape) if shape in allowed else len(allowed))
 
 
 def pick_room(rows, now_ms: float | None = None, exclude=(),
               min_lead_seconds: float = MIN_LEAD_SECONDS,
               max_lead_seconds: float = MAX_LEAD_SECONDS,
-              min_teams_joined: int = MIN_TEAMS_JOINED) -> dict | None:
+              min_teams_joined: int = MIN_TEAMS_JOINED,
+              shapes=None, counts=None) -> dict | None:
     """The single best room to join right now, or None if the lobby has
     nothing that fits. None is an ordinary outcome -- the lobby serves rooms
     in batches, so a poll landing between batches sees no room inside the
@@ -274,33 +423,71 @@ def pick_room(rows, now_ms: float | None = None, exclude=(),
     not to relax the filter.
     """
     ranked = rank_rooms(rows, now_ms, exclude, min_lead_seconds,
-                        max_lead_seconds, min_teams_joined)
+                        max_lead_seconds, min_teams_joined, shapes, counts)
     return ranked[0] if ranked else None
 
 
 def lobby_report(rows, now_ms: float | None = None, exclude=(),
                  min_lead_seconds: float = MIN_LEAD_SECONDS,
-                 max_lead_seconds: float = MAX_LEAD_SECONDS) -> dict:
+                 max_lead_seconds: float = MAX_LEAD_SECONDS,
+                 shapes=None) -> dict:
     """What the lobby is offering, ignoring the human floor. For the LOG.
 
     `pick_room` returning None is two very different situations wearing the
-    same face: a poll that landed between batches and saw no 8-team PPR room
-    at all, or a lobby full of them with nobody sitting in any. An unattended
-    run that only ever prints "nothing fits" cannot tell whether the floor is
-    starving it, and that is precisely the number somebody reading the log in
-    the morning needs.
+    same face: a poll that landed between batches and saw no room of any
+    farmed shape at all, or a lobby full of them with nobody sitting in any.
+    An unattended run that only ever prints "nothing fits" cannot tell
+    whether the floor is starving it, and that is precisely the number
+    somebody reading the log in the morning needs.
 
     So this counts the survivors of every filter EXCEPT the human floor, and
     reports the best `teamsJoined` among them. `best` is None when there were
     no shape-and-timing survivors to have a best of -- which is the "between
-    batches" case, said in the one way that distinguishes it.
+    batches" case, said in the one way that distinguishes it. `size` is the
+    seat count of THAT room rather than a constant, now that the rooms in
+    this list are not all the same size, so "the fullest holds 3/12" names a
+    real room.
+
+    `by_shape` is how many joinable rooms each allowed shape has, in the
+    order the shapes are listed -- the other half of the morning's question,
+    which is no longer "is anybody in there" but "is the lobby even serving
+    the shape the corpus is short of".
     """
+    allowed = FARM_SHAPES if shapes is None else tuple(shapes)
     open_rooms = rank_rooms(rows, now_ms, exclude, min_lead_seconds,
-                            max_lead_seconds, min_teams_joined=0)
+                            max_lead_seconds, min_teams_joined=0,
+                            shapes=allowed)
     joined = [int(r.get("teamsJoined") or 0) for r in open_rooms]
+    fullest = max(open_rooms, key=lambda r: int(r.get("teamsJoined") or 0),
+                  default=None)
+    by_shape = {shape: 0 for shape in allowed}
+    for room in open_rooms:
+        shape = shape_of(room)
+        if shape in by_shape:
+            by_shape[shape] += 1
     return {"rows": len(rows), "open": len(open_rooms),
             "best": max(joined) if joined else None,
-            "size": FARM_LEAGUE_SIZE}
+            "size": None if fullest is None else int(fullest["leagueSize"]),
+            "by_shape": by_shape}
+
+
+def shape_line(counts, report: dict | None = None, shapes=None) -> str:
+    """One line naming every farmed shape, what the corpus holds of it, and
+    how many rooms the lobby is offering. For the LOG, once per pass.
+
+    `8:ppr 854 recorded/2 open  10:ppr 0/1  ...` -- the whole rotation on one
+    line, in the order the tie-break uses, so a morning reader can see both
+    why the farm chose what it chose and whether the shape it wants exists in
+    the lobby at all.
+    """
+    allowed = FARM_SHAPES if shapes is None else tuple(shapes)
+    by_shape = (report or {}).get("by_shape") or {}
+    parts = []
+    for shape in allowed:
+        teams, fmt = shape
+        parts.append(f"{teams}:{fmt} {int(counts.get(shape, 0))} recorded/"
+                     f"{int(by_shape.get(shape, 0))} open")
+    return "shapes -- " + ", ".join(parts)
 
 
 def room_url(league_id, season: int) -> str:

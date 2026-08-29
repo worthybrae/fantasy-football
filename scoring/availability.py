@@ -46,12 +46,26 @@ parametric curve fitted from the same rows (see `_fit_curve`):
 A fallback is not a nicety here: without it those cases return 0/0 and 1/1,
 i.e. "certainly gone" and "certainly there", which are the two most confident
 things this module could possibly say.
+
+CONDITIONED ON THE SHAPE, once there is enough of one. A draft's shape is
+`(teams, format)` -- see `pipeline.draft_log.draft_format` -- and it changes
+the answer twice over: twelve teams means twelve picks a round rather than
+eight, so pick 30 is early rather than late, and PPR means a receiver goes
+where standard scoring leaves him. The counts are therefore kept per shape
+as well as pooled, and a room reading its own shape's counts gets them as
+soon as that shape holds `MIN_SHAPE_DRAFTS` drafts. Below that it reads the
+pooled counts, which is what every room read before the farm went looking
+for other shapes -- a slightly wrong answer from 854 drafts beats a right
+one from nine. The parametric curve stays pooled at every size: it is fitted
+across ADP buckets rather than per player, and splitting it five ways would
+empty the buckets it needs.
 """
 from __future__ import annotations
 
 import os
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -70,6 +84,17 @@ MAX_PICK = 300
 # hundred, and the fallback -- which at least knows what his ADP is -- is the
 # better answer.
 MIN_DRAFTS = 25
+
+# How many drafts of ONE SHAPE it takes before that shape answers for itself
+# rather than borrowing the pooled corpus. Above MIN_DRAFTS, deliberately:
+# MIN_DRAFTS is the floor on one player's conditioned denominator inside a
+# table that has already been chosen, while this is the floor on choosing the
+# table at all, and choosing it wrongly costs every player on the board. Sixty
+# drafts is roughly where a mid-round player's own denominator clears
+# MIN_DRAFTS in the shape rather than only in the pool -- so the shape's table
+# starts being used at about the point it can answer with counts instead of
+# handing most of the board to the curve.
+MIN_SHAPE_DRAFTS = 60
 
 # Width of the ADP buckets the fallback curve is fitted in. Narrow enough
 # that the top of the board (where one pick of ADP is a real difference in
@@ -139,6 +164,29 @@ def position_group(position) -> str:
     return _GROUPS.get(str(position).strip().upper(), SKILL)
 
 
+class ShapeCounts(NamedTuple):
+    """One shape's own counts: `pooled` and `taken_by` exactly as the table's
+    pooled arrays, over the SAME player index, plus how many drafts of that
+    shape the corpus holds.
+
+    `pooled` and `taken_by` are None for a shape under `MIN_SHAPE_DRAFTS`:
+    the count is still worth carrying (it is what says how close the shape is
+    to answering for itself, and what `api/seo.py` will read to decide
+    whether a shape gets a page), the arrays are not worth the megabyte.
+
+    `max_pick_observed` IS PER SHAPE and not a copy of the table's. An 8-team
+    room stops at pick 128 and a 12-team one runs to 192, so the pooled depth
+    of a mixed corpus is the deepest of them -- and reading an 8-team shape's
+    counts at pick 150 against a depth of 192 would report everybody still on
+    the board at 128 as still there at 150. That is the censoring the module
+    docstring is about, arrived at from the shape side.
+    """
+    pooled: np.ndarray | None
+    taken_by: np.ndarray | None
+    drafts: int
+    max_pick_observed: int = 0
+
+
 @dataclass
 class AvailabilityTable:
     """The corpus, counted once, in the shape the room asks questions in.
@@ -169,6 +217,10 @@ class AvailabilityTable:
     adp_curve: dict          # group -> {bucket: (mu, sigma)}
     corpus_mtime: float = 0.0
     max_pick_observed: int = 0
+    # (teams, format) -> ShapeCounts. Empty when the corpus holds no draft
+    # whose shape can be read, which is what every hand-built table in a test
+    # and every reader that does not ask about a shape sees.
+    shapes: dict = field(default_factory=dict)
 
     def __post_init__(self):
         self.index = {str(pid): i for i, pid in enumerate(self.player_ids)}
@@ -189,6 +241,42 @@ class AvailabilityTable:
     def curve_for(self, group: str):
         """(mu, sigma) arrays for a group, empty when it was never fitted."""
         return self.curves.get(group, (np.empty(0), np.empty(0)))
+
+    def counts_for(self, teams=None, fmt=None):
+        """`(pooled, taken_by, max_pick_observed)` for a shape.
+
+        The shape's own arrays once it holds `MIN_SHAPE_DRAFTS` drafts, and
+        the pooled corpus otherwise -- including when the caller names no
+        shape at all, which is every reader that has no league to speak for
+        (the ADP pages, a test, a room whose settings never arrived).
+
+        Falling back rather than answering thinly is the whole design: a
+        12-team room on a corpus with nine 12-team drafts wants the 854-draft
+        answer, which is wrong about the pick axis, not the nine-draft one,
+        which is wrong about everything.
+        """
+        pooled = (self.pooled, self.taken_by, self.max_pick_observed)
+        if teams is None or fmt is None:
+            return pooled
+        try:
+            key = (int(teams), str(fmt))
+        except (TypeError, ValueError):
+            return pooled
+        shape = self.shapes.get(key)
+        if (shape is None or shape.pooled is None
+                or shape.drafts < MIN_SHAPE_DRAFTS):
+            return pooled
+        return shape.pooled, shape.taken_by, shape.max_pick_observed
+
+    def shape_drafts(self, teams=None, fmt=None) -> int:
+        """How many drafts of one shape the corpus holds. 0 for a shape it
+        has never seen."""
+        try:
+            key = (int(teams), str(fmt))
+        except (TypeError, ValueError):
+            return 0
+        shape = self.shapes.get(key)
+        return 0 if shape is None else int(shape.drafts)
 
     @classmethod
     def empty(cls) -> "AvailabilityTable":
@@ -284,13 +372,23 @@ def load_table(corpus_path: str = dl.CORPUS_PATH) -> AvailabilityTable:
                 SELECT draft_id, player_id, min(pick_no) AS pick_no
                 FROM draft_log_pick GROUP BY 1, 2
             )
-            SELECT l.player_id AS player_id,
+            SELECT l.draft_id AS draft_id,
+                   l.player_id AS player_id,
                    l.position AS position,
                    coalesce(l.espn_rank, l.adp_rank) AS value,
                    t.pick_no AS pick_no
             FROM draft_log_pool l
             LEFT JOIN taken t USING (draft_id, player_id)
         """).df()
+        # The heads, separately and small (one row per draft): the shape is
+        # two fields of the draft, and joining them onto 200k pool rows in
+        # SQL would carry a kilobyte of settings JSON per row to learn one
+        # word. `draft_format` reads either stored blob -- see it for why
+        # both are asked for.
+        heads = conn.execute(
+            "SELECT draft_id, teams, "
+            "coalesce(scoring_json, settings_json) AS scoring "
+            "FROM draft_log WHERE teams IS NOT NULL").fetchall()
     except Exception:      # noqa: BLE001 -- a file that is not a corpus yet
         return AvailabilityTable.empty()
     finally:
@@ -321,10 +419,65 @@ def load_table(corpus_path: str = dl.CORPUS_PATH) -> AvailabilityTable:
         "bucket": np.floor_divide(value[known], ADP_BUCKET).astype(np.int64),
         "pick": pick[known], "taken": was_taken[known],
         "player": codes[known]}))
+    shapes = _shape_counts(rows["draft_id"], heads, codes, n_players, pick,
+                           was_taken)
     return AvailabilityTable(
         player_ids=np.asarray(ids, dtype=object), pooled=pooled,
         taken_by=taken_by, adp_curve=curve, corpus_mtime=mtime,
-        max_pick_observed=min(max_pick_observed, MAX_PICK))
+        max_pick_observed=min(max_pick_observed, MAX_PICK), shapes=shapes)
+
+
+def _shape_counts(draft_column, heads, codes, n_players: int, pick,
+                  was_taken) -> dict:
+    """The same counting as `load_table`'s, once per shape.
+
+    `codes` are the player row indices of the pooled rows and `pick` /
+    `was_taken` their picks, so every shape's arrays land on the SAME player
+    index as the pooled ones and `table.index` answers for all of them.
+
+    A SHAPE'S DRAFTS ARE COUNTED FROM THE POOL, not from the head rows: a
+    draft with no pool snapshot (every draft `draft_log.backfill_history`
+    imports) contributes nothing to any count, and letting it push a shape
+    over MIN_SHAPE_DRAFTS would switch a room onto a table built from
+    nothing. `draft_log.shape_counts`, which the farm's rotation reads,
+    counts the heads instead and says so -- the two answer different
+    questions.
+
+    Arrays are built only for the shapes that will be used; the rest keep
+    their draft count and nothing else. On the real corpus this is one shape,
+    so the extra work is one bincount over 200k rows.
+    """
+    shape_by_draft = {}
+    for draft_id, teams, scoring in heads:
+        try:
+            shape_by_draft[str(draft_id)] = (int(teams),
+                                             dl.draft_format(scoring))
+        except (TypeError, ValueError):
+            continue
+    draft_codes, draft_ids = pd.factorize(draft_column.astype(str))
+    # A LIST, not an object array: numpy reads a list of 2-tuples as a 2-D
+    # array of numbers, and every shape would then be a row rather than a key.
+    per_draft = [shape_by_draft.get(str(d)) for d in draft_ids]
+    out: dict = {}
+    for shape in {x for x in per_draft if x is not None}:
+        mine = np.array([x == shape for x in per_draft], dtype=bool)
+        drafts = int(mine.sum())
+        if drafts < MIN_SHAPE_DRAFTS:
+            out[shape] = ShapeCounts(None, None, drafts)
+            continue
+        rows_here = mine[draft_codes]
+        pooled = np.bincount(codes[rows_here],
+                             minlength=n_players).astype(np.int64)
+        drafted = rows_here & was_taken
+        width = MAX_PICK + 1
+        at = np.clip(pick[drafted], 1, MAX_PICK).astype(np.int64)
+        counts = np.bincount(codes[drafted] * width + at,
+                             minlength=n_players * width)
+        depth = int(pick[drafted].max()) if drafted.any() else 0
+        out[shape] = ShapeCounts(
+            pooled, np.cumsum(counts.reshape(n_players, width), axis=1),
+            drafts, min(depth, MAX_PICK))
+    return out
 
 
 def _floats(series) -> np.ndarray:
@@ -424,8 +577,8 @@ def fallback_probability(value: float, k: int, n: int,
 
 
 def availability_at(table: AvailabilityTable, player_ids, k: int, n: int,
-                    espn_adp=None, market_rank=None, positions=None
-                    ) -> np.ndarray:
+                    espn_adp=None, market_rank=None, positions=None,
+                    teams=None, fmt=None) -> np.ndarray:
     """P(still there when pick n is made | still there now), per player id.
 
     `k` is the number of picks already made and `n` an overall pick number,
@@ -444,6 +597,13 @@ def availability_at(table: AvailabilityTable, player_ids, k: int, n: int,
     is a player nobody is about to draft. `positions` chooses which of the
     fitted curves he is read off; without it everyone is read off the skill
     curve, which is wrong for a kicker and harmless for anyone else.
+
+    `teams` and `fmt` are the asking league's shape -- 10 and "ppr" for a
+    ten-team PPR room. Given both, the counts come from that shape alone once
+    the corpus holds `MIN_SHAPE_DRAFTS` drafts of it, and from the whole
+    corpus until then (`table.counts_for`); given neither, from the whole
+    corpus, which is what every reader with no league to speak for wants. The
+    parametric fallback is pooled either way.
 
     Vectorised over the whole board: one gather out of `taken_by` and one
     normal tail, because this runs for every remaining turn of every room on
@@ -474,17 +634,20 @@ def availability_at(table: AvailabilityTable, player_ids, k: int, n: int,
     # Which pick the curve conditions on: now, or the corpus's own depth for
     # a player the counts have already carried that far.
     given = np.full(size, float(k))
-    if table.pooled.size and have.any():
+    # The shape's own counts, or the pooled corpus. Read once, before the
+    # gather, because every line below is about one table or the other and
+    # nothing here should have to remember which.
+    all_pooled, all_taken_by, depth = table.counts_for(teams, fmt)
+    if all_pooled.size and have.any():
         where = np.flatnonzero(have)
         rows = idx[where]
-        depth = table.max_pick_observed
-        pooled = table.pooled[rows].astype(float)
-        denominator = pooled - table.taken_by[rows, k]
-        numerator = pooled - table.taken_by[rows, n - 1]
+        pooled = all_pooled[rows].astype(float)
+        denominator = pooled - all_taken_by[rows, k]
+        numerator = pooled - all_taken_by[rows, n - 1]
         enough = denominator >= MIN_DRAFTS
         # Every pooled draft took him inside the recorded depth. Nothing
         # about him is censored, so the counts answer any pick, however deep.
-        complete = table.taken_by[rows, depth] >= pooled
+        complete = all_taken_by[rows, depth] >= pooled
         # And every pooled draft took him before THIS pick, which is not a
         # ratio and does not need MIN_DRAFTS behind it -- it needs enough
         # drafts to not be a coincidence (MIN_COMPLETE_DRAFTS) and one draft
@@ -500,7 +663,7 @@ def availability_at(table: AvailabilityTable, player_ids, k: int, n: int,
         # carries them from there, conditioned on that same pick so the two
         # halves meet instead of stepping.
         carry = enough & ~direct
-        carried[where[carry]] = ((pooled - table.taken_by[rows, depth])[carry]
+        carried[where[carry]] = ((pooled - all_taken_by[rows, depth])[carry]
                                  / denominator[carry])
         # The depth, or the clock if the clock is already past it. Once `k`
         # is deeper than anything the corpus recorded, the counts have

@@ -3,12 +3,19 @@
 WHAT THIS IS FOR. `pipeline.mock_backfill` harvested the 23 completed mocks
 that happened to be sitting in `data/leagues/`; that pile does not grow by
 itself. This module is the thing that makes it grow: it watches ESPN's mock
-lobby, takes a seat in an 8-team PPR snake room, plays all 16 rounds, and
-records the finished draft through `pipeline.draft_log.record` with
-`source=SOURCE_MOCK` -- the same corpus, the same shape, so a later refit
-reads one table and cannot tell which writer produced a row except by the
-two fields this writer knows and the backfill does not (`my_slot` and
-per-pick `autodrafted`).
+lobby, takes a seat in a snake room of one of the shapes it is farming,
+plays every round, and records the finished draft through
+`pipeline.draft_log.record` with `source=SOURCE_MOCK` -- the same corpus and
+the same columns, so a later refit reads one table and cannot tell which
+writer produced a row except by the two fields this writer knows and the
+backfill does not (`my_slot` and per-pick `autodrafted`).
+
+WHICH SHAPE IT JOINS is a rotation, not a constant: each pass counts what
+the corpus already holds per `(teams, format)` and prefers the shape it is
+shortest of that has a room open right now (`espn_mock_lobby.FARM_SHAPES`,
+`draft_log.shape_counts`). Every draft is recorded under its own real shape,
+read from the room's own settings, so a corpus of mixed shapes is not a
+mixed-up corpus -- `scoring.availability` counts each shape separately.
 
 WHAT IT DOES NOT REINVENT. The transport is finished and lives elsewhere:
 `pipeline.draft_socket` mints the token, builds the socket URL, reconnects
@@ -181,7 +188,8 @@ TOKEN_TIMEOUT_SECONDS = 90.0
 START_TIMEOUT_SECONDS = 1800.0
 # Between drafts: long enough that the lobby directory has refreshed and we
 # are not hammering it, short enough not to miss the next batch of rooms
-# (measured: a new 8-team PPR room every ~5 minutes).
+# (measured: a new 8-team PPR room every ~5 minutes; the other farmed shapes
+# are rarer, which is the other reason not to wait long here).
 BETWEEN_DRAFTS_SECONDS = 20.0
 # How long to wait between lobby polls when nothing in the lobby fits.
 LOBBY_RETRY_SECONDS = 45.0
@@ -783,6 +791,13 @@ def build_record(timeline, tool, settings, league_id, season, my_slot,
         source=dl.SOURCE_MOCK, league_id=str(league_id), season=int(season),
         teams=int(teams), rounds=int(rounds), my_slot=my_slot,
         human_seats=human_seats(owners, my_team_id),
+        # THE SCORING TABLE ON ITS OWN, as well as inside `settings_json`.
+        # A draft's shape is (teams, format) -- see `draft_log.draft_format`
+        # -- and the format is one number in this table, so a counter that
+        # groups the corpus by shape should not have to parse a whole
+        # LeagueSettings to find it. The two cannot disagree: they are the
+        # same object, written twice, in the same call.
+        scoring_json=json.dumps(dict(settings.scoring or {})),
         settings_json=league.to_json(settings), started_at=started_at,
         picks=picks[~missing].reset_index(drop=True), pool=tool.pool_df,
         draft_id=draft_id)
@@ -1762,6 +1777,13 @@ def farm(n: int, season: int = CURRENT_SEASON, seed: int = 0,
     its own bot, and says what it saw while waiting so an unattended log
     shows whether the floor is starving the run.
 
+    THE SHAPE IS CHOSEN BY WHAT THE CORPUS LACKS. Every pass reads the
+    per-shape draft counts out of the corpus and hands them to `rank_rooms`,
+    which puts the least-recorded shape with a joinable room first and then
+    ranks within it exactly as before (fullest room, then experience, then
+    soonest start). One line per pass names every shape, what is recorded,
+    and what the lobby is offering.
+
     EVERYTHING PRINTED BELOW THIS LINE IS SCRUBBED. The wrap happens once,
     here, rather than at the call sites that format an exception -- there are
     six of them today, one is a bare `traceback.format_exc()`, and the next
@@ -1799,8 +1821,24 @@ def farm(n: int, season: int = CURRENT_SEASON, seed: int = 0,
             # before ranking. Swept of dead claims on every read, so a
             # process killed mid-draft does not fence its room off forever.
             skip = played | claims.claimed()
+            # WHAT THE CORPUS IS SHORT OF, re-read every pass rather than
+            # once at the top: a pass takes as long as a draft (30-40
+            # minutes) and this process has just added one to a shape's
+            # count, as may three other farms against the same file. Cheap
+            # (one grouped count over ~900 head rows) and lock-tolerant, so a
+            # poll that lands while somebody is recording gets {} and ranks
+            # on fullness alone rather than failing the pass.
+            recorded_by_shape = dl.shape_counts(corpus_path)
+            # Every pass says what the rotation is looking at, whether or not
+            # it finds a room: the shape counts are the only account of why
+            # the farm chose what it chose, and the open counts are the only
+            # way to tell "the corpus is short of 12-team standard" from
+            # "ESPN is not serving 12-team standard tonight".
+            report = lobby.lobby_report(rooms, exclude=skip)
+            out(lobby.shape_line(recorded_by_shape, report))
             ranked = lobby.rank_rooms(rooms, exclude=skip,
-                                      min_teams_joined=min_humans)
+                                      min_teams_joined=min_humans,
+                                      counts=recorded_by_shape)
             # Claim, then join -- never the other way round. Two processes can
             # rank identically and both reach this line; exactly one of them
             # wins the exclusive create, and the loser drops to the next room
@@ -1811,18 +1849,17 @@ def farm(n: int, season: int = CURRENT_SEASON, seed: int = 0,
                 # Three different reasons to be here and they call for three
                 # different mornings, so they are said apart rather than
                 # collapsed into "nothing fits".
-                report = lobby.lobby_report(rooms, exclude=skip)
                 if ranked:
                     out(f"another farm process holds all {len(ranked)} "
                         f"qualifying room(s) -- waiting "
                         f"{LOBBY_RETRY_SECONDS:.0f}s")
                 elif report["open"] == 0:
-                    out(f"no joinable 8-team PPR snake room in the lobby's "
-                        f"{report['rows']} rows right now -- waiting "
+                    out(f"no joinable snake room of any farmed shape in the "
+                        f"lobby's {report['rows']} rows right now -- waiting "
                         f"{LOBBY_RETRY_SECONDS:.0f}s")
                 else:
-                    out(f"{report['open']} joinable 8-team PPR snake "
-                        f"room(s) in the lobby's {report['rows']} rows, but "
+                    out(f"{report['open']} joinable room(s) of a farmed "
+                        f"shape in the lobby's {report['rows']} rows, but "
                         f"the fullest holds {report['best']}/"
                         f"{report['size']} and the floor is {min_humans} "
                         f"-- waiting {LOBBY_RETRY_SECONDS:.0f}s")

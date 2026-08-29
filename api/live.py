@@ -1266,6 +1266,13 @@ def _billing_state(request, session) -> dict:
     session for some other season would be a draft nobody can run here
     anyway.
 
+    ONE DECISION, NOT THIS ROOM'S OWN. `billing.free_reason` is what the gate
+    itself acts on, so the buttons the room draws and the answer somebody gets
+    when they press them cannot disagree. They did: this function knew about
+    entitlements and nothing else, so while the founding period was open it
+    locked the room and offered checkout to readers the gate was letting
+    straight through -- $9.99 for a draft nobody was going to charge for.
+
     Never raises. A billing database that cannot be read must not take the
     draft room down mid-draft; an unreadable one answers "not required",
     which fails toward the drafter.
@@ -1274,13 +1281,16 @@ def _billing_state(request, session) -> dict:
         if not billing.enabled():
             return {"enabled": False, "required": False, "entitled": True}
         league_id = getattr(session, "league_id", None)
-        if billing.is_free_draft(league_id):
-            return {"enabled": True, "required": False, "entitled": True,
-                    "reason": "mock"}
-        paid = billing.entitled(billing._account_ids(request),
-                                league_id, CURRENT_SEASON)
-        return {"enabled": True, "required": not paid, "entitled": paid,
-                "league_id": str(league_id), "season": int(CURRENT_SEASON)}
+        ids, source = billing.account_context(request)
+        reason = billing.free_reason(ids, league_id, CURRENT_SEASON, source)
+        free = reason is not None
+        state = {"enabled": True, "required": not free, "entitled": free,
+                 "league_id": str(league_id), "season": int(CURRENT_SEASON)}
+        if reason is not None:
+            # `reason: "mock"` is the one this payload has always carried.
+            # The others are new and nothing branches on the value.
+            state["reason"] = reason
+        return state
     except Exception:      # noqa: BLE001 -- see the docstring
         return {"enabled": False, "required": False, "entitled": True}
 
@@ -2236,6 +2246,12 @@ def rank_and_plan(board, pool, taken, taken_order, counts, my_indices, my_slot,
     this position would do for the roster, as of now.
     """
     teams, rounds = int(settings.teams), int(settings.rounds)
+    # THE ROOM'S OWN SHAPE, handed to every availability read below. Once the
+    # corpus holds MIN_SHAPE_DRAFTS drafts of it, "will he last" is answered
+    # from drafts of this size and this scoring rather than from the pooled
+    # corpus (see scoring/availability.py); until then the same pooled answer
+    # comes back and nothing on screen changes.
+    fmt = league_mod.scoring_format(settings)
     snake = snake_slots(teams, rounds)
     made = len(taken_order) if picks_made is None else int(picks_made)
     turns = ([i + 1 for i in range(min(made, len(snake)), len(snake))
@@ -2266,7 +2282,8 @@ def rank_and_plan(board, pool, taken, taken_order, counts, my_indices, my_slot,
     if next_turn is not None and len(ids):
         lasts = np.asarray(availability_at(table, ids, made, next_turn,
                                            espn_adp, market_rank,
-                                           positions=positions), dtype=float)
+                                           positions=positions,
+                                           teams=teams, fmt=fmt), dtype=float)
         edge = np.asarray(edge_at(proj, positions, lasts), dtype=float)
     else:
         lasts = edge = None
@@ -2338,7 +2355,7 @@ def rank_and_plan(board, pool, taken, taken_order, counts, my_indices, my_slot,
                       health=health_level(games_pg), roster_counts=dict(counts),
                       settings=settings, turns=turns, picks_made=made,
                       favourites=set(favourites), table=table, names=names,
-                      roster_byes=roster_byes)
+                      roster_byes=roster_byes, teams=teams, fmt=fmt)
         plan = build_plan(**common)
         # ON THE CLOCK the first turn is this pick, and its cards are
         # `target_now`'s (spec section 4): the same score with everybody

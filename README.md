@@ -275,6 +275,17 @@ ADP buckets fitted on the same rows, a normal tail conditioned the same way,
 by position group. `scoring/availability.py` holds the table and the
 query; the table rebuilds itself when the corpus file changes.
 
+**Counted per shape, once there is enough of one.** A draft's shape is its
+team count and its scoring format, and both move the answer: twelve teams
+means twelve picks a round, so pick 30 is early rather than late, and PPR
+means a receiver goes where standard scoring leaves him. The corpus is
+therefore counted per `(teams, format)` as well as pooled, and a room reads
+its own shape's counts as soon as that shape holds 60 drafts
+(`MIN_SHAPE_DRAFTS`). Below that it reads the pooled counts, which is what
+every room read before -- a slightly wrong answer from 854 drafts beats a
+right one from nine. Nothing on screen changes until the farm has recorded a
+second shape.
+
 **Edge** is what taking him now is worth over waiting: his projected points
 minus the expected best player at his position you would get at your next
 turn, where "expected" weights every other player at the position by his
@@ -283,19 +294,26 @@ own Lasts %. Positive means take him; negative means the position keeps.
 at once.
 
 **The plan** draws one target and two alternates for each of your remaining
-turns, greedily, in one pass: at each turn only players likely enough to be
-there are eligible (50%, or 35% for one of your guys), each is scored by how
-much the roster needs his position times his projection, less what waiting
-one more turn at that position would get, and the target's position counts
-against the roster before the next turn is drawn. A turn nobody clears says
-so ("no clear target") rather than inventing a name. On the clock, the three
-cards are the same score with everybody available at 100%, and their
-reasons are measured at the turn after this one. Each target carries up to
-four reasons for and up to four against, in a fixed order: ★ your guy; the
-Lasts % line; the edge as a pro or, negative, a con; the slot he fills;
-"ADP vs ESPN -- may go earlier" when the two disagree by more than six
-picks; a bye week that stacks with two of your starters; a health meter at
-two bars or under.
+turns, greedily, in one pass. At each turn only players likely enough to be
+there are eligible (50%, or 35% for one of your guys), and the order is
+ESPN's, moved by four things: what the roster needs (a flex body four
+places, a bench body twenty, a kicker before kicker o'clock two hundred),
+one of your guys eight places, fifteen places against anybody the corpus
+says would still be there at your NEXT turn -- a pick you can also make in
+two rounds is not this round's pick -- and half a place for every pick past
+six that the turn is ahead of his ESPN ADP, which is what reaching is. The
+target's position counts against the roster before the next turn is drawn.
+Points never cross positions: the edge only breaks ties inside two places.
+A turn nobody clears says so ("no clear target") rather than inventing a
+name. On the clock, the three cards are the same order with everybody
+available at 100%, and their reasons are measured at the turn after this
+one. Each target carries up to five reasons for and up to four against, in
+a fixed order: ★ your guy; ESPN's rank; the Lasts % line; "likely gone
+before your next pick"; "you could probably wait" and "reach: ADP 21 at
+pick 11" as cons; the edge as a pro or, negative, a con; the biggest
+drop-off on the board; the slot he fills; "ADP vs ESPN -- may go earlier"
+when the two disagree by more than six picks; a bye week that stacks with
+two of your starters; a health meter at two bars or under.
 
 **Your guys.** A signed-in account can star between 5 and 25 players; the
 dashboard asks for them once and then shows a compact "Your guys" card with
@@ -367,12 +385,14 @@ volume Railway attaches by default is enough for a season, not for several.
 | `REFRESH_MAX_AGE_HOURS` | `24` | How stale the oldest source may get first |
 | `RUN_FARM` | `1` | **Off by default.** Needs the login variable below |
 | `FARM_CONCURRENCY` | `1` | How many drafts at once. Six matches a full local setup; capped at 8 |
+| `FARM_SHAPES` | `8:ppr,10:ppr,12:ppr,10:std,12:std` | Which rooms the farm joins, as `teams:format`. It rotates onto whichever it has fewest of |
 | `FARM_ESPN_STATE_B64` | `make farm-secret` | The farm's ESPN login. A live session — host's variable store only |
 | `ANTHROPIC_API_KEY` | `sk-ant-…` | **Off by default.** Absent, every report card is `numbers_only` — see The league report card |
 | `STRIPE_SECRET_KEY` | `rk_live_…` | **Off by default.** Absent, every draft is free — see Charging for it |
 | `STRIPE_PRICE_ID` | `price_…` | The $9.99 price, made in the Stripe Dashboard |
 | `STRIPE_WEBHOOK_SECRET` | `whsec_…` | Required with the key. Without it the webhook refuses everything |
 | `PUBLIC_BASE_URL` | `https://…` | Where Stripe sends a buyer back to. Behind a proxy the app cannot work this out itself |
+| `FOUNDERS_LIMIT` | `100` | How many accounts draft free forever — see Founders. Whether the list is still open is a code change (`billing.FOUNDERS_OPEN`); this is only how many seats it has. `0` switches the offer off; a negative value is read as a typo, logged once and ignored |
 | `SUPABASE_DB_URL` | `postgresql://postgres.<ref>:…@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require` | **Off by default.** A Supabase Postgres DSN via the **session** pooler, port 5432, `sslmode=require`. Not the 6543 transaction pooler: psycopg's prepared statements break there. Only a `postgresql://` or `postgres://` value is used: anything else — the `https://<ref>.supabase.co` project URL the dashboard shows first, most likely — is ignored with one warning line and never reaches the driver, though with the password below it composes the DSN just as the next row does. Absent, custody, billing and the live session records stay in DuckDB files on the volume |
 | `SUPABASE_URL` | `https://<ref>.supabase.co` | The project URL, the second way to say the row above. Set with the password below and the pooler DSN is composed from it, so the two values the Supabase dashboard hands you are enough |
 | `SUPABASE_DB_PASSWORD` | — | The database password, shown once when the project is created. Nothing is composed without it. URL-encoded on the way in, so a generated password full of punctuation is safe |
@@ -421,6 +441,50 @@ is for, are in `docs/superpowers/reference/cloudflare-runbook.md`.
 Off unless `STRIPE_SECRET_KEY` is set. Without it every draft is free, the
 gate is a no-op and no billing database is ever created — which is what every
 local checkout and the whole test suite runs as.
+
+**Founders, and why nobody is charged today.** The first `FOUNDERS_LIMIT`
+accounts (100) to connect an ESPN account draft free forever. Not for a
+season, and not until payment is switched on. While `billing.FOUNDERS_OPEN` is
+`True` nothing is charged for at all, and every connected account that asks
+this server anything takes the next seat.
+
+A seat is a row in `founder`, beside the entitlement it stands in for and
+keyed by the same custody account id. It is claimed lazily, by whichever
+request already had the account in hand: the gate, `GET /api/account/me`, or
+the favourites read. Reads span key versions like everything else in that
+store, so a rotated custody key neither loses somebody their seat nor spends a
+second one on them. Ordinals are identities: one past the highest ever given,
+unique in the table, and never reused after a row is removed.
+`GET /api/account/me` answers `{founder, ordinal, founders_left, connected}`
+to anybody, signed in or not, which is what lets the landing page offer the
+seats that are left.
+
+The saved local ESPN login (`is_local_request`, the owner's own machine) reads
+under a real account id and is given nothing. That id is derived from
+whichever custody key the machine has, so a seat claimed there would belong to
+nobody a deployment could ever recognise. Those requests are simply free.
+
+**One decision, four callers.** `billing.free_reason` says why a draft costs
+nothing — billing off, the local login, the founding period, a founder, a
+mock, or a purchase — and the gate, the draft room's state payload, `GET
+/api/billing/status` and the checkout all ask it. They used to decide
+separately, and three of them knew only about purchases: while the founding
+period is open that would mean a locked room and a $9.99 checkout for a draft
+the gate was letting through. A checkout for a draft that is already free is
+refused (409, or 400 for a mock).
+
+Flipping `FOUNDERS_OPEN` to `False` closes the list and turns the price back
+on for everybody except the accounts already in that table, who keep what they
+were promised. It is a constant rather than a variable on purpose: changing
+what the product costs is a decision with a date attached and a landing page
+to match, and it belongs in a commit somebody can read.
+
+The one guarantee that depends on the deployment shape is the count. The claim
+counts and inserts in a single statement under a process lock, so the
+hundredth seat is the hundredth on the single replica this service runs as. A
+second worker sharing a Postgres could slip an extra seat past it; it could
+not produce two founders with the same number, which is what the unique
+ordinal is for.
 
 With it, one real league's draft costs $9.99 for the season. Mock drafts stay
 free: they are the trial, and charging for the trial is charging for the sales
@@ -516,6 +580,25 @@ no shell and no file transfer. The variable deliberately **overwrites** any
 file already on the volume, because a dead session sitting there is exactly
 the case this exists to fix. A bad or truncated value costs the farm and
 nothing else: the site still comes up, and the boot log says what was wrong.
+
+**Which rooms it joins.** `FARM_SHAPES` is a list of `teams:format` pairs --
+`8:ppr,10:ppr,12:ppr,10:std,12:std` by default, and `ppr`, `half` or `std`
+for the format. Every pass counts what the corpus already holds of each
+shape, joins a room of whichever shape it is shortest of, and falls to the
+next shape when that one has nothing open; within a shape the fullest room
+still wins, because a room at 6/8 is six people waiting for a draft and an
+empty one is ESPN's autodraft engine reading ADP back at us. One line per
+pass says what is recorded and what is open, per shape:
+
+```
+shapes -- 8:ppr 854 recorded/2 open, 10:ppr 0 recorded/1 open, 12:ppr 0 recorded/0 open, ...
+```
+
+Every draft is filed under the shape the room really was, read from the
+room's own settings rather than the lobby listing, so a mixed corpus is not
+a mixed-up one: `scoring/availability.py` counts each shape separately and
+uses a shape's own counts once it holds 60 drafts. A typo in the variable
+stops the process at import rather than quietly narrowing the rotation.
 
 **How many at once.** `farm(n)` plays its drafts one after another, so being
 in six drafts at the same time means six processes, not a bigger `n` — which

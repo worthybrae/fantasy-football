@@ -33,6 +33,10 @@
 --text-1:#e8eaef;--text-2:#98a0b0;--text-3:#565b69;  /* --text-3 is 2.9:1 on --bg-0: never prose, never a label */
 --accent:#ffb454;--accent-bg:rgba(255,180,84,.12);--accent-border:rgba(255,180,84,.5);
 --ok:#4eb850;--fail:#d56262;
+/* The two steps of the five-step ramp that are not already a token. Its ends
+   are --ok and --fail and its fourth step is --accent; these two are the
+   middle, and they are the app's own (web/src/index.css). */
+--ramp-strong:#7cb342;--ramp-mid:#b3c132;--ramp-warm:#e0762c;
 --qb:#3987e5;--rb:#d95926;--wr:#199e70;--te:#c98500;--k:#d55181;--dst:#9085e9;
 --sans:'Inter Variable',system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;
 --mono:'JetBrains Mono',ui-monospace,'SFMono-Regular',Menlo,Consolas,monospace;
@@ -186,6 +190,99 @@ td.who img{width:24px;height:24px;border-radius:50%;object-fit:cover;
 .news li{padding:9px 0;border-bottom:1px solid var(--border);font-size:var(--t-base)}
 .news li:last-child{border-bottom:0}
 .news .meta{font-family:var(--mono);font-size:var(--t-sm);color:var(--text-2);display:block}
+
+/* -- the profile the app draws -------------------------------------------- */
+/* TWO FIVE-STEP RAMPS, BECAUSE THE APP HAS TWO. `e1..e5` is the panel ramp --
+   what a season's finish, a week's points, a schedule's softness and an
+   o-line's share are graded on. `m1..m5` is the meter ramp the board's own
+   Health, Reliable and Growth columns use. They agree at both ends and at the
+   fourth step and part in the middle, and folding them into one would repaint
+   a column of the draft room. One is the worst outcome and five the best in
+   both, which is what makes a glance across a row of them mean one thing. */
+.e1{--ramp:var(--fail)}.e2{--ramp:var(--accent)}.e3{--ramp:var(--ramp-mid)}
+.e4{--ramp:var(--ramp-strong)}.e5{--ramp:var(--ok)}
+.m1{--ramp:var(--fail)}.m2{--ramp:var(--ramp-warm)}.m3{--ramp:var(--accent)}
+.m4{--ramp:var(--ramp-strong)}.m5{--ramp:var(--ok)}
+/* Green up, red down: the two tokens the whole page spends on "better" and
+   "worse". `.down` is already defined above and means the same thing here. */
+.up{color:var(--ok)}
+.accent{color:var(--accent)}
+td.e1,td.e2,td.e3,td.e4,td.e5,
+.room .e1,.room .e2,.room .e3,.room .e4,.room .e5{color:var(--ramp)}
+
+/* Flex rather than a grid of `1fr` tracks: a defense earns one of these
+   four and a grid would stretch that one meter across the whole page, five
+   segments and all. Bounded, so four of them share a row and one keeps a
+   card's width. */
+.meters{display:flex;flex-wrap:wrap;gap:8px}
+.meter{flex:1 1 148px;max-width:320px}
+.meter{background:var(--bg-1);border:1px solid var(--border);border-radius:var(--r);
+ padding:11px 13px}
+.card .lead+.note.mono{color:var(--text-2)}
+.meter .k{font-family:var(--mono);font-size:var(--t-micro);letter-spacing:.09em;
+ text-transform:uppercase;color:var(--text-2)}
+.meter .v{font-family:var(--mono);font-size:var(--t-xl);color:var(--text-1);
+ margin-top:3px;line-height:1.15}
+.meter .v.e1,.meter .v.e2,.meter .v.e3,.meter .v.e4,.meter .v.e5,
+.meter .v.m1,.meter .v.m2,.meter .v.m3,.meter .v.m4,.meter .v.m5{color:var(--ramp)}
+.meter .segs{display:flex;gap:3px;margin:8px 0 6px}
+.meter .segs i{flex:1;height:7px;border-radius:1px;background:var(--bg-2)}
+.meter .segs i.e1,.meter .segs i.e2,.meter .segs i.e3,.meter .segs i.e4,
+.meter .segs i.e5,.meter .segs i.m1,.meter .segs i.m2,.meter .segs i.m3,
+.meter .segs i.m4,.meter .segs i.m5{background:var(--ramp)}
+.meter .s{font-size:var(--t-sm);color:var(--text-2);line-height:1.35}
+
+/* A scrollport for something wide INSIDE a card or a figure. `.scroll` is
+   cut for a section at the page's own width -- its negative margins would
+   break a table out through the side of the card holding it. */
+.xscroll{overflow-x:auto;overflow-y:hidden}
+.xscroll>svg{min-width:640px}
+
+.chart .e1,.chart .e2,.chart .e3,.chart .e4,.chart .e5{fill:var(--ramp)}
+.chart .off{fill:var(--text-3)}
+.chart .ax{fill:var(--text-2)}
+
+/* The one row in a season table that has not happened yet. */
+tr.proj td{color:var(--text-2)}
+/* ...but the forecast keeps its own step of the ramp. The colour answers
+   "is this good" and the row's grey answers "has it happened", and one must
+   not swallow the other. */
+tr.proj td.e1,tr.proj td.e2,tr.proj td.e3,tr.proj td.e4,tr.proj td.e5{color:var(--ramp)}
+/* The seam between the two shares and the rates under them: one half is how
+   much of the offence he was, the other is what he did with it. Heavier than
+   the rule every row already carries, or it would not be a seam at all. */
+tr.seam td{border-top:1px solid var(--text-3)}
+td.now,td.proj{color:var(--text-1)}
+/* Eighteen weeks across, so it scrolls rather than wraps -- an opponent
+   broken over two lines ("at\A PIT") is the one cell on the row a reader
+   cannot scan. */
+.scroll table.sched{min-width:840px}
+table.sched td,table.sched th{white-space:nowrap}
+
+.card .lead{margin:6px 0 0;font-family:var(--mono);font-size:var(--t-lg);
+ color:var(--text-2)}
+.card .lead b{color:var(--text-1);font-weight:500}
+/* NOT `.bar`, WHICH IS THE PAGE HEADER. Naming this one that turned the top
+   bar into a three-column grid and pushed its call to action 88 pixels off
+   the right of every page. */
+.gauges{display:grid;gap:5px;margin:10px 0 0}
+.gauge{display:grid;grid-template-columns:74px 1fr 38px;align-items:center;gap:8px;
+ font-size:var(--t-sm);color:var(--text-2)}
+.gauge .track{height:6px;background:var(--bg-2);border-radius:3px;overflow:hidden}
+.gauge .track i{display:block;height:100%;background:var(--ramp)}
+.gauge .v{text-align:right;color:var(--text-1)}
+.room{margin:8px 0 0;padding:0;list-style:none;font-size:var(--t-base)}
+.room li{display:flex;align-items:baseline;gap:8px;padding:3px 0;
+ border-bottom:1px solid var(--bg-2)}
+.room li:last-child{border-bottom:0}
+.room .d{font-family:var(--mono);font-size:var(--t-sm);color:var(--text-2);min-width:32px}
+.room .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.room li.me .nm{color:var(--accent)}
+/* A board peer with no page of his own: the same tile, without the link. */
+.near .flat{background:var(--bg-1);border:1px solid var(--border);border-radius:var(--r);
+ padding:6px 10px;font-size:var(--t-base);display:flex;align-items:center;gap:8px;
+ color:var(--text-2)}
+.near .flat b{font-family:var(--mono);font-weight:500;color:var(--accent)}
 
 /* -- faq and cta ---------------------------------------------------------- */
 .faq{max-width:68ch}

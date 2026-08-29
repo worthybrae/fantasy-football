@@ -36,6 +36,13 @@ in the environment -- a checkout on somebody's laptop, the test suite, the
 owner's own machine -- `enabled()` is False, every draft is free, and the
 gate below is a no-op. Turning payment on is one variable on one deployment,
 not a code path anybody else has to think about.
+
+AND FOUNDERS, which is the second thing that makes a draft free. The first
+hundred accounts to connect draft free forever -- see `FOUNDERS_OPEN` and
+`claim_founder`. While that period is open the gate charges nobody at all;
+once it closes, the hundred rows in `founder` go on being honoured while
+everybody else meets the price. It is the same shape as the entitlement it
+stands beside: a row, keyed by the same id, that says what somebody was given.
 """
 from __future__ import annotations
 
@@ -73,6 +80,29 @@ WEBHOOK_SECRET_ENV = "STRIPE_WEBHOOK_SECRET"
 # proxy that terminates TLS, so the request's own base URL says `http://` and
 # Stripe rejects a plaintext return URL in live mode.
 BASE_URL_ENV = "PUBLIC_BASE_URL"
+
+# HOW MANY PEOPLE DRAFT FREE FOR GOOD, and whether the door is still open.
+#
+# The first hundred accounts to connect get every draft free forever. That is
+# a promise, not a discount: it survives billing being switched on, it is
+# written down in a table rather than inferred from a date, and nothing below
+# can take it back. The two knobs are separate because they answer separate
+# questions -- how many seats there are, and whether anybody may still take
+# one -- and only the first is worth changing without a deploy.
+FOUNDERS_LIMIT_ENV = "FOUNDERS_LIMIT"
+DEFAULT_FOUNDERS_LIMIT = 100
+
+# WHETHER THE FOUNDING PERIOD IS RUNNING. While it is: no draft is charged
+# for at all, and every connected account that asks this server anything takes
+# the next seat. Flipping it to False closes the list and turns the paywall on
+# -- for everybody EXCEPT the accounts already in the table, who keep what
+# they were promised.
+#
+# A module constant rather than an environment variable, deliberately. Turning
+# the paywall back on is a decision with a date attached and a landing page to
+# match; it belongs in a commit somebody can read, not in a dashboard field
+# that changes what the product costs with no record of who typed it.
+FOUNDERS_OPEN = True
 
 # Entitlements and the webhook's own event log. Relative by default, which
 # puts it on the volume: the Dockerfile mounts that at `/app/data` precisely
@@ -183,9 +213,34 @@ _SCHEMA = (
         ord INTEGER NOT NULL,
         created_at TIMESTAMP NOT NULL,
         PRIMARY KEY (account_id, player_id))""",
+    # THE FIRST HUNDRED. One row per account that drafts free forever, and the
+    # order they arrived in -- `ordinal` is the count at the moment of the
+    # insert, so #37 really was the thirty-seventh, and the badge on the
+    # dashboard can say so.
+    #
+    # Here rather than in the credential store for the reason the entitlement
+    # table is here: it is keyed by `store.account_id(swid)`, it is a
+    # statement about money, and it is read on the same round trip as the
+    # entitlement it stands in for. It says as little about the person as
+    # every other row in this file -- an id nobody can test for membership
+    # without the custody key, a number, and a timestamp.
+    #
+    # `granted_at`, not `claimed_at`, to match the column the entitlement
+    # table already calls that: both are the moment something was given away.
+    #
+    # `ordinal` IS UNIQUE, and that is a correctness bound rather than
+    # tidiness. Two founders numbered 37 is a badge that lies to one of them,
+    # and the only thing standing between the table and that pair is a lock
+    # held in one process. With the constraint the database refuses the second
+    # row whatever raced to write it -- the claim's `ON CONFLICT DO NOTHING`
+    # turns that into "no seat this time", and the next request tries again.
+    """CREATE TABLE IF NOT EXISTS founder (
+        account_id VARCHAR PRIMARY KEY,
+        ordinal INTEGER NOT NULL UNIQUE,
+        granted_at TIMESTAMP NOT NULL)""",
 )
 
-# The same four tables in Postgres spellings, derived rather than written out
+# The same five tables in Postgres spellings, derived rather than written out
 # again so that adding a column cannot leave the two backends holding
 # different tables. TIMESTAMPTZ for the same reason pipeline/pgstore.to_pg
 # exists: these are audit columns, and one that is silently wrong by a session
@@ -282,7 +337,7 @@ class _Duck:
 
 
 class _Pg:
-    """The same four tables in Postgres, shared by every process with the DSN.
+    """The same five tables in Postgres, shared by every process with the DSN.
 
     Which is the entire point of this backend: the file above is correct for
     one process and unusable for two, and an entitlement that only one worker
@@ -343,7 +398,7 @@ class _Pg:
         """Create the tables once per process, not once per adapter.
 
         `reset_for_tests` builds a fresh adapter, and on Postgres the tables it
-        would create are already there -- four round trips to say so.
+        would create are already there -- five round trips to say so.
         """
         global _PG_READY
         if _PG_READY:
@@ -512,6 +567,21 @@ def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+# WHAT HAS ALREADY BEEN SAID. Both callers below are on paths a busy server
+# runs constantly -- the limit is read every time a room polls its state -- so
+# a misconfiguration or a store that has gone away would otherwise print the
+# same line a few times a second for as long as it lasted. Once per distinct
+# message is enough to find it in a log and cheap enough to leave in.
+_warned: set = set()
+
+
+def _warn_once(message: str) -> None:
+    if message in _warned:
+        return
+    _warned.add(message)
+    print(f"billing: {message}")
+
+
 def reset_for_tests(path: str | None = None) -> None:
     """Drop the cached store so a test can point at its own file.
 
@@ -529,6 +599,7 @@ def reset_for_tests(path: str | None = None) -> None:
         _seeded = False
         _seed_done.set()
         _known_mocks.clear()
+        _warned.clear()
     if path is not None:
         os.environ[DB_PATH_ENV] = path
 
@@ -728,8 +799,27 @@ def _local_swid(request: Request):
     return saved[0] if saved else None
 
 
-def _account_ids(request: Request, store=None) -> list:
-    """Every id this browser's ESPN account could hold rows under.
+# WHERE AN ACCOUNT ID CAME FROM, which decides what may be done with it.
+#
+# `CONNECTED` is a custody cookie this browser was given, resolving to an ESPN
+# session somebody stored here. Every visitor to a deployment is this.
+#
+# `LOCAL` is the saved ESPN login in `pipeline/espn_drafts`, honoured only on
+# a request that did not come off a network (see `is_local_request`). It is an
+# identity for reading -- the owner's own machine IS the account -- and it is
+# NOT an identity for claiming anything: on a checkout with `.env` loaded, the
+# custody key is a local one and the store is the deployment's Postgres, so a
+# founder seat claimed there would be a row the deployment can never match to
+# a person and a seat nobody can ever be given. It also fires on `make up`,
+# which would have made the owner's laptop founder #1 the first time anybody
+# opened a draft room on it.
+CONNECTED = "connected"
+LOCAL = "local"
+
+
+def account_context(request: Request, store=None) -> tuple:
+    """`(ids, source)`: every id this browser's account could hold rows under,
+    and which of the two paths above found it.
 
     A list, not a value, because the custody key can be rotated: a row written
     under version 1 keeps its version-1 id forever and the newest key computes
@@ -737,17 +827,26 @@ def _account_ids(request: Request, store=None) -> list:
     which is the same lazy-rotation rule the credential rows themselves
     follow.
 
-    Empty when this browser holds no stored ESPN session at all. That is not
-    an error here -- it is the ordinary state of somebody who has not
+    `([], None)` when this browser holds no stored ESPN session at all. That is
+    not an error here -- it is the ordinary state of somebody who has not
     connected -- and every caller treats it as "not entitled".
     """
     resolved = custody_for(request, store)
-    # The connected path: a cookie this browser was given, resolving to a
-    # stored ESPN session. Every visitor to a deployment is this.
-    swid = resolved.swid if resolved is not None else _local_swid(request)
+    if resolved is not None:
+        return _custody_store(store).account_ids(resolved.swid), CONNECTED
+    swid = _local_swid(request)
     if swid is None:
-        return []
-    return _custody_store(store).account_ids(swid)
+        return [], None
+    return _custody_store(store).account_ids(swid), LOCAL
+
+
+def _account_ids(request: Request, store=None) -> list:
+    """The ids alone, for the callers that only want to read rows under them.
+
+    Anything that GIVES something away -- a founder seat -- takes
+    `account_context` instead and looks at the source. See there.
+    """
+    return account_context(request, store)[0]
 
 
 def entitled(account_ids: list, league_id, season: int) -> bool:
@@ -912,7 +1011,267 @@ def set_favorites(account_ids: list, player_ids) -> list:
     return ids
 
 
+# -- founders ----------------------------------------------------------------
+#
+# THE PROMISE. The first `FOUNDERS_LIMIT` accounts that ever connect an ESPN
+# account to this server draft free forever -- not for a season, not until
+# billing is switched on, forever. A promise made to the people who turned up
+# before the product had proved anything is the one promise it cannot go back
+# on, so it is stored the way an entitlement is (a row, in the same file,
+# under the same id) rather than derived from a signup date or a coupon.
+#
+# WHEN A SEAT IS TAKEN. Lazily, on any request that already has the account in
+# hand: the gate below, `GET /api/account/me`, and `GET /api/account/favorites`
+# (api/account.py). There is no "sign up" step in this product to hang it on --
+# connecting an ESPN account IS the signup -- and a claim that costs one
+# statement on a request that was already reading this store is cheaper than
+# any endpoint built to do it deliberately.
+
+# THE COUNT AND THE INSERT HAVE TO AGREE, and this is what makes them agree.
+#
+# The statement below counts the table and inserts in one go, which is atomic
+# on either backend for one connection; this lock is what stops two THREADS of
+# this process interleaving a count with each other's insert. FastAPI runs
+# every sync handler in a threadpool, so two people connecting in the same
+# millisecond is the ordinary case rather than a rare one, and the failure it
+# would cause is 101 founders -- a promise made to somebody it was not meant
+# for, which cannot be withdrawn afterwards.
+#
+# ONE PROCESS IS THE WHOLE GUARANTEE, and the README says so where it says why
+# this service runs one replica. A second worker sharing a Postgres could
+# still slip a seat past the `WHERE` below under snapshot isolation; the
+# overshoot is bounded by how many claims land in the same instant, and the
+# alternative (a lock table, or a unique index on `ordinal` and a retry loop)
+# is machinery for a deployment shape this app does not have.
+_founder_lock = threading.Lock()
+
+
+def founders_limit() -> int:
+    """How many seats there are.
+
+    Read from the environment on every call rather than captured at import,
+    for the same reason `enabled()` is: the suite moves it around individual
+    tests, and a value frozen at import time cannot be moved.
+
+    A VALUE THAT MAKES NO SENSE IS THE DEFAULT, AND SAYS SO. This is read on
+    the path that opens a draft room, so a typo must not be able to take that
+    down -- but it must not silently change what the product promises either,
+    and a `-1` read as "no seats" would turn the offer off and look exactly
+    like it working. Not a number and less than zero are both typos; zero is
+    not, and stays the way to switch the offer off deliberately.
+
+    At most twenty characters of the value are echoed, and only into the
+    server's own log. It is a number in a deployment's configuration rather
+    than a secret, but nothing stops somebody pasting the wrong variable in.
+    """
+    raw = os.environ.get(FOUNDERS_LIMIT_ENV, "").strip()
+    if not raw:
+        return DEFAULT_FOUNDERS_LIMIT
+    try:
+        seats = int(raw)
+    except ValueError:
+        _warn_once(f"{FOUNDERS_LIMIT_ENV} is not a number ({raw[:20]!r}); "
+                   f"using {DEFAULT_FOUNDERS_LIMIT}")
+        return DEFAULT_FOUNDERS_LIMIT
+    if seats < 0:
+        _warn_once(f"{FOUNDERS_LIMIT_ENV} is negative ({seats}); "
+                   f"using {DEFAULT_FOUNDERS_LIMIT}. Zero is how the offer "
+                   f"is switched off.")
+        return DEFAULT_FOUNDERS_LIMIT
+    return seats
+
+
+def founder_ordinal(account_ids: list) -> int | None:
+    """Which founder this account is, counting from 1. None for everybody else.
+
+    ACROSS KEY VERSIONS, like `entitled` and `favorites`: rotating the custody
+    key computes a different id for the same person, and a row keeps the id it
+    was written under. The LOWEST ordinal wins where two versions both have a
+    row, because the earlier claim is the one that was actually made -- and
+    because `claim_founder` reads this first, a rotated account cannot take a
+    second seat with its new id.
+    """
+    if not account_ids:
+        return None
+    marks = ", ".join("?" for _ in account_ids)
+    rows = _db().execute(
+        f"SELECT ordinal FROM founder WHERE account_id IN ({marks}) "
+        f"ORDER BY ordinal",
+        [str(account_id) for account_id in account_ids])
+    return int(rows[0][0]) if rows else None
+
+
+def is_founder(account_ids: list) -> bool:
+    """Whether one of these ids drafts free forever."""
+    return founder_ordinal(account_ids) is not None
+
+
+def founders_taken() -> int:
+    """How many seats are gone: the rows in the table, whatever the limit
+    says today."""
+    return int(_db().execute("SELECT count(*) FROM founder")[0][0])
+
+
+def founders_left() -> int:
+    """How many are still going. Clamped at zero rather than allowed to go
+    negative: a limit lowered after a hundred seats were handed out is a
+    hundred promises that stand and no seats left, which is what "-20" would
+    be trying to say and what the landing page would print."""
+    return max(0, founders_limit() - founders_taken())
+
+
+def claim_founder(account_ids: list) -> int | None:
+    """This account's ordinal, taking the next seat if it does not have one.
+
+    Returns the ordinal it holds afterwards, or None: an unconnected browser,
+    a closed list, or a hundred people who got here first.
+
+    IDEMPOTENT, and that is the first thing it checks. Every caller is a route
+    that runs on every page load, so the ordinary case is an account that
+    claimed its seat weeks ago and the ordinary cost is one SELECT.
+
+    ONE STATEMENT DOES THE COUNTING AND THE INSERTING, inside `transaction()`
+    on the adapter, because the two halves of "take a seat if there is one"
+    are the two halves nothing may get between: a count that says 99 and an
+    insert that lands after somebody else's would be a hundred and first
+    founder. See `_founder_lock` for the thread half of the same problem.
+
+    THE NEXT ORDINAL IS ONE PAST THE HIGHEST, NOT ONE PAST THE COUNT. They
+    are the same number until a row leaves the table -- a seat withdrawn by
+    hand, a test cleaning up after itself -- and after that the count reuses a
+    number somebody already has. With `ordinal` unique that reuse is not a
+    duplicate badge, it is a claim that silently does nothing and an account
+    left with no seat; without the constraint it would be two founders
+    numbered 37. Ordinals are identities, so they are never handed out twice
+    and the sequence is allowed to have gaps in it.
+
+    `ON CONFLICT DO NOTHING` on top, for the two cases the count cannot see:
+    the same account claiming twice from two tabs at once, and two claims that
+    somehow computed the same ordinal. The keys do that work, not the guard --
+    a claim that hits either one takes no seat and the next request tries
+    again.
+
+    Best-effort in the sense that matters to a caller: it takes a seat or it
+    does not, and it never invents one. A store that cannot be written raises
+    `StoreError` like everything else here, and the routes decide.
+    """
+    if not account_ids:
+        return None
+    held = founder_ordinal(account_ids)
+    if held is not None:
+        return held
+    # Closed list: the founders already in the table keep what they have (see
+    # `require_paid`), and nobody else joins them.
+    if not FOUNDERS_OPEN:
+        return None
+    limit = founders_limit()
+    if limit <= 0:
+        return None
+    with _founder_lock:
+        _db().transaction([(
+            """INSERT INTO founder (account_id, ordinal, granted_at)
+               SELECT ?, (SELECT coalesce(max(ordinal), 0) + 1 FROM founder), ?
+                WHERE (SELECT count(*) FROM founder) < ?
+                   ON CONFLICT DO NOTHING""",
+            [str(account_ids[0]), _now(), int(limit)])])
+        # Read back rather than computed here: the row that landed is the
+        # answer, and on a full table there is no row and no ordinal.
+        return founder_ordinal(account_ids)
+
+
+def claim_founder_quietly(account_ids: list) -> int | None:
+    """`claim_founder`, for a caller that has something better to do than fail.
+
+    The claim is a side effect of routes that exist to answer other questions.
+    A billing store that is briefly away is a reason to serve those answers
+    without a founder badge on them; it is not a reason to refuse somebody
+    their favourites list. The seat is still there on the next request.
+
+    SAID OUT LOUD, ONCE. Swallowed silently, a store that had stopped
+    accepting the claim would look exactly like a hundred seats already gone:
+    every visitor told nothing, no error anywhere, and the offer quietly dead.
+    One line per distinct failure, because this runs on every poll of every
+    room -- see `_warn_once`.
+    """
+    try:
+        return claim_founder(account_ids)
+    except Exception as exc:      # noqa: BLE001 -- see the docstring
+        _warn_once(f"a founder seat could not be claimed "
+                   f"({type(exc).__name__})")
+        return None
+
+
 # -- the gate ----------------------------------------------------------------
+#
+# ONE DECISION, ASKED IN FOUR PLACES. Whether a draft costs anything is a
+# question the room asks on every poll (`api/live._billing_state`), the page
+# asks before it offers a button (`GET /api/billing/status`), the checkout asks
+# before it takes money, and the gate below asks before it opens a draft. Each
+# of those used to answer it for itself, and three of them only knew about
+# entitlements -- so on the day the founding period opened, the room went on
+# locking its buttons and offering checkout to people the gate was letting
+# through for free. A reader would have paid $9.99 for a draft nobody was
+# going to charge them for.
+#
+# So the reasons live here, in `free_reason`, and the four callers ask it.
+# Adding a fifth reason is one edit, and nothing can be told a different story
+# than the one the gate acts on.
+
+# Why a draft is free. Names rather than a bare bool because two of the
+# callers show the reason: the room's payload has carried `reason: "mock"`
+# since it existed, and a checkout that refuses has to say which of these it
+# refused for.
+FREE_BILLING_OFF = "billing_off"
+FREE_LOCAL = "local"
+FREE_FOUNDERS_OPEN = "founders_open"
+FREE_FOUNDER = "founder"
+FREE_MOCK = "mock"
+FREE_ENTITLED = "entitled"
+
+
+def free_reason(account_ids: list, league_id, season, source=None) -> str | None:
+    """Why this draft costs this account nothing, or None if it does.
+
+    THE ORDER IS THE ARGUMENT, cheapest and most absolute first:
+
+      1. This instance sells nothing. No key, no price, no gate -- every local
+         checkout and the whole test suite.
+      2. The account came off the machine we are running on (`LOCAL`). The
+         owner IS the account there and there is nobody to charge.
+      3. The founding period. **The seat is claimed here**, on whatever
+         request got here first, and only for a `CONNECTED` account -- see
+         `CONNECTED`/`LOCAL` for why a loopback login must never take one.
+         While the period is open nothing is charged for at all.
+      4. A founder, forever. Above the mock and entitlement tests rather than
+         below them because it outlives both: it is the clause that is still
+         here on the day `FOUNDERS_OPEN` goes False.
+      5. A mock room. The trial, and free by construction.
+      6. Somebody paid for it.
+
+    Raises `StoreError` like every other read here. The four callers each have
+    their own answer to that: the gate and the checkout refuse with a 503, the
+    room fails open, and the status endpoint says the store is unavailable.
+    """
+    if not enabled():
+        return FREE_BILLING_OFF
+    if source == LOCAL:
+        return FREE_LOCAL
+    founder = (claim_founder_quietly(account_ids)
+               if source == CONNECTED else None) is not None
+    if FOUNDERS_OPEN:
+        return FREE_FOUNDERS_OPEN
+    if founder:
+        return FREE_FOUNDER
+    if is_free_draft(league_id):
+        return FREE_MOCK
+    if entitled(account_ids, league_id, int(season or CURRENT_SEASON)):
+        return FREE_ENTITLED
+    return None
+
+
+def free_for(account_ids: list, league_id, season, source=None) -> bool:
+    """Whether this draft costs this account nothing. See `free_reason`."""
+    return free_reason(account_ids, league_id, season, source) is not None
 
 
 def require_paid(request: Request, league_id, season, store=None) -> None:
@@ -922,15 +1281,19 @@ def require_paid(request: Request, league_id, season, store=None) -> None:
     names the league so the page can offer checkout for the right draft rather
     than for whatever it last had in a state variable.
 
-    Free, always, when: billing is off on this instance, the room is a mock,
-    or this account has already bought this draft.
+    Every reason a draft is free is in `free_reason`, which the room, the
+    status endpoint and the checkout ask too. This function adds one thing to
+    it: what to do when the answer is no.
+
+    `enabled()` IS ASKED TWICE, here and in there. Deliberately: with billing
+    off this must not resolve a cookie, read a credential store or ask ESPN
+    anything, and a test asserts that it does not even look at the league.
     """
     if not enabled():
         return
-    if is_free_draft(league_id):
-        return
     season = int(season or CURRENT_SEASON)
-    if entitled(_account_ids(request, store), league_id, season):
+    ids, source = account_context(request, store)
+    if free_for(ids, league_id, season, source):
         return
     raise HTTPException(
         status_code=402,
@@ -988,6 +1351,19 @@ def _base_url(request: Request) -> str:
     return str(request.base_url).rstrip("/")
 
 
+# WHY A CHECKOUT WAS REFUSED, in the words the page shows the reader. Every
+# one of these is somebody trying to pay for something they already have, so
+# each says which of the ways they have it -- "already paid for" in front of a
+# founding member would read as a charge they cannot find.
+_ALREADY_FREE = {
+    FREE_ENTITLED: "This draft is already paid for.",
+    FREE_FOUNDER: "You are a founding member. Every draft is free.",
+    FREE_FOUNDERS_OPEN: "Every draft is free while the founding offer is "
+                        "open.",
+    FREE_LOCAL: "This machine's own ESPN login drafts free.",
+}
+
+
 class CheckoutBody(BaseModel):
     leagueId: str
     season: str | None = None
@@ -1013,21 +1389,28 @@ def register_billing_routes(app, store=None):
         an unconnected visitor too rather than 401ing: "you are not entitled"
         is the honest answer to "may I draft", and being signed out is one
         reason for it.
+
+        `reason` is carried when there is one, which is how a page can say
+        WHY a draft is free rather than only that it is. It used to be set for
+        a mock and nothing else; the other reasons are new and no client has
+        ever branched on the value.
         """
         if not enabled():
             return {"enabled": False, "required": False, "entitled": True}
         year = int(season or CURRENT_SEASON)
         if leagueId is None:
             return {"enabled": True, "required": False, "entitled": False}
-        if is_free_draft(leagueId):
-            return {"enabled": True, "required": False, "entitled": True,
-                    "reason": "mock"}
         try:
-            paid = entitled(_account_ids(request, store), leagueId, year)
+            ids, source = account_context(request, store)
+            reason = free_reason(ids, leagueId, year, source)
         except StoreError as exc:
             raise _unavailable(exc) from None
-        return {"enabled": True, "required": not paid, "entitled": paid,
-                "league_id": str(leagueId), "season": year}
+        free = reason is not None
+        answer = {"enabled": True, "required": not free, "entitled": free,
+                  "league_id": str(leagueId), "season": year}
+        if reason is not None:
+            answer["reason"] = reason
+        return answer
 
     @app.post("/api/billing/checkout")
     def billing_checkout(body: CheckoutBody, request: Request):
@@ -1041,23 +1424,31 @@ def register_billing_routes(app, store=None):
         if not enabled():
             raise HTTPException(status_code=503,
                                 detail="this instance does not sell anything")
-        ids = _account_ids(request, store)
+        ids, source = account_context(request, store)
         if not ids:
             raise HTTPException(
                 status_code=401,
                 detail="Connect your ESPN account first. The purchase is "
                        "attached to it.")
         year = int(body.season or CURRENT_SEASON)
-        if is_free_draft(body.leagueId):
-            raise HTTPException(status_code=400,
-                                detail="Mock drafts are free.")
+        # THE SAME DECISION THE GATE MAKES, and this is the caller it matters
+        # most for: everything below takes money. A checkout offered for a
+        # draft the gate was going to let through free is $9.99 charged for
+        # nothing, which is the failure this endpoint has to be incapable of.
         try:
-            already_paid = entitled(ids, body.leagueId, year)
+            reason = free_reason(ids, body.leagueId, year, source)
         except StoreError as exc:
             raise _unavailable(exc) from None
-        if already_paid:
+        if reason == FREE_MOCK:
+            # 400 rather than the 409 below, and the message it has always
+            # had: a mock is not "already free for you", it is free for
+            # everybody and was never for sale.
+            raise HTTPException(status_code=400,
+                                detail="Mock drafts are free.")
+        if reason is not None:
             raise HTTPException(status_code=409,
-                                detail="This draft is already paid for.")
+                                detail=_ALREADY_FREE.get(
+                                    reason, "This draft is already free."))
         base = _base_url(request)
         back = _return_to(body.returnTo)
         joiner = "&" if "?" in back else "?"

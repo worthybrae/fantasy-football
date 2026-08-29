@@ -19,6 +19,12 @@ shape:
     the custody key changes the id and does not change who the person is;
   * a write goes to the newest.
 
+THE ONE EXCEPTION TO THE 401 is `GET /api/account/me`, which answers a
+question an anonymous browser is allowed to ask: how many founder seats are
+left, and does this browser hold one. It writes nothing under an invented id
+-- with no session there is nothing to write -- and the page that reads it is
+the landing page, where every reader is signed out by definition.
+
 WHY THE IDS ARE CHECKED AGAINST THE BOARD. A favourite id travels into the
 draft plan and comes back out as a star beside a row. An id that names nobody
 would be a star beside a blank, or an entry the plan silently drops -- a bug
@@ -115,14 +121,16 @@ OUTLOOK_TTL_SECONDS = 60.0
 # once; past that the oldest entry goes.
 _OUTLOOK_MAX_ENTRIES = 64
 
-# HOW OFTEN THE BOARD'S IDENTITY IS RE-READ, and why it is not read per
-# request. `board_cache.board_key` is three DuckDB queries against the league
-# file -- 3 ms on an idle connection and three to five times that on a server
-# thread competing for one -- which on a cache HIT is the entire cost of the
-# request. It is also the one part of the key that can change without anybody
-# asking, so it gets a timer of its own instead of being dropped: a rebuilt
-# board retires every entry within five seconds, comfortably inside the minute
-# an answer is kept for anyway.
+# HOW OFTEN THE SERVER'S OWN HALF OF THE KEY IS RE-READ, and why it is not
+# read per request. `board_cache.board_key` is three DuckDB queries against
+# the league file -- 3 ms on an idle connection and three to five times that
+# on a server thread competing for one -- which on a cache HIT is the entire
+# cost of the request. The league's scoring format (the other half of the
+# shape the answer is computed for) is one more such read, on the same timer
+# and for the same reason. Both can change without anybody asking, so they
+# get a timer instead of being dropped from the key: a rebuilt board retires
+# every entry within five seconds, comfortably inside the minute an answer is
+# kept for anyway.
 _BOARD_IDENTITY_TTL_SECONDS = 5.0
 
 
@@ -241,11 +249,17 @@ def _ranked_board(cur):
     return _attach_espn_rank(cur, board)
 
 
-def _outlook_players(board, saved: list, picks: list) -> list:
+def _outlook_players(board, saved: list, picks: list,
+                     teams=None, fmt=None) -> list:
     """One row per saved favourite, in the saved order.
 
     THE ORDER IS THE PREFERENCE (see `billing.favorites`), so the answer is
     built by walking `saved` rather than by walking the board.
+
+    `teams` and `fmt` are the shape the answer is for -- the size the reader
+    picked, and the scoring of the league this deployment holds -- and go
+    straight to `availability_at`, which reads that shape's own counts once
+    the corpus holds enough drafts of it and the pooled ones until then.
 
     A saved id the board no longer names keeps its row and carries nulls. It
     is a rare case -- the write checked every id against the board -- but the
@@ -281,7 +295,7 @@ def _outlook_players(board, saved: list, picks: list) -> list:
         at_pick = {pick: availability_at(
             table, known, 0, pick,
             espn_adp.to_numpy(dtype=float), market_rank.to_numpy(dtype=float),
-            positions=positions) for pick in picks}
+            positions=positions, teams=teams, fmt=fmt) for pick in picks}
         for i, pid in enumerate(known):
             curves[pid] = [round(float(at_pick[pick][i]) * 100, 1)
                            for pick in picks]
@@ -318,7 +332,7 @@ def _outlook_players(board, saved: list, picks: list) -> list:
 
 
 def register_account_routes(app, conn, store=None):
-    """`GET`/`PUT /api/account/favorites`.
+    """`GET /api/account/me`, and `GET`/`PUT /api/account/favorites`.
 
     `conn` is the board's connection, and it is REQUIRED rather than optional
     like the connection every other router here takes: the write's only real
@@ -335,13 +349,24 @@ def register_account_routes(app, conn, store=None):
     routes are safe in.
     """
 
-    def _account_ids(request: Request) -> list:
-        ids = billing._account_ids(request, store)
+    def _account(request: Request) -> tuple:
+        """`(ids, source)` for a request that must have an account, else 401.
+
+        The source matters to exactly one thing here -- whether a founder seat
+        may be claimed -- and it comes back with the ids because working it
+        out separately would mean resolving the cookie and reading the
+        credential store twice for one request.
+        """
+        ids, source = billing.account_context(request, store)
         if not ids:
             raise HTTPException(
                 status_code=401,
                 detail="Connect your ESPN account to keep a favourites list.")
-        return ids
+        return ids, source
+
+    def _account_ids(request: Request) -> list:
+        """The ids alone, for the two routes that give nothing away."""
+        return _account(request)[0]
 
     # PER APP, not per module. The key below carries the board's identity, so
     # two apps in one process could safely share a dictionary -- but the
@@ -350,23 +375,41 @@ def register_account_routes(app, conn, store=None):
     # live here instead, which also means a test's app starts cold.
     outlook_cache: dict = {}
     outlook_lock = threading.Lock()
-    board_identity: list = [0.0, None]      # [read at, value]
+    # [read at, (board key, the league's scoring format)]
+    server_identity: list = [0.0, None]
 
-    def _board_identity(cur):
-        """The board cache's own key, re-read at most every
-        `_BOARD_IDENTITY_TTL_SECONDS`. See that constant for why it is on a
-        timer rather than on every request."""
+    def _identity(cur):
+        """What the SERVER brings to an answer: `(board key, the league's
+        scoring format)`.
+
+        Both are re-read at most every `_BOARD_IDENTITY_TTL_SECONDS` -- see
+        that constant for why the board's key is on a timer rather than on
+        every request, and note that the format is the same kind of quantity:
+        a DuckDB read whose answer changes only when a league is imported,
+        which is also when the board is rebuilt. One timer over the pair
+        rather than two, so a cache HIT still does no queries at all.
+
+        THE SHAPE IS HALF THE READER'S AND HALF THE LEAGUE'S. `teams` is a
+        control on the page -- somebody planning for a ten-team draft can ask
+        about one -- but the scoring is not: this page is read by an account
+        connected to one ESPN league, and asking it to name its own format
+        would be asking a question the server can already answer. A
+        deployment with no league imported reads "ppr", which is what
+        `scoring.league.scoring_format` says about a league it cannot see.
+        """
+        from scoring import league as league_mod
         from scoring.board_cache import board_key
 
         with outlook_lock:
-            at, value = board_identity
+            at, value = server_identity
             if value is not None and time.monotonic() - at < _BOARD_IDENTITY_TTL_SECONDS:
                 return value
-        # Outside the lock: it is three queries, and a second request arriving
-        # during them should read the board rather than queue behind us.
-        value = board_key(cur)
+        # Outside the lock: it is a handful of queries, and a second request
+        # arriving during them should read the board rather than queue behind
+        # us.
+        value = (board_key(cur), league_mod.scoring_format(league_mod.load(cur)))
         with outlook_lock:
-            board_identity[:] = [time.monotonic(), value]
+            server_identity[:] = [time.monotonic(), value]
         return value
 
     def _board_ids() -> set:
@@ -386,10 +429,64 @@ def register_account_routes(app, conn, store=None):
             cur.close()
         return {str(player_id) for player_id in board["player_id"]}
 
+    @app.get("/api/account/me")
+    def account_me(request: Request, response: Response):
+        """Who this browser is to us, which today is one question: founder?
+
+        200 WITHOUT A SESSION, and that is the whole reason this route reads
+        the account the quiet way rather than through the `_account_ids` above.
+        The landing page is the main caller and its reader is by definition not
+        connected yet -- "N founder spots left, connect to claim one" is an
+        offer, and an offer that 401s is a page that cannot make it. So an
+        anonymous caller gets `connected: false`, `founder: false`, and the
+        same honest count of seats as everybody else.
+
+        PRIVATE, said out loud rather than left to `DefaultPrivate`. Two
+        readers get different bodies from the same URL with no query string
+        between them, so this is the exact shape a shared cache serves to the
+        wrong person. The seat count alone would be cacheable; the sentence
+        above it is not.
+
+        AND THE SEAT IS CLAIMED HERE. This is the request the dashboard makes
+        on every load, so it is the one that covers somebody who never opens a
+        real league's draft at all -- see `billing.claim_founder` for why the
+        claim is a side effect of routes that already hold the account rather
+        than an endpoint of its own.
+        """
+        http_cache.private(response)
+        ids, source = billing.account_context(request, store)
+        try:
+            # Ordered: the claim first, so a seat taken by THIS request is
+            # already out of the count the same response reports.
+            #
+            # AND ONLY FOR A CONNECTED ACCOUNT. The other source is the saved
+            # ESPN login on the machine this process runs on, which is an
+            # identity for reading and not one to give a seat to: on a
+            # checkout with the deployment's `.env` loaded, that id is
+            # computed from a LOCAL custody key and written to the SHARED
+            # store, so the seat would belong to nobody the deployment can
+            # ever recognise. See `billing.CONNECTED`.
+            ordinal = (billing.claim_founder(ids)
+                       if ids and source == billing.CONNECTED else None)
+            left = billing.founders_left()
+        except StoreError as exc:
+            raise billing._unavailable(exc) from None
+        return {"connected": bool(ids),
+                "founder": ordinal is not None,
+                "ordinal": ordinal,
+                "founders_left": left}
+
     @app.get("/api/account/favorites")
     def account_favorites(request: Request):
         """This account's list, in its own order. Empty until it saves one."""
-        ids = _account_ids(request)
+        ids, source = _account(request)
+        # A founder's seat, taken on the way past, and only for a connected
+        # account -- see `/api/account/me` above for what the other source is
+        # and why it may not claim. Quietly: this route exists to answer a
+        # different question, and a billing store that is briefly away is not
+        # a reason to refuse somebody their own list.
+        if source == billing.CONNECTED:
+            billing.claim_founder_quietly(ids)
         try:
             return {"players": billing.favorites(ids)}
         except StoreError as exc:
@@ -486,7 +583,9 @@ def register_account_routes(app, conn, store=None):
             # The board's identity is read BEFORE the board is built: it
             # completes this answer's key, and on a hit it is the only work
             # the request does.
-            key = (tuple(saved), int(teams), int(slot), _board_identity(cur))
+            identity = _identity(cur)
+            fmt = identity[1]
+            key = (tuple(saved), int(teams), int(slot), identity)
             with outlook_lock:
                 hit = outlook_cache.get(key)
                 if hit is not None and time.monotonic() - hit[0] < OUTLOOK_TTL_SECONDS:
@@ -497,7 +596,8 @@ def register_account_routes(app, conn, store=None):
                 "teams": int(teams),
                 "slot": int(slot),
                 "picks": picks,
-                "players": _outlook_players(_ranked_board(cur), saved, picks),
+                "players": _outlook_players(_ranked_board(cur), saved, picks,
+                                            teams=int(teams), fmt=fmt),
             }
         finally:
             cur.close()

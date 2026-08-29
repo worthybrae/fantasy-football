@@ -900,3 +900,228 @@ def test_a_store_that_cannot_answer_is_a_503_here_too(client, monkeypatch,
     monkeypatch.setattr(billing, "_db", _broken)
 
     assert _outlook(client).status_code == 503
+
+
+# -- founders, over the same routes -------------------------------------------
+#
+# `GET /api/account/me` is the one route in this file that answers an
+# anonymous browser, and the reason is the landing page: "N founder spots
+# left -- connect ESPN to claim one" is an offer, and an offer that 401s is a
+# page that cannot make it. Everything else here is the claim itself, which is
+# a side effect of routes that exist to answer other questions (see
+# `billing.claim_founder`) rather than an endpoint of its own -- so the tests
+# below make ordinary requests and then ask what happened.
+
+SEATS = 5
+
+
+@pytest.fixture
+def seats(monkeypatch):
+    """A small, known number of founder seats.
+
+    Set rather than left to the default: the real one is a hundred, and a test
+    that filled it would be a hundred claims to prove one rule.
+    """
+    monkeypatch.setenv(billing.FOUNDERS_LIMIT_ENV, str(SEATS))
+    return SEATS
+
+
+def test_a_signed_out_browser_is_told_how_many_seats_are_left(
+        client, monkeypatch, seats):
+    """200, not 401. The reader of this answer has not connected anything yet
+    -- that is the entire point of showing it to them."""
+    _signed_out(monkeypatch)
+
+    res = client.get("/api/account/me")
+
+    assert res.status_code == 200
+    assert res.json() == {"connected": False, "founder": False,
+                          "ordinal": None, "founders_left": SEATS}
+    # One person's answer, and never in a shared cache: two browsers get
+    # different bodies from this URL with no query string between them.
+    assert res.headers["cache-control"] == "private, no-store"
+
+
+def test_asking_who_i_am_claims_a_seat(client, monkeypatch, seats):
+    """The dashboard makes this request on every load, so it is the one that
+    covers somebody who never opens a real league's draft at all."""
+    _sign_in(monkeypatch)
+
+    body = client.get("/api/account/me").json()
+
+    assert body == {"connected": True, "founder": True, "ordinal": 1,
+                    "founders_left": SEATS - 1}
+
+
+def test_asking_twice_is_the_same_seat(client, monkeypatch, seats):
+    """A hundred pageviews must not be a hundred founders."""
+    _sign_in(monkeypatch)
+    first = client.get("/api/account/me").json()
+
+    assert client.get("/api/account/me").json() == first
+    assert billing.founders_taken() == 1
+
+
+def test_a_rotated_key_keeps_the_seat_it_already_has(client, monkeypatch,
+                                                     seats):
+    """Rotation changes the id and does not change who the person is. A read
+    that only looked at the newest would lose them their seat and spend
+    another one on them."""
+    _sign_in(monkeypatch, ids=(OLD_ID,))
+    assert client.get("/api/account/me").json()["ordinal"] == 1
+
+    _sign_in(monkeypatch, ids=(NEW_ID, OLD_ID))
+    after = client.get("/api/account/me").json()
+
+    assert after["ordinal"] == 1
+    assert after["founders_left"] == SEATS - 1
+
+
+def test_reading_the_favourites_claims_a_seat_too(client, monkeypatch, seats):
+    """The other authenticated read this app makes on a dashboard load. It
+    claims for the same reason: the account is already in hand."""
+    _sign_in(monkeypatch)
+
+    assert client.get("/api/account/favorites").status_code == 200
+
+    body = client.get("/api/account/me").json()
+    assert body["ordinal"] == 1
+    assert body["founders_left"] == SEATS - 1
+
+
+def test_the_favourites_read_survives_a_billing_store_that_cannot_claim(
+        client, monkeypatch, seats):
+    """The claim is a side effect. A store that is briefly away is a reason to
+    serve the list without a founder badge, not a reason to refuse the list."""
+    _sign_in(monkeypatch)
+    monkeypatch.setattr(billing, "claim_founder",
+                        lambda ids: (_ for _ in ()).throw(
+                            billing.StoreError("gone")))
+
+    assert client.get("/api/account/favorites").json() == {"players": []}
+
+
+def test_a_latecomer_is_told_the_seats_are_gone(client, monkeypatch, seats):
+    """Zero left, and no invented ordinal for somebody who has none."""
+    for i in range(SEATS):
+        billing.claim_founder([f"earlier-{i}"])
+    _sign_in(monkeypatch)
+
+    body = client.get("/api/account/me").json()
+
+    assert body == {"connected": True, "founder": False, "ordinal": None,
+                    "founders_left": 0}
+
+
+def test_me_is_a_503_when_the_store_cannot_answer(client, monkeypatch, seats):
+    """The count is the answer here, so an unreadable store has nothing
+    honest to say -- 503, like every other route in this file."""
+    _sign_in(monkeypatch)
+
+    def _broken(*_a, **_k):
+        raise billing.StoreError("gone")
+
+    monkeypatch.setattr(billing, "_db", _broken)
+
+    assert client.get("/api/account/me").status_code == 503
+
+
+# -- the machine the server runs on -------------------------------------------
+
+
+def _local_login(monkeypatch):
+    """No cookie, and the saved ESPN login answering instead.
+
+    Patched at `_local_swid` rather than by faking a loopback address: a
+    TestClient request comes from "testclient", so `is_local_request` would
+    refuse it and the branch under test would never run.
+    """
+    monkeypatch.setattr(billing, "custody_for",
+                        lambda request, store=None: None)
+    monkeypatch.setattr(billing, "_local_swid", lambda request: SWID)
+    monkeypatch.setattr(
+        billing, "_custody_store",
+        lambda store=None: type("S", (), {
+            "account_ids": staticmethod(lambda swid: [NEW_ID])})())
+
+
+def test_the_owners_own_machine_is_never_made_a_founder(client, monkeypatch,
+                                                        seats):
+    """It reads rows under a real id and is given nothing.
+
+    That id is computed from whatever custody key the machine happens to have
+    -- a local one on a checkout, even with the deployment's `.env` loaded and
+    the shared store underneath -- so a seat claimed here is one the
+    deployment can never match to a person, and one fewer for a real reader.
+    The first `make up` would have taken #1.
+    """
+    _local_login(monkeypatch)
+
+    body = client.get("/api/account/me").json()
+
+    # Connected, because it IS an account for everything else it does.
+    assert body == {"connected": True, "founder": False, "ordinal": None,
+                    "founders_left": SEATS}
+    assert billing.founders_taken() == 0
+
+
+def test_the_favourites_read_claims_nothing_for_a_local_login(
+        client, monkeypatch, seats):
+    """The other claiming route, under the same rule."""
+    _local_login(monkeypatch)
+
+    assert client.get("/api/account/favorites").status_code == 200
+    assert billing.founders_taken() == 0
+def test_the_outlook_asks_about_the_shape_the_reader_chose(client, monkeypatch,
+                                                           counted):
+    """THE SEAT IS A SHAPE, not just a set of pick numbers. `availability_at`
+    reads a shape's own counts once the corpus holds enough drafts of it, so
+    a twelve-team question has to arrive as a twelve-team question -- the
+    picks alone would leave it answered from eight-team drafts forever.
+
+    The format is the LEAGUE's, not the reader's: this page is read by an
+    account connected to one ESPN league, and the server already knows what
+    that league scores.
+    """
+    _sign_in(monkeypatch)
+    billing.set_favorites([NEW_ID], OUTLOOK_LIST)
+    asked = []
+    real = av.availability_at
+
+    def spy(table, ids, k, n, *args, **kwargs):
+        asked.append((kwargs.get("teams"), kwargs.get("fmt")))
+        return real(table, ids, k, n, *args, **kwargs)
+
+    monkeypatch.setattr(av, "availability_at", spy)
+
+    assert _outlook(client, teams=12, slot=3).status_code == 200
+
+    assert asked, "the route never asked the counted table anything"
+    assert {teams for teams, _ in asked} == {12}
+    # This fixture's board has no ESPN league imported, and "ppr" is what
+    # `scoring.league.scoring_format` says about a league it cannot see -- the
+    # format every source has always been read as.
+    assert {fmt for _, fmt in asked} == {"ppr"}
+
+
+def test_the_outlook_players_pass_the_shape_straight_through(monkeypatch):
+    """The other half of the same wire, tested where the value can be forced:
+    a standard-scoring league asks about standard-scoring drafts."""
+    import api.account as account
+
+    board = pd.DataFrame([{"player_id": "p7", "name": "Player 07",
+                           "position": "RB", "team": "DET", "espn_rank": 1.0,
+                           "espn_adp": 1.0, "market_rank": 1}])
+    asked = []
+
+    def spy(table, ids, k, n, *args, **kwargs):
+        asked.append((kwargs.get("teams"), kwargs.get("fmt")))
+        import numpy as np
+        return np.ones(len(list(ids)))
+
+    monkeypatch.setattr(av, "availability_at", spy)
+    monkeypatch.setattr(av, "cached_table", lambda *_a, **_k: av.AvailabilityTable.empty())
+
+    account._outlook_players(board, ["p7"], [1, 16], teams=12, fmt="std")
+
+    assert asked == [(12, "std"), (12, "std")]

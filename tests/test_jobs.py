@@ -401,3 +401,27 @@ def test_a_connection_that_cannot_answer_is_not_warmed():
     request rather than a failed boot. The fake connections in this file are
     exactly that case, and so is a database mid-creation."""
     assert jobs._has_data(_Conn([])) is False
+
+
+def test_the_farm_child_inherits_this_processs_environment(monkeypatch):
+    """`FARM_SHAPES` reaches the farm through the ENVIRONMENT: the lobby
+    module reads it at import, and `_run_farm` starts the farm as a child
+    process. Passing an explicit `env=` here would drop it -- along with
+    every other platform variable the farm needs -- so the absence of one is
+    the guard.
+    """
+    import subprocess
+
+    from pipeline import espn_mock_lobby as lobby
+
+    calls = []
+    monkeypatch.setattr(subprocess, "run",
+                        lambda argv, **kwargs: calls.append((argv, kwargs)))
+
+    jobs._run_farm(2)
+
+    argv, kwargs = calls[0]
+    assert argv[-3:] == ["-m", "pipeline.mock_farm", "2"]
+    assert "env" not in kwargs
+    # And the name this file documents is the one the lobby actually reads.
+    assert jobs.FARM_SHAPES_ENV == lobby.FARM_SHAPES_ENV == "FARM_SHAPES"

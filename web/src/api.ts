@@ -1145,6 +1145,37 @@ export function fetchCustody(): Promise<{ connected: boolean }> {
   })
 }
 
+/** Who this browser is to us, which today is one question: founder?
+ *
+ *  The first hundred accounts to connect draft free forever (api/billing.py).
+ *  A seat is CLAIMED BY THIS REQUEST when there is one going and this browser
+ *  has a session, so it is not a passive read -- it is what the dashboard's
+ *  first load does about the offer the landing page makes.
+ *
+ *  200 for everybody, signed in or not. A reader who has connected nothing is
+ *  exactly the reader the offer is for, so `connected: false` is an ordinary
+ *  answer here rather than a 401. */
+export interface Me {
+  /** Whether this browser holds a stored ESPN session at all. */
+  connected: boolean
+  founder: boolean
+  /** Which founder, counting from 1. Null for everybody else. */
+  ordinal: number | null
+  /** Seats still going, for the offer on the landing page. Reported to an
+   *  anonymous reader too -- it is the same number for everybody. */
+  founders_left: number
+}
+
+export function fetchMe(): Promise<Me> {
+  // Shared for the five seconds a page takes to mount, like the custody
+  // probe above: the badge and whatever else asks are one request.
+  return cachedGet('account/me', async () => {
+    const res = await fetch('/api/account/me')
+    if (!res.ok) throw new Error(await detailText(res))
+    return res.json() as Promise<Me>
+  })
+}
+
 export async function fetchUpcomingDrafts(): Promise<UpcomingDrafts> {
   const res = await fetch('/api/espn/drafts')
   if (!res.ok) throw new Error(await detailText(res))
