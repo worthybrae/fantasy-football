@@ -208,6 +208,22 @@ MOVE_PICKS = 8
 # How many of them either list holds.
 MOVERS = 10
 
+# Every field a player MAY have, and what "we could not answer that" looks
+# like. Set on every player before a page is rendered, so a template can ask
+# for any of them without guarding, and so the shape of a player is written
+# down in one place rather than inferred from nine sources that each fill in
+# a few of it. A blank here is the answer for anybody the crosswalks miss --
+# see scoring/adp_facts.py on why it is never somebody else's number.
+BLANKS = {
+    "bye": None, "tier": None, "fp_tier": None, "consensus": None,
+    "espn_rank": None, "espn_pick": None, "espn_order": None, "vs_espn": None,
+    "proj_points": None, "rookie": False, "sources": [],
+    "age": None, "rookie_season": None, "height": None, "weight": None,
+    "seasons": [], "spark": None, "auction": None, "cheat_rank": None,
+    "last_season": None, "projection": None, "futures": [],
+    "news": [], "status": None, "still_there": [], "curve": None,
+}
+
 
 def _empty() -> dict:
     return {"players": [], "by_slug": {}, "drafts": 0, "teams": 0, "rounds": 0,
@@ -374,6 +390,9 @@ def build_adp(conn) -> dict:
             p["spark"] = _spark(p["seasons"])
     _espn_gap(players)
     _availability(players, teams)
+    for p in players:
+        for field, blank in BLANKS.items():
+            p.setdefault(field, blank)
     risers = sorted((p for p in players if (p.get("vs_espn") or 0) >= MOVE_PICKS),
                     key=lambda p: -p["vs_espn"])[:MOVERS]
     fallers = sorted((p for p in players if (p.get("vs_espn") or 0) <= -MOVE_PICKS),
@@ -606,7 +625,7 @@ def _availability(players: list, teams: int) -> None:
         p["curve"] = _curve_path([float(v) for v in curve[:, i]])
 
 
-def _curve_path(values: list, width: int = 320, height: int = 60) -> str:
+def _curve_path(values: list, width: int = 960, height: int = 100) -> str:
     """A step curve as one SVG `path` d attribute.
 
     A STEP, NOT A LINE, because the underlying thing is a step: he is there
@@ -768,6 +787,31 @@ def _provenance(data: dict) -> str:
     when = data["updated"].strftime("%b %-d, %Y") if data["updated"] else "today"
     return (f"From {data['drafts']} real ESPN mock drafts "
             f"({data['teams']}-team PPR, {data['rounds']} rounds), updated {when}.")
+
+
+def _person(p: dict, image: str | None) -> dict:
+    """The player, as structured data.
+
+    `Person` for a player and `SportsTeam` for a D/ST, because a defense is
+    not a person and saying so would be the sort of wrong that a rich result
+    is built on. Only fields this page can actually stand behind: the name,
+    the page's own URL, the face when there is one, and the team when the
+    depth charts or ESPN's board named it.
+    """
+    url = f"{SITE}/adp/{p['slug']}"
+    if p["position"] == "DST":
+        node = {"@context": "https://schema.org", "@type": "SportsTeam",
+                "name": p["name"], "url": url, "sport": "American football"}
+    else:
+        node = {"@context": "https://schema.org", "@type": "Person",
+                "name": p["name"], "url": url,
+                "jobTitle": f"{p['position']}, American football"}
+        if p.get("team"):
+            node["affiliation"] = {"@type": "SportsTeam", "name": p["team"],
+                                   "sport": "American football"}
+    if image:
+        node["image"] = image
+    return node
 
 
 def _crumbs(*items) -> dict:
@@ -958,23 +1002,27 @@ def register_seo_routes(app, conn=None):
             return _missing(f"/adp/{key}")
         i = p["rank"] - 1
         near = [q for q in d["players"][max(0, i - 4): i + 5] if q is not p]
-        pct = int(round(p["share"] * 100))
+        pct = int(round(p["of_share"] * 100))
         desc = (f"{p['name']} ADP {p['adp']:.1f} in {d['drafts']} real ESPN mock drafts: "
                 f"usually picks {p['p10']}–{p['p90']}, round {p['round_mode']}, "
                 f"taken in {pct}% of drafts, {p['position']}{p['pos_rank']}.")
+        if p.get("vs_espn") and abs(p["vs_espn"]) >= 1:
+            way = "earlier" if p["vs_espn"] > 0 else "later"
+            desc += f" {abs(p['vs_espn']):.0f} picks {way} than ESPN's board."
+        # base.html hangs `og:image` on this, and a card image has to be at
+        # least 200px square to be shown at all -- so the social tag asks for
+        # a bigger one than the 128-pixel `img` on the page, off the same
+        # url. `thumb` replaces a width it already set (scoring/headshot.py),
+        # which is what makes that possible here without carrying the
+        # original around.
+        social = thumb(p["headshot"], 320)
         return page(rendered(d["stamp"], ("player", p["slug"]), lambda: render(
             "adp_player.html", title=f"{p['name']} ADP – ESPN mock drafts {d['updated'].year if d['updated'] else ''} – ESPN Draft Assist",
             description=desc, path=f"/adp/{p['slug']}", p=p, drafts=d["drafts"],
             teams=d["teams"], rounds=d["rounds"], picks_total=d["teams"] * d["rounds"],
-            # base.html hangs `og:image` on this, and a card image has to
-            # be at least 200px square to be shown at all -- so the social
-            # tag asks for a bigger one than the 72-pixel `img` on the page,
-            # off the same url. `thumb` replaces a width it already set
-            # (scoring/headshot.py), which is what makes that possible here
-            # without carrying the original around.
-            peak=max(p["hist"]) or 1, near=near,
-            headshot=thumb(p["headshot"], 320),
-            provenance=_provenance(d),
+            near=near, headshot=social, face=thumb(p["headshot"], 256),
+            corpus_seconds=d["seconds"], curve_picks=CURVE_PICKS,
+            provenance=_provenance(d), person_schema=_person(p, social),
             breadcrumbs=_crumbs(("ADP", "/adp"), (p["position"], f"/adp/{p['position'].lower()}"),
                                 (p["name"], f"/adp/{p['slug']}")))))
 

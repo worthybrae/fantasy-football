@@ -174,7 +174,7 @@ def _from_board(player: dict, row) -> None:
             for key, label in SOURCES if _num(sources.get(key)) is not None]
 
     stats = getattr(row, "stats", None)
-    if isinstance(stats, dict) and _int(stats.get("games")):
+    if isinstance(stats, dict) and _int(stats.get("games")) and _num(stats.get("points")):
         player["last_season"] = {
             "season": _int(stats.get("season")),
             "games": _int(stats.get("games")),
@@ -343,7 +343,12 @@ def _last_season(conn, ids: list) -> dict:
     for pid, games, total, best, worst, week, opponent in rows:
         played = _int(games) or 0
         points = _num(total)
-        if not played or points is None:
+        # A zero season is not a season this table can speak for. nflverse
+        # computes `fantasy_points_ppr` from the passing, rushing and
+        # receiving lines and nothing else, so every kicker in it reads 0.0
+        # over seventeen games -- and "PPR points 0" beside a kicker who
+        # scored 140 is worse than no line at all.
+        if not played or not points:
             continue
         out[str(pid)] = {
             "season": season, "games": played,
