@@ -174,14 +174,20 @@ def _openings(slot: int) -> dict:
         return empty
     try:
         try:
-            teams, rounds = market._shape(conn)
+            teams, rounds, fmt = market._shape(conn)
         except (HTTPException, duckdb.Error):
             return empty
+        # THE ARCHIVE'S SHAPE IS (teams, rounds, format), and every query
+        # below filters through `market.shape_filter` rather than restating
+        # columns -- the format lives in a JSON blob and a WHERE on two
+        # columns cannot express it. See `market._shape`: an opening walked
+        # in PPR is a different opening from the same seat's in standard,
+        # because a receiver goes a round earlier in one of them.
         drafts = conn.execute(
-            "SELECT count(*) FROM draft_log WHERE teams = ? AND rounds = ?",
-            [teams, rounds]).fetchone()[0]
+            "SELECT count(*) FROM draft_log"
+            f" WHERE {market.shape_filter('')}").fetchone()[0]
         corpus = {"teams": int(teams), "rounds": int(rounds),
-                  "drafts": int(drafts)}
+                  "format": fmt, "drafts": int(drafts)}
         if not 1 <= slot <= teams:
             return {**empty, "corpus": corpus}
 
@@ -191,11 +197,11 @@ def _openings(slot: int) -> dict:
                 SELECT pk.draft_id,
                        string_agg(pk.position, '-' ORDER BY pk.round) AS path
                 FROM draft_log_pick pk JOIN draft_log d USING (draft_id)
-                WHERE d.teams = ? AND d.rounds = ? AND pk.slot = ?
+                WHERE {market.shape_filter()} AND pk.slot = ?
                   AND pk.round <= ? AND {human}
                 GROUP BY 1 HAVING count(*) = ?
             ) GROUP BY 1 ORDER BY 2 DESC LIMIT ?
-        """, [teams, rounds, slot, market.SEQUENCE_ROUNDS,
+        """, [slot, market.SEQUENCE_ROUNDS,
               market.SEQUENCE_ROUNDS, TOP_OPENINGS]).fetchall()
 
         # The denominator is every path walked from this seat, not the three
@@ -206,11 +212,11 @@ def _openings(slot: int) -> dict:
             SELECT count(*) FROM (
                 SELECT pk.draft_id
                 FROM draft_log_pick pk JOIN draft_log d USING (draft_id)
-                WHERE d.teams = ? AND d.rounds = ? AND pk.slot = ?
+                WHERE {market.shape_filter()} AND pk.slot = ?
                   AND pk.round <= ? AND {human}
                 GROUP BY 1 HAVING count(*) = ?
             )
-        """, [teams, rounds, slot, market.SEQUENCE_ROUNDS,
+        """, [slot, market.SEQUENCE_ROUNDS,
               market.SEQUENCE_ROUNDS]).fetchone()[0]
 
         # EVERY PICK COUNTS HERE, autodrafts included, and that is the
@@ -218,15 +224,15 @@ def _openings(slot: int) -> dict:
         # STRATEGY and only a person has one; a run is the board emptying, and
         # "when does the first quarterback go" does not care who took him.
         # Same call `api/market._players_payload` makes for the same reason.
-        runs = conn.execute("""
+        runs = conn.execute(f"""
             SELECT position, median(first_pick) FROM (
                 SELECT pk.draft_id, pk.position, min(pk.pick_no) AS first_pick
                 FROM draft_log_pick pk JOIN draft_log d USING (draft_id)
-                WHERE d.teams = ? AND d.rounds = ?
+                WHERE {market.shape_filter()}
                   AND pk.position IN (SELECT unnest(?))
                 GROUP BY 1, 2
             ) GROUP BY 1
-        """, [teams, rounds, list(RUN_POSITIONS)]).fetchall()
+        """, [list(RUN_POSITIONS)]).fetchall()
     except duckdb.Error:
         # THE FOUR READS ABOVE ARE THE OPENING CARDS AND NOTHING ELSE. A
         # corpus that opened and then failed mid-read -- the farm swapping the

@@ -313,13 +313,17 @@ def test_the_opening_is_what_this_seat_actually_walked(client, corpus,
 
 
 def test_the_shape_the_numbers_came_from_is_stated(client, corpus, monkeypatch):
-    """The corpus is one league size and the caller may be asking about
-    another. Saying which drafts were counted is what keeps that honest."""
+    """The corpus is one league size and one scoring format, and the caller
+    may be asking about another. Saying which drafts were counted is what
+    keeps that honest -- an opening walked in PPR is a different opening from
+    the same seat's in standard, because a receiver goes a round earlier in
+    one of them."""
     _signed_out(monkeypatch)
 
     body = client.get("/api/plan/preview?teams=12&slot=2").json()
 
-    assert body["corpus"] == {"teams": 4, "rounds": 5, "drafts": 4}
+    assert body["corpus"] == {"teams": 4, "rounds": 5, "format": "ppr",
+                              "drafts": 4}
     # Still answered from the four-team archive: the opening shape of a seat
     # is the most transferable thing here, and an empty card would be worse.
     assert body["opening"][0]["path"] == ["RB", "WR", "WR", "RB", "TE"]
