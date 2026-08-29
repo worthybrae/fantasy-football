@@ -376,6 +376,31 @@ def test_a_seat_snakes_back_on_an_even_round(corpus, board):
     assert "Seat 1 — pick 8" in body and "Seat 4 — pick 5" in body
 
 
+def test_a_gap_measured_over_a_handful_of_rooms_says_so(corpus, board, monkeypatch):
+    """`once` is taken in one draft of ten. Whatever his gap against ESPN
+    works out to, it is the average of one room, and the figure says which
+    rooms it came from instead of pointing green or amber at a drafter."""
+    monkeypatch.setattr(seo, "MOVE_PICKS", 1)
+    seo.clear_pages()
+    market._CACHE.clear()
+    # ...with ESPN ranking him, so there is a gap to caveat at all.
+    board.execute("UPDATE espn_adp SET espn_adp = 120.0 WHERE espn_id = 555")
+    d = seo.build_adp(board)
+    once = d["by_slug"]["once-guy"]
+    assert once["of_share"] < seo.MOVER_MIN_SHARE and once["vs_espn"] is not None
+    assert once not in d["risers"] and once not in d["fallers"]
+    body = _client(board).get("/adp/once-guy").text
+    assert "from the 10% of rooms that drafted him" in body
+    assert "rooms that drafted him at all" in body
+    assert 'class="v early"' not in body and 'class="v late"' not in body
+    # ...muted, and muted in a way that beats `.fig .v`'s own colour.
+    assert 'class="v dim"' in body
+    assert ".fig .v.dim{color:var(--text-2)}" in body
+    # ...while a player the rooms do take keeps the colour.
+    swift = _client(board).get("/adp/dandre-swift").text
+    assert 'class="v early"' in swift or 'class="v late"' in swift
+
+
 def test_espns_undrafted_sentinel_is_not_a_draft_position(corpus, board):
     """MUTATION: read a sentinel ADP as a rank. `once` carries ESPN's
     169.5, which is where ESPN parks a player its lobby never drafts -- 329
@@ -895,26 +920,27 @@ def _board_frame(name: str = "Seattle Defense"):
         "stats": None}])
 
 
-def test_a_board_that_fails_twice_is_asked_a_third_time(corpus, board, monkeypatch):
+def test_a_board_that_fails_once_is_asked_again(corpus, board, monkeypatch):
     """THE COLD-START RACE. `cached_build_board` raises when another thread
     is part-way through building the same board on the same connection,
     which is what a keep-warm pass landing on a request looks like. Forty of
     the two hundred published players -- every D/ST, every rookie -- have no
     `players` row and no name without it, and a player who cannot be named
     gets no page: the sitemap went 228 to 187 and stayed there until the
-    next warm pass."""
+    next warm pass. The race clears in about a second, which is what the one
+    retry is for."""
     from scoring import board_cache
     calls = []
 
     def flaky(conn, *args, **kwargs):
         calls.append(1)
-        if len(calls) < 3:
+        if len(calls) < 2:
             raise RuntimeError("another thread is building this board")
         return _board_frame()
 
     monkeypatch.setattr(board_cache, "cached_build_board", flaky)
     d = seo.build_adp(board)
-    assert len(calls) == 3, "the board was not retried"
+    assert len(calls) == 2, "the board was not retried"
     seattle = d["by_slug"]["seattle-defense"]
     assert seattle["player_id"] == "adp_seattle_defense"
     assert seattle["bye"] == 9 and seattle["tier"] == 3
@@ -937,9 +963,32 @@ def test_a_board_that_stops_answering_does_not_cost_a_page(corpus, board, monkey
     first = seo.build_adp(board)
     assert "seattle-defense" in first["by_slug"]
     second = seo.build_adp(board)
-    assert len(calls) == 4, "the second build did not retry three times"
+    assert len(calls) == 3, "the second build did not retry"
     assert set(second["by_slug"]) == set(first["by_slug"])
     assert second["by_slug"]["seattle-defense"]["bye"] == 9
+
+
+def test_a_remembered_board_a_day_old_is_not_served(corpus, board, monkeypatch):
+    """The trade stops being worth making. A bye week from yesterday's board
+    is a wrong answer rather than an old one, and these pages already print a
+    blank for every player the crosswalks miss."""
+    from scoring import board_cache
+    monkeypatch.setattr(board_cache, "cached_build_board",
+                        lambda conn, *a, **k: _board_frame())
+    assert "seattle-defense" in seo.build_adp(board)["by_slug"]
+
+    def gone(conn, *args, **kwargs):
+        raise RuntimeError("gone")
+
+    monkeypatch.setattr(board_cache, "cached_build_board", gone)
+    monkeypatch.setattr(seo, "_last_board_at",
+                        time.time() - seo.BOARD_MEMORY_SECONDS - 1)
+    d = seo.build_adp(board)
+    assert "seattle-defense" not in d["by_slug"]
+    # ...and the memory is dropped rather than kept for the next build.
+    assert seo._last_board_facts == {}
+    # The corpus's own figures are untouched by any of it.
+    assert d["by_slug"]["dandre-swift"]["adp"] == 1.0
 
 
 def test_a_board_that_never_builds_costs_the_board_fields_and_no_more(corpus, board):

@@ -117,6 +117,9 @@ td.who img{width:24px;height:24px;border-radius:50%;object-fit:cover;
 .early,.fig .v.early{color:var(--ok)}
 .late,.fig .v.late{color:var(--accent)}
 .dim{color:var(--text-2)}
+/* ...and a figure that is quieter than the ones around it has to beat
+   `.fig .v`'s own colour, which `.dim` alone does not. */
+.fig .v.dim{color:var(--text-2)}
 
 /* -- cards ---------------------------------------------------------------- */
 .figs{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:8px;margin:18px 0}

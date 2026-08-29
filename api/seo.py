@@ -138,12 +138,21 @@ WARM_SECONDS = 240.0
 # the copy it is trying to replace.
 ADP_KEY = "seo-adp"
 
-# How hard `build_adp` tries to get the board, and how long it waits between
-# tries. See `_board_facts`: the failure this defends against is another
-# thread part-way through building the same board on the same connection,
-# which clears in about a second.
-BOARD_ATTEMPTS = 3
-BOARD_RETRY_SECONDS = 2.0
+# How hard `build_adp` tries to get the board, how long it waits between
+# tries, and how long it will serve the last board it saw. See
+# `_board_facts`: the failure this defends against is another thread
+# part-way through building the same board on the same connection, which
+# clears in about a second -- so one retry a second later is the whole of
+# what waiting can buy, and a third attempt is two seconds of a six-second
+# budget spent on a board that is not coming.
+#
+# THE MEMORY EXPIRES. Bye weeks, tiers and the consensus come off the board,
+# and a day is the point past which serving them is worse than serving
+# nothing: the pages fall back to blanks, which is what they print for every
+# player the crosswalks miss anyway.
+BOARD_ATTEMPTS = 2
+BOARD_RETRY_SECONDS = 1.0
+BOARD_MEMORY_SECONDS = 24 * 60 * 60.0
 
 # How many rendered pages to keep. The sitemap is 228 URLs and a crawler
 # works through it in a burst, so this holds a whole crawl and then some.
@@ -365,6 +374,7 @@ def _stamp(conn, drafts: int, teams: int, rounds: int, updated) -> tuple:
 
 
 _last_board_facts: dict = {}
+_last_board_at = 0.0
 _board_lock = threading.Lock()
 
 
@@ -382,13 +392,21 @@ def _board_facts(conn) -> dict:
     keep-warm pass. A crawler that walks a sitemap missing a fifth of its
     pages does not come back for them.
 
-    So: three attempts two seconds apart, which is longer than any board
-    build takes, and if it still will not come, the last board this process
-    saw. Its bye weeks and tiers are a few minutes old at worst -- and a
+    So: a second attempt a second later, which is longer than the race it is
+    waiting out, and if that does not come either, the last board this
+    process saw. Its bye weeks and tiers are minutes old at worst, and a
     stale tier beside a fresh ADP is a smaller lie than a page that is not
     there.
+
+    FOR A DAY, AND NOT LONGER. Past that the trade stops being worth making:
+    a bye week from yesterday's board is a wrong answer rather than an old
+    one, and these pages already know how to print a blank -- every player
+    the crosswalks miss gets one. After a day the memory is dropped and the
+    fields go with it. The names are the exception this whole mechanism
+    exists for, and they go too: a page that says nothing about a player is
+    better than a page that says something untrue about him.
     """
-    global _last_board_facts
+    global _last_board_facts, _last_board_at
     if conn is None:
         return {}
     from scoring import adp_facts
@@ -403,8 +421,12 @@ def _board_facts(conn) -> dict:
         if rows:
             with _board_lock:
                 _last_board_facts = rows
+                _last_board_at = time.time()
         return rows
     with _board_lock:
+        if time.time() - _last_board_at > BOARD_MEMORY_SECONDS:
+            _last_board_facts = {}
+            return {}
         return dict(_last_board_facts)
 
 
@@ -1389,7 +1411,7 @@ def register_seo_routes(app, conn=None):
             description=desc, path=f"/adp/{p['slug']}", p=p, drafts=d["drafts"],
             teams=d["teams"], rounds=d["rounds"], picks_total=d["teams"] * d["rounds"],
             near=near, headshot=social, face=thumb(p["headshot"], 256),
-            round_min=ROUND_MIN_SHARE, pron=pron,
+            round_min=ROUND_MIN_SHARE, pron=pron, mover_floor=MOVER_MIN_SHARE,
             corpus_seconds=d["seconds"], curve_picks=CURVE_PICKS,
             provenance=_provenance(d), person_schema=_person(p, social),
             breadcrumbs=_crumbs(("ADP", "/adp"), (p["position"], f"/adp/{p['position'].lower()}"),

@@ -48,11 +48,11 @@ for _switch in ("SEO_WARM", "DEMO_WARM", "WARM_ON_BOOT"):
 def _seo_warm_off():
     """And no waiting on the board, either.
 
-    `seo._board_facts` retries `cached_build_board` twice, two seconds
-    apart, because the failure it defends against is a concurrent build that
-    clears in about a second (see its docstring). Every board a test hands
-    it is a partial fixture database that will never build, so under pytest
-    those two waits are four seconds per `build_adp` and nothing else. The
+    `seo._board_facts` retries `cached_build_board` once, a second later,
+    because the failure it defends against is a concurrent build that clears
+    in about a second (see its docstring). Every board a test hands it is a
+    partial fixture database that will never build, so under pytest that
+    wait is a second per `build_adp` and nothing else. The
     retry itself still runs; only the sleep between attempts is zero, and
     the tests that are about the retry drive it directly.
     """
