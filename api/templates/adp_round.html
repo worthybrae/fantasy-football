@@ -41,7 +41,7 @@
 <h2>Who goes in round {{ n }}</h2>
 {% if not rows %}<p>No player has gone in round {{ n }} often enough to say.</p>{% else %}
 <div class="scroll">
-<table>
+<table class="wide">
 <thead><tr><th>Player</th><th>Pos</th><th>Team</th><th class="n">ADP</th><th class="n">Range</th><th class="n">Of his picks</th><th class="n">Of all drafts</th><th>How often</th></tr></thead>
 <tbody>
 {% for r in rows %}

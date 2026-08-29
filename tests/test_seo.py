@@ -1143,7 +1143,10 @@ def test_the_index_leads_with_risers_fallers_and_the_runs(corpus, board, monkeyp
 def test_the_index_table_sorts_and_says_so_once(corpus, board):
     body = _client(board).get("/adp").text
     assert body.count("table.sortable") == 1
-    assert body.count('class="sortable"') == 1
+    # `sortable` is one class on the table, not the whole attribute -- the
+    # index's table also carries `wide`, which is what gives it its phone
+    # scroll floor.
+    assert len(re.findall(r'<table[^>]*\bclass="[^"]*\bsortable\b', body)) == 1
     assert 'data-k="n"' in body and 'aria-sort' in body
     # ...and nowhere else. A player page has no table to sort.
     assert "table.sortable" not in _client(board).get("/adp/dandre-swift").text
@@ -1359,39 +1362,48 @@ def profiled(tmp_path):
     from pipeline.db import get_conn, write_table
     from scoring import board_cache, profile_cache
 
+    # SIX, NOT TWO. `test_six_player_pages_at_once_each_get_their_whole_page`
+    # needs six pages that really build a profile, because the failure it
+    # guards -- six threads on one DuckDB connection -- does not show at two
+    # any more than a deadlock shows at one lock. The four after `mid` are
+    # the corpus fixture's own remaining ids, so every one of them is a real
+    # row on the ADP board rather than an orphan the pages would skip.
+    people = (("star", "D'Andre Swift", "CHI", 6), ("mid", "Amon-Ra St. Brown", "DET", 0),
+              ("twin_a", "Rhamondre Stevenson", "NE", 1),
+              ("twin_b", "Javonte Williams", "DEN", 2),
+              ("swing", "Tony Pollard", "TEN", 3),
+              ("late", "Jaylen Waddle", "MIA", 4))
     conn = get_conn(str(tmp_path / "universal.duckdb"))
     weekly = []
-    for pid, name, team in (("star", "D'Andre Swift", "CHI"),
-                            ("mid", "Amon-Ra St. Brown", "DET")):
+    for pid, name, team, bump in people:
         for season, per_week in ((2024, 5), (2025, 7)):
             for week in range(1, 13):
+                per = per_week + bump
                 weekly.append({
                     "player_id": pid, "player_display_name": name,
                     "position": "RB", "recent_team": team, "opponent_team": "GB",
                     "season": season, "week": week,
-                    "carries": per_week + 8, "rushing_yards": per_week * 9,
+                    "carries": per + 8, "rushing_yards": per * 9,
                     "rushing_tds": 1 if week % 4 == 0 else 0,
-                    "targets": per_week, "receptions": per_week - 2,
-                    "receiving_yards": per_week * 7,
+                    "targets": per, "receptions": max(0, per - 2),
+                    "receiving_yards": per * 7,
                     "receiving_tds": 1 if week % 6 == 0 else 0})
     write_table(conn, "weekly", pd.DataFrame(weekly))
     # `market._names` reads this one, which is what gives the pages their
     # slugs; the board and the profile read `weekly` above.
     write_table(conn, "players", pd.DataFrame([
-        {"gsis_id": "star", "display_name": "D'Andre Swift", "headshot": None,
-         "birth_date": "1999-01-14", "rookie_season": 2020, "height": 70.0,
-         "weight": 215.0},
-        {"gsis_id": "mid", "display_name": "Amon-Ra St. Brown", "headshot": None,
-         "birth_date": "1999-10-24", "rookie_season": 2021, "height": 72.0,
-         "weight": 197.0}]))
+        {"gsis_id": pid, "display_name": name, "headshot": None,
+         "birth_date": f"199{9 - bump % 9}-0{1 + bump % 9}-14",
+         "rookie_season": 2020 + bump % 4, "height": 70.0 + bump,
+         "weight": 215.0 - bump}
+        for pid, name, _team, bump in people]))
     write_table(conn, "schedules", pd.DataFrame([
-        {"home_team": "CHI", "away_team": "GB", "week": 1,
-         "total_line": 44.0, "spread_line": 2.0},
-        {"home_team": "DET", "away_team": "GB", "week": 1,
-         "total_line": 51.0, "spread_line": 3.0}]))
+        {"home_team": team, "away_team": "GB", "week": 1,
+         "total_line": 44.0 + bump, "spread_line": 2.0 + bump}
+        for _pid, _name, team, bump in people]))
     write_table(conn, "adp", pd.DataFrame([
-        {"adp_name": "D'Andre Swift", "position": "RB", "team": "CHI", "adp": 12.0},
-        {"adp_name": "Amon-Ra St. Brown", "position": "RB", "team": "DET", "adp": 5.1}]))
+        {"adp_name": name, "position": "RB", "team": team, "adp": 5.1 + 3 * i}
+        for i, (_pid, name, team, _bump) in enumerate(people)]))
     for name, columns in (
             ("depth_charts", ["gsis_id", "depth_team", "formation", "week", "position"]),
             ("snap_counts", ["player", "team", "season", "offense_pct"]),
@@ -1532,11 +1544,10 @@ def test_a_player_page_stays_inside_its_size_budget(corpus, profiled):
     sections roughly doubled one, and the ceiling is what stops the next
     section being added without anybody measuring.
 
-    Measured against the real corpus and the real universal database, the
-    heaviest player page is 56 KB (a tight end: five cards of history, a
-    full game log and eight news items). The fixture's pages are far
-    smaller, so this is a guard rail rather than a measurement -- see the
-    task report for the real figures."""
+    Measured against the real corpus (854 drafts, 203 pages) and the real
+    universal database, the heaviest player page is 61.2 KB and the median
+    is 56.5 KB. The fixture's pages are far smaller, so this is a guard rail
+    rather than a measurement -- see the task report for the real figures."""
     client = _client(profiled)
     for player in seo.adp_data(profiled)["players"]:
         body = client.get(f"/adp/{player['slug']}").text
@@ -1583,7 +1594,259 @@ def test_nothing_on_a_player_page_can_push_it_sideways():
     css = (Path(seo.TEMPLATES) / "base.html").read_text(encoding="utf-8")
     assert ".scroll{overflow-x:auto" in css
     assert ".xscroll{overflow-x:auto" in css
+
+    # STRUCTURAL, NOT LITERAL. This used to assert two exact strings with the
+    # newline between the div and the tag baked in, which is a test of where
+    # somebody pressed return: reflowing one line of the template broke it,
+    # and adding a ninth table it had never heard of did not.
     page = (Path(seo.TEMPLATES) / "adp_player.html").read_text(encoding="utf-8")
-    # Every wide thing the profile sections add is inside one of the two.
-    assert '<div class="scroll">\n<table class="sched">' in page
-    assert '<div class="xscroll">\n<svg viewBox="0 0 720 128"' in page
+    stack, loose = [], []
+    for m in re.finditer(r"<(/?)(div|table)\b([^>]*)>", page):
+        closing, tag, attrs = m.groups()
+        if tag == "div":
+            if closing:
+                if stack:
+                    stack.pop()
+            else:
+                found = re.search(r'class="([^"]*)"', attrs)
+                stack.append((found.group(1) if found else "").split())
+        elif not closing and not any(
+                "scroll" in cls or "xscroll" in cls for cls in stack):
+            loose.append(page[:m.start()].count("\n") + 1)
+    assert not loose, f"tables outside a scrollport, at lines {loose}"
+
+    # And nothing is given a floor wide enough to matter outside one. Every
+    # min-width big enough to overflow a phone -- the week chart's 640, the
+    # schedule's 840, the wide tables' 660 -- has to be written as a
+    # descendant of a scrollport, which is what makes the check above
+    # sufficient rather than a spot check on one template.
+    for selector, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
+        for floor in re.findall(r"min-width:\s*(\d+)px", body):
+            assert int(floor) <= 400 or "scroll" in selector, (
+                f"{selector.strip()} sets min-width:{floor}px outside a "
+                "scrollport")
+
+
+def test_six_player_pages_at_once_each_get_their_whole_page(corpus, profiled):
+    """ONE CONNECTION IS NOT SIX. A DuckDBPyConnection carries the statement
+    and result state of the query running on it, and two threads issuing
+    queries on the same one do not queue -- they overwrite each other's
+    state. The route used to hand `render_player` the process-wide `conn`,
+    so a burst of player pages (which is exactly how a crawler walks a
+    228-URL sitemap) had six profile builds racing on one connection: five
+    of the six lost every section, the stripped page was then written into
+    the page cache under the corpus's own stamp, and `_profile_failed`
+    said so once and never again.
+
+    The fix is the cursor `api/main.py`'s profile route and the keep-warm
+    loop already take. This test is the reason it has to stay: a page built
+    concurrently must be byte for byte the page built alone.
+    """
+    from scoring import board_cache, profile_cache
+
+    slugs = [p["slug"] for p in seo.adp_data(profiled)["players"]][:6]
+    assert len(slugs) == 6, slugs
+    client = _client(profiled)
+
+    # COLD, AND ALL AT ONCE -- a warm profile cache answers without touching
+    # the connection at all, and the race is in the build.
+    board_cache.clear()
+    profile_cache.clear()
+    seo.clear_pages()
+    got, errors = {}, []
+    start = threading.Barrier(len(slugs))
+
+    def fetch(slug):
+        try:
+            start.wait(timeout=30)
+            got[slug] = client.get(f"/adp/{slug}").text
+        except Exception as exc:      # noqa: BLE001 -- reported, not swallowed
+            errors.append((slug, repr(exc)))
+
+    threads = [threading.Thread(target=fetch, args=(slug,)) for slug in slugs]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(60)
+    assert not errors, errors
+
+    # The same six, one at a time, as the yardstick.
+    seo.clear_pages()
+    alone = {slug: client.get(f"/adp/{slug}").text for slug in slugs}
+
+    for slug in slugs:
+        assert len(got[slug].encode()) == len(alone[slug].encode()), (
+            f"{slug}: {len(got[slug].encode())} bytes under six threads, "
+            f"{len(alone[slug].encode())} on its own")
+    # And the sections are really there in at least the pages that have a
+    # profile at all, so this cannot pass by every page losing them.
+    with_sections = [s for s in slugs if "How he grades" in html.unescape(alone[s])]
+    assert with_sections, "the fixture built no profile for any of these six"
+    for slug in with_sections:
+        body = html.unescape(got[slug])
+        for heading in ("How he grades", "Every season he has played"):
+            assert heading in body, f"{slug} lost {heading!r} to the race"
+
+
+@pytest.mark.parametrize("payload,broke", [
+    # A LINE WITH NO PLACE. `int(oline["rank"])` was unguarded, and a team
+    # whose line ranks nowhere -- an expansion week, a season the source has
+    # not graded yet -- is a null in that column, not an absent card.
+    ({"header": {"position": "RB", "career_games_pg": 15.0},
+      "oline": {"team": "CHI", "rank": None, "teams": 32}}, "a null o-line rank"),
+    # A PAYLOAD WITH NO `bio`. `_season_rows` reads `payload["bio"]` by
+    # subscript to date the projection row, and `.get("bio")` is a key the
+    # builder is free to stop filling.
+    ({"header": {"position": "RB", "proj_pos_finish": 8},
+      "seasons": [{"season": 2025, "games": 16, "ppg": 14.0, "pos_finish": 9}],
+      "summary": {"proj_ppg": 15.0}}, "no bio"),
+])
+def test_a_shaper_that_raises_costs_the_sections_not_the_page(
+        corpus, profiled, monkeypatch, capsys, payload, broke):
+    """THE GUARD HAS TO COVER THE SHAPING, NOT ONLY THE FETCH.
+
+    `cached_profile_or_none` swallowed everything the universal database
+    could do wrong and then handed the payload to fifteen shapers that
+    swallowed nothing -- `_meters`, `_season_rows`, `_weeks`, `_usage`,
+    `_schedule`, `_oline`, and the `payload["header"]` / `payload["bio"]` /
+    `int(g["week"])` subscripts inside them. A payload the builder is
+    entitled to produce therefore turned a 200 into a 500 on a page that
+    needs none of it.
+    """
+    from scoring import profile_cache
+    monkeypatch.setattr(profile_cache, "cached_profile",
+                        lambda *a, **k: dict(payload))
+    monkeypatch.setattr(seo, "_profile_failed", False)
+    seo.clear_pages()
+    capsys.readouterr()
+    client = _client(profiled)
+    res = client.get("/adp/dandre-swift")
+    assert res.status_code == 200, broke
+    body = html.unescape(res.text)
+    # The corpus's own page, whole.
+    assert "D'Andre Swift ADP" in body and "Where the room takes him" in body
+    # And not one section that would have needed the payload.
+    for heading in ("How he grades", "Every season he has played",
+                    "What his points are made of", "The team around him"):
+        assert heading not in body, heading
+    # Said once for the process, not once per page of a crawl.
+    client.get("/adp/amon-ra-st-brown")
+    said = [line for line in capsys.readouterr().out.splitlines()
+            if "profile enrichment unavailable" in line]
+    assert len(said) == 1, said
+
+
+def _steady_cls(rank, pool):
+    """The steadiness column of a season, off `seo._season_rows`."""
+    rows = seo._season_rows({
+        "header": {"position": "RB"},
+        "bio": {"season": 2026},
+        "seasons": [{"season": 2025, "games": 16, "ppg": 12.0, "pos_finish": 10,
+                     "pos_rank_ppg": 10, "pos_rank_ppg_n": 40,
+                     "cv_rank": rank, "cv_rank_n": pool}]})["rows"]
+    return rows[0]["steady_cls"]
+
+
+def _place_cls(rank, of):
+    """The place a single o-line starter is painted on, off `seo._oline`."""
+    card = seo._oline({"oline": {
+        "team": "CHI", "rank": 12, "teams": 32,
+        "starters": [{"name": "Braxton Jones", "position": "LT",
+                      "avail_rank": rank, "avail_rank_of": of}]}})
+    return card["starters"][0]["cls"]
+
+
+def test_a_place_on_the_boundary_is_painted_the_app_s_own_step():
+    """`1 - rank / pool` IS NOT `rank / pool` IN BINARY, and the app cuts on
+    the second one.
+
+    `steadyTone` (web/src/components/draft/panels.ts) and `placeTone`
+    (web/src/components/profile/LineQuality.tsx) both ask "is this place
+    inside the top fifth / quarter / half of its field" as
+    `rank / pool <= ceiling`. Turned into `1 - rank / pool >= floor` -- the
+    same statement in exact arithmetic -- it stops being the same statement
+    in floating point: 1 - 24/30 is 0.19999999999999996, under the 0.2 floor
+    that 24/30 is exactly on, so a lineman placed 24th of 30 was painted the
+    worst step here and the second-worst in the room. Every exact boundary
+    was one step dark.
+    """
+    # The app's two functions, transcribed. Ceilings, ascending, best first.
+    def steady_tone(rank, pool):
+        p = rank / pool
+        return (5 if p <= 0.25 else 4 if p <= 0.5 else 3 if p <= 0.75
+                else 2 if p <= 0.9 else 1)
+
+    def place_tone(rank, of):
+        p = rank / of
+        return (5 if p <= 0.2 else 4 if p <= 0.4 else 3 if p <= 0.6
+                else 2 if p <= 0.8 else 1)
+
+    # The case the review named, spelled out before the sweep so a failure
+    # says which one.
+    assert _place_cls(24, 30) == seo._PANEL_RAMP[1]
+    assert _steady_cls(9, 10) == seo._PANEL_RAMP[1]
+    assert _steady_cls(18, 20) == seo._PANEL_RAMP[1]
+
+    for pool in range(2, 41):
+        for rank in range(1, pool + 1):
+            assert _steady_cls(rank, pool) == seo._PANEL_RAMP[
+                steady_tone(rank, pool) - 1], f"steady {rank}/{pool}"
+            assert _place_cls(rank, pool) == seo._PANEL_RAMP[
+                place_tone(rank, pool) - 1], f"o-line {rank}/{pool}"
+
+
+def test_a_news_row_is_a_link_only_when_its_url_is_one():
+    """`player_news.url` IS WHATEVER THE FEED PUT THERE. The page renders an
+    `<a href>` straight off that column, so a `javascript:` row would be a
+    script handed to a reader on a click and a bare path would be a link
+    into this site that goes nowhere. The headline is the thing worth
+    reading either way, so the row stays and only the link goes."""
+    rows = seo._merge_news([
+        {"headline": "Real", "url": "https://espn.com/a", "date": None},
+        {"headline": "Plain http", "url": "http://wire.example/b", "date": None},
+        {"headline": "Script", "url": "javascript:alert(1)", "date": None},
+        {"headline": "Data", "url": "data:text/html,<b>x</b>", "date": None},
+        {"headline": "Bare path", "url": "/adp/somebody", "date": None},
+        {"headline": "Protocol relative", "url": "//evil.example/c", "date": None},
+        {"headline": "Nothing at all", "url": "", "date": None},
+    ], [])
+    by_headline = {r["headline"]: r["url"] for r in rows}
+    assert by_headline["Real"] == "https://espn.com/a"
+    assert by_headline["Plain http"] == "http://wire.example/b"
+    for headline in ("Script", "Data", "Bare path", "Protocol relative",
+                     "Nothing at all"):
+        assert by_headline[headline] is None, headline
+    # And every one of them is still a row: the headline is the news.
+    assert len(rows) == 7
+
+
+def test_a_page_with_no_season_table_still_says_what_finish_is_among(
+        corpus, profiled, monkeypatch):
+    """A DEFENSE HAS NOWHERE ELSE TO SAY IT. The twelve-team yardstick was
+    stated once, in the note under the season table -- and a defense gets no
+    season table, so its page showed a finish on a five-step bar and never
+    said seventh of what, nor that the twelve is an assumption these pages
+    make because they have no league to ask."""
+    from scoring import profile_cache
+    monkeypatch.setattr(profile_cache, "cached_profile", lambda *a, **k: {
+        "header": {"position": "DST", "proj_pos_finish": 7}, "seasons": []})
+    seo.clear_pages()
+    body = html.unescape(_client(profiled).get("/adp/dandre-swift").text)
+    assert "How he grades" in body and "Every season he has played" not in body
+    assert "a place among 12 startable DSTs" in body
+    assert "twelve-team league's shape" in body
+    # ...and what shape these drafts really are, which is the corpus fixture's
+    # own four teams.
+    assert "4-team" in body
+
+
+def test_the_profile_s_own_colour_classes_are_not_bare_globals():
+    """`.bar` ALREADY DID THIS ONCE. A one-word class in a stylesheet every
+    page on the site loads collided with the page header's own and pushed
+    the call to action 88px off the right of every page. `.up` and `.accent`
+    were the same shape of trap; `.down` keeps its name because it predates
+    these sections and the pages above them use it."""
+    css = (Path(seo.TEMPLATES) / "base.html").read_text(encoding="utf-8")
+    assert ".pf-up{" in css and ".pf-accent{" in css
+    assert not re.search(r"(^|[\s,}])\.up\s*[{,]", css)
+    assert not re.search(r"(^|[\s,}])\.accent\s*[{,]", css)
