@@ -34,6 +34,7 @@ far past his ADP the alternative was) is recoverable by replay.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -185,6 +186,94 @@ def ensure_schema(conn) -> None:
                  "ADD COLUMN IF NOT EXISTS seconds_to_pick DOUBLE")
     conn.execute("ALTER TABLE draft_log_pick "
                  "ADD COLUMN IF NOT EXISTS clock_seconds DOUBLE")
+
+
+def draft_format(scoring_json) -> str:
+    """A recorded draft's scoring format: `'ppr'` | `'half'` | `'std'`.
+
+    WHAT A SHAPE IS. A draft's shape is `(teams, format)` -- the two things
+    that decide when a player comes off the board. Team count sets who is on
+    the clock at pick k; the format decides whether a receiver's 90 catches
+    are worth 90 points, which moves half a round of wide receivers past the
+    running backs. `scoring.availability` conditions its counts on the pair,
+    and `pipeline.mock_farm` rotates the farm over it, so both need one
+    answer to "what shape was this draft" and this is it.
+
+    READS EITHER STORED BLOB. `scoring_json` is a bare scoring table
+    (`{"receptions": 1.0, ...}`, the column names `scoring.league` uses) and
+    `settings_json` is a whole `LeagueSettings` with that table nested under
+    `scoring` -- and every draft recorded before this function existed has
+    only the second one (the farm wrote `settings_json` and left
+    `scoring_json` NULL). Rather than make every caller know which it holds,
+    this takes either and looks in both places. Pass
+    `coalesce(scoring_json, settings_json)` and it does the right thing.
+
+    A BLOB THAT WILL NOT PARSE IS PPR, not an error and not a fourth
+    category. `scoring.league.scoring_format` already answers "ppr" for a
+    league whose scoring it cannot read -- it is the format every ESPN mock
+    is unless it says otherwise -- and a shape key that could be None would
+    have to be handled by every counter downstream to say the same thing.
+    """
+    from scoring.league import format_for_receptions
+
+    if isinstance(scoring_json, dict):
+        blob = scoring_json
+    elif not scoring_json:
+        return "ppr"
+    else:
+        try:
+            blob = json.loads(scoring_json)
+        except (TypeError, ValueError):
+            return "ppr"
+    if not isinstance(blob, dict):
+        return "ppr"
+    scoring = blob.get("scoring") if isinstance(blob.get("scoring"), dict) else blob
+    if not scoring:
+        return "ppr"
+    return format_for_receptions(scoring.get("receptions", 0))
+
+
+def shape_counts(corpus_path: str | None = None) -> dict:
+    """How many recorded drafts the corpus holds of each `(teams, format)`.
+
+    FOR THE FARM'S ROTATION (`pipeline.mock_farm`), which joins the shape it
+    has the fewest of. Read-only and lock-tolerant, the same judgement
+    `scoring.availability.load_table` makes for the same reason: the farm
+    itself holds the corpus's write lock while it records a draft, and a
+    poll that cannot read the counts should join the room it would have
+    joined anyway rather than fail the pass. An unreadable corpus is `{}`,
+    which reads as "nothing recorded yet" -- the answer that makes the
+    rotation try every shape rather than none.
+
+    A draft with no `teams` is left out entirely rather than counted under a
+    guess: it is the one field the shape cannot be assumed for (see
+    `pipeline.mock_farm.play_draft`, which refuses a room whose seat count
+    the lobby and the league disagree about).
+
+    EVERY SOURCE COUNTS, imported league history included. The question is
+    what the corpus already holds of a shape, and a real 12-team draft
+    somebody imported is as much a 12-team draft as one the farm played.
+    """
+    import duckdb
+    target = corpus_path or CORPUS_PATH
+    try:
+        conn = duckdb.connect(target, read_only=True)
+    except Exception:      # noqa: BLE001 -- locked, missing, or not a corpus
+        return {}
+    try:
+        rows = conn.execute(
+            "SELECT teams, coalesce(scoring_json, settings_json) AS scoring, "
+            "count(*) AS drafts FROM draft_log "
+            "WHERE teams IS NOT NULL GROUP BY 1, 2").fetchall()
+    except Exception:      # noqa: BLE001 -- a file that is not a corpus yet
+        return {}
+    finally:
+        conn.close()
+    counts: dict = {}
+    for teams, scoring, drafts in rows:
+        shape = (int(teams), draft_format(scoring))
+        counts[shape] = counts.get(shape, 0) + int(drafts)
+    return counts
 
 
 def draft_id_for(source: str, league_id, season, started_at=None) -> str:

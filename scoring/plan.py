@@ -588,7 +588,8 @@ def build_plan(*, proj, positions, player_ids, espn_rank, espn_adp,
                market_rank, byes, health, roster_counts, settings,
                turns: list, picks_made: int, favourites: set,
                table: AvailabilityTable, names: dict,
-               roster_byes: dict | None = None) -> list:
+               roster_byes: dict | None = None,
+               teams=None, fmt=None) -> list:
     """A target and two alternates for each of the user's remaining turns.
 
     `turns` are overall pick numbers (`draft_sim.snake_slots`), `picks_made`
@@ -607,6 +608,13 @@ def build_plan(*, proj, positions, player_ids, espn_rank, espn_adp,
     out of the PRICING as well as the eligibility -- what a later turn can
     expect at a position does not include the man this plan has already
     spent an earlier turn on.
+
+    `teams` and `fmt` are the league's shape, passed straight through to
+    `availability_at`: with them, "will he last to my next turn" is answered
+    from drafts of this size and scoring once the corpus holds enough of them
+    (`scoring.availability.MIN_SHAPE_DRAFTS`). Both default to None, which is
+    the pooled corpus -- every caller that has no league to speak for, and
+    every caller written before shapes existed.
 
     `roster_byes` is for the STARTERS already drafted, not the whole roster:
     a bye week is a lineup problem, and two benched players sharing one is
@@ -627,7 +635,7 @@ def build_plan(*, proj, positions, player_ids, espn_rank, espn_adp,
     # them in the loop would do each one twice.
     avail = [availability_at(table, board.ids, picks_made, pick,
                              board.espn_adp, board.market_rank,
-                             board.positions)
+                             board.positions, teams=teams, fmt=fmt)
              for pick in turns]
 
     roster = dict(roster_counts or {})
@@ -736,7 +744,8 @@ def target_now(*, proj, positions, player_ids, espn_rank, espn_adp,
                market_rank, byes, health, roster_counts, settings,
                turns: list, picks_made: int, favourites: set,
                table: AvailabilityTable, names: dict,
-               roster_byes: dict | None = None) -> list:
+               roster_byes: dict | None = None,
+               teams=None, fmt=None) -> list:
     """The three cards for the pick on the clock.
 
     The same priority as `build_plan`, with one difference that is not a
@@ -765,7 +774,7 @@ def target_now(*, proj, positions, player_ids, espn_rank, espn_adp,
     else:
         here = availability_at(table, board.ids, picks_made, next_pick,
                                board.espn_adp, board.market_rank,
-                               board.positions)
+                               board.positions, teams=teams, fmt=fmt)
         best_next = _best_other(board.proj, board.positions, here)
 
     # My remaining picks INCLUDING this one, the reading `need_kind` wants.

@@ -4862,3 +4862,43 @@ def test_a_connect_with_history_fits_nobody(tmp_path, monkeypatch, _isolated_lea
         conn.close()
     assert session.managers == 2
     assert session.betas == {} and session.nested is None
+
+
+def test_the_room_asks_the_counted_table_about_its_own_shape(tmp_path,
+                                                             monkeypatch):
+    """A ten-team standard room is a different question from an eight-team
+    PPR one, and `availability_at` can only condition on a shape it is told.
+    Both halves are checked -- the candidate rows' "lasts" and the plan's --
+    because they are two different calls and either could be left pooled.
+
+    Nothing on screen changes today: until the corpus holds
+    `availability.MIN_SHAPE_DRAFTS` drafts of a shape, the same pooled answer
+    comes back.
+    """
+    import dataclasses
+
+    state, _recompute = _live_routes_with_conn(tmp_path)
+    session = _live_session()
+    session = dataclasses.replace(
+        session,
+        settings=dataclasses.replace(_settings(teams=10),
+                                     scoring={"receptions": 0.0}))
+    monkeypatch.setattr("api.live._drafted_state",
+                        lambda cur, pool: (np.zeros(5, bool), []))
+    monkeypatch.setattr("api.live._seed_rosters",
+                        lambda *a, **k: ({slot: {"counts": {}, "indices": []}
+                                          for slot in range(1, 11)}, []))
+    asked = []
+
+    def availability(table, ids, k, n, espn_adp=None, market_rank=None,
+                     positions=None, teams=None, fmt=None, **_):
+        asked.append((teams, fmt))
+        return np.full(len(list(ids)), 0.5)
+
+    monkeypatch.setattr("api.live.availability_at", availability)
+    monkeypatch.setattr("scoring.plan.availability_at", availability)
+
+    _recompute(session, picks_made=3)
+
+    assert asked, "the recompute never asked the counted table anything"
+    assert set(asked) == {(10, "std")}
