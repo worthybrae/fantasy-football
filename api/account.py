@@ -43,10 +43,13 @@ runs from `register_custody_routes`. `api/main.py` mounts both on the same
 app, which is why these routes are safe there. An app that mounted these
 routes WITHOUT the custody ones would have no transport guard at all.
 """
-from fastapi import HTTPException, Request
+import threading
+import time
+
+from fastapi import HTTPException, Request, Response
 from pydantic import BaseModel
 
-from api import billing
+from api import billing, http_cache
 from api.billing import StoreError
 from pipeline import redact
 
@@ -56,6 +59,67 @@ from pipeline import redact
 # write into a shared table.
 MIN_FAVORITES = 5
 MAX_FAVORITES = 25
+
+# -- your guys, by pick -------------------------------------------------------
+#
+# WHAT THE OUTLOOK IS. The favourites list says who somebody wants. It does
+# not say whether he can have them, and on a 12-team board from the eighth
+# seat the honest answer for half the list is "no". `GET
+# /api/account/favorites/outlook` draws that: for each favourite, the chance
+# he is still on the board at each of the first eight turns of a chosen seat,
+# read off the SAME counted table the live room reads (`scoring/availability`,
+# a ratio of recorded-draft counts, not a simulation).
+#
+# CONDITIONED ON NOTHING, which is what makes it a pre-draft answer rather
+# than a room one. The room asks `availability_at(..., k=picks_made, ...)`:
+# given the draft is here and he is still on the board, will he last. This
+# asks with `k = 0` -- from the start, before anybody has picked -- because
+# nobody is drafting yet and there is no board state to condition on. That is
+# also why pick 1 reads 100% for everybody and why it should: the first pick
+# of a draft cannot have taken anyone away.
+
+# Eight turns, i.e. the first eight rounds. Far enough that a favourite the
+# corpus never lets past round two has visibly run out, short enough that the
+# grid still fits a phone without becoming a spreadsheet.
+OUTLOOK_ROUNDS = 8
+
+# The seat, and how big the league is. Bounds are the product's: below four
+# teams a snake is not a snake, above sixteen ESPN will not host it.
+MIN_TEAMS = 4
+MAX_TEAMS = 16
+DEFAULT_TEAMS = 10
+DEFAULT_SLOT = 5
+
+# "Still likely there." A coin flip is the line, so `best_pick` is the last
+# turn at which waiting is better than even -- the pick a reader can plan to
+# take him at rather than the pick he has to reach at.
+BEST_PICK_FLOOR = 50.0
+
+# HOW LONG AN ANSWER IS KEPT, and what it is an answer to. The inputs are a
+# saved list, a seat, and the board -- none of which move during the minute
+# somebody spends sliding the two controls, and all three of which are IN the
+# key, so a stale answer here is one served inside sixty seconds of a board
+# rebuild rather than one served under the wrong list. The cost it removes is
+# not the availability arithmetic (half a millisecond for twenty-five players
+# across eight picks) but the board: `cached_build_board` copies its frame on
+# every call and ESPN's ranks are attached on top, which is ~13 ms per request
+# for an answer that has not changed.
+OUTLOOK_TTL_SECONDS = 60.0
+
+# Bounded because the key holds a favourites list, so it grows with readers
+# rather than with pages. Sixty-four is a few dozen people sliding controls at
+# once; past that the oldest entry goes.
+_OUTLOOK_MAX_ENTRIES = 64
+
+# HOW OFTEN THE BOARD'S IDENTITY IS RE-READ, and why it is not read per
+# request. `board_cache.board_key` is three DuckDB queries against the league
+# file -- 3 ms on an idle connection and three to five times that on a server
+# thread competing for one -- which on a cache HIT is the entire cost of the
+# request. It is also the one part of the key that can change without anybody
+# asking, so it gets a timer of its own instead of being dropped: a rebuilt
+# board retires every entry within five seconds, comfortably inside the minute
+# an answer is kept for anyway.
+_BOARD_IDENTITY_TTL_SECONDS = 5.0
 
 
 class FavoritesBody(BaseModel):
@@ -86,6 +150,144 @@ def _quote(ids) -> str:
     return f"{text} and {extra} more" if extra > 0 else text
 
 
+def _picks_for(teams: int, slot: int) -> list:
+    """The overall pick numbers this seat owns in the first `OUTLOOK_ROUNDS`
+    rounds of a snake.
+
+    The same derivation the live room uses (`api/live.py`'s `rank_and_plan`):
+    lay the snake out slot by slot and take the offsets that are mine. Overall
+    pick numbers, never round numbers, because that is the axis
+    `availability_at` measures on.
+    """
+    from scoring.draft_sim import snake_slots
+
+    snake = snake_slots(int(teams), OUTLOOK_ROUNDS)
+    return [i + 1 for i, seat in enumerate(snake) if seat == int(slot)]
+
+
+def _float_or_none(value):
+    """A JSON number, or null for a NaN. `None` is the honest answer for a
+    column that is NaN by design -- ESPN publishes no ADP before drafts open
+    -- and `float('nan')` is not valid JSON."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if number != number else number
+
+
+def _int_or_none(value):
+    number = _float_or_none(value)
+    return None if number is None else int(number)
+
+
+def _text_or_none(value):
+    """A string, or null for a missing one. `None` and `NaN` both mean "this
+    column has nothing for him", and a bare `value or None` would keep the
+    NaN: `float('nan')` is truthy, and it is not valid JSON."""
+    if value is None or value != value:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _ranked_board(cur):
+    """The cached board with ESPN's rank and ADP attached.
+
+    `api/live.py._attach_espn_rank` is the one place that knows how those two
+    columns are assembled -- the lobby's PPR rank with the printable cheat
+    sheet filling in behind it, and the ADP joined out of `espn_adp` by
+    `espn_id` only when the season's column is usable at all -- so this
+    borrows it rather than growing a second, quietly divergent copy. Imported
+    here rather than at the top of the file: `api/live.py` is a large module
+    and this route is the only thing in this one that needs it.
+
+    A board with no ESPN columns is not a failure. `availability_at` reads the
+    ADP only for the players the corpus cannot answer for, and falls back to
+    the consensus rank for those; the response simply carries nulls in the two
+    ESPN fields.
+    """
+    from scoring.board_cache import cached_build_board
+
+    board = cached_build_board(cur)
+    try:
+        from api.live import _attach_espn_rank
+    except Exception:          # noqa: BLE001 -- no ESPN columns, not a failure
+        return board
+    return _attach_espn_rank(cur, board)
+
+
+def _outlook_players(board, saved: list, picks: list) -> list:
+    """One row per saved favourite, in the saved order.
+
+    THE ORDER IS THE PREFERENCE (see `billing.favorites`), so the answer is
+    built by walking `saved` rather than by walking the board.
+
+    A saved id the board no longer names keeps its row and carries nulls. It
+    is a rare case -- the write checked every id against the board -- but the
+    board is rebuilt from new data and a player can leave it, and the two
+    alternatives are both worse: dropping the row silently shortens somebody's
+    list, and asking `availability_at` about an id it has never seen returns
+    the "nobody has ranked him, so nobody is about to draft him" answer, which
+    would print an unknown player at 100% for every pick.
+    """
+    import numpy as np
+    import pandas as pd
+
+    from scoring.availability import availability_at, cached_table
+
+    ids = pd.Index([str(pid) for pid in board["player_id"]])
+    known = [pid for pid in saved if pid in ids]
+    rows = board.set_index(ids).reindex(known) if known else None
+
+    curves = {}
+    if known:
+        espn_adp = pd.to_numeric(rows.get("espn_adp"), errors="coerce")
+        market_rank = pd.to_numeric(rows.get("market_rank"), errors="coerce")
+        positions = np.asarray([str(p) for p in rows["position"]], dtype=object)
+        table = cached_table()
+        # One vectorised call per pick rather than one per player: twenty-five
+        # players is one gather out of the counts, and eight of those is the
+        # whole computation.
+        at_pick = {pick: availability_at(
+            table, known, 0, pick,
+            espn_adp.to_numpy(dtype=float), market_rank.to_numpy(dtype=float),
+            positions=positions) for pick in picks}
+        for i, pid in enumerate(known):
+            curves[pid] = [round(float(at_pick[pick][i]) * 100, 1)
+                           for pick in picks]
+
+    def _best(curve) -> int | None:
+        """The LAST pick still better than even, not the first. The question
+        the card answers is "how long can I wait", so a favourite who reads 90%
+        at pick 5 and 60% at pick 16 is a pick-16 player."""
+        found = None
+        for pick, chance in zip(picks, curve):
+            if chance is not None and chance >= BEST_PICK_FLOOR:
+                found = pick
+        return found
+
+    known_rows = {} if rows is None else {
+        pid: row for pid, row in zip(known, rows.to_dict("records"))}
+    players = []
+    for pid in saved:
+        row = known_rows.get(pid)
+        curve = curves.get(pid, [None] * len(picks))
+        players.append({
+            "player_id": pid,
+            "name": None if row is None else _text_or_none(row.get("name")),
+            "position": None if row is None else _text_or_none(row.get("position")),
+            "team": None if row is None else _text_or_none(row.get("team")),
+            "headshot": None if row is None else _text_or_none(row.get("headshot")),
+            "espn_rank": None if row is None else _int_or_none(row.get("espn_rank")),
+            "espn_adp": None if row is None else _float_or_none(row.get("espn_adp")),
+            "market_rank": None if row is None else _int_or_none(row.get("market_rank")),
+            "avail": curve,
+            "best_pick": _best(curve),
+        })
+    return players
+
+
 def register_account_routes(app, conn, store=None):
     """`GET`/`PUT /api/account/favorites`.
 
@@ -111,6 +313,32 @@ def register_account_routes(app, conn, store=None):
                 status_code=401,
                 detail="Connect your ESPN account to keep a favourites list.")
         return ids
+
+    # PER APP, not per module. The key below carries the board's identity, so
+    # two apps in one process could safely share a dictionary -- but the
+    # board-identity memo could not, and an app pointed at a second league
+    # file would read the first one's answer to "has the board moved". Both
+    # live here instead, which also means a test's app starts cold.
+    outlook_cache: dict = {}
+    outlook_lock = threading.Lock()
+    board_identity: list = [0.0, None]      # [read at, value]
+
+    def _board_identity(cur):
+        """The board cache's own key, re-read at most every
+        `_BOARD_IDENTITY_TTL_SECONDS`. See that constant for why it is on a
+        timer rather than on every request."""
+        from scoring.board_cache import board_key
+
+        with outlook_lock:
+            at, value = board_identity
+            if value is not None and time.monotonic() - at < _BOARD_IDENTITY_TTL_SECONDS:
+                return value
+        # Outside the lock: it is three queries, and a second request arriving
+        # during them should read the board rather than queue behind us.
+        value = board_key(cur)
+        with outlook_lock:
+            board_identity[:] = [time.monotonic(), value]
+        return value
 
     def _board_ids() -> set:
         """Every player id the board knows, as strings.
@@ -182,5 +410,70 @@ def register_account_routes(app, conn, store=None):
         except StoreError as exc:
             raise billing._unavailable(exc) from None
         return {"players": stored}
+
+    @app.get("/api/account/favorites/outlook")
+    def account_favorites_outlook(request: Request, response: Response,
+                                  teams: int = DEFAULT_TEAMS,
+                                  slot: int = DEFAULT_SLOT):
+        """Each favourite's chance of still being there at each of my picks.
+
+        `teams` and `slot` describe a seat rather than a league: this is the
+        page somebody reads BEFORE they have connected anything, so there is
+        no league settings row to take them from and they arrive as query
+        parameters with the most common draft (ten teams, the middle seat) as
+        the default.
+
+        422 with a plain sentence for a seat that does not exist, matching the
+        PUT above -- the controls that send these are a pair of selects, so a
+        value outside the bounds is a client bug and deserves to be named.
+        """
+        account = _account_ids(request)
+        if not MIN_TEAMS <= teams <= MAX_TEAMS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"A league has between {MIN_TEAMS} and {MAX_TEAMS} "
+                       f"teams. That one has {teams}.")
+        if not 1 <= slot <= teams:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Slot {slot} does not exist in a {teams}-team league.")
+
+        try:
+            saved = [str(pid) for pid in billing.favorites(account)]
+        except StoreError as exc:
+            raise billing._unavailable(exc) from None
+
+        # PRIVATE, and said out loud rather than left to `DefaultPrivate`.
+        # The body is one person's favourites list; a shared cache holding it
+        # under a URL every reader sends would serve one account's players to
+        # the next.
+        http_cache.private(response)
+
+        cur = conn.cursor()
+        try:
+            # The board's identity is read BEFORE the board is built: it
+            # completes this answer's key, and on a hit it is the only work
+            # the request does.
+            key = (tuple(saved), int(teams), int(slot), _board_identity(cur))
+            with outlook_lock:
+                hit = outlook_cache.get(key)
+                if hit is not None and time.monotonic() - hit[0] < OUTLOOK_TTL_SECONDS:
+                    return hit[1]
+
+            picks = _picks_for(teams, slot)
+            answer = {
+                "teams": int(teams),
+                "slot": int(slot),
+                "picks": picks,
+                "players": _outlook_players(_ranked_board(cur), saved, picks),
+            }
+        finally:
+            cur.close()
+
+        with outlook_lock:
+            outlook_cache[key] = (time.monotonic(), answer)
+            while len(outlook_cache) > _OUTLOOK_MAX_ENTRIES:
+                outlook_cache.pop(next(iter(outlook_cache)))
+        return answer
 
     return app
