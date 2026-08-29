@@ -15,6 +15,11 @@ import { namesFor } from '../lib/playerNames'
 // an invitation when nothing is saved, the list when the names are known, and
 // a count when they are not -- because a column of player ids is a fact about
 // our storage rather than about somebody's team.
+//
+// IT NO LONGER OWNS A HEADING. This card and the availability grid beside it
+// are two halves of one answer -- who you want, and whether you can have them
+// -- so the dashboard puts them under one "Your guys" heading and each of them
+// draws a column under it. See Dashboard.tsx.
 export default memo(function YourGuys({ players, onOpen, refresh = 0 }: {
   /** The saved ids, in their saved order. */
   players: string[]
@@ -38,9 +43,9 @@ export default memo(function YourGuys({ players, onOpen, refresh = 0 }: {
   const anyNamed = named.some((row) => row.name !== null)
 
   return (
-    <section className="db-sec">
-      <div className="db-sec-head">
-        <h2 className="db-sec-title">Your guys</h2>
+    <div className="db-guys-col">
+      <div className="db-guys-head">
+        <h3 className="db-guys-title">In your order</h3>
         {players.length > 0 && (
           <span className="mono db-sec-count">{players.length}</span>
         )}
@@ -87,6 +92,6 @@ export default memo(function YourGuys({ players, onOpen, refresh = 0 }: {
           </button>
         </div>
       </div>
-    </section>
+    </div>
   )
 })

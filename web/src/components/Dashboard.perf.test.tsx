@@ -49,14 +49,16 @@ vi.mock('./LeagueCards', async (importOriginal) => {
 })
 
 const { fetchFavorites, fetchPlayers, fetchLeagueReports, fetchMockRooms,
-        fetchRoomProgress } = vi.hoisted(() => ({
+        fetchRoomProgress, fetchFavoritesOutlook, fetchPlanPreview } = vi.hoisted(() => ({
   fetchFavorites: vi.fn(), fetchPlayers: vi.fn(), fetchLeagueReports: vi.fn(),
   fetchMockRooms: vi.fn(), fetchRoomProgress: vi.fn(),
+  fetchFavoritesOutlook: vi.fn(), fetchPlanPreview: vi.fn(),
 }))
 
 vi.mock('../api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../api')>()),
-  fetchFavorites, fetchPlayers, fetchLeagueReports, fetchMockRooms, fetchRoomProgress,
+  fetchFavorites, fetchPlayers, fetchLeagueReports, fetchMockRooms,
+  fetchRoomProgress, fetchFavoritesOutlook, fetchPlanPreview,
 }))
 
 // A draft half an hour out: inside the hour, which is the case the old page
@@ -75,6 +77,10 @@ beforeEach(() => {
   fetchMockRooms.mockResolvedValue({ rooms: [], next: null })
   fetchRoomProgress.mockResolvedValue([])
   fetchFavorites.mockResolvedValue(['p1', 'p2', 'p3', 'p4', 'p5'])
+  // Never settling, both of them: this file counts COMMITS, and a payload
+  // landing mid-measurement is a commit the clock did not cause.
+  fetchFavoritesOutlook.mockReturnValue(new Promise(() => {}))
+  fetchPlanPreview.mockReturnValue(new Promise(() => {}))
 })
 
 afterEach(() => { cleanup(); vi.useRealTimers() })
@@ -92,7 +98,11 @@ test('a second passing renders the countdown and nothing else', async () => {
   await waitFor(() => expect(fetchFavorites).toHaveBeenCalled())
   await act(async () => { await Promise.resolve() })
 
-  const clock = () => screen.getByText(/^\d+:\d\d$/).textContent
+  // EVERY clock on the page, not one of them. The next draft is stated twice
+  // now -- once at the top as the page's own answer, once in the league list
+  // as one row among the account's -- and both are the same subscription.
+  const clock = () => screen.getAllByText(/^\d+:\d\d$/)
+    .map((node) => node.textContent).join(' | ')
   const before = clock()
   const guys = renders.guys
   const leagues = renders.leagues

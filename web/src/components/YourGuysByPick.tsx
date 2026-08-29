@@ -57,7 +57,7 @@ function clampSeat(teams: unknown, slot: unknown): Seat {
   }
 }
 
-function readSeat(): Seat {
+export function readSeat(): Seat {
   try {
     const raw = window.localStorage.getItem(STORE_KEY)
     if (raw === null) return clampSeat(DEFAULT_TEAMS, DEFAULT_SLOT)
@@ -83,21 +83,47 @@ export function tintFor(chance: number | null): string {
   return 'gbp-thin'
 }
 
-export default function YourGuysByPick({ players }: {
+export default function YourGuysByPick({ players, teams = null, onSeat }: {
   /** The saved ids. Not rendered -- the server sends its own rows -- but a
    *  changed list is a changed answer, and it is what keeps the five-second
    *  request cache from serving the pre-save one. */
   players: string[]
+  /** The league size, when something else on the page KNOWS it -- an upcoming
+   *  draft on the account states how many teams are in it. The select is then
+   *  a label: a reader whose draft is on Thursday should not be able to ask
+   *  this card about a league they are not in, and a control that can be set
+   *  to the wrong answer is a control that will be. Null leaves the reader to
+   *  say, which is the pre-draft case this card was built for. */
+  teams?: number | null
+  /** Told whenever the seat changes, including once on mount. The plan
+   *  section above reads the same seat, and two answers about "your next
+   *  draft" that disagreed about which seat it was would be worse than one. */
+  onSeat?: (seat: Seat) => void
 }) {
-  const [seat, setSeat] = useState<Seat>(readSeat)
+  const [seat, setSeat] = useState<Seat>(
+    () => (teams === null ? readSeat() : clampSeat(teams, readSeat().slot)))
   const [outlook, setOutlook] = useState<FavoritesOutlook | null>(null)
   const [error, setError] = useState<string | null>(null)
   const tag = useMemo(() => players.join(','), [players])
+
+  // A league size that arrives after mount -- the account list lands a beat
+  // after the page does -- pulls the seat inside it. Same clamp as the select
+  // uses, so seat 11 of a twelve-team league becomes seat 8 of eight rather
+  // than a request the server would refuse.
+  useEffect(() => {
+    if (teams === null) return
+    setSeat((s) => (s.teams === teams ? s : clampSeat(teams, s.slot)))
+  }, [teams])
 
   useEffect(() => {
     try {
       window.localStorage.setItem(STORE_KEY, JSON.stringify(seat))
     } catch { /* private window: the seat is just not remembered */ }
+    onSeat?.(seat)
+    // `onSeat` is deliberately not a dependency: the parent hands a fresh
+    // closure on every render, and depending on it would report the seat
+    // once per render rather than once per change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seat])
 
   useEffect(() => {
@@ -113,20 +139,27 @@ export default function YourGuysByPick({ players }: {
   const picks = outlook?.picks ?? []
 
   return (
-    <section className="db-sec">
-      <div className="db-sec-head">
-        <h2 className="db-sec-title">By pick</h2>
+    <div className="db-guys-col">
+      <div className="db-guys-head">
+        <h3 className="db-guys-title">By pick</h3>
         <div className="gbp-controls">
-          <label className="gbp-ctl">
-            League
-            <select
-              className="gbp-select"
-              value={seat.teams}
-              onChange={(e) => setSeat(clampSeat(Number(e.target.value), seat.slot))}
-            >
-              {SIZES.map((n) => <option key={n} value={n}>{n} teams</option>)}
-            </select>
-          </label>
+          {teams === null ? (
+            <label className="gbp-ctl">
+              League
+              <select
+                className="gbp-select"
+                value={seat.teams}
+                onChange={(e) => setSeat(clampSeat(Number(e.target.value), seat.slot))}
+              >
+                {SIZES.map((n) => <option key={n} value={n}>{n} teams</option>)}
+              </select>
+            </label>
+          ) : (
+            <span className="gbp-ctl gbp-ctl-fixed">
+              League
+              <span className="gbp-fixed mono">{seat.teams} teams</span>
+            </span>
+          )}
           <label className="gbp-ctl">
             Seat
             <select
@@ -218,6 +251,6 @@ export default function YourGuysByPick({ players }: {
           </div>
         )}
       </div>
-    </section>
+    </div>
   )
 }

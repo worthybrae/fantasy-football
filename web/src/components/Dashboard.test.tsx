@@ -1,24 +1,34 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
-import type { Player } from '../api'
+import type { Player, UpcomingDraft } from '../api'
 import Dashboard from './Dashboard'
 import { forgetBoard } from '../lib/board'
 import { forgetNames, rememberNames } from '../lib/playerNames'
 
-// WHAT THIS FILE IS FOR. Two properties, and the first is the whole reason
-// this page was rebuilt: the dashboard must not fetch the board. It is 250
-// rows with a photograph each, it was fetched on every visit for a panel
-// almost nobody opened, and it is now the dialog's own business. The second is
-// that the three states of "Your guys" are three different cards.
+// WHAT THIS FILE IS FOR. Three properties.
+//
+// The first is the whole reason this page was rebuilt: the dashboard must not
+// fetch the board. It is 250 rows with a photograph each, it was fetched on
+// every visit for a panel almost nobody opened, and it is now the dialog's own
+// business. The second is that the three states of "Your guys" are three
+// different cards.
+//
+// The third is the ORDER. The page answers four questions and they have to
+// arrive in the order somebody asks them -- when is my draft, who do I want,
+// what should I take, what else could I be drafting in -- because the page
+// used to open with the whole league list, which is a filing cabinet rather
+// than an answer.
 
 const { fetchFavorites, fetchPlayers, fetchLeagueReports, fetchMockRooms,
-        fetchRoomProgress } = vi.hoisted(() => ({
+        fetchRoomProgress, fetchFavoritesOutlook, fetchPlanPreview } = vi.hoisted(() => ({
   fetchFavorites: vi.fn(),
   fetchPlayers: vi.fn(),
   fetchLeagueReports: vi.fn(),
   fetchMockRooms: vi.fn(),
   fetchRoomProgress: vi.fn(),
+  fetchFavoritesOutlook: vi.fn(),
+  fetchPlanPreview: vi.fn(),
 }))
 
 vi.mock('../api', async (importOriginal) => ({
@@ -28,6 +38,8 @@ vi.mock('../api', async (importOriginal) => ({
   fetchLeagueReports,
   fetchMockRooms,
   fetchRoomProgress,
+  fetchFavoritesOutlook,
+  fetchPlanPreview,
 }))
 
 function player(i: number): Player {
@@ -45,6 +57,30 @@ function player(i: number): Player {
 }
 const BOARD = Array.from({ length: 30 }, (_, i) => player(i + 1))
 
+const PLAN = {
+  teams: 10, slot: 5, picks: [5, 16, 25, 36],
+  opening: [{ path: ['RB', 'WR', 'WR', 'RB', 'TE'], count: 265, share: 0.31 }],
+  opening_rounds: 5, opening_observed: 854,
+  position_runs: { QB: 41, TE: 33, K: null, DST: null },
+  corpus: { teams: 8, rounds: 16, drafts: 854 },
+  targets: [{
+    pick_no: 5, round: 1,
+    target: {
+      player_id: 'plan-1', name: 'A Plan Target', position: 'RB', team: 'DET',
+      headshot: null, lasts_pct: 88.2, edge_pts: 12.1, edge_at_pick: 16,
+      favourite: false, pros: ['a reason'], cons: [],
+    },
+    alternates: [],
+  }],
+}
+
+/** A league with a draft an hour out, joinable. */
+const SOON: UpcomingDraft = {
+  league_id: 'L1', name: 'Sunday Money', team_id: '7', team_name: 'My Team',
+  season: 2026, teams: 12, draft_type: 'Snake', live: false,
+  draft_at: new Date(Date.now() + 3_600_000).toISOString(),
+}
+
 beforeEach(() => {
   // Call counts, not implementations: several tests here assert that the
   // board was never asked for, and one test earlier in the file opens the
@@ -57,20 +93,28 @@ beforeEach(() => {
   fetchMockRooms.mockResolvedValue({ rooms: [], next: null })
   fetchRoomProgress.mockResolvedValue([])
   fetchPlayers.mockImplementation(async () => { rememberNames(BOARD); return BOARD })
+  fetchFavoritesOutlook.mockResolvedValue(
+    { teams: 10, slot: 5, picks: [5, 16], players: [] })
+  fetchPlanPreview.mockResolvedValue(PLAN)
+  // FounderBadge reads /api/account/me directly; absent until the founders
+  // branch lands its own route.
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+    { ok: false, status: 404, json: async () => ({}) }))
 })
 
 afterEach(() => {
   cleanup()
+  vi.unstubAllGlobals()
   // Both caches are module-level and one of them lives in sessionStorage:
   // without this, one test's board names the next test's ids.
   forgetBoard()
   forgetNames()
 })
 
-function draw() {
+function draw(leagues: UpcomingDraft[] = []) {
   return render(
     <MemoryRouter>
-      <Dashboard leagues={[]} onJoin={() => {}} onOpenRoom={() => {}} />
+      <Dashboard leagues={leagues} onJoin={() => {}} onOpenRoom={() => {}} />
     </MemoryRouter>,
   )
 }
@@ -157,3 +201,112 @@ test('names appear after the picker has been opened and dismissed', async () => 
   expect(screen.getByText('Player 2')).toBeTruthy()
   expect(screen.queryByText('2 players saved.')).toBeNull()
 })
+
+
+// -- the order the page answers in --------------------------------------------
+
+/** The page's headings, top to bottom. The h2s are the sections; the next
+ *  draft leads with an eyebrow rather than a heading because it is the answer
+ *  and not a category. */
+function sections(): string[] {
+  return Array.from(document.querySelectorAll('h2'))
+    .map((h) => (h.textContent ?? '').trim())
+}
+
+test('the next draft is the first thing on the page, with the way in',
+     async () => {
+       fetchFavorites.mockResolvedValue([])
+       draw([SOON])
+
+       expect(await screen.findByText('Your next draft')).toBeTruthy()
+       const clock = document.querySelector('.db-next-clock')
+       expect(clock?.textContent).toMatch(/^\d+:\d\d$/)
+       expect(screen.getByRole('button', { name: 'Open the board' })).toBeTruthy()
+       // And it is above everything else the page has to say.
+       const next = document.querySelector('.db-next')
+       const first = document.querySelector('.db-secs')
+       expect(next!.compareDocumentPosition(first!)
+         & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+     })
+
+test('a league with no date set is never "next"', async () => {
+  fetchFavorites.mockResolvedValue([])
+  draw([{ ...SOON, draft_at: null }])
+
+  await waitFor(() => expect(fetchFavorites).toHaveBeenCalled())
+  expect(screen.queryByText('Your next draft')).toBeNull()
+  // The league is still on the page, in the list where the account lives.
+  expect(screen.getByText('Sunday Money')).toBeTruthy()
+})
+
+test('the sections run: your guys, your plan, leagues, mocks', async () => {
+  fetchFavorites.mockResolvedValue(BOARD.slice(0, 7).map((p) => p.player_id))
+  draw([SOON])
+
+  await screen.findByRole('button', { name: 'Edit' })
+  expect(sections()).toEqual(['Your guys', 'Your plan', 'Leagues', 'Mock drafts'])
+})
+
+test('with no favourites the plan is still there, and the leagues after it',
+     async () => {
+       fetchFavorites.mockResolvedValue([])
+       draw([SOON])
+
+       await screen.findByRole('button', { name: 'Pick your guys' })
+       expect(sections()).toEqual(['Your guys', 'Your plan', 'Leagues', 'Mock drafts'])
+     })
+
+test('no account session drops "Your guys" and keeps the rest', async () => {
+  fetchFavorites.mockResolvedValue(null)
+  draw([SOON])
+
+  await waitFor(() => expect(fetchFavorites).toHaveBeenCalled())
+  expect(sections()).toEqual(['Your plan', 'Leagues', 'Mock drafts'])
+})
+
+// -- your guys, both halves under one heading ---------------------------------
+
+test('nothing saved is the invitation alone, with no grid beside it',
+     async () => {
+       fetchFavorites.mockResolvedValue([])
+       draw()
+
+       await screen.findByRole('button', { name: 'Pick your guys' })
+       expect(document.querySelector('.db-guys.is-empty')).toBeTruthy()
+       expect(fetchFavoritesOutlook).not.toHaveBeenCalled()
+     })
+
+test('a saved list puts the names and the grid side by side', async () => {
+  fetchFavorites.mockResolvedValue(BOARD.slice(0, 7).map((p) => p.player_id))
+  draw()
+
+  await screen.findByRole('button', { name: 'Edit' })
+  expect(document.querySelectorAll('.db-guys .db-guys-col')).toHaveLength(2)
+  expect(screen.getByRole('heading', { level: 3, name: 'In your order' })).toBeTruthy()
+  expect(screen.getByRole('heading', { level: 3, name: 'By pick' })).toBeTruthy()
+})
+
+// -- the plan's seat ----------------------------------------------------------
+
+test('the plan takes the league size from the draft that is coming', async () => {
+  fetchFavorites.mockResolvedValue([])
+  draw([SOON])
+
+  await waitFor(() => expect(fetchPlanPreview).toHaveBeenCalled())
+  // Twelve, from the league, rather than whatever the reader last set.
+  expect(fetchPlanPreview.mock.calls.at(-1)?.[0]).toBe(12)
+  expect(screen.getByText(/For Sunday Money — 12 teams/)).toBeTruthy()
+})
+
+test('with no draft to read a size off, the plan uses the saved seat',
+     async () => {
+       window.localStorage.setItem('guys-outlook',
+                                   JSON.stringify({ teams: 14, slot: 3 }))
+       fetchFavorites.mockResolvedValue([])
+       draw()
+
+       await waitFor(() => expect(fetchPlanPreview).toHaveBeenCalled())
+       expect(fetchPlanPreview.mock.calls.at(-1)?.slice(0, 2)).toEqual([14, 3])
+       expect(screen.getByText(/Seat 3 of 14/)).toBeTruthy()
+       window.localStorage.clear()
+     })

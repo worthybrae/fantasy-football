@@ -4,12 +4,15 @@ import {
   buildLeagueReport, fetchFavorites, fetchLeagueReports, mintDraftToken,
   type ReportSummary, type TokenConnectParams, type UpcomingDraft,
 } from '../api'
+import { Countdown } from './Countdown'
+import FounderBadge from './FounderBadge'
 import LeagueCards from './LeagueCards'
 import { Logo } from './Logo'
 import MockLobby from './MockLobby'
+import PlanPreview from './PlanPreview'
 import { PickerBoundary, PickerFallback } from './PickerBoundary'
 import YourGuys from './YourGuys'
-import YourGuysByPick from './YourGuysByPick'
+import YourGuysByPick, { readSeat, type Seat } from './YourGuysByPick'
 
 // THE PICKER IS NOT IN THIS PAGE'S BUNDLE. It is a 250-row board with a photo
 // per row, opened by a fraction of the readers who load this page and never
@@ -82,6 +85,13 @@ function isMock(league: UpcomingDraft): boolean {
   return (league.name ?? '').toLowerCase().includes('mock')
 }
 
+/** THE NEXT DRAFT, AND NOTHING ELSE. The one drafting now if there is one,
+ *  otherwise the soonest with a date. A league whose commissioner has set no
+ *  date is never "next": there is nothing to be next before. */
+function nextDraft(live: UpcomingDraft[], upcoming: UpcomingDraft[]) {
+  return live[0] ?? upcoming.find((l) => l.draft_at !== null) ?? null
+}
+
 export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
   leagues: UpcomingDraft[]
   onJoin: (params: TokenConnectParams) => void
@@ -116,6 +126,16 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
   // `closePicker`. It is a cache-busting counter, not a piece of state
   // anything reads for its value.
   const [namesAt, setNamesAt] = useState(0)
+  // WHICH SEAT THE PLAN IS FOR. One value, reported up by the availability
+  // grid, so the plan and the grid cannot describe two different drafts. The
+  // grid owns the controls (it is where a reader is already looking when they
+  // think about their seat); this page owns the answer they both read.
+  //
+  // Seeded from the same store the grid seeds from, so the plan is requested
+  // once with the right seat rather than once with a default and again a beat
+  // later. The league SIZE is overridden below when the account actually names
+  // one.
+  const [seat, setSeat] = useState<Seat>(readSeat)
 
   useEffect(() => {
     let cancelled = false
@@ -180,6 +200,15 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
   const upcoming = useMemo(
     () => real.filter((l) => !l.live).sort(byUrgency), [real])
 
+  // THE ONE DRAFT THIS PAGE IS ABOUT. Everything above the fold answers two
+  // questions -- when, and how do I get in -- and both of them are about this
+  // league. The rest of the account is a list further down.
+  const next = useMemo(() => nextDraft(live, upcoming), [live, upcoming])
+  // The plan's shape, from the draft when the account states one. A league
+  // that has not said how many teams it holds leaves the reader's own setting
+  // alone rather than guessing at ten.
+  const planTeams = next?.teams ?? null
+
   // Stable identities, because YourGuys is memoized and a fresh closure per
   // render would make that memo a comment.
   const openPicker = useCallback(() => setPicking(true), [])
@@ -224,6 +253,11 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
           counts this page actually holds in the league line's place. */}
       <header className="draft-topbar">
         <span className="draft-topbar-title"><Logo /> ESPN Draft Assist</span>
+        {/* Only ever drawn for somebody who holds one of the first hundred
+            accounts; every other reader gets nothing here. See
+            FounderBadge.tsx, which is a placeholder until the founders branch
+            lands its own. */}
+        <FounderBadge variant="member" />
         <span className="draft-topbar-sep" aria-hidden="true" />
         {/* THE SAME TAB STRIP THE ROOM HAS, in the same slot, carrying this
             page's views. Home is where a signed-in reader lands and is
@@ -254,18 +288,111 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
           column their error belongs to. */}
       {error !== null && <p className="db-error">{error}</p>}
 
-      {/* TWO SECTIONS, STACKED, EACH A ROW OF CARDS. They were three fixed
-          columns, which is the wrong shape for what they hold: a reader has
-          a handful of leagues and twenty-odd open mock rooms, so two columns
-          ran dry a fifth of the way down while the third scrolled past the
-          fold. Stacked, each section is exactly as tall as it needs to be
-          and every card gets the full width of the page to be legible in --
-          which is also what stops a league name being cut off mid-word.
+      {/* THE PAGE IN THE ORDER SOMEBODY READS IT.
+          
+          when is my next draft, and how do I get in
+          who do I want, and can I have them
+          what should I take, round by round
+          everything else I could be drafting in
+          twenty mock rooms, if none of the above
 
-          One card shape per row: a clock, what the draft is, and the way in.
-          A league that is drafting now leads the row with the live dot where
-          its clock would be; the rest follow by how soon. */}
+          It used to open with the whole league list, which is a filing
+          cabinet: a reader with three leagues had to find the one that
+          matters among the ones that do not, and the two things that would
+          actually help them before Thursday were below the fold under it. */}
+
+      {/* THE CLOCK, ALONE. The soonest draft on the account at display size,
+          with the way in beside it. No card frame around it: this is not one
+          item in a list, it is the answer to the question the reader opened
+          the page with, and a border would make it one of several. */}
+      {next !== null && (
+        <section className="db-next" aria-labelledby="db-next-h">
+          <p className="lp-cap" id="db-next-h">
+            {next.live ? 'Drafting now' : 'Your next draft'}
+          </p>
+          <p className="db-next-clock mono">
+            {next.live
+              ? <><span className="db-dot" aria-hidden="true" />live</>
+              : <Countdown at={next.draft_at} />}
+          </p>
+          <p className="db-next-name">
+            <Link className="db-league-link"
+                  to={`/league/${encodeURIComponent(next.league_id)}`}>
+              {next.name ?? `League ${next.league_id}`}
+            </Link>
+            {next.team_name && (
+              <span className="db-next-team"> · {next.team_name}</span>
+            )}
+            {next.teams !== null && (
+              <span className="db-next-shape mono"> · {next.teams} teams</span>
+            )}
+          </p>
+          {next.team_id !== null && (
+            <button type="button" className="db-join db-next-join"
+                    disabled={joining !== null}
+                    onClick={() => join(next)}>
+              {joining === next.league_id ? 'Opening…' : 'Open the board'}
+            </button>
+          )}
+        </section>
+      )}
+
       <div className="db-secs">
+        {/* YOUR GUYS: who you want, and whether you can have them, under one
+            heading. They were two sections stacked, which read as two
+            unrelated cards -- and the second one only appeared once the first
+            had a list, so the connection between them was never on screen at
+            the moment it would have explained itself.
+
+            Absent entirely when there is no account session to read
+            favourites from (`favorites === null`): this page cannot offer to
+            save something it cannot load. */}
+        {favorites !== null && (
+          <section className="db-sec">
+            <div className="db-sec-head">
+              <h2 className="db-sec-title">Your guys</h2>
+              <span className="db-sec-note">
+                Starred in the draft room, and the plan reaches for them a
+                round early.
+              </span>
+            </div>
+            <div className={`db-guys${favorites.length === 0 ? ' is-empty' : ''}`}>
+              <YourGuys players={favorites} onOpen={openPicker}
+                        refresh={namesAt} />
+              {/* The grid is an answer ABOUT a list, so with no list saved it
+                  would be an empty table asking a question nobody had. The
+                  invitation beside it is the whole section then. */}
+              {favorites.length > 0 && (
+                <YourGuysByPick players={favorites} teams={planTeams}
+                                onSeat={setSeat} />
+              )}
+            </div>
+          </section>
+        )}
+
+        {/* YOUR PLAN. The room's own planner, run against an empty board for
+            this seat -- so the best thing this product does is readable on
+            the Sunday before the draft rather than only during it. */}
+        <PlanPreview
+          teams={planTeams ?? seat.teams}
+          slot={seat.slot}
+          tag={(favorites ?? []).join(',')}
+          // WHERE THE SEAT CAME FROM, said out loud. A plan for the wrong
+          // seat is a plan for somebody else's draft, and the reader is the
+          // only one who can catch that.
+          note={next !== null && planTeams !== null
+            ? `For ${next.name ?? 'your next draft'} — ${planTeams} teams, seat ${seat.slot}`
+            : (favorites !== null && favorites.length > 0
+              ? `Seat ${seat.slot} of ${seat.teams} — set it under Your guys`
+              : `Seat ${seat.slot} of ${seat.teams}`)}
+        />
+
+        {/* EVERYTHING ELSE ON THE ACCOUNT. The next draft is above; this is
+            the rest, soonest first, with its report cards.
+
+            One card shape per row: a clock, what the draft is, and the way in.
+            A league that is drafting now leads the row with the live dot where
+            its clock would be. */}
         <LeagueCards
           real={real}
           live={live}
@@ -276,27 +403,6 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
           onJoin={join}
           onBuild={build}
         />
-
-        {/* YOUR GUYS, between the leagues and the lobby. Above the mock
-            rooms deliberately: this is a thing to do once, before a draft,
-            and a reader who has not done it should meet it before he meets
-            twenty rooms he could join instead.
-
-            A card and a button, never the list itself -- see YourGuys.tsx for
-            why the names are not here. Absent entirely when there is no
-            account session to read favourites from (`favorites === null`):
-            this page cannot offer to save something it cannot load. */}
-        {favorites !== null && (
-          <YourGuys players={favorites} onOpen={openPicker} refresh={namesAt} />
-        )}
-
-        {/* And whether they can HAVE them. Directly under the list, and only
-            once there is a list: the card is an answer about somebody's
-            favourites, so with none saved it would be an empty grid asking a
-            question nobody had. */}
-        {favorites !== null && favorites.length > 0 && (
-          <YourGuysByPick players={favorites} />
-        )}
 
         <MockLobby
           onOpen={onOpenRoom}
