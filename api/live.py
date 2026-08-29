@@ -2220,7 +2220,8 @@ def _board_column(board, name, index, default=np.nan):
 
 
 def rank_and_plan(board, pool, taken, taken_order, counts, my_indices, my_slot,
-                  settings, favourites, table, picks_made=None, with_plan=True):
+                  settings, favourites, table, picks_made=None, with_plan=True,
+                  fmt=None):
     """The room's candidate rows and its plan, from what is on the board now.
 
     `taken` is the pool's drafted mask and `taken_order` the drafted pool
@@ -2251,7 +2252,13 @@ def rank_and_plan(board, pool, taken, taken_order, counts, my_indices, my_slot,
     # from drafts of this size and this scoring rather than from the pooled
     # corpus (see scoring/availability.py); until then the same pooled answer
     # comes back and nothing on screen changes.
-    fmt = league_mod.scoring_format(settings)
+    # `fmt` overrides the settings' own scoring, for the one caller whose
+    # settings are half the room's and half this deployment's: the landing
+    # page reshapes the stored league to the ROOM's teams and rounds but
+    # keeps the local scoring, because that is what the board was priced
+    # against (see api/demo.py `_ranked`). Everybody else passes None and
+    # gets the league's own answer.
+    fmt = fmt or league_mod.scoring_format(settings)
     snake = snake_slots(teams, rounds)
     made = len(taken_order) if picks_made is None else int(picks_made)
     turns = ([i + 1 for i in range(min(made, len(snake)), len(snake))

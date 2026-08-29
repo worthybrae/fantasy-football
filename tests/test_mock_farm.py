@@ -2297,3 +2297,23 @@ def test_a_live_file_that_will_not_write_does_not_stop_the_draft(monkeypatch,
     assert len(said) == 1
     # And the room was still held, both times.
     assert mf.claims.claimed() == {"77"}
+
+
+def test_the_live_file_says_what_the_room_is_scored_by():
+    """The page that draws a live room ranks players against the counted
+    corpus, and the corpus is conditioned on (teams, format) -- so the room
+    has to publish its format, not just its size."""
+    timeline = mf.draft_timeline(_trace_listener().events)
+    tool = _tool_for(timeline)
+    standard = _room_settings(teams=TRACE_TEAMS, receptions=0.0)
+
+    payload = mf.live_payload(timeline, tool, "1", 2026, TRACE_TEAMS,
+                              TRACE_ROUNDS, 4, None, settings=standard)
+    assert payload["scoring_format"] == "std"
+    assert payload["teams"] == TRACE_TEAMS
+
+    # A caller that has no settings to hand publishes null rather than a
+    # guess: the reader falls back to its own league, which is what it did
+    # before the farm recorded anything but PPR.
+    assert mf.live_payload(timeline, tool, "1", 2026, TRACE_TEAMS,
+                           TRACE_ROUNDS, 4, None)["scoring_format"] is None

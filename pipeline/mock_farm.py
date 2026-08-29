@@ -921,7 +921,8 @@ def seat_owners(timeline, slots, teams: int, owners: dict | None) -> list:
 
 def live_payload(timeline, tool, league_id, season, teams, rounds, my_slot,
                  started_at, owners: dict | None = None,
-                 my_team_id: int | None = None) -> dict:
+                 my_team_id: int | None = None,
+                 settings=None) -> dict:
     """This draft as it stands right now, in enough detail to draw the board
     without the corpus.
 
@@ -946,6 +947,14 @@ def live_payload(timeline, tool, league_id, season, teams, rounds, my_slot,
     null` and keeps its place, the same way `taken_order_from` keeps one: a
     pick nobody can name still happened, and dropping it would slide every
     later pick onto the wrong seat.
+
+    `scoring_format` IS PART OF THE ROOM'S SHAPE, not decoration. The page
+    that draws this room ranks players against the counted corpus, and the
+    corpus is conditioned on `(teams, format)` -- so a reader shown a
+    standard-scoring room with PPR numbers is being shown another room's
+    draft. `settings` is the room's own `LeagueSettings`; without it the
+    field is null and the reader falls back to its own league, which is what
+    it did before the farm recorded anything but PPR.
     """
     slots = snake_slots(int(teams), int(rounds))
     picks = []
@@ -981,6 +990,8 @@ def live_payload(timeline, tool, league_id, season, teams, rounds, my_slot,
         "season": int(season),
         "teams": int(teams),
         "rounds": int(rounds),
+        "scoring_format": (None if settings is None
+                           else league.scoring_format(settings)),
         "my_slot": None if my_slot is None else int(my_slot),
         "started_at": iso_utc(started_at),
         "human_seats": human_seats(owners, my_team_id),
@@ -1622,7 +1633,8 @@ def play_draft(conn, corpus_path, cookies, room, rng,
                     league_id,
                     lambda: live_payload(timeline, tool, league_id, season,
                                          teams, rounds, my_slot, started_at,
-                                         owners=owners, my_team_id=team_id),
+                                         owners=owners, my_team_id=team_id,
+                                         settings=settings),
                     live_published_warning, out)
 
             # ESPN flips a team onto autodraft the moment it misses a pick,

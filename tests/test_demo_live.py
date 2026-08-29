@@ -742,3 +742,117 @@ def test_a_pick_that_fell_past_its_adp_is_a_positive_value():
     cell = payload["cells"][0]
     assert cell["overall"] == 31 and cell["player"]["market_rank"] == 21
     assert cell["player"]["value"] == 10
+
+
+def test_the_landing_room_asks_the_counts_about_its_own_shape(monkeypatch):
+    """A 12-team standard room drawn with 8-team PPR numbers is another
+    room's draft. The room's teams come from the live file already; its
+    scoring format comes from there too now (`mock_farm.live_payload`), and
+    both reach `availability_at`.
+
+    The deployment's own league is the fallback, and it is not the same
+    answer -- this one is PPR -- so a test that saw "ppr" would be seeing the
+    fallback rather than the room.
+    """
+    import numpy as np
+    import pandas as pd
+    import scoring.league as league
+    from api import live
+    from scoring.league import LeagueSettings
+
+    class _Pool:
+        player_id = np.array(["00-0001", "00-0002"], dtype=object)
+        position = np.array(["RB", "RB"], dtype=object)
+        points = np.array([300.0, 250.0])
+
+    board = pd.DataFrame([
+        {"player_id": "00-0001", "name": "Somebody", "team": "SF", "bye": 9,
+         "rank": 1, "market_rank": 2, "position": "RB", "proj_points": 300.0,
+         "espn_rank": 1.0, "espn_pos_rank": 1.0, "espn_adp": 1.5,
+         "career_games_pg": 16.0},
+        {"player_id": "00-0002", "name": "Other", "team": "DET", "bye": 5,
+         "rank": 2, "market_rank": 3, "position": "RB", "proj_points": 250.0,
+         "espn_rank": 2.0, "espn_pos_rank": 2.0, "espn_adp": 2.5,
+         "career_games_pg": 15.0},
+    ])
+    monkeypatch.setattr(demo, "_cached_pool", lambda conn, board, s: _Pool())
+    monkeypatch.setattr(league, "load", lambda conn: LeagueSettings(
+        season=2026, teams=8,
+        starters={"QB": 1, "RB": 2, "WR": 2, "TE": 1, "K": 1, "DST": 1},
+        flex_slots=2, bench=5, scoring={"receptions": 1.0},
+        draft_type="SNAKE"))
+    asked = []
+
+    def _availability(table, ids, k, n, *a, **kw):
+        asked.append((kw.get("teams"), kw.get("fmt")))
+        return np.ones(len(list(ids)))
+
+    monkeypatch.setattr(live, "availability_at", _availability)
+    monkeypatch.setattr("scoring.plan.availability_at", _availability)
+
+    demo._ranked(conn=None, board=board, picks=[], slot=1, limit=3,
+                 teams=12, rounds=16, fmt="std")
+
+    assert asked, "the landing room never asked the counted table anything"
+    assert set(asked) == {(12, "std")}
+
+
+def test_a_live_file_that_never_said_its_format_falls_back(monkeypatch):
+    """An older live file has no `scoring_format`. The room is still drawn --
+    with this deployment's league's scoring, which is what every room got
+    before the farm recorded anything but PPR."""
+    import numpy as np
+    import pandas as pd
+    import scoring.league as league
+    from api import live
+    from scoring.league import LeagueSettings
+
+    class _Pool:
+        player_id = np.array(["00-0001"], dtype=object)
+        position = np.array(["RB"], dtype=object)
+        points = np.array([300.0])
+
+    board = pd.DataFrame([
+        {"player_id": "00-0001", "name": "Somebody", "team": "SF", "bye": 9,
+         "rank": 1, "market_rank": 2, "position": "RB", "proj_points": 300.0,
+         "espn_rank": 1.0, "espn_pos_rank": 1.0, "espn_adp": 1.5,
+         "career_games_pg": 16.0}])
+    monkeypatch.setattr(demo, "_cached_pool", lambda conn, board, s: _Pool())
+    monkeypatch.setattr(league, "load", lambda conn: LeagueSettings(
+        season=2026, teams=8,
+        starters={"QB": 1, "RB": 2, "WR": 2, "TE": 1, "K": 1, "DST": 1},
+        flex_slots=2, bench=5, scoring={"receptions": 0.0},
+        draft_type="SNAKE"))
+    asked = []
+    monkeypatch.setattr(live, "availability_at",
+                        lambda table, ids, k, n, *a, **kw: (
+                            asked.append(kw.get("fmt")) or
+                            np.ones(len(list(ids)))))
+    monkeypatch.setattr("scoring.plan.availability_at",
+                        lambda table, ids, k, n, *a, **kw: (
+                            asked.append(kw.get("fmt")) or
+                            np.ones(len(list(ids)))))
+
+    demo._ranked(conn=None, board=board, picks=[], slot=1, limit=3,
+                 teams=10, rounds=16, fmt=None)
+
+    assert set(asked) == {"std"}
+
+
+def test_the_rooms_settings_payload_names_its_own_scoring(monkeypatch):
+    """The page hands these settings to the same component the draft room
+    uses, and the pill it draws says the format."""
+    import scoring.league as league
+    from scoring.league import LeagueSettings
+
+    monkeypatch.setattr(league, "load", lambda conn: LeagueSettings(
+        season=2026, teams=8,
+        starters={"QB": 1, "RB": 2, "WR": 2, "TE": 1, "K": 1, "DST": 1},
+        flex_slots=2, bench=5, scoring={"receptions": 1.0},
+        draft_type="SNAKE"))
+
+    room = demo._settings_payload(None, 12, 16, "std")
+    assert (room["teams"], room["rounds"]) == (12, 16)
+    assert room["scoring_format"] == "std"
+    # And a room that did not say gets this deployment's own.
+    assert demo._settings_payload(None, 12, 16, None)["scoring_format"] == "ppr"

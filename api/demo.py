@@ -635,14 +635,18 @@ def _roster_payload(picks: list, slot: int | None, board, settings: dict) -> lis
     return slots
 
 
-def _settings_payload(conn, teams: int, rounds: int) -> dict:
+def _settings_payload(conn, teams: int, rounds: int,
+                      fmt: str | None = None) -> dict:
     """The league shape, in `/api/live/state`'s own `settings` shape.
 
     Served so the landing page can hand it to the same `AvailableList` the
     draft room uses. The starters come from this deployment's league (that is
     what the board was priced against, so a different roster here would label
-    tiers the prices do not match); the teams and rounds come from the ROOM,
-    because that is what the picks below are actually being made in.
+    tiers the prices do not match); the teams, rounds and scoring format come
+    from the ROOM, because that is what the picks below are actually being
+    made in. A room that did not say its format -- an older live file -- gets
+    this deployment's, which is what every room got before the farm recorded
+    anything but PPR.
     """
     from scoring import league
     settings = league.load(conn)
@@ -652,7 +656,7 @@ def _settings_payload(conn, teams: int, rounds: int) -> dict:
         "starters": dict(settings.starters),
         "flex_slots": settings.flex_slots,
         "bench": settings.bench,
-        "scoring_format": league.scoring_format(settings),
+        "scoring_format": str(fmt) if fmt else league.scoring_format(settings),
     }
 
 
@@ -674,7 +678,8 @@ def _seat_counts(picks: list, slot: int | None, positions: dict) -> dict:
 
 
 def _ranked(conn, board, picks: list, slot: int | None, limit: int,
-            teams: int | None = None, rounds: int | None = None) -> list:
+            teams: int | None = None, rounds: int | None = None,
+            fmt: str | None = None) -> list:
     """The room's own ranked list, for the seat on the clock.
 
     THE RAW BOARD IS THE WRONG LIST, and this is the difference between
@@ -694,6 +699,13 @@ def _ranked(conn, board, picks: list, slot: int | None, limit: int,
     follow in ESPN order. `limit` caps the whole. `teams`/`rounds` are the
     ROOM's shape, so a seat's turns are the room's and not the stored
     league's; the stored league still supplies the roster shape.
+
+    `fmt` is the room's scoring, off the live file (`mock_farm.live_payload`),
+    and it goes with `teams` into the counted table: "will he last" is
+    answered from drafts of this size and this scoring once the corpus holds
+    enough of them. None -- an older live file, or a room that never said --
+    falls back to this deployment's own league, which is the same assumption
+    `_settings_payload` already makes about the roster.
     """
     from api import live as live_mod
     from scoring import league
@@ -701,6 +713,8 @@ def _ranked(conn, board, picks: list, slot: int | None, limit: int,
     from scoring.plan import health_level, target_now
 
     settings = league.load(conn)
+    # The ROOM's scoring if it said, this deployment's league otherwise.
+    shape_format = str(fmt) if fmt else league.scoring_format(settings)
     if teams or rounds:
         # `rounds` is not a field but the roster's size (starters + flex +
         # bench), so the room's round count is set through its bench. The
@@ -735,7 +749,12 @@ def _ranked(conn, board, picks: list, slot: int | None, limit: int,
     # rows and the turns are all it asks for.
     rows, _plan, turns = live_mod.rank_and_plan(
         board, pool, taken, taken_order, counts, mine, int(slot or 1),
-        settings, frozenset(), table, picks_made=len(picks), with_plan=False)
+        # `settings` carries the room's teams and rounds (reshaped above) but
+        # this deployment's SCORING, since the board was priced against it --
+        # so `rank_and_plan` would read the wrong half of the shape off it.
+        # The room's own format goes through `fmt`.
+        settings, frozenset(), table, picks_made=len(picks), with_plan=False,
+        fmt=shape_format)
 
     by_id = {}
     if isinstance(board, pd.DataFrame):
@@ -764,6 +783,7 @@ def _ranked(conn, board, picks: list, slot: int | None, limit: int,
                 health=health_level(games), roster_counts=dict(counts),
                 settings=settings, turns=turns, picks_made=len(picks),
                 favourites=set(), table=table,
+                teams=int(settings.teams), fmt=shape_format,
                 names={pid: str(getattr(by_id[pid], "name", pid)) if by_id.get(pid) is not None else pid
                        for pid in ids})]
         except Exception:      # noqa: BLE001 -- the cards are a garnish on
@@ -1316,17 +1336,21 @@ def _build(conn, now: float | None = None) -> dict:
         # The room's own settings, because `AvailableList` draws finish tiers
         # from them -- the last startable back is a different rank in an
         # 8-team league than a 12-team one, and this IS an 8-team room.
-        "settings": _settings_payload(conn, teams, rounds),
+        "settings": _settings_payload(conn, teams, rounds,
+                                      record.get("scoring_format")),
         # The grid and the roster, in the room's own shapes, so the landing
         # page can run `DraftBoardGrid`, `PickTicker` and `RosterPanel`
         # unmodified. See `_board_payload`.
         "board": _board_payload(record, picks, board,
                                 _on_the_clock({**record, "picks": picks})),
         "roster": _roster_payload(picks, _on_the_clock({**record, "picks": picks}),
-                                  board, _settings_payload(conn, teams, rounds)),
+                                  board, _settings_payload(
+                                      conn, teams, rounds,
+                                      record.get("scoring_format"))),
         "recent": [row for row in recent if row["name"]],
         "shortlist": _ranked(conn, board, picks, _on_the_clock({**record, "picks": picks}),
-                             SHORTLIST, teams=teams, rounds=rounds),
+                             SHORTLIST, teams=teams, rounds=rounds,
+                             fmt=record.get("scoring_format")),
     }
 
 
