@@ -275,6 +275,17 @@ ADP buckets fitted on the same rows, a normal tail conditioned the same way,
 by position group. `scoring/availability.py` holds the table and the
 query; the table rebuilds itself when the corpus file changes.
 
+**Counted per shape, once there is enough of one.** A draft's shape is its
+team count and its scoring format, and both move the answer: twelve teams
+means twelve picks a round, so pick 30 is early rather than late, and PPR
+means a receiver goes where standard scoring leaves him. The corpus is
+therefore counted per `(teams, format)` as well as pooled, and a room reads
+its own shape's counts as soon as that shape holds 60 drafts
+(`MIN_SHAPE_DRAFTS`). Below that it reads the pooled counts, which is what
+every room read before -- a slightly wrong answer from 854 drafts beats a
+right one from nine. Nothing on screen changes until the farm has recorded a
+second shape.
+
 **Edge** is what taking him now is worth over waiting: his projected points
 minus the expected best player at his position you would get at your next
 turn, where "expected" weights every other player at the position by his
@@ -367,6 +378,7 @@ volume Railway attaches by default is enough for a season, not for several.
 | `REFRESH_MAX_AGE_HOURS` | `24` | How stale the oldest source may get first |
 | `RUN_FARM` | `1` | **Off by default.** Needs the login variable below |
 | `FARM_CONCURRENCY` | `1` | How many drafts at once. Six matches a full local setup; capped at 8 |
+| `FARM_SHAPES` | `8:ppr,10:ppr,12:ppr,10:std,12:std` | Which rooms the farm joins, as `teams:format`. It rotates onto whichever it has fewest of |
 | `FARM_ESPN_STATE_B64` | `make farm-secret` | The farm's ESPN login. A live session — host's variable store only |
 | `ANTHROPIC_API_KEY` | `sk-ant-…` | **Off by default.** Absent, every report card is `numbers_only` — see The league report card |
 | `STRIPE_SECRET_KEY` | `rk_live_…` | **Off by default.** Absent, every draft is free — see Charging for it |
@@ -516,6 +528,25 @@ no shell and no file transfer. The variable deliberately **overwrites** any
 file already on the volume, because a dead session sitting there is exactly
 the case this exists to fix. A bad or truncated value costs the farm and
 nothing else: the site still comes up, and the boot log says what was wrong.
+
+**Which rooms it joins.** `FARM_SHAPES` is a list of `teams:format` pairs --
+`8:ppr,10:ppr,12:ppr,10:std,12:std` by default, and `ppr`, `half` or `std`
+for the format. Every pass counts what the corpus already holds of each
+shape, joins a room of whichever shape it is shortest of, and falls to the
+next shape when that one has nothing open; within a shape the fullest room
+still wins, because a room at 6/8 is six people waiting for a draft and an
+empty one is ESPN's autodraft engine reading ADP back at us. One line per
+pass says what is recorded and what is open, per shape:
+
+```
+shapes -- 8:ppr 854 recorded/2 open, 10:ppr 0 recorded/1 open, 12:ppr 0 recorded/0 open, ...
+```
+
+Every draft is filed under the shape the room really was, read from the
+room's own settings rather than the lobby listing, so a mixed corpus is not
+a mixed-up one: `scoring/availability.py` counts each shape separately and
+uses a shape's own counts once it holds 60 drafts. A typo in the variable
+stops the process at import rather than quietly narrowing the rotation.
 
 **How many at once.** `farm(n)` plays its drafts one after another, so being
 in six drafts at the same time means six processes, not a bigger `n` — which

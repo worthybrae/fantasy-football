@@ -84,6 +84,15 @@ DEFAULT_FARM_CONCURRENCY = 1
 # shape of behaviour that gets an account looked at.
 MAX_FARM_CONCURRENCY = 8
 
+# WHICH ROOMS THE FARM JOINS is `FARM_SHAPES`, and it is deliberately NOT
+# read here. `pipeline.espn_mock_lobby` reads it at import, and `_run_farm`
+# starts the farm as a child process, which inherits this one's environment
+# -- so the platform variable reaches it without this module having to know
+# what a shape is. Named here only so that somebody reading the farm's knobs
+# in one place finds it: `8:ppr,10:ppr,12:ppr,10:std,12:std` by default, and
+# the rotation joins whichever of those the corpus is shortest of.
+FARM_SHAPES_ENV = "FARM_SHAPES"
+
 # How long the farm waits after a pass that recorded nothing. ESPN's mock
 # lobby is empty at 4am and full at 8pm, so a run that finds no joinable room
 # is an ordinary outcome and not an error -- it just should not be retried in
@@ -260,6 +269,10 @@ def _run_farm(batch: int) -> None:
     NO SEED. The local Makefile passes one so a person can reproduce a run; a
     server looping forever wants a different room each time, and `mock_farm`
     treats seed 0 as "pick for yourself".
+
+    NO SHAPE ARGUMENT EITHER: `FARM_SHAPES` is read from the environment by
+    `pipeline.espn_mock_lobby`, and a child process inherits it. See
+    `FARM_SHAPES_ENV` above.
     """
     import subprocess
     import sys
