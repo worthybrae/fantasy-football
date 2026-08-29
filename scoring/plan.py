@@ -14,9 +14,10 @@ simulated opponent model.
 
 THE PLAN is a greedy walk over the turns you have left. At each one it takes
 the first man in ESPN's order who is likely enough to still be there
-(`THRESHOLD`, lowered to `FAVOURITE_THRESHOLD` for the account's favourites)
-and whom the roster can still use, adds him to the roster it is carrying, and
-moves on. Greedy rather than a search: the input probabilities are measured
+(`THRESHOLD`, lowered to `FAVOURITE_THRESHOLD` for the account's
+favourites), whom the roster can still use, and whom the turn after this one
+would probably NOT hand you anyway, adds him to the roster it is carrying,
+and moves on. Greedy rather than a search: the input probabilities are measured
 to two digits, the roster need penalties are a four-value table, and no
 amount of search makes a plan for pick 118 mean anything -- what the panel is
 for is the shape of the next few rounds, which one pass gets right.
@@ -31,10 +32,11 @@ quarterback at the top of a one-quarterback league's first round. The room
 recommended Josh Allen, ESPN's 26th player, over Christian McCaffrey at pick
 6, with the edge as its whole argument.
 
-THE ORDER IS ESPN'S ORDER (spec decision 1), moved by two things and nothing
-else:
+THE ORDER IS ESPN'S ORDER (spec decision 1), moved by four things and
+nothing else:
 
-    priority = espn_rank + need_penalty - favourite_bonus   (lowest first)
+    priority = espn_rank + need_penalty - favourite_bonus
+                        + waitable + reach_penalty         (lowest first)
 
 `need_penalty` is `need_kind`'s word for the roster, in RANKS rather than a
 multiplier -- a flex body is worth about four places, a bench body twenty,
@@ -45,16 +47,37 @@ judgement, made in the quiet before the draft, is worth a tier and not a
 round. A player ESPN does not rank uses the consensus (`market_rank`); with
 neither he sorts last, by projection.
 
-WHERE THE DROP-OFF GETS ITS SAY. Two players a place apart on ESPN's list
-are not a decision; the position behind them is. So inside a window of
-`DROP_WINDOW` ranks below the best priority at this turn, the biggest EDGE
-takes the pick -- the man whose position falls off hardest before your next
-turn -- and outside it nobody wins on the edge however large it is. Twelve
-ranks is about a round of an eight-team draft: near enough that ESPN is
-saying the two are the same class of player, far enough that the drop-off is
-what is left to separate them. This is the whole of the edge's authority: it
-reorders a tier, it does not cross one. Josh Allen at 26 was 18 places
-behind, so no edge could have bought him the card.
+CAN YOU WAIT? That is the question the first three miss and the one that
+separates a good pick from a good player: a pick is a good pick when the man
+is ranked well AND is unlikely to be there when you come back. So a
+candidate the table expects to still be sitting there at your NEXT turn is
+charged `WAITABLE` ranks and the pick goes to somebody who will not be.
+Fifteen is a round and a half of an eight-team draft -- more than a tier,
+because a player you can have at either of two turns is not a decision at
+the first of them. The line is the same one the plan plans on
+(`THRESHOLD`, `FAVOURITE_THRESHOLD` for a starred player), and it is a step
+rather than a slope on purpose: "will he be there" is a yes or no asked on a
+clock, the counts behind it are two digits wide, and a smooth function of
+them would order two players by the third digit of a probability.
+
+REACHING IS THE OTHER HALF. ESPN's rank says how good a player is; ESPN's
+ADP says when the room actually takes him. Taking a man twenty picks before
+the room does is paying for something the next turn would have handed you,
+so `reach_penalty` charges half a rank per pick of the gap past
+`REACH_FREE`. Six picks are free because a rank and an ADP inside a round of
+each other are telling the same story (`ADP_GAP` draws that same line for
+the reasons); a ten-pick reach costs two ranks and a thirty-pick reach
+twelve. Josh Allen, ESPN 26 with an ADP of 21, at pick 11 of an eight-team
+draft: two ranks of reach on top of a rank that was already eighteen behind.
+
+WHERE THE DROP-OFF GETS ITS SAY. Two players two ranks apart are not a
+decision; the position behind them is. So a run of candidates whose
+priorities sit within `TIE_RANKS` of each other is settled by the biggest
+EDGE, and outside that tie nobody wins on the edge however large it is.
+The window used to be twelve ranks, which is a tier rather than a tie, and a
+quarterback's raw-point cliff ate a whole round of the draft with it. This
+is the whole of the edge's authority: it breaks a tie, it does not cross a
+tier.
 """
 from __future__ import annotations
 
@@ -90,20 +113,43 @@ FAVOURITE_BONUS = 8.0
 # there in the first place.
 NEED_PENALTY = {"starter": 0.0, "flex": 4.0, "bench": 20.0, "deferred": 200.0}
 
-# How far below the best priority at a turn the drop-off still decides. See
-# the module docstring: inside the window the biggest edge takes the pick,
-# outside it the edge is only an explanation. Twelve ranks is about a round
-# of an eight-team draft.
-DROP_WINDOW = 12.0
+# What a player you can probably still have at your next turn costs, IN
+# RANKS. See the module docstring: this is the plan's answer to "can you
+# wait?", and it is the difference between a good player and a good pick.
+# Fifteen is a round and a half of an eight-team draft -- deliberately more
+# than the favourites bonus and more than a bench slot, because a man
+# available at either of two turns is not a decision at the first of them.
+WAITABLE = 15.0
+
+# How far apart two priorities can be and still be a tie the drop-off
+# settles. Two ranks is ESPN saying "these are the same player"; the twelve
+# this replaced was a tier, and a tier is not the edge's to reorder.
+TIE_RANKS = 2.0
+
+# The reach: how many picks earlier than his ESPN ADP a turn is. The first
+# `REACH_FREE` are free -- a rank and an ADP inside a round of each other
+# are telling the same story -- and every pick past that costs `REACH_RATE`
+# ranks. Half a rank a pick: a ten-pick reach is worth two ranks, which
+# nudges, and a thirty-pick reach is worth twelve, which decides.
+REACH_FREE = 6.0
+REACH_RATE = 0.5
 
 # How likely a player has to be to still be there for the plan to plan on
 # him. Half is the honest line for "expect him": below it the plan would be
 # writing down names that are usually gone by the time you get there.
+#
+# IT IS ALSO THE WAITABLE LINE, asked one turn later: "likely enough to be
+# there for me to plan on him at this turn" and "likely enough to be there
+# for me to wait for him past it" are the same question about the same
+# table, and two different numbers for it would only be two numbers to
+# explain.
 THRESHOLD = 0.50
 
 # Favourites are planned for on a coin-flip's worth less certainty. The
 # account said it wants this player; naming him at the turn he might last to
-# is the whole point of having asked.
+# is the whole point of having asked. The same allowance runs the other way:
+# a favourite is only "waitable" when he is really quite safe, so a starred
+# player on the edge of going is taken rather than gambled on.
 FAVOURITE_THRESHOLD = 0.35
 
 # How many reasons a card prints, per list. The ORDER below is the priority,
@@ -265,14 +311,27 @@ def _number(value):
 
 def reasons_for(*, favourite: bool, lasts, at_pick, edge, next_pick,
                 position: str, slot, espn_rank, espn_adp, bye, health,
-                bye_mates=(), drop_off: bool = False) -> tuple[list, list]:
+                bye_mates=(), drop_off: bool = False, gone_next=None,
+                waitable: bool = False, reach=None,
+                reach_at=None) -> tuple[list, list]:
     """The rule-derived pros and cons for one target, in the fixed order.
 
     `lasts` is a probability, not a percentage. `bye_mates` are the display
     names of the players already on the roster who share his bye week --
     `build_plan` keeps that list as it walks, since it is drafting into the
-    same roster. `drop_off` is True when the drop-off window is what put
-    this player ahead of somebody ESPN ranks higher (`_ranked`).
+    same roster. `drop_off` is True when this player's edge is the biggest
+    on the board, which is the card's answer to "why him and not the man
+    ESPN ranks above him".
+
+    `gone_next` is 1 - P(still there at the turn AFTER this one), `waitable`
+    whether that cleared the line the priority charges `WAITABLE` for, and
+    `reach`/`reach_at` how many picks early `reach_at` is against his ADP.
+    The three of them are the priority's own arithmetic said out loud: the
+    card has to be able to explain a pick it made for a new reason.
+
+    THE WAIT AND THE REACH LEAD THE CONS because they are the two that argue
+    against the pick itself rather than against a detail of it. A card that
+    runs out of room has said the thing worth saying.
     """
     pros: list[str] = []
     cons: list[str] = []
@@ -289,8 +348,33 @@ def reasons_for(*, favourite: bool, lasts, at_pick, edge, next_pick,
         pros.append(f"ESPN's #{rank:.0f} overall")
 
     lasts = _number(lasts)
-    if lasts is not None and at_pick is not None:
+    gone = _number(gone_next)
+    likely_gone = gone is not None and gone >= THRESHOLD
+    could_wait = bool(waitable) and gone is not None and next_pick is not None
+    # THE SURVIVAL LINE IS SAID ONCE. `target_now` measures "still there" at
+    # the very turn the waiting is about, so the bare percentage and the
+    # line that judges it would be the same number twice -- once as a pro
+    # and once as a con, which reads as a contradiction rather than a
+    # reason. The judged line wins where they collide: it is the one that
+    # says what to do about the number. `build_plan`'s two picks are
+    # genuinely different picks, so both are printed there.
+    same_pick = (at_pick is not None and next_pick is not None
+                 and int(at_pick) == int(next_pick))
+    if (lasts is not None and at_pick is not None
+            and not (same_pick and (likely_gone or could_wait))):
         pros.append(f"{lasts * 100:.0f}% still there at pick {int(at_pick)}")
+
+    if likely_gone:
+        pros.append(f"likely gone before your next pick ({gone * 100:.0f} %)")
+
+    if could_wait:
+        cons.append(f"you could probably wait — {(1 - gone) * 100:.0f} % "
+                    f"still there at pick {int(next_pick)}")
+
+    reach = _number(reach)
+    if (reach is not None and reach > REACH_FREE
+            and adp is not None and reach_at is not None):
+        cons.append(f"reach: ADP {adp:.0f} at pick {int(reach_at)}")
 
     # THE EDGE IS PRICED AT `next_pick`, NOT AT THIS TURN -- it is what
     # taking him now is worth over the man you would get if you waited, so
@@ -306,9 +390,10 @@ def reasons_for(*, favourite: bool, lasts, at_pick, edge, next_pick,
             cons.append(f"−{abs(edge):.1f} pts vs waiting for "
                         f"{position}{at or ''}")
 
-    # WHY HE IS AHEAD OF A PLAYER ESPN RANKS HIGHER: he is inside a tier of
-    # them and his position falls off hardest before the next turn (see
-    # `_ranked`). Said only when that is what happened.
+    # WHY HE IS AHEAD OF A PLAYER ESPN RANKS HIGHER: no position on the
+    # board falls off harder than his before the next turn. Said only when
+    # that is true of him, since it is the one thing the edge is allowed to
+    # claim (see `_ranked`).
     if drop_off and next_pick is not None:
         pros.append(f"biggest drop-off at {position} before "
                     f"pick {int(next_pick)}")
@@ -370,21 +455,53 @@ class _Board:
         capped = np.array([kinds[pos] == "capped" for pos in self.positions])
         return penalty, capped
 
-    def priority(self, penalty: np.ndarray) -> np.ndarray:
+    def waitable(self, gone_next) -> np.ndarray:
+        """`WAITABLE` ranks for everybody the next turn would hand you anyway.
+
+        `gone_next` is 1 - P(still there at the turn AFTER this one | now),
+        so a small number means "you can come back for him". The line is
+        `THRESHOLD`, and `FAVOURITE_THRESHOLD` for a starred player -- the
+        same two the plan's own eligibility uses, one turn later.
+        """
+        gone = np.asarray(gone_next, dtype=float)
+        line = np.where(self.is_favourite, FAVOURITE_THRESHOLD, THRESHOLD)
+        return WAITABLE * (gone < line)
+
+    def reach(self, pick_no) -> np.ndarray:
+        """How many picks earlier than ESPN's ADP this turn is.
+
+        Zero for a player ESPN has no usable ADP for: a reach is a claim
+        about when the room takes him, and without an ADP there is nothing
+        to be early of. Zero, too, for the ordinary case of a turn at or
+        past his ADP -- taking a man the room would already have taken is
+        not reaching, it is being late.
+        """
+        gap = np.where(np.isfinite(self.espn_adp),
+                       self.espn_adp - float(pick_no), 0.0)
+        return np.maximum(0.0, gap)
+
+    def priority(self, penalty: np.ndarray, waitable: np.ndarray,
+                 reach: np.ndarray) -> np.ndarray:
         """ESPN's order as the plan reads it. LOWEST FIRST.
 
-        `espn_rank + need_penalty - favourite_bonus`, with the consensus
-        standing in for a player ESPN does not rank -- the same fallback the
-        room's own list order uses (spec section 1), so the plan and the
-        table cannot disagree about who is ahead of whom. A player with
-        neither rank is infinite here and sorts last; `_by_priority` orders
-        those few by projection, which is the only thing left to say about
-        them.
+        `espn_rank + need_penalty - favourite_bonus + waitable +
+        reach_penalty`, with the consensus standing in for a player ESPN
+        does not rank -- the same fallback the room's own list order uses
+        (spec section 1), so the plan and the table cannot disagree about
+        who is ahead of whom. A player with neither rank is infinite here
+        and sorts last; `_by_priority` orders those few by projection, which
+        is the only thing left to say about them.
+
+        `waitable` comes in already in ranks (`waitable`); `reach` comes in
+        as picks and is charged here, so the free `REACH_FREE` and the rate
+        live in one place and the reasons can read the raw number.
         """
         base = np.where(np.isfinite(self.espn_rank),
                         self.espn_rank, self.market_rank)
         rank = np.where(np.isfinite(base), base, np.inf)
-        return rank + penalty - FAVOURITE_BONUS * self.is_favourite
+        return (rank + penalty - FAVOURITE_BONUS * self.is_favourite
+                + waitable
+                + REACH_RATE * np.maximum(0.0, reach - REACH_FREE))
 
     def name(self, i) -> str:
         return self.names.get(self.ids[i], self.ids[i])
@@ -418,28 +535,41 @@ def _by_priority(priority, proj, edge, keep) -> np.ndarray:
 def _ranked(priority, proj, edge, keep, drop_off: bool = True) -> np.ndarray:
     """The kept indices in the order the room reads them.
 
-    `_by_priority` first, then the drop-off window has its say: everybody
-    within `DROP_WINDOW` ranks of the best priority is reordered by EDGE,
-    biggest first, and everybody outside it keeps his place behind them. A
-    tie on the edge falls back to the priority order, so a board where the
-    drop-off says nothing is ESPN's list exactly.
+    `_by_priority` first, then the drop-off breaks the ties in it: a RUN of
+    players whose priorities are all within `TIE_RANKS` of the first of them
+    is reordered by EDGE, biggest first, and the next run starts where that
+    stops. A tie on the edge falls back to the priority order, so a board
+    where the drop-off says nothing is ESPN's list exactly.
+
+    THE RUN IS MEASURED FROM ITS OWN LEADER, not from the man before it, so
+    a long ladder of players a rank apart cannot chain into one group and
+    let the edge reorder the whole board two ranks at a time.
 
     `drop_off` is False at a turn with nothing after it: the edge there is
     not a number (there is no next pick to price against, so the walk hands
-    back the whole projection), and sorting one tier by raw projection
+    back the whole projection), and sorting even a tie by raw projection
     across positions is the mistake this module exists to stop making.
     """
     idx = _by_priority(priority, proj, edge, keep)
     if not drop_off or idx.size == 0:
         return idx
-    best = priority[idx[0]]
-    if not np.isfinite(best):
-        return idx
-    inside = idx[priority[idx] <= best + DROP_WINDOW]
-    outside = idx[priority[idx] > best + DROP_WINDOW]
     edge = np.asarray(edge, dtype=float)
-    inside = inside[np.argsort(-edge[inside], kind="stable")]
-    return np.concatenate([inside, outside])
+    ordered = np.asarray(priority, dtype=float)[idx]
+    runs, start = [], 0
+    while start < idx.size:
+        # The unranked sort last and by projection (`_by_priority`); an
+        # infinite priority is not within two of anything, itself included.
+        if not np.isfinite(ordered[start]):
+            runs.append(idx[start:])
+            break
+        end = start + 1
+        while (end < idx.size and np.isfinite(ordered[end])
+               and ordered[end] <= ordered[start] + TIE_RANKS):
+            end += 1
+        run = idx[start:end]
+        runs.append(run[np.argsort(-edge[run], kind="stable")])
+        start = end
+    return np.concatenate(runs)
 
 
 def _row(board, i, lasts, edge, edge_at=None, pros=(), cons=()) -> dict:
@@ -518,12 +648,20 @@ def build_plan(*, proj, positions, player_ids, espn_rank, espn_adp,
         turns_left = len(turns) - t
         gain = board.proj - best_next
         penalty, capped = board.need_penalty(settings, roster, turns_left)
-        # ESPN'S ORDER, MOVED BY THE ROSTER AND THE STARS, then reordered
-        # inside one tier by the drop-off. `gain` is a raw point difference
-        # and comparing one across positions ranks quarterbacks (see the
-        # module docstring), so it decides between neighbours and never
-        # across the board.
-        priority = board.priority(penalty)
+        # CAN YOU WAIT FOR HIM? P(still there at the turn after this one),
+        # from the same table, is already computed as `avail[t + 1]`. At the
+        # last turn there is nothing to wait for, so nobody is waitable:
+        # every man on the board is gone by a pick that never comes.
+        gone_next = (1.0 - avail[t + 1] if next_pick is not None
+                     else np.ones(board.size))
+        wait = board.waitable(gone_next)
+        reach = board.reach(pick_no)
+        # ESPN'S ORDER, MOVED BY THE ROSTER, THE STARS, THE WAIT AND THE
+        # REACH, then its ties broken by the drop-off. `gain` is a raw point
+        # difference and comparing one across positions ranks quarterbacks
+        # (see the module docstring), so it settles a tie and never the
+        # board.
+        priority = board.priority(penalty, wait, reach)
 
         eligible = ~planned & ~capped & ((here >= THRESHOLD)
                                          | (board.is_favourite
@@ -538,17 +676,21 @@ def build_plan(*, proj, positions, player_ids, espn_rank, espn_adp,
         ranked = _ranked(priority, board.proj, gain, eligible,
                          drop_off=next_pick is not None)[:3]
         target = int(ranked[0])
-        # He came through the window rather than off the top of the list:
-        # somebody ESPN ranks higher was passed over, and the card has to
-        # say why.
-        drop_off = bool(priority[target] > np.min(priority[eligible]))
         edge = (None if next_pick is None
                 else board.proj[target] - best_next[target])
+        # NOBODY'S POSITION FALLS OFF HARDER THAN HIS before the next turn,
+        # which is the card's answer for a man ESPN ranks below somebody
+        # else on the list. Claimed only when it is true of the whole
+        # eligible board, and only when there is a drop-off to have.
+        drop_off = bool(edge is not None and edge >= 0.05
+                        and gain[target] >= np.max(gain[eligible]))
         pros, cons = reasons_for(
             favourite=bool(board.is_favourite[target]),
             lasts=here[target], at_pick=pick_no, edge=edge,
             next_pick=next_pick, position=str(board.positions[target]),
-            drop_off=drop_off,
+            drop_off=drop_off, gone_next=gone_next[target],
+            waitable=bool(wait[target] > 0), reach=float(reach[target]),
+            reach_at=pick_no,
             slot=fills_slot(settings, roster, str(board.positions[target]),
                             turns_left),
             espn_rank=board.espn_rank[target], espn_adp=board.espn_adp[target],
@@ -602,7 +744,9 @@ def target_now(*, proj, positions, player_ids, espn_rank, espn_adp,
     so nobody is filtered out for being unlikely to last. The percentage is
     still reported -- against the NEXT turn, which is the pick a reader is
     weighing this one against -- because "2% still there at pick 20" is
-    exactly the argument for taking him now.
+    exactly the argument for taking him now. That is also the number the
+    wait is charged on: on the clock "will he last" and "can I wait" are one
+    question, and the card says it once (see `reasons_for`).
     """
     board = _Board(proj=proj, positions=positions, player_ids=player_ids,
                    espn_rank=espn_rank, espn_adp=espn_adp,
@@ -630,7 +774,14 @@ def target_now(*, proj, positions, player_ids, espn_rank, espn_adp,
     roster = dict(roster_counts or {})
     gain = board.proj - best_next
     penalty, capped = board.need_penalty(settings, roster, turns_left)
-    priority = board.priority(penalty)
+    # THE WAIT IS THE SAME QUESTION ON THE CLOCK: `here` is already measured
+    # at my next turn, so 1 - it is exactly "gone before I am back". The
+    # reach is measured at the pick I am actually making, which is this one
+    # and not the turn the percentages name.
+    gone_next = (np.ones(board.size) if here is None else 1.0 - here)
+    wait = board.waitable(gone_next)
+    reach = board.reach(on_the_clock)
+    priority = board.priority(penalty, wait, reach)
     # A player at his position's roster cap has no slot to go in, starter or
     # bench, so he is not a card however the numbers read.
     stack = _bye_stack(board, roster_byes)
@@ -638,7 +789,7 @@ def target_now(*, proj, positions, player_ids, espn_rank, espn_adp,
     cards = []
     order = _ranked(priority, board.proj, gain, ~capped,
                     drop_off=next_pick is not None)
-    best = np.min(priority[~capped]) if order.size else np.inf
+    biggest = np.max(gain[~capped]) if order.size else np.inf
     for i in order[:3]:
         i = int(i)
         edge = None if next_pick is None else board.proj[i] - best_next[i]
@@ -647,7 +798,10 @@ def target_now(*, proj, positions, player_ids, espn_rank, espn_adp,
             lasts=None if here is None else here[i], at_pick=next_pick,
             edge=edge, next_pick=next_pick,
             position=str(board.positions[i]),
-            drop_off=bool(i == int(order[0]) and priority[i] > best),
+            drop_off=bool(i == int(order[0]) and edge is not None
+                          and edge >= 0.05 and gain[i] >= biggest),
+            gone_next=gone_next[i], waitable=bool(wait[i] > 0),
+            reach=float(reach[i]), reach_at=on_the_clock,
             slot=fills_slot(settings, roster, str(board.positions[i]),
                             turns_left),
             espn_rank=board.espn_rank[i], espn_adp=board.espn_adp[i],

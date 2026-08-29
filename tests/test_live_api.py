@@ -797,6 +797,35 @@ def test_a_player_who_will_not_last_is_not_the_target_at_my_next_turn(tmp_path, 
     assert all(a["player_id"] != "gibbs" for a in first["alternates"])
 
 
+def test_the_rooms_plan_does_not_target_a_man_my_next_turn_would_hand_me(
+        tmp_path, monkeypatch):
+    """Product-push section 1, through the room. Gibbs is ESPN's 5th and 95%
+    to still be sitting there at pick 11; the receiver ESPN ranks 6th is
+    80% to be gone by then. The plan takes the receiver -- a pick you can
+    also make at your next turn is not a pick -- and says so on the card."""
+    state, _recompute = _live_routes_with_conn(tmp_path)
+    session = _live_session(my_slot=6)             # turns 6, 11, 22, ...
+    monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (np.zeros(5, bool), [None] * 4))
+    monkeypatch.setattr("api.live._seed_rosters", _no_roster)
+
+    def availability(table, ids, k, n, espn_adp=None, market_rank=None,
+                     positions=None, **_):
+        return np.array([0.95 if pid == "gibbs"
+                         else (0.9 if n <= 6 else 0.2) for pid in ids])
+    monkeypatch.setattr("api.live.availability_at", availability)
+    monkeypatch.setattr("scoring.plan.availability_at", availability)
+    _recompute(session, picks_made=4)
+    first = state["plan"][0]
+    assert first["pick_no"] == 6
+    assert first["target"]["player_id"] == "wr1"
+    # Not the higher-ranked man who will keep: not the target, not a name
+    # the card offers instead of him.
+    assert "gibbs" not in [first["target"]["player_id"]]
+    assert all(a["player_id"] != "gibbs" for a in first["alternates"])
+    assert ("likely gone before your next pick (80 %)"
+            in first["target"]["pros"])
+
+
 def test_live_start_success_path_builds_and_stores_a_session(tmp_path):
     """live_start's non-reused path: build_session runs against a real
     database, the response carries the pinned seed and a real board

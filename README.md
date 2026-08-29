@@ -283,19 +283,26 @@ own Lasts %. Positive means take him; negative means the position keeps.
 at once.
 
 **The plan** draws one target and two alternates for each of your remaining
-turns, greedily, in one pass: at each turn only players likely enough to be
-there are eligible (50%, or 35% for one of your guys), each is scored by how
-much the roster needs his position times his projection, less what waiting
-one more turn at that position would get, and the target's position counts
-against the roster before the next turn is drawn. A turn nobody clears says
-so ("no clear target") rather than inventing a name. On the clock, the three
-cards are the same score with everybody available at 100%, and their
-reasons are measured at the turn after this one. Each target carries up to
-four reasons for and up to four against, in a fixed order: ★ your guy; the
-Lasts % line; the edge as a pro or, negative, a con; the slot he fills;
-"ADP vs ESPN -- may go earlier" when the two disagree by more than six
-picks; a bye week that stacks with two of your starters; a health meter at
-two bars or under.
+turns, greedily, in one pass. At each turn only players likely enough to be
+there are eligible (50%, or 35% for one of your guys), and the order is
+ESPN's, moved by four things: what the roster needs (a flex body four
+places, a bench body twenty, a kicker before kicker o'clock two hundred),
+one of your guys eight places, fifteen places against anybody the corpus
+says would still be there at your NEXT turn -- a pick you can also make in
+two rounds is not this round's pick -- and half a place for every pick past
+six that the turn is ahead of his ESPN ADP, which is what reaching is. The
+target's position counts against the roster before the next turn is drawn.
+Points never cross positions: the edge only breaks ties inside two places.
+A turn nobody clears says so ("no clear target") rather than inventing a
+name. On the clock, the three cards are the same order with everybody
+available at 100%, and their reasons are measured at the turn after this
+one. Each target carries up to five reasons for and up to four against, in
+a fixed order: ★ your guy; ESPN's rank; the Lasts % line; "likely gone
+before your next pick"; "you could probably wait" and "reach: ADP 21 at
+pick 11" as cons; the edge as a pro or, negative, a con; the biggest
+drop-off on the board; the slot he fills; "ADP vs ESPN -- may go earlier"
+when the two disagree by more than six picks; a bye week that stacks with
+two of your starters; a health meter at two bars or under.
 
 **Your guys.** A signed-in account can star between 5 and 25 players; the
 dashboard asks for them once and then shows a compact "Your guys" card with

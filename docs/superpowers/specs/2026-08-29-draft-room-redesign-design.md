@@ -130,22 +130,26 @@ Greedy, one pass:
 
 ```
 roster = counts so far
-for each turn Tₜ:
+for each turn Tₜ with next turn T′:
     P_t = availability at Tₜ conditioned on now
     eligible = players with P_t ≥ 0.50, or favourites with P_t ≥ 0.35,
                excluding need_kind == "capped" and players already planned
     for each eligible i:
+        gone_next_i = 1 − (availability at T′ conditioned on now)
+                      (1 at the last turn: there is nothing to wait for)
+        reach_i = max(0, espn_adp_i − Tₜ)   (0 when ADP is blank)
         priority_i = espn_rank_i
                      + need_penalty(need_kind(position_i, roster))
                      - (8 if favourite else 0)
+                     + (15 if gone_next_i < 0.50 else 0)
+                       (favourites: gone_next_i < 0.35)
+                     + 0.5 × max(0, reach_i − 6)
         (espn_rank falls back to market_rank; a player with neither is
          infinite and sorts last, by projection)
-        edge_i = proj_i − E[best other at position_i at T_{t+1}]
+        edge_i = proj_i − E[best other at position_i at T′]
         (E over players not already planned; 0 for the last turn)
-    best = min priority over the eligible
-    window = the eligible with priority <= best + DROP_WINDOW (12 ranks)
-    order = window by edge descending (ties by priority),
-            then everyone else by priority
+    order = the eligible by priority ascending, then each RUN of players
+            within 2 ranks of the run's leader reordered by edge descending
     target = order[0]; alternates = order[1:3]
     roster[position(target)] += 1
     mark target and alternates as planned (a planned target is not eligible
@@ -155,15 +159,30 @@ for each turn Tₜ:
 `need_penalty` is `need_kind`'s five words as places on ESPN's board:
 starter 0, flex +4, bench +20, deferred +200, capped ineligible.
 
-THE DROP-OFF WINDOW is the edge's whole authority. Two players a place apart
-on ESPN's list are not a decision and the position behind them is, so inside
-twelve ranks of the best priority at this turn the biggest edge takes the
-pick; outside it no edge wins anything. Twelve is about a round of an
-eight-team draft. The window reorders a tier, it never crosses one: Josh
-Allen at ESPN 26, eighteen places behind St. Brown once the favourites bonus
-is counted, cannot reach the card whatever his +47 says. At the last turn
-there is no next pick to price against, so the edge is not a number and the
-order is priority alone.
+CAN YOU WAIT is the question the rank, the roster and the star all miss. A
+pick is a good pick when the man is ranked well AND is unlikely to be there
+when you come back, so a candidate the corpus expects to still be sitting
+there at T′ is charged fifteen ranks -- a round and a half of an eight-team
+draft, deliberately more than a tier, because a player available at either
+of two turns is not a decision at the first of them. The line is the same
+one eligibility uses, asked one turn later, and it is a step rather than a
+slope: "will he be there" is a yes or no asked on a clock, and the counts
+behind it are two digits wide.
+
+REACHING is the other half. ESPN's rank says how good a player is; ESPN's
+ADP says when the room takes him. Six picks of gap are free (a rank and an
+ADP inside a round of each other tell the same story), and every pick past
+that costs half a rank: a ten-pick reach is two ranks, a thirty-pick reach
+twelve. Josh Allen, ESPN 26 with an ADP of 21, at pick 11 of an eight-team
+draft is a ten-pick reach on top of a rank already eighteen behind.
+
+THE DROP-OFF BREAKS TIES AND NOTHING ELSE. Two players two ranks apart are
+not a decision and the position behind them is, so a run of priorities
+inside two ranks is settled by the biggest edge; outside that tie no edge
+wins anything. It used to be a twelve-rank window, which is a tier rather
+than a tie, and a quarterback's raw-point cliff ate a round of the draft
+with it. At the last turn there is no next pick to price against, so the
+edge is not a number and the order is priority alone.
 
 Output per turn: `{pick_no, round, target: {player_id, lasts_pct, edge_pts,
 edge_at_pick, pros, cons}, alternates: [{player_id, lasts_pct, edge_pts,
@@ -178,13 +197,22 @@ this order:
 - `"★ favourite"` when in the favourites set.
 - `"ESPN's #{rank} overall"` — the first thing the order is built from, so
   the card says it before it says anything else.
-- `"{lasts_pct}% still there at pick {T}"` — this turn's own pick.
+- `"{lasts_pct}% still there at pick {T}"` — this turn's own pick. Not
+  printed when it would name the same pick and the same number as one of
+  the two lines below it, which is what happens on the clock: the judged
+  line wins, since the bare percentage as a pro and its complement as a con
+  read as a contradiction rather than a reason.
+- `"likely gone before your next pick ({gone_next} %)"` when
+  `gone_next ≥ 0.50` — the argument for spending this turn on him.
+- `"you could probably wait — {P(T')} % still there at pick {T'}"` (a con)
+  when the fifteen ranks were charged.
+- `"reach: ADP {adp} at pick {T}"` (a con) when `reach > 6`.
 - `"+{edge} pts over the next {POS} you'd get at pick {T'}"` when edge > 0,
   `"−{|edge|} pts vs waiting for {POS} at pick {T'}"` when edge < 0 (a con).
   `T'` is `edge_at_pick`, the turn AFTER this one.
-- `"biggest drop-off at {POS} before pick {T'}"` when the window is what put
-  him ahead of somebody ESPN ranks higher — the card has to say why it
-  passed over the higher-ranked name.
+- `"biggest drop-off at {POS} before pick {T'}"` when no eligible player's
+  position falls off harder than his — the card has to say why it passed
+  over a higher-ranked name, and this is the one thing the edge may claim.
 - `"fills {slot}"` from `need_kind` (e.g. "fills RB2", "flex").
 - `"ADP {adp} vs ESPN {rank} — may go earlier"` when ESPN ADP is more than
   6 picks ahead of ESPN rank (a con); the reverse as a pro.

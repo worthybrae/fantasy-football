@@ -438,13 +438,18 @@ def test_health_level_bands_the_board_the_way_the_room_draws_it():
 def test_the_favourite_bonus_is_exactly_eight_ranks():
     """A tier, not a round. The starred receiver at ESPN 15 goes ahead of a
     stranger at 8 and still behind a stranger at 6 -- all three the same
-    position, so the roster moves none of them."""
+    position, so the roster moves none of them.
+
+    THE TURN IS PICK 15, at or past all three ADPs, so nobody is reaching
+    and the bonus is the only thing moving anybody. It is a single turn, so
+    nobody is waitable either: the two other things in the priority are
+    switched off to measure this one."""
     ids = ["wr6", "wr8", "wr15"]
     table = make_table(dict.fromkeys(ids, {}))
     args = board_args(table, ids, ["WR", "WR", "WR"],
                       [200.0, 190.0, 180.0], espn_rank=[6.0, 8.0, 15.0],
                       espn_adp=[6.0, 8.0, 15.0], market_rank=[6.0, 8.0, 15.0],
-                      favourites={"wr15"}, turns=[6])
+                      favourites={"wr15"}, turns=[15])
     turn = pl.build_plan(**args)[0]
     assert turn["target"]["player_id"] == "wr6"
     assert [a["player_id"] for a in turn["alternates"]] == ["wr15", "wr8"]
@@ -453,7 +458,7 @@ def test_the_favourite_bonus_is_exactly_eight_ranks():
     plain = pl.build_plan(**board_args(
         table, ids, ["WR", "WR", "WR"], [200.0, 190.0, 180.0],
         espn_rank=[6.0, 8.0, 15.0], espn_adp=[6.0, 8.0, 15.0],
-        market_rank=[6.0, 8.0, 15.0], turns=[6]))[0]
+        market_rank=[6.0, 8.0, 15.0], turns=[15]))[0]
     assert [a["player_id"] for a in plain["alternates"]] == ["wr8", "wr15"]
 
 
@@ -513,36 +518,43 @@ def test_the_room_does_not_target_a_quarterback_espn_ranks_twenty_sixth():
     the edge said otherwise, which is what a raw point difference compared
     across positions does.
 
-    Priority: St. Brown 8 - 8 = 0, McCaffrey 7, Allen 26 - 8 = 18. The
-    window is twelve ranks, so Allen is not in the argument at all; between
-    the two who are, McCaffrey's position falls off hardest (+53.7 against
-    +34) and he takes the card."""
+    Pick 11 is five picks away, so every one of these four is a man this
+    seat could probably still have at it: they are all waitable and the
+    fifteen ranks cancel. What is left is ESPN's order moved by the star and
+    by the reach -- St. Brown 8 - 8 = 0, McCaffrey 7, Allen 26 - 8 + 4.5 for
+    being fifteen picks ahead of his own ADP = 22.5 -- and the starred
+    receiver takes the card. Allen is two tiers away from it."""
     turn = pl.build_plan(**owner_args())[0]
     assert turn["pick_no"] == 6
-    assert turn["target"]["player_id"] == "cmc"
-    assert turn["target"]["edge_pts"] == pytest.approx(53.7)
-    assert [a["player_id"] for a in turn["alternates"]] == ["arsb", "allen"]
+    assert turn["target"]["player_id"] == "arsb"
+    assert turn["target"]["edge_pts"] == pytest.approx(34.0)
+    assert [a["player_id"] for a in turn["alternates"]] == ["cmc", "allen"]
     # The 2%-to-last consensus number one is not on the card at all.
     assert turn["target"]["player_id"] != "gibbs"
     assert "gibbs" not in [a["player_id"] for a in turn["alternates"]]
     # The edge is priced at the NEXT turn, and every string that names a
     # pick names the pick it was measured at.
     assert turn["target"]["edge_at_pick"] == 11
-    assert turn["target"]["pros"][0] == "ESPN's #7 overall"
-    assert "+53.7 pts over the next RB you'd get at pick 11" in \
+    assert turn["target"]["pros"][:2] == ["★ favourite", "ESPN's #8 overall"]
+    assert "+34.0 pts over the next WR you'd get at pick 11" in \
         turn["target"]["pros"]
-    assert "biggest drop-off at RB before pick 11" in turn["target"]["pros"]
-    assert "65% still there at pick 6" in turn["target"]["pros"]
+    assert "91% still there at pick 6" in turn["target"]["pros"]
+    # McCaffrey's position falls off harder (+53.7), so the card does not
+    # claim the drop-off it did not win on -- and it says out loud that the
+    # man it named could probably have been had at pick 11 anyway.
+    assert not any("drop-off" in pro for pro in turn["target"]["pros"])
+    assert ("you could probably wait — 91 % still there at pick 11"
+            in turn["target"]["cons"])
 
 
-def test_no_edge_carries_a_player_past_the_drop_off_window():
+def test_no_edge_carries_a_quarterback_up_the_board():
     """Allen's +47 is the second biggest on this board and he is still not
-    the target, an alternate on the edge, or anywhere near the card: he is
-    eighteen ranks behind the best priority and the window is twelve."""
+    the target, an alternate on the edge, or anywhere near the card: the
+    edge breaks ties inside two ranks and he is twenty-two behind."""
     turn = pl.build_plan(**owner_args(
         proj=[310.0, 300.0, 290.0, 900.0, 245.0, 256.0, 333.0]))[0]
-    assert turn["target"]["player_id"] == "cmc"
-    assert turn["alternates"][0]["player_id"] == "arsb"
+    assert turn["target"]["player_id"] == "arsb"
+    assert [a["player_id"] for a in turn["alternates"]] == ["cmc", "allen"]
 
 
 def test_a_quarterback_ranked_twenty_sixth_is_not_the_pick_over_the_field():
@@ -563,19 +575,187 @@ def test_a_quarterback_ranked_twenty_sixth_is_not_the_pick_over_the_field():
 def test_the_target_now_cards_follow_the_same_order():
     """On the clock, with the same board. Nobody is filtered for being
     unlikely to last -- they are all there this second -- and the same
-    window over the same priorities picks the same three names."""
+    priorities pick the same three names."""
     cards = pl.target_now(**owner_args(turns=[6, 11], picks_made=5))
-    # The same three priorities inside the same window -- St. Brown (0),
-    # Gibbs (1) and McCaffrey (7) -- reordered by the drop-off each of them
-    # faces from HERE. Five picks in, Gibbs is 61% to last rather than 2%,
-    # which is most of what McCaffrey's running-back edge was made of: it
-    # falls from 53.7 to 15.1 and St. Brown's 34 takes the card.
-    assert [c["player_id"] for c in cards] == ["arsb", "cmc", "gibbs"]
+    # Five picks in, Gibbs is 61% to last rather than 2%, so he is waitable
+    # like everybody else here and the fifteen ranks cancel again: St. Brown
+    # (8 - 8), Gibbs (1) and McCaffrey (7), in that order, with the first
+    # two inside two ranks of each other and the bigger drop-off (34 against
+    # 10) settling which of the pair leads.
+    assert [c["player_id"] for c in cards] == ["arsb", "gibbs", "cmc"]
     assert cards[0]["edge_pts"] == pytest.approx(34.0)
     assert cards[0]["edge_at_pick"] == 11
-    # Allen is eighteen ranks off the best priority: outside the window,
-    # and +47 buys him nothing.
+    # Allen is twenty-two ranks off the best priority once his reach is
+    # counted, and +47 buys him nothing.
     assert "allen" not in [c["player_id"] for c in cards]
+
+
+# --- can you wait? ----------------------------------------------------------
+
+# The owner's second complaint, with the seat he actually drafts from: seat 6
+# of an eight-team draft, turns 6, 11, 22 and 27. Josh Allen is ESPN's 26th
+# player with an ADP of 21, and he is starred. The four names ahead of him
+# are the running backs and receivers ESPN ranks in the teens; the three
+# behind him are the field each position is priced against.
+WAIT_IDS = ["rb_hi", "wr_hi", "wr_2", "rb_2", "allen",
+            "rb_lo", "wr_lo", "qb_lo"]
+WAIT_POS = ["RB", "WR", "WR", "RB", "QB", "RB", "WR", "QB"]
+WAIT_RANK = [12.0, 14.0, 15.0, 16.0, 26.0, 44.0, 46.0, 48.0]
+WAIT_ADP = [12.0, 14.0, 15.0, 16.0, 21.0, 44.0, 46.0, 48.0]
+# Allen outprojects everybody and the next quarterback is 47 points behind
+# him, which is the whole of the old argument for taking him in round 2.
+WAIT_PROJ = [310.0, 290.0, 285.0, 300.0, 380.0, 245.0, 256.0, 333.0]
+# The pick each was taken at, out of a hundred recorded drafts. Allen lasts
+# to pick 11 in ninety of them and to 22 in sixty; conditioned on having
+# reached 21, he lasts to 27 in forty. The four ahead of him are 60-70% to
+# be gone by 22, which is what makes them picks and him a wait.
+WAIT_TAKEN = {"rb_hi": {9: 30, 15: 40}, "wr_hi": {9: 40, 16: 35},
+              "wr_2": {9: 40, 16: 35}, "rb_2": {9: 30, 15: 40},
+              "allen": {8: 10, 15: 30, 24: 36},
+              "rb_lo": {}, "wr_lo": {}, "qb_lo": {}}
+
+
+def wait_args(**over):
+    args = dict(
+        proj=list(WAIT_PROJ), positions=list(WAIT_POS),
+        player_ids=list(WAIT_IDS), espn_rank=list(WAIT_RANK),
+        espn_adp=list(WAIT_ADP), market_rank=list(WAIT_RANK),
+        byes=[5, 6, 7, 8, 9, 10, 11, 12], health=[5] * 8,
+        names={p: p for p in WAIT_IDS}, roster_counts={},
+        settings=settings(), turns=[6, 11, 22, 27], picks_made=0,
+        favourites={"allen"}, table=make_table(WAIT_TAKEN))
+    args.update(over)
+    return args
+
+
+def test_a_starred_quarterback_who_will_last_is_not_the_round_two_pick():
+    """THE OWNER'S COMPLAINT. Josh Allen recommended at pick 11 of an
+    eight-team draft: ESPN's 26th player, ten picks ahead of his own ADP,
+    and 60% to still be there at pick 22. The running back ESPN ranks 16th
+    is 30% to be there -- so the wait is the whole argument, and it names
+    the man who will be gone.
+
+    Allen is not filtered out. He is eligible, he is starred, and he is the
+    second name on the card: 26 - 8 for the star + 2 for a ten-pick reach
+    against the sixteenth-ranked back's 16."""
+    turns = pl.build_plan(**wait_args())
+    at_11 = turns[1]
+    assert at_11["pick_no"] == 11
+    assert at_11["target"]["player_id"] == "rb_2"
+    assert at_11["target"]["player_id"] != "allen"
+    # 70% of recorded drafts have taken him by 22: that is the pro the pick
+    # is made on, and it is a new one.
+    assert ("likely gone before your next pick (70 %)"
+            in at_11["target"]["pros"])
+    # He is the honest second name, not the recommendation.
+    assert at_11["alternates"][0]["player_id"] == "allen"
+    # And the turn before it belongs to the twelfth-ranked back, who is
+    # 70% to be gone by 11 himself.
+    assert turns[0]["target"]["player_id"] == "rb_hi"
+
+
+def test_the_same_quarterback_eleven_picks_later_is_the_pick():
+    """Pick 22, with the top of the board gone and 21 picks in. Allen is
+    40% to last to pick 27 now, so the fifteen ranks that held him off at 11
+    are not charged; his ADP is behind us, so the reach is not charged
+    either. ESPN's 26th player, starred, is the best thing on the board
+    that will not still be there -- and this time the room says so."""
+    turn = pl.build_plan(**wait_args(
+        turns=[22, 27], picks_made=21,
+        roster_counts={"RB": 1, "WR": 1}))[0]
+    assert turn["pick_no"] == 22
+    assert turn["target"]["player_id"] == "allen"
+    assert ("likely gone before your next pick (60 %)"
+            in turn["target"]["pros"])
+    # Nothing on his card calls it a reach any more.
+    assert not any("reach" in con for con in turn["target"]["cons"])
+
+
+def test_a_favourite_who_will_be_gone_beats_a_stranger_who_will_last():
+    """Spec section 1's fourth case. The starred fifteenth is 30% to still
+    be there at my next turn and the strangers ESPN ranks 6th and 10th are
+    certain to be: the starred one is the pick, because the other two are
+    picks I can also make at pick 11.
+
+    THE CONTROL is the same board with nobody lasting, where ESPN's 6th
+    goes back ahead of the starred 15th -- which is the favourites bonus
+    being a tier and not a round, exactly as it was before the wait
+    existed."""
+    ids = ["wr6", "wr10", "wr15"]
+    ranks = [6.0, 10.0, 15.0]
+    proj = [200.0, 195.0, 190.0]
+    common = dict(espn_rank=ranks, espn_adp=ranks, market_rank=ranks,
+                  settings=settings(), turns=[6, 11], picks_made=0,
+                  favourites={"wr15"})
+    lasting = make_table({"wr6": {}, "wr10": {}, "wr15": {9: 70}})
+    turn = pl.build_plan(**board_args(
+        lasting, ids, ["WR", "WR", "WR"], proj, **common))[0]
+    assert turn["target"]["player_id"] == "wr15"
+
+    nobody_lasts = make_table({pid: {9: 70} for pid in ids})
+    turn = pl.build_plan(**board_args(
+        nobody_lasts, ids, ["WR", "WR", "WR"], proj, **common))[0]
+    assert turn["target"]["player_id"] == "wr6"
+
+
+def test_a_favourite_is_waitable_only_when_he_is_really_quite_safe():
+    """The two lines, from one board. A stranger is waited on at a coin
+    flip; a starred player has to be 65% safe before the plan will risk the
+    same wait, which is the same allowance his eligibility gets."""
+    board = pl._Board(
+        proj=[100.0, 100.0], positions=["WR", "WR"],
+        player_ids=["star", "stranger"], espn_rank=[10.0, 10.0],
+        espn_adp=[10.0, 10.0], market_rank=[10.0, 10.0], byes=None,
+        health=None, names={}, favourites={"star"})
+    assert list(board.waitable([0.30, 0.30])) == [pl.WAITABLE, pl.WAITABLE]
+    # 40% gone: the stranger is still waited on, the favourite is taken.
+    assert list(board.waitable([0.40, 0.40])) == [0.0, pl.WAITABLE]
+    assert list(board.waitable([0.60, 0.60])) == [0.0, 0.0]
+
+
+def test_the_reach_is_half_a_rank_for_every_pick_past_six():
+    """A six-pick reach is free, a ten-pick reach costs two ranks and a
+    thirty-pick reach twelve. A player with no ADP is not reaching, and
+    neither is one whose ADP is already behind us."""
+    board = pl._Board(
+        proj=[100.0] * 5, positions=["WR"] * 5,
+        player_ids=["a", "b", "c", "d", "e"], espn_rank=[20.0] * 5,
+        espn_adp=[17.0, 21.0, 41.0, np.nan, 5.0],
+        market_rank=[20.0] * 5, byes=None, health=None, names={},
+        favourites=set())
+    reach = board.reach(11)
+    assert list(reach) == [6.0, 10.0, 30.0, 0.0, 0.0]
+    priority = board.priority(np.zeros(5), np.zeros(5), reach)
+    assert list(priority) == [20.0, 22.0, 32.0, 20.0, 20.0]
+
+
+def test_the_wait_and_the_reach_say_themselves_on_the_card():
+    """The three strings section 1 fixes, in the words it fixes them in."""
+    pros, cons = pl.reasons_for(
+        favourite=False, lasts=0.28, at_pick=22, edge=None, next_pick=27,
+        position="RB", slot=None, espn_rank=30.0, espn_adp=30.0, bye=None,
+        health=None, gone_next=0.72, waitable=False, reach=8.0, reach_at=22)
+    assert "likely gone before your next pick (72 %)" in pros
+    assert "reach: ADP 30 at pick 22" in cons
+
+    pros, cons = pl.reasons_for(
+        favourite=True, lasts=0.9, at_pick=22, edge=None, next_pick=27,
+        position="QB", slot=None, espn_rank=26.0, espn_adp=21.0, bye=None,
+        health=None, gone_next=0.19, waitable=True, reach=0.0, reach_at=22)
+    assert cons[0] == "you could probably wait — 81 % still there at pick 27"
+    assert not any("likely gone" in pro for pro in pros)
+
+
+def test_the_survival_line_is_not_printed_twice_on_one_card():
+    """On the clock `target_now` measures "still there" at the very turn the
+    waiting is about, so the bare percentage and the line that judges it
+    would be the same number as a pro and as a con."""
+    pros, cons = pl.reasons_for(
+        favourite=False, lasts=0.6, at_pick=13, edge=None, next_pick=13,
+        position="RB", slot=None, espn_rank=5.0, espn_adp=5.0, bye=None,
+        health=None, gone_next=0.4, waitable=True, reach=0.0, reach_at=4)
+    assert not any("still there at pick 13" in pro for pro in pros)
+    assert cons == ["you could probably wait — 60 % still there at pick 13"]
 
 
 def test_a_kicker_is_not_targeted_before_the_round_kickers_go_in():
