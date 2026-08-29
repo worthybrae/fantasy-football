@@ -286,3 +286,86 @@ def test_a_writer_that_omits_the_new_columns_still_records_its_draft(corpus):
     assert pool["proj_points"].iloc[0] == 250.0     # not shifted a column
     assert pd.isna(pool["espn_rank"].iloc[0])
     assert pd.isna(picks["seconds_to_pick"]).all()
+
+
+# ---------------------------------------------------------------------------
+# Shapes: what a draft was played under, and how much of each the corpus holds.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("blob,expected", [
+    ('{"receptions": 1.0}', "ppr"),
+    ('{"receptions": 0.5}', "half"),
+    ('{"receptions": 0.0}', "std"),
+    ('{"passing_tds": 4.0}', "std"),            # scored, and not receptions
+    # The whole-settings blob, which is what every draft recorded before
+    # `scoring_json` was written carries -- and the only thing on disk today.
+    ('{"teams": 12, "scoring": {"receptions": 0.5}}', "half"),
+    ('{"teams": 12, "scoring": {}}', "ppr"),    # nothing mapped: PPR, as ever
+    (None, "ppr"),
+    ("", "ppr"),
+    ("not json at all", "ppr"),
+    ("[1, 2, 3]", "ppr"),
+])
+def test_a_drafts_format_is_read_off_what_a_reception_was_worth(blob, expected):
+    assert dl.draft_format(blob) == expected
+
+
+def test_the_format_rule_is_the_leagues_own():
+    """One rule, in `scoring.league`, read by both: the corpus is COUNTED by
+    this function and QUERIED with the league's, so two copies of the
+    thresholds that drifted would have a room looking up a shape the farm
+    never recorded."""
+    import dataclasses
+
+    from scoring import league as league_mod
+
+    base = league_mod.default_settings()
+    for points, expected in ((1.0, "ppr"), (0.5, "half"), (0.0, "std")):
+        settings = dataclasses.replace(
+            base, scoring={**base.scoring, "receptions": points})
+        assert league_mod.scoring_format(settings) == expected
+        assert dl.draft_format(league_mod.to_json(settings)) == expected
+
+
+def _head(corpus, teams, receptions, n, source=dl.SOURCE_MOCK):
+    import json
+
+    for i in range(n):
+        dl.record(corpus, dl.DraftRecord(
+            source=source, league_id="1", season=2026, teams=teams,
+            rounds=16, started_at=f"{source}-{teams}-{receptions}-{i}",
+            scoring_json=json.dumps({"receptions": receptions})))
+
+
+def test_the_corpus_counts_its_drafts_by_shape(corpus, tmp_path):
+    """What the farm's rotation reads: how many drafts of each (teams,
+    format) are already recorded."""
+    _head(corpus, 8, 1.0, 3)
+    _head(corpus, 10, 1.0, 2)
+    _head(corpus, 12, 0.0, 1)
+    corpus.close()
+    assert dl.shape_counts(str(tmp_path / "corpus.duckdb")) == {
+        (8, "ppr"): 3, (10, "ppr"): 2, (12, "std"): 1}
+
+
+def test_a_draft_with_no_team_count_is_left_out_rather_than_guessed(corpus,
+                                                                    tmp_path):
+    """Team count is the one field a shape cannot be assumed for -- see
+    `mock_farm.play_draft`, which refuses a room the lobby and the league
+    disagree about."""
+    _head(corpus, 8, 1.0, 2)
+    dl.record(corpus, dl.DraftRecord(source=dl.SOURCE_MOCK, league_id="1",
+                                     season=2026, started_at="shapeless"))
+    corpus.close()
+    assert dl.shape_counts(str(tmp_path / "corpus.duckdb")) == {(8, "ppr"): 2}
+
+
+def test_counting_an_unreadable_corpus_is_empty_rather_than_an_error(tmp_path):
+    """The farm holds the write lock while it records, so a poll that cannot
+    read the counts is ordinary -- and `{}` reads as "nothing recorded yet",
+    which makes the rotation try every shape rather than none."""
+    assert dl.shape_counts(str(tmp_path / "does-not-exist.duckdb")) == {}
+    junk = tmp_path / "junk.duckdb"
+    junk.write_text("not a database")
+    assert dl.shape_counts(str(junk)) == {}
