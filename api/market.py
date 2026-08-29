@@ -640,9 +640,10 @@ def _at_picks_payload(picks: tuple, board_conn) -> dict:
     ROUND is not comparable between league sizes -- pick 14 is round 2 in an
     8-team draft and round 1 in a 16-team one. A pick NUMBER is comparable in
     the one way this question needs: at pick 23, twenty-two players are off the
-    board either way. The room being drawn may be 12 or 14 teams; the archive
-    is 8-team mocks, and the payload says so (`teams`/`rounds`/`drafts`) so the
-    page can attribute it rather than implying it is that room's own history.
+    board either way. The room being drawn may be 12 or 14 teams; whatever
+    shape the archive itself is, the payload says so
+    (`teams`/`rounds`/`format`/`drafts`) so the page can attribute it rather
+    than implying it is that room's own history.
 
     A pick nobody ever reached (a 14-team room's pick 200, an archive that
     stops at 128) comes back present and empty -- `observed: 0`, no names. The
