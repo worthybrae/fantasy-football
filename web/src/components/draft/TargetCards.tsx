@@ -106,6 +106,7 @@ function fromCandidate(c: LiveCandidate): PlanPlayer {
     player_id: c.player_id,
     lasts_pct: c.lasts_pct,
     edge_pts: c.edge_pts,
+    edge_at_pick: c.edge_at_pick,
     pros: [],
     cons: [],
   }
@@ -276,6 +277,15 @@ export default function TargetCards({
           const source = onClockTurn || turn === null ? c ?? row : row
           const lasts = source.lasts_pct
           const edge = source.edge_pts
+          // THE EDGE IS NOT PRICED AT THE PICK ABOVE IT. It is what taking
+          // him at this turn beats, so it is measured to the turn AFTER the
+          // one the card is for -- pick 11 on a card headed "pick 6". The
+          // caption used to reuse `at` and name the card's own pick, which
+          // made the big number and the reason under it disagree by a whole
+          // round. The server says which pick it priced; "later" is the
+          // honest fallback when it says nothing.
+          const edgeAtPick = source.edge_at_pick ?? null
+          const edgeAt = edgeAtPick === null ? 'later' : `at pick ${edgeAtPick}`
           return (
             <div key={row.player_id}
                  className={`target-card${i === 0 ? ' target-card-lead' : ''}`}>
@@ -354,8 +364,8 @@ export default function TargetCards({
                   </span>
                   <span className="target-fig-cap">
                     {edge !== null && Math.round(edge) < 0
-                      ? <>vs waiting for {position || 'him'} at {at}</>
-                      : <>over the next {position || 'player'} you would get at {at}</>}
+                      ? <>vs waiting for {position || 'him'} {edgeAt}</>
+                      : <>over the next {position || 'player'} you would get {edgeAt}</>}
                   </span>
                 </div>
               </div>

@@ -354,11 +354,17 @@ export function ageLabel(createdAt: string): string {
 // against the full board is the caller's job, via `player_id` against
 // `fetchPlayers()`'s one-time-fetched list.
 //
-// The two computed numbers are `lasts_pct` and `edge_pts`, and both are
-// measured against ONE pick: `lasts_at_pick`, the reader's own next turn.
-// Both are null when there is no next turn to measure to -- the last round,
-// or a room with no seat resolved yet -- and the table draws a dash rather
-// than a zero, which would be a claim about a probability nobody computed.
+// The two computed numbers are `lasts_pct` and `edge_pts`, and on a
+// candidate row both are measured against ONE pick, the reader's own next
+// turn -- which each of them names for itself (`lasts_at_pick`,
+// `edge_at_pick`), because the PLAN's rows do not share a pick: a turn's
+// `lasts_pct` is the chance at that turn and its `edge_pts` is priced at the
+// turn after it. A caption that inferred the pick from the row it was drawn
+// on got that wrong in the room, which is why both are on the wire.
+// All four are null when there is no next turn to measure to -- the last
+// round, or a room with no seat resolved yet -- and the table draws a dash
+// rather than a zero, which would be a claim about a probability nobody
+// computed.
 export type LiveCandidate = {
   player_id: string
   position: string
@@ -380,9 +386,13 @@ export type LiveCandidate = {
   lasts_pct: number | null
   lasts_at_pick: number | null
   /** His projection minus the best player at his position you can expect to
-   *  get at `lasts_at_pick` instead. Positive means taking him now beats
+   *  get at `edge_at_pick` instead. Positive means taking him now beats
    *  waiting; negative means waiting does. */
   edge_pts: number | null
+  /** The pick `edge_pts` is priced at -- the reader's next turn, the same
+   *  one `lasts_at_pick` names on this row. Its own key because the plan's
+   *  rows price theirs a turn further on. */
+  edge_at_pick: number | null
   /** Which roster slot he would fill -- scoring/gain.need_kind's own words
    *  ("starter", "flex", "deferred", "bench", "capped"). Null before a seat
    *  is resolved, since there is no roster to fill. */
@@ -397,15 +407,19 @@ export type LiveCandidate = {
 
 /** One player in the plan: the target of a turn, or one of its alternates.
  *
- *  `lasts_pct` and `edge_pts` here are measured at THAT TURN's pick, not at
- *  the reader's next one -- which is what makes a plan a plan rather than a
- *  list of today's numbers repeated. Alternates carry empty `pros`/`cons`:
+ *  `lasts_pct` here is the chance at THAT TURN's pick, not at the reader's
+ *  next one -- which is what makes a plan a plan rather than a list of
+ *  today's numbers repeated. `edge_pts` is measured a turn further on again:
+ *  it is what taking him at this turn beats, so it is priced at the turn
+ *  after it, and `edge_at_pick` is that pick (null on the last turn, where
+ *  there is nothing left to wait for). Alternates carry empty `pros`/`cons`:
  *  the reasoning is written for the target, and three paragraphs per turn is
  *  not a plan anybody reads under a pick clock. */
 export interface PlanPlayer {
   player_id: string
   lasts_pct: number | null
   edge_pts: number | null
+  edge_at_pick: number | null
   pros: string[]
   cons: string[]
 }
@@ -970,6 +984,7 @@ export interface LiveMockCandidate {
   lasts_pct?: number | null
   lasts_at_pick?: number | null
   edge_pts?: number | null
+  edge_at_pick?: number | null
   need?: string | null
 }
 

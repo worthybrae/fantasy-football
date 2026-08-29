@@ -219,6 +219,7 @@ export default function DemoRoom({ onMode, live = false, site = false }: {
       market_rank: row.market_rank ?? row.adp ?? null,
       lasts_pct: row.lasts_pct ?? null,
       lasts_at_pick: row.lasts_at_pick ?? null,
+      edge_at_pick: row.edge_at_pick ?? null,
       edge_pts: row.edge_pts ?? null,
       need: row.need ?? null,
       // Nobody's guys: this is somebody else's draft, watched from outside.

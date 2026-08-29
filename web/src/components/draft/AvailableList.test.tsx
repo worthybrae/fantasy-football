@@ -21,6 +21,7 @@ function candidate(over: Partial<LiveCandidate> & { player_id: string }): LiveCa
     lasts_pct: 50,
     lasts_at_pick: 20,
     edge_pts: 10,
+    edge_at_pick: 20,
     need: 'starter',
     favourite: false,
     rank: 1,

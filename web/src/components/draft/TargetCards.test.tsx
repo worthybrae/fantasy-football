@@ -22,6 +22,7 @@ function candidate(id: string, over: Partial<LiveCandidate> = {}): LiveCandidate
     lasts_pct: 40,
     lasts_at_pick: 21,
     edge_pts: 12,
+    edge_at_pick: 21,
     need: 'starter',
     favourite: false,
     rank: 1,
@@ -48,19 +49,26 @@ const PLAYERS: Record<string, Player> = Object.fromEntries(
   IDS.map((id, i) => [id, player(id, NAMES[i])]))
 const CANDIDATES = IDS.map((id) => candidate(id))
 
-function turn(pickNo: number, round: number, ids: string[]): LivePlanTurn {
+// `edgeAt` is the turn AFTER `pickNo` -- where the plan prices what taking
+// him at this turn is worth, and never the pick the card is headed with.
+function turn(pickNo: number, round: number, ids: string[],
+              edgeAt: number | null): LivePlanTurn {
   return {
     pick_no: pickNo,
     round,
-    target: { player_id: ids[0], lasts_pct: 100, edge_pts: 14, pros: ['★ favourite'], cons: [] },
+    target: {
+      player_id: ids[0], lasts_pct: 100, edge_pts: 14, edge_at_pick: edgeAt,
+      pros: ['★ favourite'], cons: [],
+    },
     alternates: ids.slice(1).map((id) => (
-      { player_id: id, lasts_pct: 60, edge_pts: 3, pros: [], cons: [] })),
+      { player_id: id, lasts_pct: 60, edge_pts: 3, edge_at_pick: edgeAt,
+        pros: [], cons: [] })),
   }
 }
 
 const PLAN = [
-  turn(12, 1, ['now1', 'now2', 'now3']),
-  turn(21, 2, ['next1', 'next2', 'next3']),
+  turn(12, 1, ['now1', 'now2', 'now3'], 21),
+  turn(21, 2, ['next1', 'next2', 'next3'], 30),
 ]
 
 // `onTheClock` defaults to `isMyTurn` here only because that is the ordinary
@@ -109,6 +117,47 @@ test('waiting, they are the next turn\'s', () => {
   // alternates at 60.
   expect(screen.getByText('100')).toBeTruthy()
   expect(screen.getAllByText('60')).toHaveLength(2)
+})
+
+// THE CARD IS HEADED WITH ONE PICK AND CARRIES TWO NUMBERS PRICED AT TWO
+// DIFFERENT ONES. The big "still there" figure is the chance at the turn on
+// the card; the big points figure is what taking him at that turn beats,
+// which is measured to the turn AFTER it. The caption used to name the
+// card's own pick for both, so a card headed "pick 6" said "+47 pts over
+// the next QB you would get at pick 6" while its own reason underneath said
+// pick 11.
+test('the edge caption names the pick the edge was priced at', () => {
+  draw(false)
+  expect(screen.getAllByText('still there at pick 21')).toHaveLength(3)
+  expect(screen.getAllByText(/over the next RB you would get at pick 30/))
+    .toHaveLength(3)
+  expect(screen.queryByText(/you would get at pick 21/)).toBeNull()
+})
+
+test('on the clock the edge is priced at the reader\'s next turn', () => {
+  draw(true)
+  // The figures come off the candidate row there, and its own
+  // `edge_at_pick` is the pick the caption names.
+  expect(screen.getAllByText(/over the next RB you would get at pick 21/))
+    .toHaveLength(3)
+})
+
+test('an edge with no pick behind it says "later" rather than guessing', () => {
+  render(
+    <TargetCards
+      plan={[turn(21, 2, ['next1', 'next2', 'next3'], null)]}
+      candidates={[]}
+      players={PLAYERS}
+      onDraft={() => {}}
+      isMyTurn={false}
+      onTheClock={false}
+      pickNo={12}
+      settings={null}
+      recompute={null}
+      onOpenPlayer={() => {}}
+    />,
+  )
+  expect(screen.getAllByText(/you would get later/)).toHaveLength(3)
 })
 
 // A PAYWALLED OR RECONNECTING ROOM STILL KNOWS WHOSE PICK IT IS. Both

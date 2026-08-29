@@ -1410,9 +1410,17 @@ export default function AvailableList({
     + 'nearly everybody lasts and this column says so; a long wait is where '
     + 'it starts separating names. A low percentage is the argument for '
     + 'taking him now.'
+  // THE PICK COMES OFF THE PAYLOAD (`edge_at_pick`), not off the round the
+  // reader thinks he is in. Every row on this list is priced at the same
+  // pick -- the reader's next turn -- so one sentence can name it; the
+  // plan's rows are priced a turn further on again, which is why the number
+  // carries its pick at all.
+  const edgeAtPick = candidates.find(
+    (c) => c.edge_at_pick !== null)?.edge_at_pick ?? null
   const edgeTitle = 'What taking him now is worth in POINTS: his projection '
     + 'minus the best player at his position you can expect to still be '
-    + 'there at your next turn, weighted by how likely each of them is to '
+    + `there ${edgeAtPick === null ? 'at your next turn' : `at pick ${edgeAtPick}`}`
+    + ', weighted by how likely each of them is to '
     + 'last. Positive means waiting costs you; negative means waiting is the '
     + 'better play and the column says so rather than talking you into a '
     + 'pick.'

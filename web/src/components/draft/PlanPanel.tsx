@@ -38,6 +38,20 @@ function edgeTone(edge: number | null): string {
   return shown > 0 ? 'is-up' : shown < 0 ? 'is-down' : ''
 }
 
+/** What the points on a plan row are, in the words the cards use. `at` is
+ *  `edge_at_pick` -- the turn AFTER the row's own, since the edge is what
+ *  taking him at this turn beats. "later" when the payload has no pick for
+ *  it, which is the last turn: there is nothing left to wait for. */
+function edgeTitle(edge: number | null, at: number | null,
+                   position: string | undefined): string {
+  if (edge === null) return 'No next turn to price him against'
+  const when = at === null ? 'later' : `at pick ${at}`
+  const pos = position ?? 'player'
+  return Math.round(edge) < 0
+    ? `${fmtSigned(edge)} pts vs waiting for ${pos} ${when}`
+    : `${fmtSigned(edge)} pts over the next ${pos} you would get ${when}`
+}
+
 interface PlanPanelProps {
   /** The reader's remaining turns, in pick order. */
   plan: LivePlanTurn[]
@@ -119,15 +133,26 @@ export default function PlanPanel({
                   that toned them differently would be the third answer to a
                   question that has one. A null in either gets no colour at
                   all: the ramp is a claim about a real number. */}
+              {/* THE TWO NUMBERS ARE MEASURED TO TWO DIFFERENT PICKS, and
+                  the rail is too narrow to caption either -- so each one
+                  says which pick it belongs to on hover. The chance is the
+                  chance at THIS turn; the points are what taking him here
+                  beats, which is priced at the turn after it
+                  (`edge_at_pick`, straight off the payload -- the room does
+                  not infer it, which is how the cards came to caption the
+                  wrong pick). */}
               <span className="plan-nums mono">
                 <span
                   className="plan-lasts"
+                  title={`Chance he is still there at pick ${turn.pick_no}`}
                   style={target.lasts_pct === null
                     ? undefined : { color: riskTone(target.lasts_pct) }}
                 >
                   {target.lasts_pct === null ? '—' : `${Math.round(target.lasts_pct)}%`}
                 </span>
-                <span className={`plan-edge delta-tone ${edgeTone(target.edge_pts)}`}>
+                <span className={`plan-edge delta-tone ${edgeTone(target.edge_pts)}`}
+                      title={edgeTitle(target.edge_pts, target.edge_at_pick,
+                                       player?.position)}>
                   {fmtSigned(target.edge_pts)}
                 </span>
               </span>

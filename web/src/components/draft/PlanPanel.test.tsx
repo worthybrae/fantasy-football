@@ -29,12 +29,14 @@ const TURN: LivePlanTurn = {
     player_id: 'p1',
     lasts_pct: 62,
     edge_pts: 18,
+    // The turn is pick 21 and the edge is priced at the turn AFTER it.
+    edge_at_pick: 30,
     pros: ['★ favourite', '62% still there at pick 21'],
     cons: ['ADP 14 vs ESPN 22 — may go earlier'],
   },
   alternates: [
-    { player_id: 'p2', lasts_pct: 40, edge_pts: 4, pros: [], cons: [] },
-    { player_id: 'p3', lasts_pct: 88, edge_pts: -2, pros: [], cons: [] },
+    { player_id: 'p2', lasts_pct: 40, edge_pts: 4, edge_at_pick: 30, pros: [], cons: [] },
+    { player_id: 'p3', lasts_pct: 88, edge_pts: -2, edge_at_pick: 30, pros: [], cons: [] },
   ],
 }
 
@@ -52,6 +54,13 @@ test('renders the turn, its target and the plan\'s own reasons', () => {
   expect(screen.getByText('Puka')).toBeTruthy()
   expect(screen.getByText('62%')).toBeTruthy()
   expect(screen.getByText('+18')).toBeTruthy()
+  // THE TWO FIGURES BELONG TO TWO DIFFERENT PICKS, and each says which.
+  // The chance is the chance at this turn; the points are what taking him
+  // here beats, priced at the turn after it.
+  expect(screen.getByText('62%').getAttribute('title'))
+    .toBe('Chance he is still there at pick 21')
+  expect(screen.getByText('+18').getAttribute('title'))
+    .toBe('+18 pts over the next WR you would get at pick 30')
   // The reasoning, both ways round.
   expect(screen.getByText('★ favourite')).toBeTruthy()
   expect(screen.getByText('62% still there at pick 21')).toBeTruthy()

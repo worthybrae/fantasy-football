@@ -142,6 +142,7 @@ function Recommendation({ room, profile }: {
     market_rank: row.market_rank ?? row.adp ?? null,
     lasts_pct: row.lasts_pct ?? null,
     lasts_at_pick: row.lasts_at_pick ?? null,
+    edge_at_pick: row.edge_at_pick ?? null,
     edge_pts: row.edge_pts ?? null,
     need: row.need ?? null,
     favourite: false,
