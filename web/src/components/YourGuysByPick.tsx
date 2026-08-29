@@ -71,7 +71,11 @@ function readSeat(): Seat {
 }
 
 /** The chip's tint. Exported because the thresholds are the card's whole
- *  claim and a test should be able to state them without a DOM. */
+ *  claim and a test should be able to state them without a DOM.
+ *
+ *  TAKES THE ROUNDED NUMBER, the one the chip actually prints. Banding the
+ *  raw value instead put 69.6% in a green chip reading 70% and 39.5% in an
+ *  amber one reading 40%, which is a card disagreeing with itself. */
 export function tintFor(chance: number | null): string {
   if (chance === null) return 'gbp-none'
   if (chance >= LIKELY) return 'gbp-likely'
@@ -186,7 +190,11 @@ export default function YourGuysByPick({ players }: {
                       </span>
                     </th>
                     {picks.map((pick, i) => {
-                      const chance = row.avail[i] ?? null
+                      // Rounded ONCE, then banded and printed from the same
+                      // number, so the tint can never contradict the text.
+                      const raw = row.avail[i]
+                      const chance = raw === null || raw === undefined
+                        ? null : Math.round(raw)
                       // THE MARKER, not a second colour: the last turn he is
                       // still better than even to reach is the one to plan
                       // on, and it is often an amber cell rather than a green
@@ -198,7 +206,7 @@ export default function YourGuysByPick({ players }: {
                             className={`gbp-chip mono ${tintFor(chance)}${best ? ' gbp-best' : ''}`}
                             title={best ? `Plan on him at pick ${pick}` : undefined}
                           >
-                            {chance === null ? '—' : `${Math.round(chance)}%`}
+                            {chance === null ? '—' : `${chance}%`}
                           </span>
                         </td>
                       )

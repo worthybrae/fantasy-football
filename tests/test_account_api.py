@@ -564,8 +564,18 @@ OUTLOOK_DRAFTS = 30
 # third would be a counted answer at all.
 ALWAYS_EARLY = {"p7": 1, "p3": 2, "p19": 3}
 LATE = {"p11": 55}
+
+# THE ONE WHOSE ANSWER CROSSES THE LINE. Taken at pick 20 in two drafts out of
+# every three and at pick 30 in the third, so from the default seat he reads
+# 100% at picks 5 and 16 and 33% at pick 25 -- his last turn above a coin flip
+# is the SECOND of them, not the first. `best_pick` is the only field with a
+# direction to get wrong, and this player is the one that says which way.
+SPLIT = "p6"
+SPLIT_EARLY = 20
+SPLIT_LATE = 30
+
 NEVER = "p25"
-OUTLOOK_SIX = ["p7", "p3", "p19", "p11", NEVER, "p2"]
+OUTLOOK_LIST = ["p7", "p3", "p19", SPLIT, "p11", NEVER, "p2"]
 
 
 def _corpus(path, drafts=OUTLOOK_DRAFTS):
@@ -579,12 +589,14 @@ def _corpus(path, drafts=OUTLOOK_DRAFTS):
     try:
         for draft in range(drafts):
             pool, picks = [], []
-            for i, player_id in enumerate(OUTLOOK_SIX):
+            for i, player_id in enumerate(OUTLOOK_LIST):
                 pool.append({"player_id": player_id, "position": "RB",
                              "team": "FA", "adp_rank": float(i + 1),
                              "proj_points": 200.0, "espn_rank": float(i + 1),
                              "espn_proj": 200.0, "bye": 5})
-            for player_id, pick_no in {**ALWAYS_EARLY, **LATE}.items():
+            taken = {**ALWAYS_EARLY, **LATE,
+                     SPLIT: SPLIT_LATE if draft % 3 == 0 else SPLIT_EARLY}
+            for player_id, pick_no in taken.items():
                 picks.append({"pick_no": pick_no, "round": 1 + (pick_no - 1) // 8,
                               "slot": 1, "owner_key": "o", "is_anonymous": False,
                               "player_id": player_id, "position": "RB"})
@@ -641,7 +653,7 @@ def test_a_seat_that_does_not_exist_is_refused(client, monkeypatch, counted,
     selects; a value outside the bounds means the client is confused, and
     answering for some other seat would hide it."""
     _sign_in(monkeypatch)
-    billing.set_favorites([NEW_ID], OUTLOOK_SIX)
+    billing.set_favorites([NEW_ID], OUTLOOK_LIST)
 
     res = _outlook(client, **params)
 
@@ -656,7 +668,7 @@ def test_the_shape(client, monkeypatch, counted):
     turns are the snake's own: 5, then 16 (round two counts back), then 25.
     """
     _sign_in(monkeypatch)
-    billing.set_favorites([NEW_ID], OUTLOOK_SIX)
+    billing.set_favorites([NEW_ID], OUTLOOK_LIST)
 
     res = _outlook(client)
 
@@ -665,7 +677,7 @@ def test_the_shape(client, monkeypatch, counted):
     body = res.json()
     assert body["teams"] == 10 and body["slot"] == 5
     assert body["picks"] == [5, 16, 25, 36, 45, 56, 65, 76]
-    assert len(body["players"]) == len(OUTLOOK_SIX)
+    assert len(body["players"]) == len(OUTLOOK_LIST)
     for player in body["players"]:
         assert set(player) == {
             "player_id", "name", "position", "team", "headshot", "espn_rank",
@@ -679,7 +691,7 @@ def test_the_shape(client, monkeypatch, counted):
 def test_the_seat_decides_the_picks(client, monkeypatch, counted):
     """The first seat of an eight-team league turns at 1 and 16, not at 5."""
     _sign_in(monkeypatch)
-    billing.set_favorites([NEW_ID], OUTLOOK_SIX)
+    billing.set_favorites([NEW_ID], OUTLOOK_LIST)
 
     body = _outlook(client, teams=8, slot=1).json()
 
@@ -701,7 +713,7 @@ def test_a_player_the_corpus_always_takes_early_is_gone_by_pick_five(
     are the counted ones.
     """
     _sign_in(monkeypatch)
-    billing.set_favorites([NEW_ID], OUTLOOK_SIX)
+    billing.set_favorites([NEW_ID], OUTLOOK_LIST)
 
     body = _outlook(client).json()
     rows = {player["player_id"]: player for player in body["players"]}
@@ -713,12 +725,34 @@ def test_a_player_the_corpus_always_takes_early_is_gone_by_pick_five(
     assert rows[NEVER]["best_pick"] is not None
 
 
+def test_the_best_pick_is_the_last_turn_above_a_coin_flip(client, monkeypatch,
+                                                          counted):
+    """NOT THE FIRST ONE. The card answers "how long can I wait", so a
+    favourite who reads 100% at pick 5, 100% at pick 16 and 33% at pick 25 is
+    a pick-16 player -- and a `best_pick` that took the first turn over the
+    line would call him a pick-5 player, which is the same as saying reach for
+    him now.
+
+    `p6` is taken at pick 20 in two drafts out of every three and at pick 30
+    in the third, so the crossing is between two turns rather than at one.
+    """
+    _sign_in(monkeypatch)
+    billing.set_favorites([NEW_ID], OUTLOOK_LIST)
+
+    body = _outlook(client).json()
+    row = next(p for p in body["players"] if p["player_id"] == SPLIT)
+
+    assert body["picks"][:3] == [5, 16, 25]
+    assert row["avail"][:3] == [100.0, 100.0, 33.3]
+    assert row["best_pick"] == 16
+
+
 def test_the_rows_follow_the_saved_order(client, monkeypatch, counted):
     """ORDER IS THE PREFERENCE (the same rule the GET above keeps). Sorting by
     rank, or by how likely each one is to last, would be a different person's
     list -- and the saved order here is deliberately neither."""
     _sign_in(monkeypatch)
-    reversed_six = list(reversed(OUTLOOK_SIX))
+    reversed_six = list(reversed(OUTLOOK_LIST))
     billing.set_favorites([NEW_ID], reversed_six)
 
     body = _outlook(client).json()
@@ -749,6 +783,89 @@ def test_a_favourite_the_board_no_longer_names_carries_nulls(
     assert missing["best_pick"] is None
 
 
+def test_saving_a_second_list_changes_the_outlook(client, monkeypatch, counted):
+    """THE FAVOURITES ARE IN THE CACHE KEY, and this is the test that says so.
+
+    Both requests are inside the sixty seconds an answer is kept for, and
+    everything else about them -- the seat, the board, the session -- is
+    identical. A key made of only those would answer the second one with the
+    list that was replaced, which is the state somebody lands in the instant
+    they close the picker.
+    """
+    _sign_in(monkeypatch)
+    billing.set_favorites([NEW_ID], OUTLOOK_LIST)
+    first = _outlook(client, teams=12, slot=6).json()
+
+    shorter = OUTLOOK_LIST[:5]
+    billing.set_favorites([NEW_ID], shorter)
+    second = _outlook(client, teams=12, slot=6).json()
+
+    assert [p["player_id"] for p in first["players"]] == OUTLOOK_LIST
+    assert [p["player_id"] for p in second["players"]] == shorter
+
+
+def test_a_league_size_on_its_own_gets_a_seat_that_exists_in_it(
+        client, monkeypatch, counted):
+    """`?teams=4` is a caller saying "the smallest league, wherever you like".
+    The default seat is the middle of a TEN-team draft, so answering it
+    literally would refuse the request with a 422 about a fifth seat nobody
+    asked for."""
+    _sign_in(monkeypatch)
+    billing.set_favorites([NEW_ID], OUTLOOK_LIST)
+
+    body = _outlook(client, teams=4).json()
+
+    assert body["teams"] == 4 and body["slot"] == 4
+    assert body["picks"] == [4, 5, 12, 13, 20, 21, 28, 29]
+
+
+def test_the_board_can_arrive_without_espns_own_columns(client, monkeypatch,
+                                                        counted):
+    """`_ranked_board` hands back the plain board when `api/live.py` cannot be
+    imported, and the plain board has neither `espn_rank` nor `espn_adp`.
+
+    The two fields go null and every percentage is still counted -- ESPN's ADP
+    is only read for the players the corpus cannot answer for, and the corpus
+    answers for all of these. Before `_numeric_column`, this path was an
+    AttributeError inside `to_numpy` and a 500.
+    """
+    _sign_in(monkeypatch)
+    billing.set_favorites([NEW_ID], OUTLOOK_LIST)
+    monkeypatch.delattr("api.live._attach_espn_rank")
+
+    res = _outlook(client, teams=8, slot=2)
+
+    assert res.status_code == 200
+    rows = {p["player_id"]: p for p in res.json()["players"]}
+    assert rows["p7"]["espn_rank"] is None and rows["p7"]["espn_adp"] is None
+    assert rows["p7"]["market_rank"] is not None      # the board's own column
+    assert rows["p7"]["avail"] == [0.0] * 8
+    assert rows[NEVER]["avail"][0] == 100.0
+
+
+def test_a_board_that_names_a_player_twice_still_answers(client, monkeypatch,
+                                                         counted):
+    """A repeated `player_id` used to be a 500 for everybody, not a duplicated
+    row for one: `reindex` refuses an index with ANY repeated label, whether or
+    not the repeat is one of the ids being asked about."""
+    from scoring import board_cache
+
+    real = board_cache.cached_build_board
+
+    def _doubled(cur, *args, **kwargs):
+        board = real(cur, *args, **kwargs)
+        return pd.concat([board, board.head(2)], ignore_index=True)
+
+    _sign_in(monkeypatch)
+    billing.set_favorites([NEW_ID], OUTLOOK_LIST)
+    monkeypatch.setattr(board_cache, "cached_build_board", _doubled)
+
+    res = _outlook(client, teams=8, slot=3)
+
+    assert res.status_code == 200
+    assert len(res.json()["players"]) == len(OUTLOOK_LIST)
+
+
 def test_the_same_question_is_answered_once(client, monkeypatch, counted):
     """The board is the expensive half of this answer and none of its inputs
     move while somebody slides two selects, so a repeat is served from the
@@ -757,7 +874,7 @@ def test_the_same_question_is_answered_once(client, monkeypatch, counted):
     from api import account
 
     _sign_in(monkeypatch)
-    billing.set_favorites([NEW_ID], OUTLOOK_SIX)
+    billing.set_favorites([NEW_ID], OUTLOOK_LIST)
     built = []
     real = account._outlook_players
     monkeypatch.setattr(account, "_outlook_players",

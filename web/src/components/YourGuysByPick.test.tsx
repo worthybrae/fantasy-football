@@ -30,14 +30,17 @@ function player(name: string, avail: (number | null)[],
   }
 }
 
-// One player per band, so a single render states all four thresholds.
+// One player per band, and every value sitting on a boundary: the four picks
+// of each row are the threshold itself, the value that ROUNDS onto it, the
+// one that rounds off it, and a plain one. The card prints a rounded number,
+// so those are the cases where the tint and the text can disagree.
 const OUTLOOK: FavoritesOutlook = {
   teams: 10,
   slot: 5,
   picks: PICKS,
   players: [
-    player('Likely', [100, 88, 70, 69.9], 25),
-    player('Maybe', [40, 39.9, 12, 0]),
+    player('Likely', [70, 69.9, 69.4, 100], 25),
+    player('Maybe', [40, 39.9, 39.4, 0]),
     player('Ghost', [null, null, null, null]),
   ],
 }
@@ -60,7 +63,8 @@ async function draw(ids: string[] = IDS) {
 
 function chip(name: string, pick: number): HTMLElement {
   const row = screen.getByRole('row', { name: new RegExp(name) })
-  // +1: the first cell of the row is the player, not a pick.
+  // No offset: the player is a `rowheader`, so `cell` is the picks and
+  // nothing else, in the order the header row lists them.
   return within(row).getAllByRole('cell')[PICKS.indexOf(pick)]
     .firstElementChild as HTMLElement
 }
@@ -82,15 +86,26 @@ test('a row per favourite and a column per pick', async () => {
   expect(faces[0].getAttribute('src')).toBe('https://example.test/Likely.png')
 })
 
-test('the tint says which band the chance is in', async () => {
+test('the tint says which band the printed number is in', async () => {
   await draw()
 
-  // 70 is likely and 69.9 is not: the boundary is the claim.
-  expect(chip('Likely', 25).className).toContain('gbp-likely')
-  expect(chip('Likely', 36).className).toContain('gbp-maybe')
-  // 40 is maybe and 39.9 is thin.
+  // 70 is likely, and so is 69.9 -- because the chip SAYS 70%, and a green
+  // threshold that disagreed with the number printed on it would be a card
+  // arguing with itself. 69.4 says 69 and drops to amber.
+  expect(chip('Likely', 5).className).toContain('gbp-likely')
+  expect(chip('Likely', 16).textContent).toBe('70%')
+  expect(chip('Likely', 16).className).toContain('gbp-likely')
+  expect(chip('Likely', 25).textContent).toBe('69%')
+  expect(chip('Likely', 25).className).toContain('gbp-maybe')
+
+  // The same boundary again at the bottom of the amber band.
   expect(chip('Maybe', 5).className).toContain('gbp-maybe')
-  expect(chip('Maybe', 16).className).toContain('gbp-thin')
+  expect(chip('Maybe', 16).textContent).toBe('40%')
+  expect(chip('Maybe', 16).className).toContain('gbp-maybe')
+  expect(chip('Maybe', 25).textContent).toBe('39%')
+  expect(chip('Maybe', 25).className).toContain('gbp-thin')
+  expect(chip('Maybe', 36).className).toContain('gbp-thin')
+
   // A player the board cannot name is a dash, not a zero.
   expect(chip('Ghost', 5).className).toContain('gbp-none')
   expect(chip('Ghost', 5).textContent).toBe('—')
@@ -101,6 +116,7 @@ test('the best pick is marked, and only that one', async () => {
 
   expect(chip('Likely', 25).className).toContain('gbp-best')
   expect(chip('Likely', 16).className).not.toContain('gbp-best')
+  expect(chip('Likely', 36).className).not.toContain('gbp-best')
   // Nobody's best pick, so nothing on the row is marked.
   expect(chip('Maybe', 5).className).not.toContain('gbp-best')
 })

@@ -88,6 +88,10 @@ OUTLOOK_ROUNDS = 8
 MIN_TEAMS = 4
 MAX_TEAMS = 16
 DEFAULT_TEAMS = 10
+# The middle of a ten-team draft, CLAMPED to the league actually asked about:
+# `?teams=4` with no slot is a caller saying "the smallest league, wherever
+# you like", and answering it with a 422 about seat five would be refusing a
+# request nobody made.
 DEFAULT_SLOT = 5
 
 # "Still likely there." A coin flip is the line, so `best_pick` is the last
@@ -181,6 +185,26 @@ def _int_or_none(value):
     return None if number is None else int(number)
 
 
+def _numeric_column(frame, name):
+    """One column of `frame` as a float Series, or a column of NaN.
+
+    `frame.get(name)` answers `None` for a column that is not there, and
+    `pd.to_numeric(None, errors="coerce")` is a scalar NaN rather than a
+    Series -- fine right up to the `.to_numpy()` that follows it, which is an
+    AttributeError and a 500. The missing column is a REAL path, not a
+    defensive one: `_ranked_board` degrades to a board with no `espn_rank` and
+    no `espn_adp` when `api/live.py` cannot be imported. Mirrors
+    `api/live.py._board_column`, which exists for the same reason.
+    """
+    import numpy as np
+    import pandas as pd
+
+    values = None if name not in frame.columns else frame[name]
+    if values is None:
+        return pd.Series(np.nan, index=frame.index, dtype=float)
+    return pd.to_numeric(values, errors="coerce").astype(float)
+
+
 def _text_or_none(value):
     """A string, or null for a missing one. `None` and `NaN` both mean "this
     column has nothing for him", and a bare `value or None` would keep the
@@ -236,14 +260,19 @@ def _outlook_players(board, saved: list, picks: list) -> list:
 
     from scoring.availability import availability_at, cached_table
 
-    ids = pd.Index([str(pid) for pid in board["player_id"]])
-    known = [pid for pid in saved if pid in ids]
-    rows = board.set_index(ids).reindex(known) if known else None
+    # KEYED BY STRING, AND DEDUPLICATED. `reindex` refuses an index with any
+    # repeated label at all -- not just a repeated one that was asked for --
+    # so a board carrying a player twice would be a 500 rather than a
+    # duplicated row. It should not happen and it is one line to survive.
+    board = board.set_index(pd.Index([str(pid) for pid in board["player_id"]]))
+    board = board[~board.index.duplicated(keep="first")]
+    known = [pid for pid in saved if pid in board.index]
+    rows = board.reindex(known) if known else None
 
     curves = {}
     if known:
-        espn_adp = pd.to_numeric(rows.get("espn_adp"), errors="coerce")
-        market_rank = pd.to_numeric(rows.get("market_rank"), errors="coerce")
+        espn_adp = _numeric_column(rows, "espn_adp")
+        market_rank = _numeric_column(rows, "market_rank")
         positions = np.asarray([str(p) for p in rows["position"]], dtype=object)
         table = cached_table()
         # One vectorised call per pick rather than one per player: twenty-five
@@ -414,7 +443,7 @@ def register_account_routes(app, conn, store=None):
     @app.get("/api/account/favorites/outlook")
     def account_favorites_outlook(request: Request, response: Response,
                                   teams: int = DEFAULT_TEAMS,
-                                  slot: int = DEFAULT_SLOT):
+                                  slot: int | None = None):
         """Each favourite's chance of still being there at each of my picks.
 
         `teams` and `slot` describe a seat rather than a league: this is the
@@ -433,6 +462,9 @@ def register_account_routes(app, conn, store=None):
                 status_code=422,
                 detail=f"A league has between {MIN_TEAMS} and {MAX_TEAMS} "
                        f"teams. That one has {teams}.")
+        # After the team bound, so the clamp is never against a nonsense size.
+        if slot is None:
+            slot = min(DEFAULT_SLOT, teams)
         if not 1 <= slot <= teams:
             raise HTTPException(
                 status_code=422,
