@@ -147,7 +147,7 @@ def open_league(path: str | None = None):
     return duckdb.connect(path or db_mod.DEFAULT_PATH, read_only=True)
 
 
-def snapshot_draft_ids(corpus) -> list:
+def snapshot_draft_ids(corpus, out=print) -> list:
     """Every draft this fit may use, fixed at the top of the run.
 
     THE FARM IS WRITING TO THIS DATABASE WHILE THIS RUNS. `make farm-mocks`
@@ -164,14 +164,46 @@ def snapshot_draft_ids(corpus) -> list:
     `espn_history` row -- `draft_log.backfill_history` writes picks and no
     pool) has no choice set to offer. Sorted by id so the order is stable
     across runs rather than following physical row order.
+
+    ONE SHAPE ONLY, and the reason is the same one the ADP pages have. Every
+    draft in the fit is priced off ONE board, built once under one draft's
+    scoring rules -- three seconds per build against sixty drafts is why --
+    and every roster-shape feature is defined against a team count. That was
+    exactly true while the corpus was 854 8-team PPR mocks and stops being
+    true the moment the farm records a 12-team standard one: those picks
+    would be fitted against a board priced for somebody else's league, in a
+    room with four more seats than the features assume.
+    
+    So the fit takes the dominant `(teams, format)` -- the same total
+    tie-break the archive pages use, `draft_log.dominant_shape` -- and says
+    how many drafts it left out. A refit that silently halved its own corpus
+    would look like a fit that got worse for no reason.
     """
-    return corpus.execute(
-        """SELECT d.draft_id FROM draft_log d
+    rows = corpus.execute(
+        """SELECT d.draft_id, d.teams,
+                  coalesce(d.scoring_json, d.settings_json) AS scoring
+           FROM draft_log d
            WHERE EXISTS (SELECT 1 FROM draft_log_pool o
                          WHERE o.draft_id = d.draft_id)
              AND EXISTS (SELECT 1 FROM draft_log_pick p
                          WHERE p.draft_id = d.draft_id)
-           ORDER BY d.draft_id""").df()["draft_id"].tolist()
+           ORDER BY d.draft_id""").fetchall()
+    by_shape: dict = {}
+    for draft_id, teams, scoring in rows:
+        if teams is None:
+            continue          # no team count: no shape, and no roster features
+        by_shape.setdefault((int(teams), dl.draft_format(scoring)),
+                            []).append(str(draft_id))
+    shape = dl.dominant_shape({s: len(ids) for s, ids in by_shape.items()})
+    if shape is None:
+        return []
+    kept = by_shape[shape]
+    left_out = len(rows) - len(kept)
+    if left_out:
+        out(f"fitting {len(kept)} drafts of the corpus's main shape "
+            f"({shape[0]} teams, {shape[1]}); {left_out} draft(s) of other "
+            "shapes left out")
+    return kept
 
 
 def attributes_by_player_id(league_conn, season: int) -> pd.DataFrame:
@@ -473,9 +505,14 @@ def build_corpus_observations(corpus, league_conn, draft_ids: list,
     if not draft_ids:
         return out
 
+    # ORDERED, because `heads.iloc[0]` below decides which draft's roster and
+    # scoring the one shared board is priced under. Without an ORDER BY that
+    # is whichever row DuckDB hands back first, which is not a promise -- and
+    # "the board every pick in the fit is scored against" is not a thing to
+    # leave to physical row order.
     heads = corpus.execute(
-        "SELECT * FROM draft_log WHERE draft_id IN ({})".format(
-            ",".join(["?"] * len(draft_ids))), draft_ids).df()
+        "SELECT * FROM draft_log WHERE draft_id IN ({}) ORDER BY draft_id"
+        .format(",".join(["?"] * len(draft_ids))), draft_ids).df()
     pools = corpus.execute(
         "SELECT * FROM draft_log_pool WHERE draft_id IN ({})".format(
             ",".join(["?"] * len(draft_ids))), draft_ids).df()
@@ -493,14 +530,16 @@ def build_corpus_observations(corpus, league_conn, draft_ids: list,
     attrs_by_season = {s: attributes_by_player_id(league_conn, s) for s in seasons}
     fallback_season = season or (seasons[0] if seasons else None)
 
-    # One board for the whole corpus, built once, under the first draft's
-    # roster and scoring rules. `build_board` is ~3s, so building it per draft
-    # would add three seconds per mock to a fit that already replays every
-    # pick -- and every draft in this corpus is the same 8-team PPR mock, so
-    # a per-draft board would be the same board 60 times. A corpus that ever
-    # mixed league SHAPES would need one board per distinct `settings_json`;
-    # the shape is read off a draft rather than assumed so that change is a
-    # cache key rather than a rewrite.
+    # One board for the whole corpus, built once, under the FIRST draft's
+    # roster and scoring rules -- first by draft id, since the query above is
+    # ordered. `build_board` is ~3s, so building it per draft would add three
+    # seconds per mock to a fit that already replays every pick.
+    #
+    # WHAT MAKES THAT SOUND is `snapshot_draft_ids`, which hands this one
+    # shape: every draft here has the same team count and the same scoring
+    # format, so a per-draft board would differ only in roster slots and
+    # would be the same board sixty times over. It was true by accident while
+    # the corpus was all 8-team PPR mocks; it is true on purpose now.
     board_signals = board_signals_by_player_id(
         league_conn, _settings_for(heads.iloc[0]) if len(heads) else None)
 

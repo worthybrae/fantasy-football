@@ -661,3 +661,83 @@ def test_a_duplicated_board_player_id_is_dropped_rather_than_duplicating_a_row(
     by_id = enriched.set_index("player_id")
     assert pd.isna(by_id.loc["p0", "vor"])       # both sides of the collision
     assert by_id.loc["p1", "vor"] == 10.0
+
+
+# ---------------------------------------------------------------------------
+# One shape per fit.
+# ---------------------------------------------------------------------------
+
+
+def _odd_shape_draft(path, draft_id, teams, receptions):
+    """One more draft in the same corpus file, of a different shape."""
+    import json
+
+    conn = dl.corpus_conn(str(path))
+    try:
+        dl.record(conn, dl.DraftRecord(
+            source=dl.SOURCE_MOCK, league_id=draft_id, season=2026,
+            teams=teams, rounds=ROUNDS, draft_id=draft_id,
+            scoring_json=json.dumps({"receptions": receptions}),
+            settings_json=league_mod.to_json(_settings()),
+            picks=_picks(draft_id, _alternating_picks(TEAMS * ROUNDS)),
+            pool=_pool()))
+    finally:
+        conn.close()
+
+
+def test_the_fit_takes_one_shape_and_says_what_it_left_out(tmp_path):
+    """Every pick in the fit is priced off ONE board, built once under one
+    draft's rules, and every roster-shape feature is defined against a team
+    count. That was exactly true while the corpus was all 8-team PPR mocks.
+    A 12-team standard draft in the same fit would be scored against a board
+    priced for somebody else's league, in a room with four more seats than
+    the features assume.
+    """
+    path = _corpus_of(tmp_path, n_drafts=3)              # 4-team, PPR
+    _odd_shape_draft(path, "mock:twelve", teams=12, receptions=1.0)
+    _odd_shape_draft(path, "mock:standard", teams=TEAMS, receptions=0.0)
+
+    corpus = fp.open_corpus(path)
+    said = []
+    try:
+        ids = fp.snapshot_draft_ids(corpus, out=said.append)
+    finally:
+        corpus.close()
+
+    assert ids == ["mock:fixture0", "mock:fixture1", "mock:fixture2"]
+    assert len(said) == 1
+    assert "2 draft(s) of other shapes left out" in said[0]
+    assert f"{TEAMS} teams, ppr" in said[0]
+
+
+def test_a_corpus_of_one_shape_says_nothing(tmp_path):
+    """Which is every corpus this project has had until now: a line about
+    exclusions on every run would be noise."""
+    corpus = fp.open_corpus(_corpus_of(tmp_path, n_drafts=3))
+    said = []
+    try:
+        ids = fp.snapshot_draft_ids(corpus, out=said.append)
+    finally:
+        corpus.close()
+
+    assert len(ids) == 3 and said == []
+
+
+def test_the_biggest_shape_wins_and_ties_are_broken_the_same_way_everywhere(
+        tmp_path):
+    """The archive pages and the prior have to agree about what the corpus
+    IS, so both read `draft_log.dominant_shape`."""
+    path = _corpus_of(tmp_path, n_drafts=2)              # 4-team PPR x2
+    _odd_shape_draft(path, "mock:std1", teams=TEAMS, receptions=0.0)
+    _odd_shape_draft(path, "mock:std2", teams=TEAMS, receptions=0.0)
+    _odd_shape_draft(path, "mock:std3", teams=TEAMS, receptions=0.0)
+
+    corpus = fp.open_corpus(path)
+    try:
+        ids = fp.snapshot_draft_ids(corpus, out=lambda *a: None)
+    finally:
+        corpus.close()
+
+    assert ids == ["mock:std1", "mock:std2", "mock:std3"]
+    # And on a tie the same rule the pages use: PPR first.
+    assert dl.dominant_shape({(4, "std"): 2, (4, "ppr"): 2}) == (4, "ppr")

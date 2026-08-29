@@ -168,12 +168,6 @@ def _corpus():
                    "a moment.") from exc
 
 
-# The order formats are preferred in when two shapes are equally recorded.
-# Full PPR first because it is what most leagues play and what every source
-# this project reads publishes by default, then half, then standard.
-_FORMAT_ORDER = ("ppr", "half", "std")
-
-
 def shape_filter(alias: str = "d") -> str:
     """SQL for "this draft is the one the archive is about".
 
@@ -198,12 +192,14 @@ def _shape(conn) -> tuple:
     ONE shape is chosen -- the most recorded -- and it is stated in every
     answer rather than assumed by the page.
 
-    THE TIE-BREAK IS TOTAL AND DETERMINISTIC: most drafts first, then the
-    fewest teams, then PPR before half before standard. Two shapes with the
-    same count is not a hypothetical while the farm is rotating over five of
-    them, and a page whose shape flipped between requests -- because DuckDB
-    is free to return equal groups in any order -- would serve two different
-    archives under one URL and cache whichever it saw first.
+    THE TIE-BREAK IS TOTAL AND DETERMINISTIC (`draft_log.dominant_shape`,
+    shared with the fitted prior so the two cannot disagree about what the
+    corpus is): most drafts first, then the smaller shape, then PPR before
+    half before standard. Two shapes with the same count is not a
+    hypothetical while the farm is rotating over five of them, and a page
+    whose shape flipped between requests -- because DuckDB is free to return
+    equal groups in any order -- would serve two different archives under one
+    URL and cache whichever it saw first.
 
     Leaves that shape's draft ids in a temp table (`shape_draft`) on this
     connection, which is what `shape_filter` reads. Temp, so it belongs to
@@ -222,9 +218,8 @@ def _shape(conn) -> tuple:
     if not counts:
         raise HTTPException(status_code=404,
                             detail="No drafts have been recorded yet.")
-    teams, rounds, fmt = min(
-        counts, key=lambda s: (-len(counts[s]), s[0], s[1],
-                               _FORMAT_ORDER.index(s[2])))
+    teams, rounds, fmt = dl.dominant_shape(
+        {shape: len(ids) for shape, ids in counts.items()})
     conn.execute("CREATE OR REPLACE TEMP TABLE shape_draft AS "
                  "SELECT unnest(?::VARCHAR[]) AS draft_id",
                  [counts[(teams, rounds, fmt)]])

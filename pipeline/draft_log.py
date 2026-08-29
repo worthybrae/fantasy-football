@@ -233,7 +233,37 @@ def draft_format(scoring_json) -> str:
     return format_for_receptions(scoring.get("receptions", 0))
 
 
-def shape_counts(corpus_path: str | None = None) -> dict:
+# The order formats are preferred in when two shapes are equally recorded.
+# Full PPR first because it is what most leagues play and what every source
+# this project reads publishes by default, then half, then standard.
+FORMAT_ORDER = ("ppr", "half", "std")
+
+
+def dominant_shape(counts: dict):
+    """The shape a reader should be shown, out of `{shape: drafts}`.
+
+    Most drafts wins. THE TIE-BREAK IS TOTAL, and that is the point of having
+    this in one place: the farm rotates over five shapes and deliberately
+    keeps their counts close, so ties are ordinary -- and two readers that
+    broke one differently (the ADP pages one way, the fitted prior another)
+    would disagree about what the corpus IS. Ties go to the smaller shape
+    first (fewest teams, then fewest rounds), then to PPR before half before
+    standard.
+
+    Shapes are tuples whose LAST element is the format and whose earlier
+    elements are numbers: `(teams, format)` and `(teams, rounds, format)` are
+    both fine, as long as one caller does not mix the two.
+    """
+    if not counts:
+        return None
+    return min(counts, key=lambda shape: (
+        -int(counts[shape]), tuple(shape[:-1]),
+        FORMAT_ORDER.index(shape[-1]) if shape[-1] in FORMAT_ORDER
+        else len(FORMAT_ORDER)))
+
+
+def shape_counts(corpus_path: str | None = None,
+                 source: str | None = SOURCE_MOCK) -> dict:
     """How many recorded drafts the corpus holds of each `(teams, format)`.
 
     FOR THE FARM'S ROTATION (`pipeline.mock_farm`), which joins the shape it
@@ -250,9 +280,14 @@ def shape_counts(corpus_path: str | None = None) -> dict:
     `pipeline.mock_farm.play_draft`, which refuses a room whose seat count
     the lobby and the league disagree about).
 
-    EVERY SOURCE COUNTS, imported league history included. The question is
-    what the corpus already holds of a shape, and a real 12-team draft
-    somebody imported is as much a 12-team draft as one the farm played.
+    MOCKS ONLY, by default, and that is not a detail. A draft's format is
+    read off its stored scoring, and the drafts imported from a league's
+    history carry none -- `backfill_history` writes picks and nothing else --
+    so every one of them would be filed under "ppr" whatever the league
+    actually scored. Six imported seasons reading as six 8-team PPR drafts is
+    enough to nudge a rotation that is deliberately keeping its shapes within
+    a few drafts of each other. `source=None` counts everything, for a caller
+    that wants the whole file.
     """
     import duckdb
     target = corpus_path or CORPUS_PATH
@@ -261,10 +296,11 @@ def shape_counts(corpus_path: str | None = None) -> dict:
     except Exception:      # noqa: BLE001 -- locked, missing, or not a corpus
         return {}
     try:
+        where = "teams IS NOT NULL" + (" AND source = ?" if source else "")
         rows = conn.execute(
             "SELECT teams, coalesce(scoring_json, settings_json) AS scoring, "
-            "count(*) AS drafts FROM draft_log "
-            "WHERE teams IS NOT NULL GROUP BY 1, 2").fetchall()
+            f"count(*) AS drafts FROM draft_log WHERE {where} "
+            "GROUP BY 1, 2", [source] if source else []).fetchall()
     except Exception:      # noqa: BLE001 -- a file that is not a corpus yet
         return {}
     finally:
