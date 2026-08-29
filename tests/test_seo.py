@@ -64,6 +64,16 @@ def corpus(tmp_path, monkeypatch):
                 " 100.0, FALSE, TRUE, 5.0, 30.0)",
                 [f"d{i}", pick_no, (pick_no - 1) // 4 + 1, (pick_no - 1) % 4 + 1,
                  pid, position])
+        # THE POOL, which is what `of` and the availability strip count
+        # against. Everybody is on the board in every draft here, so the
+        # honest denominator and the draft count agree and every share above
+        # stays what it was before the pool existed.
+        for pid in ("star", "mid", "twin_a", "twin_b", "ghost", "late", "once"):
+            conn.execute(
+                "INSERT INTO draft_log_pool (draft_id, player_id, position,"
+                " team, adp_rank, proj_points, espn_rank, espn_proj, bye)"
+                " VALUES (?, ?, 'RB', 'CHI', 1.0, 100.0, 1.0, 100.0, 9)",
+                [f"d{i}", pid])
     conn.close()
     monkeypatch.setattr(market.dl, "CORPUS_PATH", str(path))
     market._CACHE.clear()
@@ -92,15 +102,70 @@ def board():
     test that shares this fixture."""
     conn = duckdb.connect(":memory:")
     conn.execute("CREATE TABLE players (gsis_id VARCHAR, display_name VARCHAR,"
-                 " headshot VARCHAR)")
-    conn.executemany("INSERT INTO players VALUES (?, ?, ?)", [
-        ("star", "D'Andre Swift", "https://img.test/swift.png"),
-        ("mid", "Amon-Ra St. Brown", None),
-        ("late", "Late Guy", None),
-        ("once", "Once Guy", None),
-        ("twin_a", "Josh Allen", None),
-        ("twin_b", "Josh Allen", None),
-        ("ghost", None, None),
+                 " headshot VARCHAR, birth_date VARCHAR, rookie_season INTEGER,"
+                 " height DOUBLE, weight DOUBLE)")
+    conn.executemany("INSERT INTO players VALUES (?, ?, ?, ?, ?, ?, ?)", [
+        ("star", "D'Andre Swift", "https://img.test/swift.png",
+         "1999-01-14", 2020, 70.0, 215.0),
+        ("mid", "Amon-Ra St. Brown", None, "1999-10-24", 2021, 72.0, 197.0),
+        # `late` deliberately has no bio, no history, no projection and no
+        # ESPN id anywhere below: he is the player every crosswalk misses.
+        ("late", "Late Guy", None, None, None, None, None),
+        ("once", "Once Guy", None, None, None, None, None),
+        ("twin_a", "Josh Allen", None, None, None, None, None),
+        ("twin_b", "Josh Allen", None, None, None, None, None),
+        ("ghost", None, None, None, None, None, None),
+    ])
+    conn.execute("CREATE TABLE historic_adp (season BIGINT, adp_name VARCHAR,"
+                 " position VARCHAR, team VARCHAR, adp_rank BIGINT)")
+    conn.executemany("INSERT INTO historic_adp VALUES (?, ?, ?, ?, ?)", [
+        (2024, "D'Andre Swift", "RB", "CHI", 41), (2025, "D'Andre Swift", "RB", "CHI", 33),
+        # A trap: same name as the corpus's `late`, different position. He is
+        # a WR there, so this row is somebody else and must not reach him.
+        (2025, "Late Guy", "TE", "NYJ", 120),
+    ])
+    conn.execute("CREATE TABLE historic_espn_cs (season BIGINT, cs_rank BIGINT,"
+                 " position VARCHAR, cs_name VARCHAR, team VARCHAR, auction_value DOUBLE)")
+    conn.executemany("INSERT INTO historic_espn_cs VALUES (?, ?, ?, ?, ?, ?)", [
+        (2024, 44, "RB", "D'Andre Swift", "CHI", 12.0),
+        (2026, 29, "RB", "D'Andre Swift", "CHI", 17.0),
+    ])
+    conn.execute("CREATE TABLE espn_projections (season BIGINT, espn_id BIGINT,"
+                 " espn_name VARCHAR, position VARCHAR, proj_points DOUBLE,"
+                 " proj_games DOUBLE, proj_carries DOUBLE, proj_rush_yards DOUBLE,"
+                 " proj_receptions DOUBLE, proj_rec_yards DOUBLE)")
+    conn.executemany("INSERT INTO espn_projections VALUES (?, ?, ?, ?, ?, ?,"
+                     " ?, ?, ?, ?)", [
+        (2026, 4259545, "D'Andre Swift", "RB", 212.5, 17, 233, 998, 41, 310),
+        # The same trap on the other key: `once` is a WR in the corpus.
+        (2026, 4242424, "Once Guy", "RB", 88.8, 17, 100, 400, 10, 60),
+    ])
+    conn.execute("CREATE TABLE player_futures (season BIGINT, market VARCHAR,"
+                 " espn_id BIGINT, american VARCHAR, implied_pct DOUBLE,"
+                 " provider VARCHAR)")
+    conn.execute("INSERT INTO player_futures VALUES (2026, 'rush_yards',"
+                 " 4259545, '+1400', 6.7, 'DraftKings')")
+    conn.execute("CREATE TABLE weekly (player_id VARCHAR, season INTEGER,"
+                 " week INTEGER, season_type VARCHAR, opponent_team VARCHAR,"
+                 " fantasy_points_ppr DOUBLE)")
+    conn.executemany("INSERT INTO weekly VALUES (?, ?, ?, 'REG', ?, ?)", [
+        ("star", 2025, 1, "GB", 11.4), ("star", 2025, 2, "DET", 28.9),
+        ("star", 2025, 3, "MIN", 6.2),
+    ])
+    conn.execute("CREATE TABLE player_news (player_id VARCHAR, name VARCHAR,"
+                 " headline VARCHAR, url VARCHAR, published_at TIMESTAMP,"
+                 " source VARCHAR, attribution VARCHAR)")
+    conn.execute("INSERT INTO player_news VALUES ('star', 'D''Andre Swift',"
+                 " 'Swift takes every first-team rep', 'https://news.test/swift',"
+                 " '2026-08-23 09:00:00'::TIMESTAMP, 'Wire Service', NULL)")
+    conn.execute("CREATE TABLE player_status (player_id VARCHAR, name VARCHAR,"
+                 " position VARCHAR, team VARCHAR, sleeper_id VARCHAR,"
+                 " injury_status VARCHAR, injury_body_part VARCHAR,"
+                 " injury_notes VARCHAR, practice_participation INTEGER)")
+    conn.executemany("INSERT INTO player_status VALUES (?, ?, 'RB', 'CHI', NULL,"
+                     " ?, ?, NULL, ?)", [
+        ("star", "D'Andre Swift", "Questionable", "hamstring", 1),
+        ("mid", "Amon-Ra St. Brown", "None", None, None),
     ])
     conn.execute("CREATE TABLE depth_charts (dt DATE, gsis_id VARCHAR, team VARCHAR)")
     conn.executemany("INSERT INTO depth_charts VALUES (?, ?, ?)", [
@@ -365,7 +430,8 @@ def test_an_unrecognized_position_does_not_500_adp_or_the_sitemap(tmp_path, monk
     ValueError. `/adp` and `/sitemap.xml` must still answer, and the
     unrecognized position gets no position page -- but the player himself,
     resolved by name, still gets his own."""
-    board.execute("INSERT INTO players VALUES ('fb', 'Fulton Reese', NULL)")
+    board.execute("INSERT INTO players (gsis_id, display_name)"
+                  " VALUES ('fb', 'Fulton Reese')")
     path = tmp_path / "fb.duckdb"
     conn = dl.corpus_conn(str(path))
     for i in range(10):
@@ -632,3 +698,186 @@ def test_a_reader_is_not_made_to_wait_for_the_warm_rebuild(corpus, board):
     assert res.status_code == 200
     assert "10 real ESPN mock drafts" in res.text
     assert waited < 0.1, f"a reader waited {waited:.2f}s behind the rebuild"
+
+
+def test_the_facts_land_on_the_right_player(corpus, board):
+    """Bio, season history, projection, futures, last season, news and the
+    injury report, all onto `star` and none of them onto anybody else."""
+    d = seo.build_adp(board)
+    star = d["by_slug"]["dandre-swift"]
+    assert star["age"] and star["rookie_season"] == 2020
+    assert [s["season"] for s in star["seasons"]] == [2024, 2025, 2026]
+    assert star["seasons"][0] == {"season": 2024, "adp": 41, "cheat": 44, "auction": 12.0}
+    assert star["auction"] == 17.0 and star["cheat_rank"] == 29
+    assert star["projection"]["points"] == 212.5
+    assert {line["label"] for line in star["projection"]["lines"]} == {
+        "Carries", "Rush yards", "Catches", "Rec yards"}
+    assert star["futures"][0]["market"] == "Most rushing yards"
+    assert star["last_season"] == {
+        "season": 2025, "games": 3, "points": 46.5, "ppg": 15.5, "best": 28.9,
+        "worst": 6.2, "best_week": 2, "best_opponent": "DET"}
+    assert star["news"][0]["headline"] == "Swift takes every first-team rep"
+    assert star["news"][0]["url"] == "https://news.test/swift"
+    assert star["status"] == {"injury": "Questionable", "body_part": "hamstring",
+                              "practice": 1.0}
+
+
+def test_a_player_the_crosswalks_miss_gets_blanks_not_a_neighbours_numbers(corpus, board):
+    """THE FAILURE MODE THIS WHOLE ENRICHMENT COULD HAVE. `late` has no
+    crosswalk row, no history, no projection and no news. Every one of those
+    fields must come back empty rather than picking up the player beside him,
+    and his page must not print another man's figures."""
+    d = seo.build_adp(board)
+    late = d["by_slug"]["late-guy"]
+    for field in ("age", "rookie_season", "projection", "status", "cheat_rank",
+                  "auction", "espn_adp", "consensus", "bye"):
+        assert late[field] is None, f"{field} came from somewhere"
+    for field in ("seasons", "futures", "news", "sources"):
+        assert late[field] == [], f"{field} came from somewhere"
+    # ...including from the tight end of the same name in `historic_adp`, and
+    # from the running back called Once Guy in `espn_projections`.
+    assert seo.build_adp(board)["by_slug"]["once-guy"]["projection"] is None
+    body = _client(board).get("/adp/late-guy").text
+    assert "212.5" not in body            # star's projection
+    assert "first-team rep" not in body   # star's news
+    assert "Questionable" not in body     # star's injury designation
+
+
+def test_the_player_page_says_whether_he_will_still_be_there(corpus, board):
+    """`star` goes first in all ten drafts, so he is gone by pick 8 in every
+    one of them -- a counted 0%, not a modelled one. The curve beside the
+    chips is drawn from the same numbers."""
+    d = seo.build_adp(board)
+    star = d["by_slug"]["dandre-swift"]
+    assert [c["pick"] for c in star["still_there"]] == list(seo.STILL_THERE_PICKS)
+    assert star["still_there"][0] == {"pick": 8, "pct": 0, "round": 2}
+    assert star["curve"].startswith("M0,")
+    body = _client(board).get("/adp/dandre-swift").text
+    assert "Still on the board at" in body
+    assert 'aria-label="Share of drafts in which' in body
+
+
+def test_the_player_page_carries_the_new_sections(corpus, board):
+    body = html.unescape(_client(board).get("/adp/dandre-swift").text)
+    for heading in ("Still on the board at", "Where the room takes him",
+                    "Season by season", "What he did, and what he is projected for",
+                    "Latest on D'Andre Swift", "Goes around the same pick"):
+        assert heading in body, heading
+    assert "212.5" in body                       # the projection
+    assert "Swift takes every first-team rep" in body
+    assert "Questionable" in body
+    # The season history, as a row: 2024, market rank 41, cheat sheet 44.
+    assert '<td class="mono">2024</td>' in body
+    assert '<td class="n">41</td>' in body and '<td class="n">44</td>' in body
+
+
+def test_the_player_pages_structured_data_parses_and_names_a_person(corpus, board):
+    blocks = _ld_json(_client(board).get("/adp/dandre-swift").text)
+    kinds = {block["@type"]: block for block in blocks}
+    assert "BreadcrumbList" in kinds
+    person = kinds["Person"]
+    assert person["name"] == "D'Andre Swift"
+    assert person["url"] == "https://espnfantasydraft.com/adp/dandre-swift"
+    assert person["affiliation"]["name"] == "CHI"
+    assert person["image"].startswith("https://")
+
+
+def _ld_json(body: str) -> list:
+    import json
+    import re
+    return [json.loads(m) for m in re.findall(
+        r'<script type="application/ld\+json">(.*?)</script>', body, re.S)]
+
+
+def test_the_index_leads_with_risers_fallers_and_the_runs(corpus, board, monkeypatch):
+    """Eight picks apart is the production threshold and the fixture's two
+    ESPN-ranked players are 1.9 apart, so the threshold is moved rather than
+    the fixture: what is under test is that the sections are built and drawn,
+    not the constant."""
+    monkeypatch.setattr(seo, "MOVE_PICKS", 1)
+    seo.clear_pages()
+    market._CACHE.clear()
+    body = html.unescape(_client(board).get("/adp").text)
+    assert "Risers" in body and "Fallers" in body and "When the runs start" in body
+    # `star` is taken at 1.0 and ESPN's board would reach him at 2.9, so he
+    # rises two picks and `mid` falls two. Matched on the mover markup, not
+    # on the bare digits -- "-2" is also the tail of the `josh-allen-2` slug.
+    assert '<span class="d big">+2</span>' in body
+    assert '<span class="d big">-2</span>' in body
+    # The runs: the first RB goes at pick 1 and the first tight end at pick 8.
+    assert "<b>pick 1</b>" in body or '<span class="nm">pick 1</span>' in body
+    assert '<span class="nm">pick 8</span>' in body
+
+
+def test_the_index_table_sorts_and_says_so_once(corpus, board):
+    body = _client(board).get("/adp").text
+    assert body.count("table.sortable") == 1
+    assert body.count('class="sortable"') == 1
+    assert 'data-k="n"' in body and 'aria-sort' in body
+    # ...and nowhere else. A player page has no table to sort.
+    assert "table.sortable" not in _client(board).get("/adp/dandre-swift").text
+
+
+def test_a_position_page_ranks_within_the_position(corpus, board):
+    body = html.unescape(_client(board).get("/adp/rb").text)
+    assert "RB rank" in body
+    assert "D'Andre Swift" in body and "Josh Allen" not in body
+
+
+def test_the_round_page_shows_the_mix_and_what_each_seat_sees(corpus, board):
+    body = html.unescape(_client(board).get("/adp/round/1").text)
+    assert "What this round is made of" in body
+    assert 'class="mix"' in body
+    assert "What a seat sees" in body
+    # Seat 1's first-round pick is pick 1, and `star` went there every time.
+    assert "Seat 1 — pick 1" in body
+    assert '<span class="d big">100%</span>' in body
+    assert "Who goes in round 1" in body
+
+
+def test_the_sitemap_holds_one_url_per_page_that_exists(corpus, board):
+    d = seo.build_adp(board)
+    root = ET.fromstring(_client(board).get("/sitemap.xml").text)
+    ns = {"s": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+    locs = [u.find("s:loc", ns).text for u in root.findall("s:url", ns)]
+    positions = {p["position"] for p in d["players"]}
+    assert len(locs) == 3 + len(positions) + d["rounds"] + len(d["players"])
+    assert len(locs) == len(set(locs))
+
+
+def test_the_stylesheet_keeps_a_wide_table_inside_a_narrow_screen(corpus, board):
+    """/adp measured 492 CSS pixels of content in a 390 pixel viewport before
+    this, which simply cut off the last three columns."""
+    body = _client(board).get("/adp").text
+    assert "@media (max-width:720px)" in body
+    assert ".scroll{overflow-x:auto" in body
+    assert "@media (prefers-reduced-motion:reduce)" in body
+    assert ":focus-visible{outline" in body
+    assert "th{position:sticky" in body
+
+
+def test_an_empty_corpus_still_has_every_key_the_pages_read(tmp_path, monkeypatch, board):
+    """A fresh deployment renders the same templates against no drafts at
+    all, and a missing key is a 500 rather than an empty section."""
+    path = tmp_path / "empty.duckdb"
+    dl.corpus_conn(str(path)).close()
+    monkeypatch.setattr(market.dl, "CORPUS_PATH", str(path))
+    market._CACHE.clear()
+    d = seo.build_adp(board)
+    for key in ("players", "by_slug", "drafts", "teams", "rounds", "updated",
+                "stamp", "risers", "fallers", "runs", "round_mix", "at_pick",
+                "seconds"):
+        assert key in d, key
+    c = _client(board)
+    assert c.get("/adp").status_code == 200
+    assert c.get("/adp/rb").status_code == 200
+    assert c.get("/sitemap.xml").status_code == 200
+
+
+def test_every_published_player_carries_every_optional_field(corpus, board):
+    """`seo.BLANKS` is what a template may ask for without guarding. A field
+    that reaches a template as Jinja's Undefined is a 500 the moment anything
+    compares it."""
+    for p in seo.build_adp(board)["players"]:
+        for field in seo.BLANKS:
+            assert field in p, f"{p['name']} has no {field}"

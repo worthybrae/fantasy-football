@@ -187,6 +187,38 @@ def _from_board(player: dict, row) -> None:
 # The universal tables
 # ---------------------------------------------------------------------------
 
+def _espn_ids(conn, players: list, board: dict) -> dict:
+    """player_id -> his ESPN id, from the board first and the crosswalk after.
+
+    The board is the better source: it resolved the id through the gsis
+    crosswalk AND the name-and-position fallback when it was built, which is
+    179 of 203 where `sleeper_ids` alone reaches 61. The crosswalk is read
+    anyway for whoever the board could not answer for, and for the case where
+    there is no board to read at all.
+    """
+    out = {}
+    for player in players:
+        row = board.get(player["player_id"])
+        espn_id = _int(getattr(row, "espn_id", None)) if row is not None else None
+        if espn_id is not None:
+            out[player["player_id"]] = espn_id
+    missing = [p["player_id"] for p in players if p["player_id"] not in out]
+    if not missing:
+        return out
+    try:
+        rows = conn.execute(
+            "SELECT gsis_id, espn_id FROM sleeper_ids"
+            f" WHERE gsis_id IN ({_in_clause(missing)}) AND espn_id IS NOT NULL",
+            missing).fetchall()
+    except Exception:      # noqa: BLE001 -- no crosswalk table on this database
+        return out
+    for gsis_id, espn_id in rows:
+        got = _int(espn_id)
+        if got is not None:
+            out.setdefault(str(gsis_id), got)
+    return out
+
+
 def _bio(conn, ids: list) -> dict:
     """gsis_id -> birth date, rookie season, height and weight."""
     if not ids:
@@ -473,17 +505,13 @@ def attach(conn, players: list) -> None:
     if conn is None:
         return
 
-    # ESPN ids come off the board, which resolved them through the crosswalk
-    # AND the name fallback when it built. Two sources below are keyed by
-    # nothing else, and this is a far wider gate than `sleeper_ids` alone.
-    espn_ids = {}
-    for player in players:
-        row = board.get(player["player_id"])
-        espn_id = _int(getattr(row, "espn_id", None)) if row is not None else None
-        if espn_id is not None:
-            espn_ids[player["player_id"]] = espn_id
-
-    gsis = [p["player_id"] for p in players if str(p["player_id"]).startswith("00-")]
+    espn_ids = _espn_ids(conn, players, board)
+    # Everybody who is a real player rather than one of the board's synthetic
+    # `adp_<team>_defense` rows: those have no `players` row, no `weekly` row
+    # and no injury report, and asking for them is four queries with a
+    # guaranteed empty answer.
+    gsis = [p["player_id"] for p in players
+            if not str(p["player_id"]).startswith("adp_")]
     teams = {(p.get("team") or "").upper() for p in players if p["position"] == "DST"}
 
     bio = _bio(conn, gsis)
