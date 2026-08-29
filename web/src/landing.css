@@ -1013,7 +1013,7 @@
 .db-league {
   gap: 4px;
   padding: 18px 20px 18px;
-  border-radius: 6px;
+  border-radius: var(--radius-lg);
 }
 
 .db-league.is-live {

@@ -218,7 +218,9 @@ export default function FavoritesPicker({
           <li className="fav-empty">
             {q
               ? `Nobody on the board matches “${search.trim()}”${pos === 'ALL' ? '' : ` at ${pos}`}.`
-              : `No ${pos} on the board.`}
+              : pos === 'ALL'
+                ? 'The board is empty.'
+                : `No ${pos} on the board.`}
           </li>
         )}
       </ul>

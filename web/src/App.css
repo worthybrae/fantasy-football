@@ -2237,7 +2237,7 @@ button.plan-target:focus-visible .plan-name {
   background: var(--bg-2);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45);
+  box-shadow: var(--shadow-pop);
   color: var(--text-2);
   font-size: var(--text-sm);
   font-weight: 400;

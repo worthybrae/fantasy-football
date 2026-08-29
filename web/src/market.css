@@ -223,10 +223,16 @@
   color: var(--text-3);
 }
 
-.mk-loading,
+.mk-loading {
+  margin: var(--space-4) 0 0;
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+
 /* Was two rules for one class, the second overriding the first's colour --
-   and even then it was a muted line of prose. Same panel as every other
-   inline error in the app now. */
+   and even then it shared its geometry with the loading line above, so a
+   failure and a wait looked alike. Same panel as every other inline error
+   in the app now. */
 .mk-error {
   margin: var(--space-4) 0 0;
   padding: var(--space-2) var(--space-3);
