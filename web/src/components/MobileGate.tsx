@@ -84,6 +84,16 @@ function GatePage() {
   }, [])
   const corpus = overview ? corpusLine(overview) : null
 
+  // "Link copied" is a confirmation, not a new name for the button. Left
+  // standing it became the label, so a reader who came back to the page a
+  // minute later saw a control that no longer said what it does. Cleared on
+  // unmount as well, or a state update lands on a page that has navigated.
+  useEffect(() => {
+    if (sent !== 'copied') return
+    const id = window.setTimeout(() => setSent('idle'), 2600)
+    return () => window.clearTimeout(id)
+  }, [sent])
+
   async function send() {
     // The share sheet is the phone's own way of getting something to a
     // computer (AirDrop, Notes, mail to self); the clipboard is the fallback,

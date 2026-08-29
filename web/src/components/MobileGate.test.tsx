@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import MobileGate from './MobileGate'
 
@@ -25,7 +25,7 @@ beforeEach(() => {
   }))
 })
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers() })
 
 test('the clip is a poster until somebody taps it', () => {
   const { container } = render(<MobileGate><span>desktop</span></MobileGate>)
@@ -53,4 +53,29 @@ test('a desktop reader gets the app, not the gate', () => {
   }))
   render(<MobileGate><span>desktop</span></MobileGate>)
   expect(screen.getByText('desktop')).toBeTruthy()
+})
+
+// The confirmation is not a new name for the control. Left standing, "Link
+// copied" WAS the label -- a reader who came back to the tab a minute later
+// found a button that no longer said what it does -- so it reverts, and the
+// timer is the thing worth pinning: a revert that never fires is the old bug
+// back again, and one that fires immediately is a confirmation nobody sees.
+test('the copied label goes back to being the button’s name', async () => {
+  vi.useFakeTimers()
+  const writeText = vi.fn().mockResolvedValue(undefined)
+  Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+
+  render(<MobileGate><span>desktop</span></MobileGate>)
+  const send = screen.getByRole('button', { name: 'Send yourself the link' })
+  // Awaited: `send()` writes to the clipboard before it sets the state, and
+  // that is a microtask fake timers do not touch.
+  await act(async () => { fireEvent.click(send) })
+  expect(writeText).toHaveBeenCalledWith(`${window.location.origin}/`)
+  expect(screen.getByRole('button', { name: 'Link copied' })).toBeTruthy()
+
+  // Long enough to be read, and gone after that.
+  act(() => { vi.advanceTimersByTime(2500) })
+  expect(screen.getByRole('button', { name: 'Link copied' })).toBeTruthy()
+  act(() => { vi.advanceTimersByTime(200) })
+  expect(screen.getByRole('button', { name: 'Send yourself the link' })).toBeTruthy()
 })

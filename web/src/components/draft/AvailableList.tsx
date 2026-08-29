@@ -194,6 +194,48 @@ const NATURAL_DIR: Record<SortKey, SortDir> = {
   adp: 'asc', cons: 'asc',
 }
 
+// -- the compact tiers, from the sort's side --------------------------------
+//
+// App.css drops four columns as the room narrows (its `COMPACT MODE` block),
+// and the sort outlived the column: at 1400px a table sorted by Growth had
+// no Growth column, no caret anywhere on the header row, and no header left
+// to click to undo it -- the rows sat in an order nothing on screen
+// explained. These widths are that stylesheet's own and the two have to stay
+// in step, because there is no way to ask CSS which rule matched.
+const DROPPED_AT: Partial<Record<SortKey, number>> = {
+  cons: 1500, change: 1500, steady: 1360, finish: 1200,
+}
+
+// Where the order falls back to while the chosen column is gone: ESPN's own
+// rank, which is this table's default and the one column that never drops.
+const ESPN_SORT: { key: SortKey; dir: SortDir } = { key: 'espn', dir: 'asc' }
+
+// Which of those four are off the table at the current width. `matchMedia`
+// rather than a resize listener: it fires once when a tier is crossed
+// instead of on every pixel of a drag, and it reads the same `max-width` the
+// stylesheet does. No matchMedia at all means no compact mode -- the honest
+// answer for a renderer that is not applying the media queries either.
+function useDroppedColumns(): Set<SortKey> {
+  const [dropped, setDropped] = useState<Set<SortKey>>(() => new Set())
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return
+    const tiers = (Object.entries(DROPPED_AT) as [SortKey, number][]).map(
+      ([key, width]) => [key, window.matchMedia(`(max-width: ${width}px)`)] as const)
+    const read = (): void => setDropped((prev) => {
+      const next = new Set(tiers.filter(([, mq]) => mq.matches).map(([key]) => key))
+      // The same set means the same object. This runs on every tier crossed
+      // and a fresh Set each time would re-render 250 rows for a width that
+      // changed nothing about them.
+      const same = next.size === prev.size && [...next].every((k) => prev.has(k))
+      return same ? prev : next
+    })
+    read()
+    for (const [, mq] of tiers) mq.addEventListener('change', read)
+    return () => { for (const [, mq] of tiers) mq.removeEventListener('change', read) }
+  }, [])
+  return dropped
+}
+
 // Position sorts in the pill row's order (QB, RB, WR, TE, K, DST), not
 // alphabetically -- alphabetical would open with DST and K, which is the
 // order nobody thinks about a draft in, and it would disagree with the
@@ -760,9 +802,19 @@ const AvailableRow = memo(function AvailableRow({
                 {/* Directly after Health: the two meters read as a pair
                     -- was he on the field, and was he worth starting when he
                     was -- and sharing the five-bar shape makes that pairing
-                    the point rather than a coincidence. */}
+                    the point rather than a coincidence.
+
+                    BOTH CLASSES, and `avail-col-steady` is the load-bearing
+                    one. It shares Health's width (App.css), which is why the
+                    cell wore only `avail-col-health` and looked right -- but
+                    the compact tier at 1360px hides `.avail-col-steady`, and
+                    it was on the <th> alone. The header row lost a cell the
+                    body still had, so every label from Growth rightward sat
+                    over the column to its left and the Draft button's header
+                    fell off the end. `AvailableList.test.tsx` holds the two
+                    rows to the same set of column classes now. */}
                 <td
-                  className="avail-col-health"
+                  className="avail-col-health avail-col-steady"
                   onMouseEnter={(e) => onCellEnter('steady', c.player_id, e.currentTarget)}
                   onMouseLeave={onCellLeave}
                 >
@@ -829,7 +881,13 @@ const AvailableRow = memo(function AvailableRow({
                   )}
                 </td>
                 <td className="avail-col-num mono avail-adp">{fmtRank(c.espn_adp)}</td>
-                <td className="avail-col-num mono avail-adp">{fmtRank(c.market_rank)}</td>
+                {/* `avail-col-cons` carries no width of its own -- it is the
+                    handle the compact-mode media queries in App.css need to
+                    drop this column on a narrow room, which is the whole
+                    reason it is not just another `avail-col-num`. */}
+                <td className="avail-col-num avail-col-cons mono avail-adp">
+                  {fmtRank(c.market_rank)}
+                </td>
                 <td className="avail-col-btn">
                   <button
                     type="button"
@@ -858,7 +916,14 @@ export default function AvailableList({
   // order the server already built the list in. Any other default would put
   // this board's opinion in front of the platform's, which is the exact
   // thing this redesign took out.
-  const [sort, setSort] = useState<{ key: SortKey; dir: SortDir }>({ key: 'espn', dir: 'asc' })
+  const [sort, setSort] = useState<{ key: SortKey; dir: SortDir }>(ESPN_SORT)
+  // The sort ACTUALLY in force. A column the window is too narrow to show
+  // cannot be the one the table is ordered by -- there is no caret to see it
+  // by and no header to click to undo it -- so the order falls back to
+  // ESPN's for as long as the column is gone, and the reader's own sort
+  // comes back with the column when the window widens again.
+  const dropped = useDroppedColumns()
+  const activeSort = dropped.has(sort.key) ? ESPN_SORT : sort
 
   // -- header tooltips: state, positioning, dismissal --
   //
@@ -1109,7 +1174,8 @@ export default function AvailableList({
       .toLowerCase().includes(q)
   })
   const withTaken = held.length === 0 ? visible : [...visible, ...held]
-  const rows = withTaken.slice().sort((a, b) => compareRows(a, b, sort.key, sort.dir, players))
+  const rows = withTaken.slice()
+    .sort((a, b) => compareRows(a, b, activeSort.key, activeSort.dir, players))
 
   // The three rows in most danger, and only those -- see PULSE_ROWS. Taken
   // rows are left out before the cut rather than dropped after it, so a pick
@@ -1181,10 +1247,13 @@ export default function AvailableList({
   })
 
 
+  // Against `activeSort`, not the stored one: while a dropped column is
+  // still in state the caret is on ESPN, and a click on ESPN has to flip
+  // the direction the reader can see rather than re-apply it.
   function toggleSort(key: SortKey): void {
-    setSort((prev) => (prev.key === key
-      ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
-      : { key, dir: NATURAL_DIR[key] }))
+    setSort(activeSort.key === key
+      ? { key, dir: activeSort.dir === 'asc' ? 'desc' : 'asc' }
+      : { key, dir: NATURAL_DIR[key] })
   }
 
   // A sortable header. The clickable thing is a real <button> inside the
@@ -1213,11 +1282,11 @@ export default function AvailableList({
   // same "must not clip inside a scroll region, must not shift the row"
   // problem for the main board's cells.
   function sortableTh(key: SortKey, label: ReactNode, className?: string): ReactNode {
-    const active = sort.key === key
+    const active = activeSort.key === key
     return (
       <th
         className={`${className ?? ''}${active ? ' is-sorted' : ''}`.trim() || undefined}
-        aria-sort={active ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}
+        aria-sort={active ? (activeSort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}
         onMouseEnter={(e) => scheduleTip(key, e.currentTarget)}
         onMouseLeave={hideTip}
         onFocus={(e) => showTipNow(key, e.currentTarget)}
@@ -1247,7 +1316,7 @@ export default function AvailableList({
             className={`avail-sort${active ? '' : ' is-idle'}`}
             aria-hidden="true"
           >
-            {(active ? sort.dir : NATURAL_DIR[key]) === 'asc' ? '▲' : '▼'}
+            {(active ? activeSort.dir : NATURAL_DIR[key]) === 'asc' ? '▲' : '▼'}
           </span>
         </button>
       </th>
@@ -1472,7 +1541,7 @@ export default function AvailableList({
                 two markets can be read against each other -- the owner
                 asked to see where ESPN disagrees with everyone else without
                 going into the profile for it. */}
-            {sortableTh('cons', 'Cons', 'avail-col-num')}
+            {sortableTh('cons', 'Cons', 'avail-col-num avail-col-cons')}
             <th
               className="avail-col-btn"
               onMouseEnter={(e) => scheduleTip('draft', e.currentTarget)}

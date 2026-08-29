@@ -87,7 +87,7 @@
 .lg-table .lg-td-text a:hover { color: var(--accent); }
 .lg-table tr.is-title td:first-child::after { content: ' ♛'; color: var(--accent); }
 .is-up { color: var(--ok); }
-.is-down { color: var(--danger, #e5484d); }
+.is-down { color: var(--fail-soft); }
 .lg-ledger { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 8px; }
 .lg-trade { display: grid; grid-template-columns: 110px 1fr 70px; gap: 12px; align-items: baseline; font-size: var(--text-sm); }
 .lg-trade-when { color: var(--text-3); }

@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import type { LivePlanTurn, Player } from '../../api'
+import { riskTone } from './tone'
 
 // THE REST OF THE DRAFT, ONE ROW PER TURN.
 //
@@ -26,6 +27,15 @@ function fmtSigned(n: number | null): string {
   if (n === null) return '—'
   const r = Math.round(n)
   return r > 0 ? `+${r}` : `${r}`
+}
+
+/** The sign, as the room's own two tones. Rounded before the sign is read,
+ *  and null carries no direction, so it carries no colour -- the same rule
+ *  the table's Edge column and the target cards already follow. */
+function edgeTone(edge: number | null): string {
+  if (edge === null) return ''
+  const shown = Math.round(edge)
+  return shown > 0 ? 'is-up' : shown < 0 ? 'is-down' : ''
 }
 
 interface PlanPanelProps {
@@ -101,11 +111,25 @@ export default function PlanPanel({
                 )}
                 {name}
               </span>
+              {/* THE TWO NUMBERS, IN THE ROOM'S OWN COLOURS. They were both
+                  grey, one step apart on the text ramp, which made the pair
+                  read as a single meaningless "0% +39". The table and the
+                  target cards already tone these two -- survival on the
+                  red-amber-green ramp, points by their sign -- and a rail
+                  that toned them differently would be the third answer to a
+                  question that has one. A null in either gets no colour at
+                  all: the ramp is a claim about a real number. */}
               <span className="plan-nums mono">
-                <span className="plan-lasts">
+                <span
+                  className="plan-lasts"
+                  style={target.lasts_pct === null
+                    ? undefined : { color: riskTone(target.lasts_pct) }}
+                >
                   {target.lasts_pct === null ? '—' : `${Math.round(target.lasts_pct)}%`}
                 </span>
-                <span className="plan-edge">{fmtSigned(target.edge_pts)}</span>
+                <span className={`plan-edge delta-tone ${edgeTone(target.edge_pts)}`}>
+                  {fmtSigned(target.edge_pts)}
+                </span>
               </span>
             </>
           )

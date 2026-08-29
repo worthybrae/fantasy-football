@@ -473,7 +473,14 @@
 .wc-corner {
   position: fixed;
   right: 24px;
-  bottom: 24px;
+  /* Above the pick ticker, not on top of it. The room behind this chip ends
+     in a rail of the last few picks, and at 24px the chip sat over its
+     right-hand end -- covering three or four picks of the very thing the
+     chip is inviting the reader into. The rail's height is `--ticker-h`
+     (index.css), which `.pick-ticker` in App.css sets itself from: the two
+     files were holding the same 52px separately, and a taller rail would
+     have put the chip back on top of it. */
+  bottom: calc(var(--ticker-h) + var(--space-4));
   z-index: 65;
   display: flex;
   align-items: center;
@@ -499,8 +506,10 @@
               0 0 0 8px color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
+/* Offset further than the app's default: the chip carries an 8px accent
+   halo on hover, and a ring at the usual 2px would land inside it. */
 .wc-corner:focus-visible {
-  outline: 2px solid var(--accent-border);
+  outline: var(--focus-ring);
   outline-offset: 4px;
 }
 
@@ -715,6 +724,20 @@
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg-1);
+}
+
+/* This had no rule of its own, so a refused connect rendered as ordinary
+   body copy in the middle of a list of drafts -- an error that did not look
+   like one. */
+.lp-drafts-error {
+  margin: var(--space-3) 0 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--fail);
+  border-radius: var(--radius);
+  background: var(--fail-bg);
+  color: var(--text-1);
+  font-size: var(--text-sm);
+  line-height: 1.5;
 }
 
 /* -- the signed-in dashboard (Dashboard.tsx, MockLobby.tsx) --------------
@@ -993,7 +1016,7 @@
 .db-league {
   gap: 4px;
   padding: 18px 20px 18px;
-  border-radius: 6px;
+  border-radius: var(--radius-lg);
 }
 
 .db-league.is-live {
@@ -1491,9 +1514,17 @@
   color: var(--text-3);
 }
 
-.db-fav-foot > .db-go {
+/* Sized by its own label, on the right of the note it belongs to. This
+   card's button used to borrow `.db-league-go`, whose whole job is to
+   stretch across the foot of a league card -- so "Edit" came out as a
+   500px slab beside a paragraph, and the same card's empty state showed a
+   normal button. One button, one size, both states. */
+.db-fav-foot > .db-go.db-fav-go {
+  flex: 0 0 auto;
   margin-left: auto;
-  flex-shrink: 0;
+  align-self: center;
+  min-width: 128px;
+  justify-content: center;
 }
 
 /* THE DIALOG. Fixed, over everything, with the page held still behind it
@@ -1631,42 +1662,74 @@
   color: var(--accent);
 }
 
+/* THE APP HAS ONE PRIMARY BUTTON and this is one of them. It used to be an
+   accent-tinted outline, which is the shape everything ELSE in this product
+   uses for a secondary action -- so the one control this dialog exists to
+   reach looked quieter than the "Join" on a lobby card. Same fill, same
+   weight and the same disabled treatment as `.db-go` and `.wc-start`. */
 .fav-save {
   padding: 6px 14px;
   border: 1px solid var(--accent-border);
-  border-radius: 4px;
-  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border-radius: var(--radius-md);
+  background: var(--accent);
   font-size: var(--text-sm);
-  font-weight: 600;
-  color: var(--accent);
+  font-weight: 700;
+  color: #10110f;
   cursor: pointer;
 }
 
 .fav-save:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--accent) 28%, transparent);
+  background: color-mix(in srgb, var(--accent) 85%, #ffffff);
 }
 
+/* Off, and saying so twice: the fill drops to a flat surface with a plain
+   border rather than a half-transparent accent (0.5 of the accent is still
+   the brightest thing in the row, so the button read as live), and the
+   cursor names the refusal on the way past. `.fav-need` beside it says what
+   would turn it back on. */
 .fav-save:disabled {
   border-color: var(--border);
-  background: none;
+  background: var(--bg-2);
   color: var(--text-3);
   cursor: not-allowed;
 }
 
+/* The quiet outline the lobby's own Join wears, so "the other one" looks the
+   same wherever it is offered. */
 .fav-cancel {
   padding: 6px 12px;
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-md);
   background: none;
   font-size: var(--text-sm);
   color: var(--text-2);
   cursor: pointer;
 }
 
+.fav-cancel:hover:not(:disabled) {
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+.fav-cancel:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* One inline-error shape, shared with the paywall, the pick dialog, the
+   mock board and the archive -- see `--fail-bg` in index.css, and the
+   flat `--fail` edge every one of them draws.
+   Before it, a refused save in this dialog was a line of red text while the
+   same refusal one screen over was a bordered panel. */
 .fav-error {
   margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--fail);
+  border-radius: var(--radius);
+  background: var(--fail-bg);
+  color: var(--text-1);
   font-size: var(--text-sm);
-  color: var(--fail);
+  line-height: 1.5;
 }
 
 /* THE LIST BEING BUILT, above the board it is built from. */
@@ -1831,7 +1894,12 @@
   color: var(--accent);
 }
 
+/* Across the whole board, not stranded in its first cell -- an empty result
+   is about the search, which spans the grid. */
 .fav-empty {
+  grid-column: 1 / -1;
+  padding: var(--space-5) 0;
+  text-align: center;
   font-size: var(--text-sm);
   color: var(--text-3);
 }
@@ -1849,7 +1917,7 @@
   margin: 0;
   padding: var(--space-2) var(--space-4);
   border-bottom: 1px solid var(--fail);
-  background: color-mix(in srgb, var(--fail) 10%, var(--bg-1));
+  background: var(--fail-bg);
   font-size: var(--text-sm);
   color: var(--text-1);
 }
@@ -1902,7 +1970,7 @@
   margin: 0;
   padding: var(--space-2) var(--space-4);
   border-bottom: 1px solid var(--fail);
-  background: color-mix(in srgb, var(--fail) 10%, var(--bg-1));
+  background: var(--fail-bg);
   font-size: var(--text-sm);
   color: var(--text-1);
 }
@@ -3335,12 +3403,14 @@ button.wr-seat:focus-visible {
 }
 
 .pw-error {
-  margin: 0 0 12px;
-  padding: 8px 10px;
+  margin: 0 0 var(--space-3);
+  padding: var(--space-2) var(--space-3);
   border: 1px solid var(--fail);
   border-radius: var(--radius);
+  background: var(--fail-bg);
+  color: var(--text-1);
   font-size: var(--text-sm);
-  color: var(--fail);
+  line-height: 1.5;
 }
 
 /* Said once, small, and true: the card never touches this server, because
@@ -3457,6 +3527,40 @@ button.wr-seat:focus-visible {
       "ask"
       "cta";
   }
+}
+
+/* -- the focus ring the landing page's controls were missing --------------
+   Eleven classes here carry `cursor: pointer` and had no `:focus-visible`
+   rule, the picker's own Save and Cancel among them -- a dialog whose only
+   two exits are invisible to a keyboard. One value, `--focus-ring`
+   (index.css), shared with the room's controls so a ring means the same
+   thing on both sides of the app. */
+.fav-cancel:focus-visible,
+.fav-chip:focus-visible,
+.fav-modal-close:focus-visible,
+.fav-row:focus-visible,
+.fav-save:focus-visible,
+.pw-pay:focus-visible,
+.pw-quiet:focus-visible,
+.wc-watch:focus-visible,
+.wc-x:focus-visible,
+.xp-q:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-offset);
+}
+
+/* The count's own sentence: what has to happen before Save turns on, or
+   that the list is full. Beside the ratio rather than under it -- this row
+   is the header of a dialog and a second line in it would push the board
+   down every time somebody crossed the minimum. */
+.fav-need {
+  font-size: var(--text-xs);
+  /* `--text-2` (7.05:1), not `--text-3` (2.73:1): at 11px the quiet grey was
+     under half the contrast the row's other text has, and this is the line
+     that says why Save is refusing to work. The sentence a reader is sent to
+     when a control looks broken cannot be the faintest thing in the row. */
+  color: var(--text-2);
+  white-space: nowrap;
 }
 
 /* -- your guys, by pick ---------------------------------------------------

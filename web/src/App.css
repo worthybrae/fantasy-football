@@ -16,6 +16,34 @@
   border: 0;
 }
 
+/* -- ONE FOCUS RING, FOR EVERY CONTROL THAT DID NOT HAVE ONE --
+
+   An audit of the stylesheets turned up sixteen classes carrying
+   `cursor: pointer` and no `:focus-visible` rule at all, which on a control
+   whose only other state is a colour change means a keyboard user cannot
+   see where they are. The Draft button on every row of the available table
+   was one of them.
+
+   The value is `--focus-ring` (index.css) rather than a width and a colour
+   written out again here, so the ring is one edit everywhere and no control
+   can quietly pick its own. Rules that deliberately inset their ring -- the
+   top bar's tabs, which would otherwise cross the bar's own bottom border --
+   keep their offset and only take the width and colour. */
+.avail-draft-btn:focus-visible,
+.avail-pill:focus-visible,
+.avail-name-btn:focus-visible,
+.avail-th-btn:focus-visible,
+.confirm-btn-cancel:focus-visible,
+.confirm-btn-confirm:focus-visible,
+.cs-link:focus-visible,
+.drawer-draft-btn:focus-visible,
+.pick-ticker-pick:focus-visible,
+.player-page-back:focus-visible,
+button.plan-target:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-offset);
+}
+
 /* -- table -- */
 
 table {
@@ -367,7 +395,46 @@ td:first-child {
   background: var(--accent-border);
 }
 
-.rail-empty { font-size: 0.8rem; color: var(--text-3); }
+.rail-empty {
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+
+/* -- WAITING LOOKS THE SAME EVERYWHERE --
+
+   Six places in this app said "Loading..." and nothing else, in four
+   different components, and three of them said it forever if the fetch
+   behind them never came back. The word is also the least useful thing a
+   wait can say: the reader can see that something is not there yet, and
+   what they cannot see is WHAT.
+
+   So the copy at each of those six now names the thing being waited for,
+   and this class gives them all the same mark -- the room's own spinner,
+   the one the recompute notice and the connect screen already use, so a
+   wait is one idiom in this product rather than four. It says nothing to a
+   screen reader by construction -- generated content with an empty `content`
+   is not announced -- and the sentence after it is the whole message. */
+.is-waiting::before {
+  content: '';
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: var(--space-2);
+  vertical-align: -1px;
+  border: 1.5px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: landing-spin 0.8s linear infinite;
+}
+
+/* Asked for stillness, given a static ring rather than nothing at all: the
+   mark is what separates "still working" from "there is nothing here". */
+@media (prefers-reduced-motion: reduce) {
+  .is-waiting::before {
+    animation: none;
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+}
 
 /* -- draft room (/draft) -- */
 
@@ -560,9 +627,13 @@ td:first-child {
   flex-shrink: 0;
   margin: 0;
   padding: var(--space-2) var(--space-4);
-  background: color-mix(in srgb, var(--fail) 10%, var(--bg-1));
+  background: var(--fail-bg);
   border-bottom: 1px solid var(--fail);
   font-size: var(--text-sm);
+  /* Stated, because two of the three places that render this banner also
+     put `.error` on it and one does not -- so the same strip came out red
+     text in the room and muted grey under the recompute notice. */
+  color: var(--text-1);
 }
 
 /* One tier below the error banner, sharing its geometry so a stack of the
@@ -580,7 +651,7 @@ td:first-child {
   flex-shrink: 0;
   margin: 0;
   padding: var(--space-2) var(--space-4);
-  background: color-mix(in srgb, var(--fail) 10%, var(--bg-1));
+  background: var(--fail-bg);
   border-bottom: 1px solid var(--fail);
   font-size: var(--text-sm);
   color: var(--text-1);
@@ -742,8 +813,10 @@ a.draft-tab {
   gap: var(--space-3);
   /* Taller than the 34px it was, because it carries a face now -- and
      because at 34px the rail read as a status line rather than as the last
-     few picks of the draft, which is what it is. */
-  height: 52px;
+     few picks of the draft, which is what it is. The token, because the
+     welcome chip on the landing page has to clear this rail and was doing
+     it with its own copy of the number (`--ticker-h` in index.css). */
+  height: var(--ticker-h);
   padding: 0 var(--space-4);
   background: var(--bg-1);
   border-top: 1px solid var(--border);
@@ -928,7 +1001,6 @@ a.draft-tab {
   padding-left: var(--space-2);
   border-left: 0;
 }
-
 
 .pick-ticker-item {
   flex-shrink: 0;
@@ -1536,8 +1608,21 @@ button.roster-row:focus-visible {
 .plan-turn {
   padding: 7px 8px;
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-md);
   background: var(--bg-1);
+  transition: border-color 120ms ease;
+}
+
+/* The whole turn lights, not just the name inside it: the row is what the
+   eye is on and the name is a four-word target inside a 340px column. */
+.plan-turn:hover {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .plan-turn {
+    transition: none;
+  }
 }
 
 /* The pick number leads, because the plan is a schedule: a reader finds his
@@ -1583,11 +1668,6 @@ button.plan-target:focus-visible .plan-name {
   color: var(--accent);
 }
 
-button.plan-target:focus-visible {
-  outline: 1px solid var(--accent-border);
-  outline-offset: 2px;
-}
-
 .plan-name {
   min-width: 0;
   overflow: hidden;
@@ -1595,6 +1675,10 @@ button.plan-target:focus-visible {
   white-space: nowrap;
   font-size: var(--text-sm);
   font-weight: 600;
+  /* A hair tighter than the rail's default. At 12px semibold in a 340px
+     column the name is the longest thing on the row, and the tracking is
+     what decides whether "Amon-Ra St. Brown" ellipsizes. */
+  letter-spacing: -0.005em;
   color: var(--text-1);
 }
 
@@ -1623,7 +1707,12 @@ button.plan-target:focus-visible {
   font-size: var(--text-xs);
 }
 
+/* Both are toned by PlanPanel itself now -- survival on the room's
+   red-amber-green ramp, points by their sign -- so these rules carry only
+   what the tone does not: the fallback colour for a null, and the weight
+   that keeps survival the one being read first. */
 .plan-lasts {
+  font-weight: 600;
   color: var(--text-2);
 }
 
@@ -1651,32 +1740,49 @@ button.plan-target:focus-visible {
   color: var(--text-3);
 }
 
-.plan-reason.is-pro::before {
-  content: '+ ';
-  color: var(--ok-soft);
+/* A fixed-width mark, matching `.target-reason-mark` on the cards: the plus
+   and the minus are not the same width in Inter, so as bare text they
+   started two reasons on two different left edges in a list read down. */
+.plan-reason::before {
+  display: inline-block;
+  width: 9px;
+  font-family: var(--font-mono);
   font-weight: 700;
+}
+
+.plan-reason.is-pro::before {
+  content: '+';
+  color: var(--ok-soft);
 }
 
 .plan-reason.is-con::before {
-  content: '− ';
+  content: '−';
   color: var(--accent);
-  font-weight: 700;
 }
 
+/* Smaller than the reasons above them, which is the whole point: these are
+   the names the plan did NOT choose for this turn. At the same 10px they
+   read as one more line of the argument rather than as its footnote. */
 .plan-alts {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
   gap: 5px;
-  margin-top: 5px;
+  margin-top: 6px;
   font-size: 10px;
   color: var(--text-3);
 }
 
+/* No opacity. `--text-3` is already the quietest text this app has -- 2.73:1
+   on the rail -- and 0.75 of it is 2.06:1, which is a 9px uppercase label
+   that has to be looked for. The token on its own is the floor here; a
+   quieter one is spelled by picking a quieter colour, not by fading the
+   quietest one further. */
 .plan-alts-cap {
   text-transform: uppercase;
   letter-spacing: 0.06em;
   font-size: 9px;
+  color: var(--text-3);
 }
 
 .plan-alt:not(:last-child)::after {
@@ -1808,6 +1914,114 @@ button.plan-target:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* AND A FLOOR UNDER IT, which is the half `max-width: 0` was missing.
+   Measured on the live room: at 1440 the name column came out 119px wide
+   and at 1280 it was 80px, so the table read "Javonte Willi...",
+   "Tetairoa Mc", "DeVonta Sm" -- every name clipped, the team and bye gone
+   entirely, in the one column the whole table is scanned by. That is what
+   `max-width: 0` buys: it makes the column's own minimum zero, so the name
+   pays for all thirteen other columns down to nothing.
+
+   `min-width` on both the header and the cells puts the minimum back. It is
+   a minimum, not a width: on a wide room the column still takes every pixel
+   the others leave, which is how it got to 359px at 1680 and still does. On
+   a narrow one the table would rather be wide than illegible -- and the
+   compact tiers below make sure it never has to be, by dropping columns
+   instead. 176px holds the longest name on the board plus the meta. */
+.avail-table th.avail-col-name,
+.avail-table td.avail-col-name {
+  min-width: 176px;
+}
+
+/* -- COMPACT MODE: FOUR TIERS, LEAST USEFUL COLUMN FIRST --
+   Fourteen columns do not fit a 1280px window. Measured before this
+   existed: `.draft-main` is the viewport less the 340px rail, so 940px at
+   1280 -- and the table's own minimum was 1039px. It overflowed by 99px,
+   and what fell off the right edge was the Draft button, so at that width
+   the room could not be drafted from without scrolling sideways for a
+   control that was invisible.
+
+   So the columns drop in order of what they are worth under a pick clock,
+   and the room keeps a table that fits at every width instead of a wider
+   one that has to be scrolled:
+
+     Cons     the five-source consensus rank -- a second opinion on ADP,
+              which is still in the table beside where it was
+     Growth   points per game against last season, a meter
+     Reliable week-to-week consistency, a meter
+     Rank     where he finished at his position in past seasons
+
+   All four are on the player's own profile, which the name opens, and the
+   first three are also on the target cards above the table. What never
+   drops is the nine that answer "who, how good, will he last, what does he
+   cost, take him": ESPN, Pos, Player, the season's scores, Health, Proj/G,
+   Lasts, Edge, ADP, and the Draft button.
+
+   `display: none`, not `visibility`, so a dropped column leaves the
+   accessibility tree with the pixels rather than being read out as an empty
+   cell in every one of 250 rows. */
+@media (max-width: 1500px) {
+  .avail-table .avail-col-cons,
+  .avail-table .avail-col-change {
+    display: none;
+  }
+}
+
+/* THE ARITHMETIC, from the widths in this file (all border-box, and the
+   name column at its floor): 54 + 58 + 176 + 92 + 58 + 74 + 74 + 74 +
+   70x5 + 78 = 1088px for the full fourteen. At 1280 the column is 940px --
+   the viewport less the 340px rail -- and this tier plus the one above it
+   are both in force, so the table is 1088 - 70 (Cons) - 74 (Growth) - 74
+   (Reliable) = 870px, with 70px of slack.
+
+   The last of those three subtractions is new. `Reliable`'s header was
+   `.avail-col-steady` and its cell was `.avail-col-health` -- the same
+   74px, so the column looked right at every width -- which meant this rule
+   hid the header and left the cell standing: the table stayed 944px
+   against a 940px column (4px over, the Draft button clipped) AND the
+   header row was one cell short of the body from Growth rightward, so
+   every remaining label sat over the column to its left. Both rows carry
+   both classes now, and AvailableList.test.tsx holds them to it. */
+@media (max-width: 1360px) {
+  .avail-table .avail-col-steady {
+    display: none;
+  }
+}
+
+@media (max-width: 1200px) {
+  .avail-table .avail-col-finish {
+    display: none;
+  }
+}
+
+/* The last thing to go, and the only one that is a chart rather than a
+   rating: below this the room is narrower than the product is designed for
+   and the nine columns that decide a pick are what is left. */
+@media (max-width: 1120px) {
+  .avail-table .avail-col-games {
+    display: none;
+  }
+
+  /* And the name's floor comes down with it. Below this width the rail
+     alone is a third of the window and there is no arrangement of nine
+     columns that is comfortable; 140px still holds every first name and
+     most full ones, and it is what keeps the Draft button on screen rather
+     than behind a sideways scroll. */
+  .avail-table th.avail-col-name,
+  .avail-table td.avail-col-name {
+    min-width: 140px;
+  }
+}
+
+/* Tighter than the table's own 10px, and only on the columns that hold a
+   right-aligned number. Four digits do not need the gutter a sentence does,
+   and the 6px this returns per column is 30px back into the name. */
+.avail-table th.avail-col-num,
+.avail-table td.avail-col-num {
+  padding-left: 6px;
+  padding-right: 8px;
 }
 
 /* -- last season's per-game bars --
@@ -1986,11 +2200,6 @@ button.plan-target:focus-visible {
   color: var(--text-1);
 }
 
-.avail-th-btn:focus-visible {
-  outline: 1px solid var(--accent-border);
-  outline-offset: 2px;
-}
-
 /* The sorted column reads at full strength against the other headers'
    --text-2, so "what is this sorted by" is answerable from the column's
    own weight as well as from the caret -- the caret alone is a 9px glyph
@@ -2046,7 +2255,7 @@ button.plan-target:focus-visible {
   background: var(--bg-2);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45);
+  box-shadow: var(--shadow-pop);
   color: var(--text-2);
   font-size: var(--text-sm);
   font-weight: 400;
@@ -2112,11 +2321,6 @@ button.plan-target:focus-visible {
 .avail-name-btn:focus-visible .avail-name {
   color: var(--accent);
   text-decoration: underline;
-}
-
-.avail-name-btn:focus-visible {
-  outline: 1px solid var(--accent-border);
-  outline-offset: 2px;
 }
 
 .avail-meta {
@@ -2264,9 +2468,15 @@ button.plan-target:focus-visible {
   border-bottom: 1px solid var(--border);
 }
 
+/* A column, so the meters can be pinned to the bottom of it -- see
+   `.target-meters`. The grid above already stretches all three cards to the
+   tallest; without this they were three cards of one height whose contents
+   all stopped at different places. */
 .target-card {
+  display: flex;
+  flex-direction: column;
   padding: var(--space-3);
-  border-radius: 4px;
+  border-radius: var(--radius-md);
   background: var(--bg-1);
   border: 1px solid var(--border);
 }
@@ -2289,6 +2499,27 @@ button.plan-target:focus-visible {
   font-size: var(--text-xs);
   font-weight: 700;
   color: var(--accent);
+}
+
+/* THE RANK BECOMES AN EYEBROW ON A NARROW ROOM.
+
+   The head is one row of four things: TARGET/ALT 1, a 46px face, the name
+   with his position and team under it, and the Draft button. At 1280 that
+   row is about 300px wide, and the first, second and fourth are all fixed
+   -- so the name gets what is left, which was enough for "Javonte Willi..."
+   and not for the rest of him. The label is the one item that does not have
+   to be on that line: read down, TARGET / face+name / figures is the same
+   card with the eyebrow where an eyebrow goes. It costs one 13px row and
+   buys the name about 55px. Wide rooms keep the single line. */
+@media (max-width: 1500px) {
+  .target-card-head {
+    flex-wrap: wrap;
+    row-gap: 3px;
+  }
+
+  .target-rank {
+    flex: 0 0 100%;
+  }
 }
 
 /* The card's own open-the-profile control (TargetCards.tsx). It replaces the
@@ -2359,8 +2590,14 @@ button.plan-target:focus-visible {
 }
 
 /* Position, team and bye on one quiet line under the name -- three facts
-   that identify him and none that argue for him. */
+   that identify him and none that argue for him. Ellipsized rather than
+   wrapped: on a second line they made the three cards different heights
+   inside their own heads, and the part that dropped was whichever of the
+   three happened to be last. */
 .target-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 10px;
   letter-spacing: 0.04em;
   color: var(--text-3);
@@ -2432,12 +2669,17 @@ button.plan-target:focus-visible {
 
 /* -- what kind of player he is ------------------------------------------- */
 
+/* ONE LINE ACROSS ALL THREE CARDS. The target carries the plan's reasons and
+   the two alternates carry none, so the three meter rows sat at three
+   different heights and the row of cards read as three unrelated panels.
+   `margin-top: auto` puts them on the floor of each card; the padding is
+   what keeps a minimum gap on the card that has no slack to give. */
 .target-meters {
   display: flex;
   align-items: flex-end;
   gap: var(--space-3);
-  margin-top: var(--space-3);
-  padding-top: var(--space-3);
+  margin-top: auto;
+  padding-top: var(--space-4);
   border-top: 1px solid var(--border);
 }
 
@@ -2574,7 +2816,6 @@ button.plan-target:focus-visible {
   color: var(--text-3);
 }
 
-
 /* -- the board's hover card (BoardPeek.tsx) ------------------------------
    A condensed player profile: the face, what he is projected to score, where
    both markets had him, how last season went, and the room's three ratings.
@@ -2649,7 +2890,6 @@ button.plan-target:focus-visible {
 /* The market and rank deltas, toned like every other steal/reach reading. */
 .board-peek-move.is-steal { color: var(--ok); }
 .board-peek-move.is-reach { color: var(--fail); }
-
 
 .board-peek-dot { color: var(--text-3); margin: 0 1px; }
 
@@ -2834,12 +3074,12 @@ button.plan-target:focus-visible {
    states. */
 .confirm-error {
   margin: var(--space-3) 0 0;
-  padding: var(--space-2);
+  padding: var(--space-2) var(--space-3);
   border: 1px solid var(--fail);
   border-radius: var(--radius);
-  font-size: var(--text-xs);
+  background: var(--fail-bg);
   color: var(--text-1);
-  background: color-mix(in srgb, var(--fail) 10%, transparent);
+  font-size: var(--text-sm);
   line-height: 1.5;
 }
 
@@ -3450,7 +3690,6 @@ button.plan-target:focus-visible {
    it nor any ancestor sets a transform that would give fixed a closer
    containing block. Left/top come in as an inline style, computed per-hover
    from the cell's own bounding rect (see DraftBoardGrid's popoverStyle). -- */
-
 
 /* ==========================================================================
    Landing page
@@ -4790,7 +5029,6 @@ button.plan-target:focus-visible {
   object-fit: cover;
   background: var(--bg-2);
 }
-
 
 .pp-pop-head {
   display: flex;
@@ -6907,10 +7145,12 @@ button.pp-pop-comp:focus-visible {
 .mocks-board-error {
   margin: var(--space-3) var(--space-4) 0;
   padding: var(--space-2) var(--space-3);
-  background: color-mix(in srgb, var(--fail) 10%, var(--bg-1));
   border: 1px solid var(--fail);
   border-radius: var(--radius);
+  background: var(--fail-bg);
+  color: var(--text-1);
   font-size: var(--text-sm);
+  line-height: 1.5;
 }
 
 .mocks-grid {

@@ -223,15 +223,25 @@
   color: var(--text-3);
 }
 
-.mk-loading,
-.mk-error {
-  margin: 16px 0 0;
+.mk-loading {
+  margin: var(--space-4) 0 0;
   font-size: var(--text-sm);
   color: var(--text-3);
 }
 
+/* Was two rules for one class, the second overriding the first's colour --
+   and even then it shared its geometry with the loading line above, so a
+   failure and a wait looked alike. Same panel as every other inline error
+   in the app now. */
 .mk-error {
-  color: var(--fail-soft);
+  margin: var(--space-4) 0 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--fail);
+  border-radius: var(--radius);
+  background: var(--fail-bg);
+  color: var(--text-1);
+  font-size: var(--text-sm);
+  line-height: 1.5;
 }
 
 /* -- your turns ---------------------------------------------------------- */
@@ -1200,4 +1210,12 @@
   .mkd-card:hover { transform: none; }
   /* Without the hover lift the way in should just be visible. */
   .mkd-card-open { opacity: 1; }
+}
+
+/* Same ring as the room and the landing page (see index.css). A raw row is
+   a real control -- it opens the draft it names -- and had nothing to show
+   for it under a keyboard. */
+.mk-raw-row:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-offset);
 }

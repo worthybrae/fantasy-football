@@ -160,7 +160,9 @@ export default function LeagueReport() {
         <Link to="/" className="lr-logo" aria-label="Home"><Logo /></Link>
       </header>
       {error && <p className="lr-note is-fail">{error}</p>}
-      {report === undefined && !error && <p className="lr-note">Loading…</p>}
+      {report === undefined && !error && (
+        <p className="lr-note is-waiting">Looking for this season's report…</p>
+      )}
       {report === null && building && (
         <p className="lr-note">Writing the report card… this takes a few seconds.</p>
       )}

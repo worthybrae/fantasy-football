@@ -80,7 +80,7 @@
   gap: 8px;
   width: 100%;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-lg);
   background: rgba(10, 11, 14, 0.35);
   color: var(--text-1);
   cursor: pointer;
@@ -113,7 +113,7 @@
   width: 100%;
   aspect-ratio: 16 / 10;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-lg);
   background: var(--bg-1);
   box-shadow: 0 18px 40px -20px rgba(0, 0, 0, 0.8);
 }
@@ -147,4 +147,12 @@
   overflow-wrap: anywhere;
   user-select: all;
   -webkit-user-select: all;
+}
+
+/* The poster is a button, so it gets the app's ring like every other one.
+   Inset, because it fills the frame it sits on and an outset ring would
+   float clear of the image it belongs to. */
+.mg-play:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: -4px;
 }
