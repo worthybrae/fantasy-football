@@ -1072,3 +1072,56 @@ def test_the_favourites_read_claims_nothing_for_a_local_login(
 
     assert client.get("/api/account/favorites").status_code == 200
     assert billing.founders_taken() == 0
+def test_the_outlook_asks_about_the_shape_the_reader_chose(client, monkeypatch,
+                                                           counted):
+    """THE SEAT IS A SHAPE, not just a set of pick numbers. `availability_at`
+    reads a shape's own counts once the corpus holds enough drafts of it, so
+    a twelve-team question has to arrive as a twelve-team question -- the
+    picks alone would leave it answered from eight-team drafts forever.
+
+    The format is the LEAGUE's, not the reader's: this page is read by an
+    account connected to one ESPN league, and the server already knows what
+    that league scores.
+    """
+    _sign_in(monkeypatch)
+    billing.set_favorites([NEW_ID], OUTLOOK_LIST)
+    asked = []
+    real = av.availability_at
+
+    def spy(table, ids, k, n, *args, **kwargs):
+        asked.append((kwargs.get("teams"), kwargs.get("fmt")))
+        return real(table, ids, k, n, *args, **kwargs)
+
+    monkeypatch.setattr(av, "availability_at", spy)
+
+    assert _outlook(client, teams=12, slot=3).status_code == 200
+
+    assert asked, "the route never asked the counted table anything"
+    assert {teams for teams, _ in asked} == {12}
+    # This fixture's board has no ESPN league imported, and "ppr" is what
+    # `scoring.league.scoring_format` says about a league it cannot see -- the
+    # format every source has always been read as.
+    assert {fmt for _, fmt in asked} == {"ppr"}
+
+
+def test_the_outlook_players_pass_the_shape_straight_through(monkeypatch):
+    """The other half of the same wire, tested where the value can be forced:
+    a standard-scoring league asks about standard-scoring drafts."""
+    import api.account as account
+
+    board = pd.DataFrame([{"player_id": "p7", "name": "Player 07",
+                           "position": "RB", "team": "DET", "espn_rank": 1.0,
+                           "espn_adp": 1.0, "market_rank": 1}])
+    asked = []
+
+    def spy(table, ids, k, n, *args, **kwargs):
+        asked.append((kwargs.get("teams"), kwargs.get("fmt")))
+        import numpy as np
+        return np.ones(len(list(ids)))
+
+    monkeypatch.setattr(av, "availability_at", spy)
+    monkeypatch.setattr(av, "cached_table", lambda *_a, **_k: av.AvailabilityTable.empty())
+
+    account._outlook_players(board, ["p7"], [1, 16], teams=12, fmt="std")
+
+    assert asked == [(12, "std"), (12, "std")]

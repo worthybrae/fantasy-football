@@ -121,14 +121,16 @@ OUTLOOK_TTL_SECONDS = 60.0
 # once; past that the oldest entry goes.
 _OUTLOOK_MAX_ENTRIES = 64
 
-# HOW OFTEN THE BOARD'S IDENTITY IS RE-READ, and why it is not read per
-# request. `board_cache.board_key` is three DuckDB queries against the league
-# file -- 3 ms on an idle connection and three to five times that on a server
-# thread competing for one -- which on a cache HIT is the entire cost of the
-# request. It is also the one part of the key that can change without anybody
-# asking, so it gets a timer of its own instead of being dropped: a rebuilt
-# board retires every entry within five seconds, comfortably inside the minute
-# an answer is kept for anyway.
+# HOW OFTEN THE SERVER'S OWN HALF OF THE KEY IS RE-READ, and why it is not
+# read per request. `board_cache.board_key` is three DuckDB queries against
+# the league file -- 3 ms on an idle connection and three to five times that
+# on a server thread competing for one -- which on a cache HIT is the entire
+# cost of the request. The league's scoring format (the other half of the
+# shape the answer is computed for) is one more such read, on the same timer
+# and for the same reason. Both can change without anybody asking, so they
+# get a timer instead of being dropped from the key: a rebuilt board retires
+# every entry within five seconds, comfortably inside the minute an answer is
+# kept for anyway.
 _BOARD_IDENTITY_TTL_SECONDS = 5.0
 
 
@@ -247,11 +249,17 @@ def _ranked_board(cur):
     return _attach_espn_rank(cur, board)
 
 
-def _outlook_players(board, saved: list, picks: list) -> list:
+def _outlook_players(board, saved: list, picks: list,
+                     teams=None, fmt=None) -> list:
     """One row per saved favourite, in the saved order.
 
     THE ORDER IS THE PREFERENCE (see `billing.favorites`), so the answer is
     built by walking `saved` rather than by walking the board.
+
+    `teams` and `fmt` are the shape the answer is for -- the size the reader
+    picked, and the scoring of the league this deployment holds -- and go
+    straight to `availability_at`, which reads that shape's own counts once
+    the corpus holds enough drafts of it and the pooled ones until then.
 
     A saved id the board no longer names keeps its row and carries nulls. It
     is a rare case -- the write checked every id against the board -- but the
@@ -287,7 +295,7 @@ def _outlook_players(board, saved: list, picks: list) -> list:
         at_pick = {pick: availability_at(
             table, known, 0, pick,
             espn_adp.to_numpy(dtype=float), market_rank.to_numpy(dtype=float),
-            positions=positions) for pick in picks}
+            positions=positions, teams=teams, fmt=fmt) for pick in picks}
         for i, pid in enumerate(known):
             curves[pid] = [round(float(at_pick[pick][i]) * 100, 1)
                            for pick in picks]
@@ -367,23 +375,41 @@ def register_account_routes(app, conn, store=None):
     # live here instead, which also means a test's app starts cold.
     outlook_cache: dict = {}
     outlook_lock = threading.Lock()
-    board_identity: list = [0.0, None]      # [read at, value]
+    # [read at, (board key, the league's scoring format)]
+    server_identity: list = [0.0, None]
 
-    def _board_identity(cur):
-        """The board cache's own key, re-read at most every
-        `_BOARD_IDENTITY_TTL_SECONDS`. See that constant for why it is on a
-        timer rather than on every request."""
+    def _identity(cur):
+        """What the SERVER brings to an answer: `(board key, the league's
+        scoring format)`.
+
+        Both are re-read at most every `_BOARD_IDENTITY_TTL_SECONDS` -- see
+        that constant for why the board's key is on a timer rather than on
+        every request, and note that the format is the same kind of quantity:
+        a DuckDB read whose answer changes only when a league is imported,
+        which is also when the board is rebuilt. One timer over the pair
+        rather than two, so a cache HIT still does no queries at all.
+
+        THE SHAPE IS HALF THE READER'S AND HALF THE LEAGUE'S. `teams` is a
+        control on the page -- somebody planning for a ten-team draft can ask
+        about one -- but the scoring is not: this page is read by an account
+        connected to one ESPN league, and asking it to name its own format
+        would be asking a question the server can already answer. A
+        deployment with no league imported reads "ppr", which is what
+        `scoring.league.scoring_format` says about a league it cannot see.
+        """
+        from scoring import league as league_mod
         from scoring.board_cache import board_key
 
         with outlook_lock:
-            at, value = board_identity
+            at, value = server_identity
             if value is not None and time.monotonic() - at < _BOARD_IDENTITY_TTL_SECONDS:
                 return value
-        # Outside the lock: it is three queries, and a second request arriving
-        # during them should read the board rather than queue behind us.
-        value = board_key(cur)
+        # Outside the lock: it is a handful of queries, and a second request
+        # arriving during them should read the board rather than queue behind
+        # us.
+        value = (board_key(cur), league_mod.scoring_format(league_mod.load(cur)))
         with outlook_lock:
-            board_identity[:] = [time.monotonic(), value]
+            server_identity[:] = [time.monotonic(), value]
         return value
 
     def _board_ids() -> set:
@@ -557,7 +583,9 @@ def register_account_routes(app, conn, store=None):
             # The board's identity is read BEFORE the board is built: it
             # completes this answer's key, and on a hit it is the only work
             # the request does.
-            key = (tuple(saved), int(teams), int(slot), _board_identity(cur))
+            identity = _identity(cur)
+            fmt = identity[1]
+            key = (tuple(saved), int(teams), int(slot), identity)
             with outlook_lock:
                 hit = outlook_cache.get(key)
                 if hit is not None and time.monotonic() - hit[0] < OUTLOOK_TTL_SECONDS:
@@ -568,7 +596,8 @@ def register_account_routes(app, conn, store=None):
                 "teams": int(teams),
                 "slot": int(slot),
                 "picks": picks,
-                "players": _outlook_players(_ranked_board(cur), saved, picks),
+                "players": _outlook_players(_ranked_board(cur), saved, picks,
+                                            teams=int(teams), fmt=fmt),
             }
         finally:
             cur.close()

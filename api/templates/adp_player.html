@@ -16,9 +16,14 @@
       {% if p.age %}<li>Age <b>{{ p.age }}</b></li>{% endif %}
       {% if p.rookie_season %}<li>{% if p.rookie %}Rookie{% else %}NFL since <b>{{ p.rookie_season }}</b>{% endif %}</li>{% endif %}
       {% if p.tier %}<li>Board tier <b>{{ p.tier }}</b></li>{% endif %}
+      {% if prof and prof.status and prof.status.slot %}<li>Depth <b>{{ prof.status.slot }}</b></li>{% endif %}
     </ul>
     <p class="lede">Rooms take {{ pron.o }} at pick <b>{{ '%.1f' % p.adp }}</b> on average — round {{ p.round_p10 }}{% if p.round_p90 != p.round_p10 %} to round {{ p.round_p90 }}{% endif %}. Taken in {{ pct(p.of_share) }} of the {{ p.of }} drafts {{ pron.s }} was on the board for.</p>
-    {% if p.status %}<p class="note">{% if p.status.injury %}Listed <b class="down">{{ p.status.injury }}</b>{% if p.status.body_part %} ({{ p.status.body_part | lower }}){% endif %}{% if p.status.practice is not none %}, {% endif %}{% endif %}{% if p.status.practice is not none %}practice participation {{ pct(p.status.practice) }}{% endif %}.</p>{% endif %}
+    {% if p.status %}<p class="note">{% if p.status.injury %}Listed <b class="down">{{ p.status.injury }}</b>{% if p.status.body_part %} ({{ p.status.body_part | lower }}){% endif %}{% if p.status.practice is not none %}, {% endif %}{% endif %}{% if p.status.practice is not none %}practice participation {{ pct(p.status.practice) }}{% endif %}.</p>
+    {# The board's own feed, for a player the ADP pass could not match. NOTHING
+       HERE EVER SAYS HEALTHY: a null designation is the absence of a claim,
+       not a clean bill of health, so there is no else. #}
+    {% elif prof and prof.status and prof.status.injury %}<p class="note">Listed <b class="down">{{ prof.status.injury }}</b>{% if prof.status.body_part %} ({{ prof.status.body_part | lower }}){% endif %}.{% if prof.status.notes %} {{ prof.status.notes }}{% endif %}</p>{% endif %}
   </div>
 </div>
 
@@ -82,21 +87,213 @@
 <figcaption>Every pick {{ pron.s }} was taken at, across {{ drafts }} drafts. The shaded round is round {{ p.usual_round }}, where the middle of {{ pron.p }} picks falls — {{ pct(p.usual_share) }} of them.{% if p.seconds and corpus_seconds %} Rooms spend a median of {{ '%g' % p.seconds }} seconds on the pick that takes {{ pron.o }}, against {{ '%g' % corpus_seconds }} seconds for a pick in general.{% endif %}</figcaption>
 </figure>
 
+{# -- the profile the app draws, in the order the app draws it -------------
+   Every figure below comes off ONE object -- `scoring.profile_cache
+   .cached_profile`, the same payload `/api/players/{id}/profile` serves the
+   draft room -- so a number here and the number in the popup are the same
+   number rather than two that agree today. `prof` is None whenever that
+   payload could not be built, and every section under it goes with it: the
+   page above this line is the corpus's own answer and needs none of it. #}
+{% if prof %}
+{% if prof.meters %}
+<h2>How {{ pron.s }} grades</h2>
+<div class="meters">
+{% for m in prof.meters %}
+  <div class="meter">
+    <div class="k">{{ m.label }}</div>
+    <div class="v {{ m.cls }}">{{ m.value }}</div>
+    {# Five steps, one worth of the ramp each: in every meter on this page one
+       bar is the worst outcome and five the best. The number above them is
+       what they were cut from, so the picture is checkable. #}
+    <div class="segs" role="img" aria-label="{{ m.level }} of 5">{% for i in range(5) %}<i class="{% if i < m.level %}{{ m.cls }}{% endif %}"></i>{% endfor %}</div>
+    <div class="s">{{ m.note }}</div>
+  </div>
+{% endfor %}
+</div>
+{% endif %}
+
+{% if prof.seasons %}
+<h2>Every season {{ pron.s }} has played</h2>
+<div class="scroll">
+<table>
+<thead><tr><th>Season</th><th class="n">Age</th><th class="n">NFL yr</th><th class="n">Games</th><th class="n">Points / g</th><th class="n">{{ prof.seasons.position }} finish</th><th class="n">By points / g</th><th class="n">Steadiness</th></tr></thead>
+<tbody>
+{% for s in prof.seasons.rows %}
+<tr>
+  <td class="mono">{{ s.season }}</td>
+  <td class="n">{{ s.age if s.age else '—' }}</td>
+  <td class="n">{{ s.nfl if s.nfl else '—' }}</td>
+  <td class="n">{{ s.games }}</td>
+  <td class="n {{ s.ppg_cls }}">{{ s.ppg }}</td>
+  <td class="n {{ s.finish_cls }}">{{ s.finish }}</td>
+  <td class="n dim">{{ s.ppg_rank }}</td>
+  <td class="n {{ s.steady_cls }}">{{ s.steady }}</td>
+</tr>
+{% endfor %}
+{% if prof.seasons.proj %}
+{# The one row here that has not happened, on the same ladder as the ones
+   behind it -- the app draws its forecast as the last column of the same
+   chart for the same reason. #}
+<tr class="proj">
+  <td class="mono">{{ prof.seasons.proj.season }} <span class="dim">proj</span></td>
+  <td class="n">—</td><td class="n">—</td><td class="n">—</td>
+  <td class="n {{ prof.seasons.proj.ppg_cls }}">{{ prof.seasons.proj.ppg }}</td>
+  <td class="n {{ prof.seasons.proj.finish_cls }}">{{ prof.seasons.proj.finish }}</td>
+  <td class="n dim">—</td><td class="n dim">—</td>
+</tr>
+{% endif %}
+</tbody>
+</table>
+</div>
+<p class="note">Finish is a place among {{ prof.seasons.starters }} startable {{ prof.seasons.position }}s, which is a twelve-team league's shape. Steadiness is {{ pron.p }} place on week-to-week swing among everyone measured at {{ pron.p }} position that season — lower is steadier.</p>
+{% endif %}
+
+{% if prof.weeks %}
+<h2>{{ prof.weeks.season }} by week</h2>
+<figure class="chart" style="margin:0">
+<div class="xscroll">
+<svg viewBox="0 0 720 128" role="img" aria-label="{{ p.name }}'s points in each week of {{ prof.weeks.season }}">
+  <g font-family="ui-monospace,monospace" text-anchor="middle">
+  {% for c in prof.weeks.cols %}
+    <text x="{{ loop.index0 * 40 + 20 }}" y="14" font-size="12" class="{{ c.cls or 'off' }}">{{ c.value }}</text>
+    {% if c.empty %}<rect x="{{ loop.index0 * 40 + 7 }}" y="101" width="26" height="3" class="off"/>{% else %}<rect x="{{ loop.index0 * 40 + 7 }}" y="{{ 104 - c.h }}" width="26" height="{{ c.h }}" class="{{ c.cls }}"/>{% endif %}
+    <text x="{{ loop.index0 * 40 + 20 }}" y="123" font-size="11" class="ax">{{ c.label }}</text>
+  {% endfor %}
+  </g>
+  <line x1="0" y1="104" x2="720" y2="104" stroke="#262932"/>
+</svg>
+</div>
+<figcaption>Every week of {{ prof.weeks.season }}, scored under this league's own rules{% if prof.weeks.avg %} — {{ prof.weeks.avg }} a game{% if prof.weeks.finish %}, which finished {{ pron.o }} {{ prof.weeks.finish }}{% endif %}{% endif %}. A mark on the baseline is a week with no game; the scale is the same for every player, so a good week is the same height on every page.</figcaption>
+</figure>
+<div class="scroll">
+<table>
+<thead><tr><th class="n">Wk</th><th>Opp</th>{% for h in prof.weeks.heads %}<th class="n">{{ h }}</th>{% endfor %}<th class="n">Pts</th></tr></thead>
+<tbody>
+{% for g in prof.weeks.lines %}
+<tr><td class="n mono">{{ g.week }}</td><td class="mono">{{ g.opponent }}</td>{% for cell in g.cells %}<td class="n mono">{{ cell }}</td>{% endfor %}<td class="n mono {{ g.cls }}">{{ g.points }}</td></tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+{% endif %}
+
+{% if prof.schedule %}
+<h2>The season in front of {{ pron.o }}</h2>
+{# THE DIRECTION IS INVERTED FROM INTUITION AND THE COPY SAYS SO. Rank 1 is
+   the SOFTEST defence -- the one that gave up the most to this position last
+   season -- so a green week is an easy one. Read as a difficulty ranking it
+   turns the best week of the season into the worst. #}
+<div class="scroll">
+<table class="sched">
+<thead><tr><th>Week</th>{% for w in prof.schedule.weeks %}<th class="n">{{ w.week }}</th>{% endfor %}</tr></thead>
+<tbody>
+<tr><td>Opponent</td>{% for w in prof.schedule.weeks %}<td class="n mono">{% if w.away %}at {% endif %}{{ w.opponent }}</td>{% endfor %}</tr>
+<tr><td>Softest</td>{% for w in prof.schedule.weeks %}<td class="n mono {{ w.cls }}">{{ w.rank }}</td>{% endfor %}</tr>
+</tbody>
+</table>
+</div>
+<p class="note">Each defence's place on what it gave up to {{ prof.position }}s last season, softest first{% if prof.schedule.teams %} of {{ prof.schedule.teams }}{% endif %} — a low number is an easy week.{% if prof.schedule.note %} Over the season {{ pron.s }} draws the <b>{{ prof.schedule.note }}</b> of the {{ prof.schedule.teams }} schedules at {{ pron.p }} position.{% endif %}</p>
+{% endif %}
+
+{% if prof.usage %}
+<h2>What {{ pron.p }} points are made of</h2>
+<div class="scroll">
+<table>
+<thead><tr><th></th>{% for h in prof.usage.head %}<th class="n">{{ h }}</th>{% endfor %}{% if prof.usage.projected %}<th class="n">proj</th>{% endif %}</tr></thead>
+<tbody>
+{% for r in prof.usage.rows %}
+<tr{% if loop.index0 == prof.usage.seam %} class="seam"{% endif %}>
+  <td>{{ r.label }}</td>
+  {% for c in r.cells %}<td class="n mono {% if c.blank %}dim{% else %}{{ c.tone }}{% endif %}{% if loop.last and not prof.usage.projected %} now{% endif %}">{{ c.text }}</td>{% endfor %}
+  {% if r.proj %}<td class="n mono proj {% if r.proj.blank %}dim{% else %}{{ r.proj.tone }}{% endif %}">{{ r.proj.text }}</td>{% endif %}
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+<p class="note">Shares first, then rates: a rate is what {{ pron.s }} did, a share is how much of the offence {{ pron.s }} was. Green is up on the season before it, red is down; a move under a twentieth of what it moved from keeps its ordinary ink.</p>
+{% endif %}
+
+{% if prof.oline or prof.vegas or prof.room %}
+<h2>The team around {{ pron.o }}</h2>
+<div class="cols">
+{% if prof.room %}
+<div class="card">
+  <h3>Depth chart{% if prof.room.team %} <span class="dim">· {{ prof.room.team }}</span>{% endif %}</h3>
+  <ol class="room">
+  {% for r in prof.room.players %}
+    <li{% if r.me %} class="me"{% endif %}><span class="d">{{ prof.room.position }}{{ r.rank }}</span> <span class="nm">{{ r.name }}</span></li>
+  {% endfor %}
+  </ol>
+</div>
+{% endif %}
+{% if prof.oline %}
+<div class="card">
+  <h3>O-line{% if prof.oline.team %} <span class="dim">· {{ prof.oline.team }}</span>{% endif %}</h3>
+  <p class="lead"><b>{{ prof.oline.rank }}</b> of {{ prof.oline.teams }}</p>
+  {% if prof.oline.parts %}
+  <div class="gauges">
+  {% for m in prof.oline.parts %}
+    <div class="gauge"><span class="l">{{ m.label }}</span><span class="track"><i class="{{ m.cls }}" style="width:{{ m.fill }}%"></i></span><span class="mono v">{{ m.value }}</span></div>
+  {% endfor %}
+  </div>
+  {% endif %}
+  {% if prof.oline.starters %}
+  <ul class="room">
+  {% for s in prof.oline.starters %}
+    <li><span class="d">{{ s.position }}</span> <span class="nm">{{ s.name }}</span> <span class="mono {{ s.cls }}">{{ s.place }}</span></li>
+  {% endfor %}
+  </ul>
+  <p class="note" style="margin:8px 0 0">Each man's place among the league's other starters at the same slot on how much of their teams' football they have been available for.</p>
+  {% endif %}
+</div>
+{% endif %}
+{% if prof.vegas %}
+<div class="card">
+  <h3>Vegas</h3>
+  {# The rank, in the O-line card's own lead treatment, because the two are
+     making the same kind of statement: one number out of the same
+     thirty-two, that a reader places instantly. The implied total is the
+     arithmetic under it rather than the headline -- read as a headline it
+     was taken for a projection for the player rather than for his whole
+     offence. #}
+  {% if prof.vegas.rank and prof.vegas.teams %}<p class="lead"><b>{{ prof.vegas.rank }}</b> of {{ prof.vegas.teams }} offences</p>{% endif %}
+  <p class="note mono" style="margin:8px 0 0">{{ prof.vegas.implied }} team pts / g{% if prof.vegas.priced %} · over {{ prof.vegas.priced }} priced week{{ '' if prof.vegas.priced == 1 else 's' }}{% endif %}</p>
+  <p class="note" style="margin:8px 0 0">A TEAM total, off the posted totals and spreads — never a player prop.</p>
+</div>
+{% endif %}
+</div>
+{% endif %}
+{% endif %}
+
 {% if p.sources %}
 <h2>What the ranking sources say</h2>
 <div class="scroll">
 <table>
-<thead><tr><th>Source</th><th class="n">Rank</th><th>What it is</th></tr></thead>
+{# THE POSITIONAL PLACE IS THE ONE THAT DECIDES A PICK, and it is the app's
+   own (`header.market_pos`, ranked over the draftable board so every place
+   counts the same population). It appears only when the profile does; the
+   overall rank beside it is the scale it sits on. #}
+<thead><tr><th>Source</th><th class="n">Rank</th>{% if prof %}<th class="n">{{ p.position }}</th>{% endif %}<th>What it is</th></tr></thead>
 <tbody>
+{% if prof and prof.market.rank %}
+<tr><td><b>This board</b></td><td class="n"><b>{{ prof.market.rank }}</b></td><td class="n">{{ prof.market.board_pos or '—' }}</td><td class="dim">Where the app's own model ranks {{ pron.o }}, which is what the rest of this table is read against</td></tr>
+{% endif %}
 {% for s in p.sources %}
 <tr>
   <td>{{ s.label }}</td>
   <td class="n">{{ '%g' % s.rank }}</td>
+  {% if prof %}<td class="n">{{ prof.market.pos[s.key] or '—' }}</td>{% endif %}
   <td class="dim">{% if s.key == 'ffc' %}Real drafts on Fantasy Football Calculator, PPR{% elif s.key == 'fp' %}Expert consensus ranking{% if p.fp_tier %}, tier {{ p.fp_tier }}{% endif %}{% elif s.key == 'cbs' %}CBS Sports PPR top 200{% elif s.key == 'mfl' %}MyFantasyLeague ADP{% else %}ESPN's PPR expert rank{% if p.auction %}, ${{ '%g' % p.auction }} auction value{% endif %}{% endif %}</td>
 </tr>
 {% endfor %}
 {% if p.consensus %}
-<tr><td><b>Consensus</b></td><td class="n"><b>{{ '%g' % p.consensus }}</b></td><td class="dim">The median of the sources above, which is what the app's board ranks on</td></tr>
+<tr><td><b>Consensus</b></td><td class="n"><b>{{ '%g' % p.consensus }}</b></td>{% if prof %}<td class="n">{{ prof.market.consensus_pos or '—' }}</td>{% endif %}<td class="dim">The median of the sources above, which is what the app's board ranks on{% if prof and prof.market.spread %}; they spread {{ '%g' % prof.market.spread }} slots between them{% endif %}</td></tr>
+{% endif %}
+{% if prof and prof.market.edge is not none and p.consensus %}
+{# The gap between the first two rows, stated. It is arithmetic a reader
+   could do, and doing it is the whole question the table exists to answer. #}
+<tr><td><b>vs consensus</b></td><td class="n {{ prof.market.edge_tone }}"><b>{{ prof.market.edge_text }}</b></td><td class="n"></td><td class="dim">Slots between this board and the consensus. Positive is the market leaving {{ pron.o }} later than the model would take {{ pron.o }}{% if prof.market.edge_tone == 'up' %} — a whole round in any league this tool supports{% endif %}</td></tr>
 {% endif %}
 </tbody>
 </table>
@@ -168,14 +365,47 @@
 </div>
 {% endif %}
 
-{% if p.news %}
+{% if prof and prof.comps %}
+<h2>Seasons that looked like {{ pron.p }}</h2>
+<div class="scroll">
+<table>
+<thead><tr><th>Season that looked like this</th><th class="n">Yr</th><th class="n">Points / g</th><th class="n">Next year</th><th class="n">Match</th></tr></thead>
+<tbody>
+{% for c in prof.comps.rows %}
+<tr>
+  {# A twin can predate this year's board -- a 2017 season is not a player
+     anybody can draft -- and only one the board still carries has a page. #}
+  <td>{% if c.slug %}<a href="/adp/{{ c.slug }}">{{ c.name }}</a>{% else %}{{ c.name }}{% endif %}</td>
+  <td class="n mono">{{ c.season }}</td>
+  <td class="n mono">{{ c.ppg }}</td>
+  <td class="n mono {{ c.tone }}">{{ c.change }}</td>
+  <td class="n mono dim">{{ c.match }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+<p class="note">The closest seasons anyone has had to {{ pron.p }} last one{% if prof.comps.age %}, at the same age ({{ prof.comps.age }}){% endif %} — matched on the stat line, not on name or draft position. "Next year" is what each of them did the season after.{% if prof.comps.note %} Across the {{ prof.comps.note.n }} seasons in that band the average move was <span class="{{ prof.comps.note.tone }}">{{ prof.comps.note.value }}</span> a game, and {{ prof.comps.note.declined }} of them fell.{% endif %}</p>
+{% endif %}
+
+{% if news %}
 <h2>Latest on {{ p.name }}</h2>
 <ul class="news">
-{% for n in p.news %}
+{% for n in news %}
 <li>{% if n.url %}<a href="{{ n.url }}" rel="nofollow noopener">{{ n.headline }}</a>{% else %}{{ n.headline }}{% endif %}
 <span class="meta">{{ n.source or 'Wire' }}{% if n.date %} · {{ n.date.strftime('%b %-d, %Y') }}{% endif %}</span></li>
 {% endfor %}
 </ul>
+{% endif %}
+
+{% if prof and prof.peers %}
+<h2>Most like {{ pron.o }} on this year's board</h2>
+<div class="near">
+{% for q in prof.peers %}
+  {% if q.slug %}<a href="/adp/{{ q.slug }}"><b>{{ q.ppg }}</b><span>{{ q.name }}</span>{% if q.gap %} <span class="mono {{ q.tone }}">{{ q.gap }}</span>{% endif %}</a>{% else %}<span class="flat"><b>{{ q.ppg }}</b><span>{{ q.name }}</span>{% if q.gap %} <span class="mono {{ q.tone }}">{{ q.gap }}</span>{% endif %}</span>{% endif %}
+{% endfor %}
+</div>
+<p class="note">Scored against {{ pron.o }} on projection, last season's stat line, age and build — the players you would be choosing between. The signed number is what taking one instead would be worth per game.</p>
 {% endif %}
 
 {% if near %}

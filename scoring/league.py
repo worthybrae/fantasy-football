@@ -330,6 +330,39 @@ def default_settings() -> LeagueSettings:
     )
 
 
+# The reception-point thresholds that separate the three common formats,
+# written once because two readers ask the same question of different
+# objects: a league's live settings (`scoring_format`, just below) and a
+# recorded draft's stored scoring blob (`pipeline.draft_log.draft_format`).
+# The corpus is COUNTED by one of them and QUERIED by the other -- see
+# `scoring.availability`'s per-shape tables -- so two copies of these numbers
+# that drifted apart would have a room looking up a shape the farm never
+# recorded, and finding nothing, silently.
+PPR_RECEPTION_POINTS = 0.75
+HALF_RECEPTION_POINTS = 0.25
+
+
+def format_for_receptions(points) -> str:
+    """`'ppr'` | `'half'` | `'std'` from what one reception is worth.
+
+        pts >= 0.75         -> 'ppr'   (full-point PPR, the real league's 1.0)
+        0.25 <= pts < 0.75  -> 'half'
+        else                -> 'std'   (0-point, standard)
+
+    Anything that is not a number reads as 0 rather than raising: a scoring
+    table that does not mention receptions does not score them.
+    """
+    try:
+        pts = float(points)
+    except (TypeError, ValueError):
+        pts = 0.0
+    if pts >= PPR_RECEPTION_POINTS:
+        return "ppr"
+    if pts >= HALF_RECEPTION_POINTS:
+        return "half"
+    return "std"
+
+
 def scoring_format(settings: "LeagueSettings | None") -> str:
     """League scoring format as one of `'ppr'` | `'half'` | `'std'`.
 
@@ -351,12 +384,7 @@ def scoring_format(settings: "LeagueSettings | None") -> str:
     """
     if settings is None or not settings.scoring:
         return "ppr"
-    pts = settings.scoring.get("receptions", 0)
-    if pts >= 0.75:
-        return "ppr"
-    if pts >= 0.25:
-        return "half"
-    return "std"
+    return format_for_receptions(settings.scoring.get("receptions", 0))
 
 
 def to_json(settings: LeagueSettings) -> str:

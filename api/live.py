@@ -2246,6 +2246,12 @@ def rank_and_plan(board, pool, taken, taken_order, counts, my_indices, my_slot,
     this position would do for the roster, as of now.
     """
     teams, rounds = int(settings.teams), int(settings.rounds)
+    # THE ROOM'S OWN SHAPE, handed to every availability read below. Once the
+    # corpus holds MIN_SHAPE_DRAFTS drafts of it, "will he last" is answered
+    # from drafts of this size and this scoring rather than from the pooled
+    # corpus (see scoring/availability.py); until then the same pooled answer
+    # comes back and nothing on screen changes.
+    fmt = league_mod.scoring_format(settings)
     snake = snake_slots(teams, rounds)
     made = len(taken_order) if picks_made is None else int(picks_made)
     turns = ([i + 1 for i in range(min(made, len(snake)), len(snake))
@@ -2276,7 +2282,8 @@ def rank_and_plan(board, pool, taken, taken_order, counts, my_indices, my_slot,
     if next_turn is not None and len(ids):
         lasts = np.asarray(availability_at(table, ids, made, next_turn,
                                            espn_adp, market_rank,
-                                           positions=positions), dtype=float)
+                                           positions=positions,
+                                           teams=teams, fmt=fmt), dtype=float)
         edge = np.asarray(edge_at(proj, positions, lasts), dtype=float)
     else:
         lasts = edge = None
@@ -2348,7 +2355,7 @@ def rank_and_plan(board, pool, taken, taken_order, counts, my_indices, my_slot,
                       health=health_level(games_pg), roster_counts=dict(counts),
                       settings=settings, turns=turns, picks_made=made,
                       favourites=set(favourites), table=table, names=names,
-                      roster_byes=roster_byes)
+                      roster_byes=roster_byes, teams=teams, fmt=fmt)
         plan = build_plan(**common)
         # ON THE CLOCK the first turn is this pick, and its cards are
         # `target_now`'s (spec section 4): the same score with everybody

@@ -797,6 +797,35 @@ def test_a_player_who_will_not_last_is_not_the_target_at_my_next_turn(tmp_path, 
     assert all(a["player_id"] != "gibbs" for a in first["alternates"])
 
 
+def test_the_rooms_plan_does_not_target_a_man_my_next_turn_would_hand_me(
+        tmp_path, monkeypatch):
+    """Product-push section 1, through the room. Gibbs is ESPN's 5th and 95%
+    to still be sitting there at pick 11; the receiver ESPN ranks 6th is
+    80% to be gone by then. The plan takes the receiver -- a pick you can
+    also make at your next turn is not a pick -- and says so on the card."""
+    state, _recompute = _live_routes_with_conn(tmp_path)
+    session = _live_session(my_slot=6)             # turns 6, 11, 22, ...
+    monkeypatch.setattr("api.live._drafted_state", lambda cur, pool: (np.zeros(5, bool), [None] * 4))
+    monkeypatch.setattr("api.live._seed_rosters", _no_roster)
+
+    def availability(table, ids, k, n, espn_adp=None, market_rank=None,
+                     positions=None, **_):
+        return np.array([0.95 if pid == "gibbs"
+                         else (0.9 if n <= 6 else 0.2) for pid in ids])
+    monkeypatch.setattr("api.live.availability_at", availability)
+    monkeypatch.setattr("scoring.plan.availability_at", availability)
+    _recompute(session, picks_made=4)
+    first = state["plan"][0]
+    assert first["pick_no"] == 6
+    assert first["target"]["player_id"] == "wr1"
+    # Not the higher-ranked man who will keep: not the target, not a name
+    # the card offers instead of him.
+    assert "gibbs" not in [first["target"]["player_id"]]
+    assert all(a["player_id"] != "gibbs" for a in first["alternates"])
+    assert ("likely gone before your next pick (80 %)"
+            in first["target"]["pros"])
+
+
 def test_live_start_success_path_builds_and_stores_a_session(tmp_path):
     """live_start's non-reused path: build_session runs against a real
     database, the response carries the pinned seed and a real board
@@ -4941,3 +4970,41 @@ def test_a_mock_room_still_says_so(monkeypatch, priced):
 
     assert state["required"] is False
     assert state["reason"] == "mock"
+def test_the_room_asks_the_counted_table_about_its_own_shape(tmp_path,
+                                                             monkeypatch):
+    """A ten-team standard room is a different question from an eight-team
+    PPR one, and `availability_at` can only condition on a shape it is told.
+    Both halves are checked -- the candidate rows' "lasts" and the plan's --
+    because they are two different calls and either could be left pooled.
+
+    Nothing on screen changes today: until the corpus holds
+    `availability.MIN_SHAPE_DRAFTS` drafts of a shape, the same pooled answer
+    comes back.
+    """
+    import dataclasses
+
+    state, _recompute = _live_routes_with_conn(tmp_path)
+    session = _live_session()
+    session = dataclasses.replace(
+        session,
+        settings=dataclasses.replace(_settings(teams=10),
+                                     scoring={"receptions": 0.0}))
+    monkeypatch.setattr("api.live._drafted_state",
+                        lambda cur, pool: (np.zeros(5, bool), []))
+    monkeypatch.setattr("api.live._seed_rosters",
+                        lambda *a, **k: ({slot: {"counts": {}, "indices": []}
+                                          for slot in range(1, 11)}, []))
+    asked = []
+
+    def availability(table, ids, k, n, espn_adp=None, market_rank=None,
+                     positions=None, teams=None, fmt=None, **_):
+        asked.append((teams, fmt))
+        return np.full(len(list(ids)), 0.5)
+
+    monkeypatch.setattr("api.live.availability_at", availability)
+    monkeypatch.setattr("scoring.plan.availability_at", availability)
+
+    _recompute(session, picks_made=3)
+
+    assert asked, "the recompute never asked the counted table anything"
+    assert set(asked) == {(10, "std")}

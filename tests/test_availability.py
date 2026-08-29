@@ -501,3 +501,142 @@ def test_a_handful_of_drafts_is_not_enough_to_call_him_gone(tmp_path):
     assert _at(thin, ["x"], 5, 30, adp)[0] == pytest.approx(
         av.fallback_probability(240.0, 5, 30, thin))
     assert _at(thin, ["x"], 5, 30, adp)[0] > 0.5
+
+
+# ---------------------------------------------------------------------------
+# Shapes: the same question, asked of drafts the same size and scoring.
+# ---------------------------------------------------------------------------
+#
+# A draft's shape is (teams, format), and it moves the answer twice over:
+# twelve teams means twelve picks a round rather than eight, so pick 30 is
+# early rather than late, and PPR means a receiver goes where standard leaves
+# him. Below, one player -- "S" -- is taken at pick 20 in every 8-team draft
+# and at pick 30 in every 10-team one, which is a corpus where the pooled
+# answer and the shape's answer cannot both be right.
+
+# Where S goes, per shape. Hand-picked so "still there at pick 25" is 0 in
+# one shape, 1 in the other, and a ratio of the two draft counts pooled.
+S_EIGHT_PICK = 20
+S_TEN_PICK = 30
+ASK_AT = 25
+
+
+def _write_shaped_corpus(path, eight: int, ten: int) -> str:
+    """A corpus of `eight` 8-team PPR drafts and `ten` 10-team PPR drafts.
+
+    Every draft pools the same twelve players; only S is ever taken, and the
+    pick he goes at is the shape's. Nothing else is needed: every assertion
+    below is about the counted path, which never reaches the fitted curve.
+    """
+    conn = dl.corpus_conn(str(path))
+    try:
+        for teams, drafts, pick in ((8, eight, S_EIGHT_PICK),
+                                    (10, ten, S_TEN_PICK)):
+            for i in range(drafts):
+                pool = [_pool_row(f"f{n}", "RB", 60.0 + n, 60.0 + n)
+                        for n in range(8)]
+                pool.append(_pool_row("S", "WR", 20.0, 20.0))
+                dl.record(conn, dl.DraftRecord(
+                    source=dl.SOURCE_MOCK, league_id="1", season=2026,
+                    teams=teams, rounds=16, started_at=f"{teams}-{i}",
+                    scoring_json='{"receptions": 1.0}',
+                    picks=pd.DataFrame([_pick_row(pick, "S", "WR")]),
+                    pool=pd.DataFrame(pool)))
+    finally:
+        conn.close()
+    return str(path)
+
+
+@pytest.fixture(scope="module")
+def shaped(tmp_path_factory):
+    """800 8-team drafts and 80 10-team ones. Module-scoped: it is 880 writes
+    and every test below reads the same table."""
+    path = tmp_path_factory.mktemp("shapes") / "corpus.duckdb"
+    return _write_shaped_corpus(path, eight=800, ten=80)
+
+
+def test_the_table_counts_each_shape_as_well_as_the_pool(shaped):
+    table = av.load_table(shaped)
+    assert set(table.shapes) == {(8, "ppr"), (10, "ppr")}
+    assert table.shape_drafts(8, "ppr") == 800
+    assert table.shape_drafts(10, "ppr") == 80
+    assert table.shape_drafts(12, "ppr") == 0
+    i = table.index["S"]
+    assert table.pooled[i] == 880
+    assert table.shapes[(8, "ppr")].pooled[i] == 800
+    assert table.shapes[(10, "ppr")].pooled[i] == 80
+    # The depth is the shape's own, not the corpus's: an 8-team room stops
+    # where its drafts stopped, whatever the 10-team ones did after it.
+    assert table.max_pick_observed == S_TEN_PICK
+    assert table.shapes[(8, "ppr")].max_pick_observed == S_EIGHT_PICK
+    assert table.shapes[(10, "ppr")].max_pick_observed == S_TEN_PICK
+
+
+def test_a_shape_with_enough_drafts_answers_for_itself(shaped):
+    """S is gone by pick 25 in every 8-team draft and still there in every
+    10-team one. The pooled answer is 80/880 -- true of neither room."""
+    table = av.load_table(shaped)
+    pooled = _at(table, ["S"], 10, ASK_AT)[0]
+    assert pooled == pytest.approx(80 / 880)
+    assert av.availability_at(table, ["S"], 10, ASK_AT,
+                              teams=8, fmt="ppr")[0] == 0.0
+    assert av.availability_at(table, ["S"], 10, ASK_AT,
+                              teams=10, fmt="ppr")[0] == 1.0
+
+
+def test_a_shape_the_corpus_has_never_seen_falls_back_to_the_pool(shaped):
+    """A 12-team room asks about a shape with no drafts at all, and gets the
+    880-draft answer -- wrong about the pick axis, which beats a right answer
+    from nothing."""
+    table = av.load_table(shaped)
+    pooled = _at(table, ["S"], 10, ASK_AT)[0]
+    for shape in ((12, "ppr"), (8, "std"), (10, "half")):
+        assert av.availability_at(table, ["S"], 10, ASK_AT,
+                                  teams=shape[0], fmt=shape[1])[0] == pooled
+    # And a caller that names no shape at all is the same reader as before.
+    assert av.availability_at(table, ["S"], 10, ASK_AT)[0] == pooled
+    assert av.availability_at(table, ["S"], 10, ASK_AT,
+                              teams=10, fmt=None)[0] == pooled
+
+
+@pytest.mark.parametrize("ten,shape_answers", [
+    (av.MIN_SHAPE_DRAFTS - 1, False),
+    (av.MIN_SHAPE_DRAFTS, True),
+])
+def test_the_shape_answers_only_once_it_holds_enough_drafts(tmp_path, ten,
+                                                            shape_answers):
+    """Sixty drafts is the line (`MIN_SHAPE_DRAFTS`). One short of it the room
+    reads the pooled corpus, exactly as it did before shapes existed; on it,
+    the shape answers for itself."""
+    assert av.MIN_SHAPE_DRAFTS == 60
+    path = _write_shaped_corpus(tmp_path / "boundary.duckdb", eight=100,
+                                ten=ten)
+    table = av.load_table(path)
+    assert table.shape_drafts(10, "ppr") == ten
+    answer = av.availability_at(table, ["S"], 10, ASK_AT, teams=10,
+                                fmt="ppr")[0]
+    pooled = _at(table, ["S"], 10, ASK_AT)[0]
+    assert pooled == pytest.approx(ten / (100 + ten))
+    if shape_answers:
+        assert answer == 1.0
+        # The counts are there either way; what the threshold decides is
+        # whether they are used.
+        assert table.shapes[(10, "ppr")].pooled is not None
+    else:
+        assert answer == pooled
+        assert table.shapes[(10, "ppr")].pooled is None
+
+
+def test_the_fitted_curve_stays_pooled(corpus):
+    """The fallback is one curve over the whole corpus at every shape: it is
+    fitted across ADP buckets rather than per player, and splitting it five
+    ways would empty the buckets it needs. A player the corpus has never seen
+    therefore gets the same answer whatever shape asks."""
+    table = av.load_table(corpus)
+    asked = [_at(table, ["stranger"], 0, 40, adp=[10.0]),
+             av.availability_at(table, ["stranger"], 0, 40, [10.0],
+                                teams=8, fmt="ppr"),
+             av.availability_at(table, ["stranger"], 0, 40, [10.0],
+                                teams=12, fmt="std")]
+    assert asked[0][0] == asked[1][0] == asked[2][0]
+    assert 0.0 < asked[0][0] < 1.0
