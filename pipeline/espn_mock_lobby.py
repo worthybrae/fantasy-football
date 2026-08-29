@@ -76,6 +76,7 @@ room we declined to join is gone forever.
 import json
 import os
 import time
+import warnings
 from urllib.parse import quote
 
 from pipeline.draft_socket import DRAFT_SECURITY_HEADERS
@@ -125,9 +126,13 @@ _ROW_FORMATS = {"PPR": "ppr", "HALF_PPR": "half", "HALF": "half",
 # is left out because it is the rarest room in the lobby and the corpus
 # already holds 854 8-team PPR drafts.
 #
-# Read from the environment ONCE, at import, and parsed strictly: a typo in
-# `FARM_SHAPES` should stop the process before it takes a seat in anybody's
-# room, not silently narrow the rotation to whatever parsed.
+# Read from the environment once, at import. A BAD VALUE DOES NOT RAISE HERE:
+# `api.main` imports this module, so a typo in a platform variable would take
+# the whole site down -- the draft room, the ADP pages, the healthcheck -- to
+# complain about a farm that may not even be switched on. It warns and uses
+# the default list instead, which is the same rotation the farm had before
+# anybody set the variable. `parse_shapes` itself is still strict, because a
+# caller that hands it a string wants to know.
 FARM_SHAPES_ENV = "FARM_SHAPES"
 DEFAULT_FARM_SHAPES = "8:ppr,10:ppr,12:ppr,10:std,12:std"
 
@@ -171,8 +176,28 @@ def parse_shapes(text: str) -> tuple:
     return tuple(shapes)
 
 
-FARM_SHAPES = parse_shapes(os.environ.get(FARM_SHAPES_ENV)
-                           or DEFAULT_FARM_SHAPES)
+def configured_shapes(text=None) -> tuple:
+    """The rotation this process will farm: `FARM_SHAPES` if it parses, the
+    default list with a warning if it does not.
+
+    `text` is the environment's value; None reads it. Separate from
+    `parse_shapes` so that the strict parser stays strict and the defensive
+    reading is one named thing a test can call.
+    """
+    raw = os.environ.get(FARM_SHAPES_ENV) if text is None else text
+    if not (raw or "").strip():
+        return parse_shapes(DEFAULT_FARM_SHAPES)
+    try:
+        return parse_shapes(raw)
+    except ValueError as exc:
+        warnings.warn(
+            f"{exc} -- farming the default shapes ({DEFAULT_FARM_SHAPES}) "
+            "instead. Nothing else is affected.",
+            RuntimeWarning, stacklevel=2)
+        return parse_shapes(DEFAULT_FARM_SHAPES)
+
+
+FARM_SHAPES = configured_shapes()
 
 
 def row_format(row: dict) -> str | None:

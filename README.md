@@ -598,7 +598,9 @@ Every draft is filed under the shape the room really was, read from the
 room's own settings rather than the lobby listing, so a mixed corpus is not
 a mixed-up one: `scoring/availability.py` counts each shape separately and
 uses a shape's own counts once it holds 60 drafts. A typo in the variable
-stops the process at import rather than quietly narrowing the rotation.
+costs the farm's rotation and nothing else: the value is read defensively at
+import, warns, and falls back to the default list, because this module is
+imported by the web app and a mistyped variable must not stop the site.
 
 **How many at once.** `farm(n)` plays its drafts one after another, so being
 in six drafts at the same time means six processes, not a bigger `n` — which

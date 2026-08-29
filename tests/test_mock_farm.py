@@ -995,6 +995,55 @@ def test_an_unreadable_shape_list_is_refused_rather_than_narrowed(text):
         lobby.parse_shapes(text)
 
 
+@pytest.mark.parametrize("text", ["8:pppr", "eight:ppr", "8", "8:ppr,10:zzz"])
+def test_a_typo_in_the_variable_does_not_take_the_site_down(text, monkeypatch):
+    """`api.main` imports this module. A platform variable with a typo in it
+    must not stop the draft room, the ADP pages and the healthcheck from
+    starting, to complain about a farm that may not even be switched on -- so
+    the module-level read warns and falls back to the default rotation.
+    """
+    monkeypatch.setenv(lobby.FARM_SHAPES_ENV, text)
+
+    with pytest.warns(RuntimeWarning, match="default shapes"):
+        shapes = lobby.configured_shapes()
+
+    assert shapes == lobby.parse_shapes(lobby.DEFAULT_FARM_SHAPES)
+
+
+@pytest.mark.parametrize("text", ["", "   "])
+def test_a_blank_variable_is_unset_rather_than_wrong(text, monkeypatch):
+    """Nothing to complain about: an empty value is somebody not setting it."""
+    import warnings
+
+    monkeypatch.setenv(lobby.FARM_SHAPES_ENV, text)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        shapes = lobby.configured_shapes()
+    assert not caught, [str(w.message) for w in caught]
+    assert shapes == lobby.parse_shapes(lobby.DEFAULT_FARM_SHAPES)
+
+
+def test_a_shape_list_that_reads_is_used_as_written(monkeypatch):
+    monkeypatch.setenv(lobby.FARM_SHAPES_ENV, "12:std,8:ppr")
+    assert lobby.configured_shapes() == ((12, "std"), (8, "ppr"))
+
+
+def test_the_module_imports_under_a_broken_variable(monkeypatch):
+    """The import itself, not just the helper: reloading the module with a
+    hostile value must not raise."""
+    import importlib
+
+    monkeypatch.setenv(lobby.FARM_SHAPES_ENV, "not a shape at all")
+    try:
+        with pytest.warns(RuntimeWarning):
+            reloaded = importlib.reload(lobby)
+        assert reloaded.FARM_SHAPES == lobby.parse_shapes(
+            lobby.DEFAULT_FARM_SHAPES)
+    finally:
+        monkeypatch.delenv(lobby.FARM_SHAPES_ENV, raising=False)
+        importlib.reload(lobby)
+
+
 def test_the_fullest_room_wins():
     """The single most important ordering key: a room at 6/8 is six humans
     waiting for a draft, a room at 0/8 fills with ESPN's autodraft engine."""
