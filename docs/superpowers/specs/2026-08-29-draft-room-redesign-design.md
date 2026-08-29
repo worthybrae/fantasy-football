@@ -108,9 +108,17 @@ probabilities and excluding the candidate. Projections are the board's
 `proj_points` under the league's scoring. Positive edge means "more than
 you would get by waiting". Exposed as `edge_pts`.
 
-Need weight: `gain.need_kind`/`NEED_WEIGHTS` are reused unchanged to tag
-each candidate with `need` ∈ {starter, flex, deferred, bench, capped}; the
-room shows it as the existing "fills" hint text.
+The edge EXPLAINS a pick; it never chooses one. It is a raw point
+difference, and points are not comparable across positions -- ranking by it
+puts a quarterback at the top of a one-quarterback league's first round
+(the room recommended ESPN's 26th player over its 7th at pick 6). The order
+is section 4's priority. Exposed alongside `edge_pts` is `edge_at_pick`: the
+pick the difference is priced at, which is the reader's NEXT turn and not
+the one the number is shown on.
+
+Need: `gain.need_kind` is reused unchanged to tag each candidate with `need`
+∈ {starter, flex, deferred, bench, capped}; the room shows it as the
+existing "fills" hint text, and section 4 turns it into places on the board.
 
 ## 4. Plan — `scoring/plan.py`
 
@@ -127,25 +135,54 @@ for each turn Tₜ:
     eligible = players with P_t ≥ 0.50, or favourites with P_t ≥ 0.35,
                excluding need_kind == "capped" and players already planned
     for each eligible i:
-        score_i = weight(need_kind(position_i, roster))
-                  * (proj_i − E[best other at position_i at T_{t+1}])
-                  * (1.15 if favourite else 1.0)
+        priority_i = espn_rank_i
+                     + need_penalty(need_kind(position_i, roster))
+                     - (8 if favourite else 0)
+        (espn_rank falls back to market_rank; a player with neither is
+         infinite and sorts last, by projection)
+        edge_i = proj_i − E[best other at position_i at T_{t+1}]
         (E over players not already planned; 0 for the last turn)
-    target = argmax score; alternates = next two by score at other or same position
+    best = min priority over the eligible
+    window = the eligible with priority <= best + DROP_WINDOW (12 ranks)
+    order = window by edge descending (ties by priority),
+            then everyone else by priority
+    target = order[0]; alternates = order[1:3]
     roster[position(target)] += 1
     mark target and alternates as planned (a planned target is not eligible
     later)
 ```
 
+`need_penalty` is `need_kind`'s five words as places on ESPN's board:
+starter 0, flex +4, bench +20, deferred +200, capped ineligible.
+
+THE DROP-OFF WINDOW is the edge's whole authority. Two players a place apart
+on ESPN's list are not a decision and the position behind them is, so inside
+twelve ranks of the best priority at this turn the biggest edge takes the
+pick; outside it no edge wins anything. Twelve is about a round of an
+eight-team draft. The window reorders a tier, it never crosses one: Josh
+Allen at ESPN 26, eighteen places behind St. Brown once the favourites bonus
+is counted, cannot reach the card whatever his +47 says. At the last turn
+there is no next pick to price against, so the edge is not a number and the
+order is priority alone.
+
 Output per turn: `{pick_no, round, target: {player_id, lasts_pct, edge_pts,
-reasons: [...]}, alternates: [{player_id, lasts_pct, edge_pts}, ...]}`.
+edge_at_pick, pros, cons}, alternates: [{player_id, lasts_pct, edge_pts,
+edge_at_pick, pros, cons}, ...]}`. `lasts_pct` is the chance at THIS turn's
+pick; `edge_pts` is priced at `edge_at_pick`, the turn after it (null on the
+last turn, where there is nothing left to wait for).
 
 Reasons are rule-derived strings, at most four pros and four cons, in this order:
 
 - `"★ favourite"` when in the favourites set.
-- `"{lasts_pct}% still there at pick {T}"`.
+- `"ESPN's #{rank} overall"` — the first thing the order is built from, so
+  the card says it before it says anything else.
+- `"{lasts_pct}% still there at pick {T}"` — this turn's own pick.
 - `"+{edge} pts over the next {POS} you'd get at pick {T'}"` when edge > 0,
-  `"−{|edge|} pts vs waiting for {POS}"` when edge < 0 (a con).
+  `"−{|edge|} pts vs waiting for {POS} at pick {T'}"` when edge < 0 (a con).
+  `T'` is `edge_at_pick`, the turn AFTER this one.
+- `"biggest drop-off at {POS} before pick {T'}"` when the window is what put
+  him ahead of somebody ESPN ranks higher — the card has to say why it
+  passed over the higher-ranked name.
 - `"fills {slot}"` from `need_kind` (e.g. "fills RB2", "flex").
 - `"ADP {adp} vs ESPN {rank} — may go earlier"` when ESPN ADP is more than
   6 picks ahead of ESPN rank (a con); the reverse as a pro.
@@ -155,7 +192,7 @@ Reasons are rule-derived strings, at most four pros and four cons, in this order
 
 Pros and cons are separate lists in the payload (`pros`, `cons`).
 
-On the clock, the "Target now" cards are the top three by the same score
+On the clock, the "Target now" cards are the top three by the same priority
 for the current pick (P = 1 for everyone available), so the recommendation
 and the plan use one rule.
 
@@ -193,8 +230,11 @@ resolves the account's favourites once and stores the id set on the
 4. `plan = build_plan(...)` for the remaining turns.
 5. `state["candidates"]` rows: `player_id, position, proj_points, espn_rank,
    espn_pos_rank, espn_adp, market_rank, lasts_pct, lasts_at_pick, edge_pts,
-   need, favourite, rank` where `rank` is the ESPN-order position in the
-   list (unranked players last, by consensus).
+   edge_at_pick, need, favourite, rank` where `rank` is the ESPN-order
+   position in the list (unranked players last, by consensus).
+   `lasts_at_pick` and `edge_at_pick` are both the reader's next turn here;
+   they are separate keys because the plan's rows price them at different
+   picks and the room captions both from the payload.
 6. `state["plan"]` = the plan payload; `/api/live/state` returns it under
    `plan`; `horizon_pick` is removed from the payload.
 

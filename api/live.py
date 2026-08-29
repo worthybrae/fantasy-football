@@ -2225,7 +2225,11 @@ def rank_and_plan(board, pool, taken, taken_order, counts, my_indices, my_slot,
     player by consensus (`market_rank`), then by name. `lasts_pct` and
     `edge_pts` are measured against my NEXT turn -- the first of mine after
     the pick on the clock, so on the clock they still say what waiting one
-    round would cost -- and are None when there is none. The plan is drawn
+    round would cost -- and are None when there is none. That pick is on the
+    row twice, as `lasts_at_pick` and `edge_at_pick`: the two numbers happen
+    to share it here, and the plan's rows do not (a turn's `lasts_pct` is
+    the chance at that turn, its `edge_pts` the price at the turn after), so
+    each number carries its own pick rather than a caption having to guess. The plan is drawn
     over every turn of mine including the one on the clock (where
     `availability_at` answers 1.0 for everybody still here, so its first
     target is `target_now`'s). `need` is `gain.need_kind`'s word for what
@@ -2288,6 +2292,11 @@ def rank_and_plan(board, pool, taken, taken_order, counts, my_indices, my_slot,
             "lasts_pct": None if lasts is None else round(float(lasts[i]) * 100, 1),
             "lasts_at_pick": next_turn,
             "edge_pts": None if edge is None else round(float(edge[i]), 1),
+            # The pick the edge is priced at -- the same next turn, spelled
+            # out rather than left for the caller to infer, because the room
+            # captions it ("over the next RB you would get at pick 11") and
+            # a caption that guessed the pick was the bug this key ends.
+            "edge_at_pick": next_turn,
             # What this position would do for MY roster -- which needs a
             # roster, so it is null until the socket names our team.
             "need": (need_kind(settings, counts, positions[i], turns_left)

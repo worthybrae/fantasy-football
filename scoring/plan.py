@@ -12,44 +12,89 @@ his position who is still there at your next turn -- the same
 empirical survival probabilities from `scoring/availability.py` instead of a
 simulated opponent model.
 
-THE PLAN is a greedy walk over the turns you have left. At each one it scores
-everyone who is likely enough to still be there (`THRESHOLD`, lowered to
-`FAVOURITE_THRESHOLD` for the account's favourites), takes the best, adds him
-to the roster it is carrying, and moves on. Greedy rather than a search: the
-input probabilities are measured to two digits, the roster need weights are a
-five-value table, and no amount of search makes a plan for pick 118 mean
-anything -- what the panel is for is the shape of the next few rounds, which
-one pass gets right.
+THE PLAN is a greedy walk over the turns you have left. At each one it takes
+the first man in ESPN's order who is likely enough to still be there
+(`THRESHOLD`, lowered to `FAVOURITE_THRESHOLD` for the account's favourites)
+and whom the roster can still use, adds him to the roster it is carrying, and
+moves on. Greedy rather than a search: the input probabilities are measured
+to two digits, the roster need penalties are a four-value table, and no
+amount of search makes a plan for pick 118 mean anything -- what the panel is
+for is the shape of the next few rounds, which one pass gets right.
 
-WHY THE SCORE IS NOT THE EDGE. The edge is a claim about the board that can
-be checked against the two players it compares, so it is what the room prints.
-The score is a ranking quantity and carries the roster in it -- `weight *
-(proj - best_next)`, the roster's need applied to what the pick GAINS rather
-than to the projection it gains it from, times the favourites bonus where
-that gain is positive, and a position already at its roster cap is not a
-candidate at all. Same split, and the same two functions
-(`need_kind`, `NEED_WEIGHTS`), as `gain.rank_available` before it.
+WHY THE EDGE DOES NOT RANK ANYTHING. The edge is a claim about the board
+that can be checked against the two players it compares, so it is what the
+room prints -- and it is a raw point difference, which is exactly why it
+cannot also be the order. Points are not comparable across positions: a
+quarterback scores half again what a receiver does and his position falls off
+a cliff, so ranking by "points over the next man at my position" puts a
+quarterback at the top of a one-quarterback league's first round. The room
+recommended Josh Allen, ESPN's 26th player, over Christian McCaffrey at pick
+6, with the edge as its whole argument.
+
+THE ORDER IS ESPN'S ORDER (spec decision 1), moved by two things and nothing
+else:
+
+    priority = espn_rank + need_penalty - favourite_bonus   (lowest first)
+
+`need_penalty` is `need_kind`'s word for the roster, in RANKS rather than a
+multiplier -- a flex body is worth about four places, a bench body twenty,
+and a kicker before the round anybody takes kickers is worth two hundred,
+which is to say never. A position at its roster cap is not a candidate at
+all. `favourite_bonus` is eight ranks, about a tier: the account's own
+judgement, made in the quiet before the draft, is worth a tier and not a
+round. A player ESPN does not rank uses the consensus (`market_rank`); with
+neither he sorts last, by projection.
+
+WHERE THE DROP-OFF GETS ITS SAY. Two players a place apart on ESPN's list
+are not a decision; the position behind them is. So inside a window of
+`DROP_WINDOW` ranks below the best priority at this turn, the biggest EDGE
+takes the pick -- the man whose position falls off hardest before your next
+turn -- and outside it nobody wins on the edge however large it is. Twelve
+ranks is about a round of an eight-team draft: near enough that ESPN is
+saying the two are the same class of player, far enough that the drop-off is
+what is left to separate them. This is the whole of the edge's authority: it
+reorders a tier, it does not cross one. Josh Allen at 26 was 18 places
+behind, so no edge could have bought him the card.
 """
 from __future__ import annotations
 
 import numpy as np
 
 from scoring.availability import AvailabilityTable, availability_at
-from scoring.config import NEED_WEIGHTS
 from scoring.gain import expected_best_next, fills_slot, need_kind
 
-# The favourites bonus. A favourite is a claim about a player the account
-# made in the quiet before the draft, which is a better moment for that
-# judgement than the eight seconds on the clock -- but it is a preference,
-# not a projection, so it is worth about one tier and no more.
+# The favourites bonus, IN RANKS. A favourite is a claim about a player the
+# account made in the quiet before the draft, which is a better moment for
+# that judgement than the eight seconds on the clock -- but it is a
+# preference, not a projection, so it is worth about one tier and no more.
+# Eight places: a starred player at ESPN 15 beats a stranger at 8 and still
+# loses to a stranger at 6.
 #
-# IT ONLY EVER HELPS. The score it multiplies is signed -- what the pick
-# gains over waiting -- so applying the bonus to a candidate whose gain is
-# negative would push him DOWN the list for being a favourite, which is the
-# opposite of what the account asked for. Below zero a favourite is scored
-# exactly as a stranger would be, and his lower eligibility threshold
-# (`FAVOURITE_THRESHOLD`) is the only preference he still gets.
-NEED_BONUS = 1.15
+# IT ONLY EVER HELPS. A subtraction from a rank cannot turn round on a
+# player the way the old multiplier on a signed score could, so a favourite
+# is never worse off for being one.
+FAVOURITE_BONUS = 8.0
+
+# What the roster does to ESPN's order, in ranks. `need_kind`'s five words
+# (`scoring/gain.py`), the same five `NEED_WEIGHTS` scores for the
+# simulation -- here as places rather than a multiplier, because the thing
+# being moved is a rank.
+#
+# A starter slot is ESPN's order untouched: the list is already sorted by
+# who is worth taking, and an open starting job is the ordinary case. FLEX
+# is most of a tier back, BENCH a round and a half -- a bench body is a real
+# pick, just never before a man who would start. DEFERRED is a kicker or a
+# defense before the round anybody takes one, and 200 is "not on this board":
+# it is a starter slot that WILL be filled, so it is not capped, but naming
+# a kicker in round 3 is the complaint that put `need_kind`'s deferred case
+# there in the first place.
+NEED_PENALTY = {"starter": 0.0, "flex": 4.0, "bench": 20.0, "deferred": 200.0}
+
+# How far below the best priority at a turn the drop-off still decides. See
+# the module docstring: inside the window the biggest edge takes the pick,
+# outside it the edge is only an explanation. Twelve ranks is about a round
+# of an eight-team draft.
+DROP_WINDOW = 12.0
 
 # How likely a player has to be to still be there for the plan to plan on
 # him. Half is the honest line for "expect him": below it the plan would be
@@ -212,31 +257,53 @@ def _number(value):
 
 def reasons_for(*, favourite: bool, lasts, at_pick, edge, next_pick,
                 position: str, slot, espn_rank, espn_adp, bye, health,
-                bye_mates=()) -> tuple[list, list]:
+                bye_mates=(), drop_off: bool = False) -> tuple[list, list]:
     """The rule-derived pros and cons for one target, in the fixed order.
 
     `lasts` is a probability, not a percentage. `bye_mates` are the display
     names of the players already on the roster who share his bye week --
     `build_plan` keeps that list as it walks, since it is drafting into the
-    same roster.
+    same roster. `drop_off` is True when the drop-off window is what put
+    this player ahead of somebody ESPN ranks higher (`_ranked`).
     """
     pros: list[str] = []
     cons: list[str] = []
 
+    rank, adp = _number(espn_rank), _number(espn_adp)
+
     if favourite:
         pros.append("★ favourite")
+
+    # WHY THE RANK IS A REASON. It is the first thing the order is built
+    # from (`_Board.priority`), so a card that did not say it was arguing
+    # for its pick with everything except the argument.
+    if rank is not None:
+        pros.append(f"ESPN's #{rank:.0f} overall")
 
     lasts = _number(lasts)
     if lasts is not None and at_pick is not None:
         pros.append(f"{lasts * 100:.0f}% still there at pick {int(at_pick)}")
 
+    # THE EDGE IS PRICED AT `next_pick`, NOT AT THIS TURN -- it is what
+    # taking him now is worth over the man you would get if you waited, so
+    # the pick it names is the turn after the one the card is for. Naming
+    # this turn's pick was the caption bug the room shipped with.
     edge = _number(edge)
     if edge is not None and abs(edge) >= 0.05:
+        at = None if next_pick is None else f" at pick {int(next_pick)}"
         if edge > 0 and next_pick is not None:
             pros.append(f"+{edge:.1f} pts over the next {position} you'd "
-                        f"get at pick {int(next_pick)}")
+                        f"get{at}")
         elif edge < 0:
-            cons.append(f"−{abs(edge):.1f} pts vs waiting for {position}")
+            cons.append(f"−{abs(edge):.1f} pts vs waiting for "
+                        f"{position}{at or ''}")
+
+    # WHY HE IS AHEAD OF A PLAYER ESPN RANKS HIGHER: he is inside a tier of
+    # them and his position falls off hardest before the next turn (see
+    # `_ranked`). Said only when that is what happened.
+    if drop_off and next_pick is not None:
+        pros.append(f"biggest drop-off at {position} before "
+                    f"pick {int(next_pick)}")
 
     if slot:
         # "fills RB2" names the slot; FLEX and BENCH read better as
@@ -246,7 +313,6 @@ def reasons_for(*, favourite: bool, lasts, at_pick, edge, next_pick,
         if label:
             pros.append(label)
 
-    rank, adp = _number(espn_rank), _number(espn_adp)
     if rank is not None and adp is not None:
         if adp < rank - ADP_GAP:
             cons.append(f"ADP {adp:.0f} vs ESPN {rank:.0f} — may go earlier")
@@ -283,22 +349,34 @@ class _Board:
         self.is_favourite = np.array([pid in self.favourites
                                       for pid in self.ids], dtype=bool)
 
-    def bonus(self, gain: np.ndarray) -> np.ndarray:
-        """The favourites multiplier, applied only where there is a gain."""
-        return np.where(self.is_favourite & (gain > 0), NEED_BONUS, 1.0)
-
-    def need(self, settings, roster, turns_left):
-        """(weight per player, "cannot be rostered" mask).
+    def need_penalty(self, settings, roster, turns_left):
+        """(rank penalty per player, "cannot be rostered" mask).
 
         One `need_kind` call per position, not per player: it reads the
         league and the roster, neither of which varies down the board.
         """
         kinds = {pos: need_kind(settings, roster, pos, turns_left)
                  for pos in np.unique(self.positions)}
-        weights = np.array([NEED_WEIGHTS[kinds[pos]]
+        penalty = np.array([NEED_PENALTY.get(kinds[pos], 0.0)
                             for pos in self.positions])
         capped = np.array([kinds[pos] == "capped" for pos in self.positions])
-        return weights, capped
+        return penalty, capped
+
+    def priority(self, penalty: np.ndarray) -> np.ndarray:
+        """ESPN's order as the plan reads it. LOWEST FIRST.
+
+        `espn_rank + need_penalty - favourite_bonus`, with the consensus
+        standing in for a player ESPN does not rank -- the same fallback the
+        room's own list order uses (spec section 1), so the plan and the
+        table cannot disagree about who is ahead of whom. A player with
+        neither rank is infinite here and sorts last; `_by_priority` orders
+        those few by projection, which is the only thing left to say about
+        them.
+        """
+        base = np.where(np.isfinite(self.espn_rank),
+                        self.espn_rank, self.market_rank)
+        rank = np.where(np.isfinite(base), base, np.inf)
+        return rank + penalty - FAVOURITE_BONUS * self.is_favourite
 
     def name(self, i) -> str:
         return self.names.get(self.ids[i], self.ids[i])
@@ -310,11 +388,61 @@ def _optional(values, size: int) -> np.ndarray:
     return np.asarray(values, dtype=float)
 
 
-def _row(board, i, lasts, edge, pros=(), cons=()) -> dict:
+def _by_priority(priority, proj, edge, keep) -> np.ndarray:
+    """The kept indices, best first.
+
+    `priority` decides it (see `_Board.priority`); the rest is tie-breaking,
+    in order: the players with no rank at all fall to the back and sort by
+    projection among themselves, then the bigger EDGE takes it -- which is
+    where the old score ended up, as the tie-break it was always fit to be
+    -- and the board's own order settles the rest so a poll is stable.
+    """
+    idx = np.flatnonzero(keep)
+    if idx.size == 0:
+        return idx
+    unranked = ~np.isfinite(priority[idx])
+    order = np.lexsort((idx, -np.asarray(edge, dtype=float)[idx],
+                        np.where(unranked, -np.asarray(proj)[idx], 0.0),
+                        priority[idx]))
+    return idx[order]
+
+
+def _ranked(priority, proj, edge, keep, drop_off: bool = True) -> np.ndarray:
+    """The kept indices in the order the room reads them.
+
+    `_by_priority` first, then the drop-off window has its say: everybody
+    within `DROP_WINDOW` ranks of the best priority is reordered by EDGE,
+    biggest first, and everybody outside it keeps his place behind them. A
+    tie on the edge falls back to the priority order, so a board where the
+    drop-off says nothing is ESPN's list exactly.
+
+    `drop_off` is False at a turn with nothing after it: the edge there is
+    not a number (there is no next pick to price against, so the walk hands
+    back the whole projection), and sorting one tier by raw projection
+    across positions is the mistake this module exists to stop making.
+    """
+    idx = _by_priority(priority, proj, edge, keep)
+    if not drop_off or idx.size == 0:
+        return idx
+    best = priority[idx[0]]
+    if not np.isfinite(best):
+        return idx
+    inside = idx[priority[idx] <= best + DROP_WINDOW]
+    outside = idx[priority[idx] > best + DROP_WINDOW]
+    edge = np.asarray(edge, dtype=float)
+    inside = inside[np.argsort(-edge[inside], kind="stable")]
+    return np.concatenate([inside, outside])
+
+
+def _row(board, i, lasts, edge, edge_at=None, pros=(), cons=()) -> dict:
     return {"player_id": board.ids[i],
             "lasts_pct": (None if lasts is None
                           else round(float(lasts) * 100, 1)),
             "edge_pts": None if edge is None else round(float(edge), 1),
+            # The pick the edge is priced at -- the turn AFTER the one this
+            # row belongs to, since the edge is what taking him now beats.
+            # Null when there is no later turn to wait for.
+            "edge_at_pick": None if edge_at is None else int(edge_at),
             "pros": list(pros), "cons": list(cons)}
 
 
@@ -381,15 +509,13 @@ def build_plan(*, proj, positions, player_ids, espn_rank, espn_adp,
                      else np.zeros(board.size))
         turns_left = len(turns) - t
         gain = board.proj - best_next
-        weights, capped = board.need(settings, roster, turns_left)
-        # THE WEIGHT MULTIPLIES THE DIFFERENCE, not the projection. Weighting
-        # the level and subtracting an unweighted expectation compares two
-        # quantities on different scales: a 300-point quarterback nine points
-        # clear of the next one scored 0.35 * 300 - 290.9 = -185.9 while a
-        # 173-point receiver two points clear scored -110.2, so the room
-        # planned the receiver. What the roster's need scales is what the
-        # pick GAINS.
-        score = weights * gain * board.bonus(gain)
+        penalty, capped = board.need_penalty(settings, roster, turns_left)
+        # ESPN'S ORDER, MOVED BY THE ROSTER AND THE STARS, then reordered
+        # inside one tier by the drop-off. `gain` is a raw point difference
+        # and comparing one across positions ranks quarterbacks (see the
+        # module docstring), so it decides between neighbours and never
+        # across the board.
+        priority = board.priority(penalty)
 
         eligible = ~planned & ~capped & ((here >= THRESHOLD)
                                          | (board.is_favourite
@@ -401,25 +527,31 @@ def build_plan(*, proj, positions, player_ids, espn_rank, espn_adp,
         if not eligible.any():
             continue
 
-        ranked = np.flatnonzero(eligible)
-        ranked = ranked[np.argsort(-score[ranked], kind="stable")][:3]
+        ranked = _ranked(priority, board.proj, gain, eligible,
+                         drop_off=next_pick is not None)[:3]
         target = int(ranked[0])
+        # He came through the window rather than off the top of the list:
+        # somebody ESPN ranks higher was passed over, and the card has to
+        # say why.
+        drop_off = bool(priority[target] > np.min(priority[eligible]))
         edge = (None if next_pick is None
                 else board.proj[target] - best_next[target])
         pros, cons = reasons_for(
             favourite=bool(board.is_favourite[target]),
             lasts=here[target], at_pick=pick_no, edge=edge,
             next_pick=next_pick, position=str(board.positions[target]),
+            drop_off=drop_off,
             slot=fills_slot(settings, roster, str(board.positions[target]),
                             turns_left),
             espn_rank=board.espn_rank[target], espn_adp=board.espn_adp[target],
             bye=board.byes[target], health=board.health[target],
             bye_mates=stack.get(_bye(board, target), []))
-        row["target"] = _row(board, target, here[target], edge, pros, cons)
+        row["target"] = _row(board, target, here[target], edge, next_pick,
+                             pros, cons)
         row["alternates"] = [
             _row(board, int(i), here[int(i)],
                  None if next_pick is None
-                 else board.proj[int(i)] - best_next[int(i)])
+                 else board.proj[int(i)] - best_next[int(i)], next_pick)
             for i in ranked[1:3]]
 
         # The plan drafts him, so every later turn sees the roster he leaves
@@ -457,7 +589,7 @@ def target_now(*, proj, positions, player_ids, espn_rank, espn_adp,
                roster_byes: dict | None = None) -> list:
     """The three cards for the pick on the clock.
 
-    The same score as `build_plan`, with one difference that is not a
+    The same priority as `build_plan`, with one difference that is not a
     detail: on the clock every available player is there with probability 1,
     so nobody is filtered out for being unlikely to last. The percentage is
     still reported -- against the NEXT turn, which is the pick a reader is
@@ -489,17 +621,17 @@ def target_now(*, proj, positions, player_ids, espn_rank, espn_adp,
     turns_left = sum(1 for t in turns if t >= on_the_clock) or None
     roster = dict(roster_counts or {})
     gain = board.proj - best_next
-    weights, capped = board.need(settings, roster, turns_left)
-    score = weights * gain * board.bonus(gain)
+    penalty, capped = board.need_penalty(settings, roster, turns_left)
+    priority = board.priority(penalty)
     # A player at his position's roster cap has no slot to go in, starter or
     # bench, so he is not a card however the numbers read.
-    score = np.where(capped, -np.inf, score)
     stack = _bye_stack(board, roster_byes)
 
     cards = []
-    for i in np.argsort(-score, kind="stable")[:3]:
-        if not np.isfinite(score[int(i)]):
-            break
+    order = _ranked(priority, board.proj, gain, ~capped,
+                    drop_off=next_pick is not None)
+    best = np.min(priority[~capped]) if order.size else np.inf
+    for i in order[:3]:
         i = int(i)
         edge = None if next_pick is None else board.proj[i] - best_next[i]
         pros, cons = reasons_for(
@@ -507,11 +639,12 @@ def target_now(*, proj, positions, player_ids, espn_rank, espn_adp,
             lasts=None if here is None else here[i], at_pick=next_pick,
             edge=edge, next_pick=next_pick,
             position=str(board.positions[i]),
+            drop_off=bool(i == int(order[0]) and priority[i] > best),
             slot=fills_slot(settings, roster, str(board.positions[i]),
                             turns_left),
             espn_rank=board.espn_rank[i], espn_adp=board.espn_adp[i],
             bye=board.byes[i], health=board.health[i],
             bye_mates=stack.get(_bye(board, i), []))
         cards.append(_row(board, i, None if here is None else here[i],
-                          edge, pros, cons))
+                          edge, next_pick, pros, cons))
     return cards

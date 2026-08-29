@@ -377,8 +377,8 @@ def _fake_candidate_rows(player_id):
     return [{"player_id": player_id, "position": "WR", "proj_points": 200.0,
              "espn_rank": 1, "espn_pos_rank": 1, "espn_adp": 1.5,
              "market_rank": 2, "lasts_pct": 80.0, "lasts_at_pick": 9,
-             "edge_pts": 12.5, "need": "starter", "favourite": False,
-             "rank": 1}]
+             "edge_pts": 12.5, "edge_at_pick": 9, "need": "starter",
+             "favourite": False, "rank": 1}]
 
 
 def _fake_rank_and_plan(player_id):
@@ -394,7 +394,8 @@ def _fake_availability(table, player_ids, k, n, espn_adp=None, market_rank=None,
 
 CANDIDATE_KEYS = {"player_id", "position", "proj_points", "espn_rank",
                   "espn_pos_rank", "espn_adp", "market_rank", "lasts_pct",
-                  "lasts_at_pick", "edge_pts", "need", "favourite", "rank"}
+                  "lasts_at_pick", "edge_pts", "edge_at_pick", "need",
+                  "favourite", "rank"}
 
 
 def test_state_candidates_carry_the_rooms_contract_in_espn_order(tmp_path):
@@ -427,6 +428,10 @@ def test_state_candidates_carry_the_rooms_contract_in_espn_order(tmp_path):
     for row in body["candidates"]:
         assert set(row) == CANDIDATE_KEYS
         assert row["lasts_pct"] is None or 0.0 <= row["lasts_pct"] <= 100.0
+        # On a candidate row the two figures share one pick -- the reader's
+        # next turn -- and each says so itself, because the plan's rows do
+        # not share theirs and the room captions both from the payload.
+        assert row["edge_at_pick"] == row["lasts_at_pick"]
         assert row["need"] in {"starter", "flex", "deferred", "bench", "capped"}
         assert row["favourite"] is False
     assert [c["rank"] for c in body["candidates"]] == list(range(1, len(body["candidates"]) + 1))
@@ -438,6 +443,10 @@ def test_state_candidates_carry_the_rooms_contract_in_espn_order(tmp_path):
     assert isinstance(body["plan"], list)
     for turn in body["plan"]:
         assert set(turn) == {"pick_no", "round", "target", "alternates"}
+        for player in [turn["target"]] + turn["alternates"]:
+            if player is not None:
+                assert set(player) == {"player_id", "lasts_pct", "edge_pts",
+                                       "edge_at_pick", "pros", "cons"}
     assert body["candidates_as_of_pick"] == 0
 
 

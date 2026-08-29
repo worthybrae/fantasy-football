@@ -717,7 +717,7 @@ def test_ranked_rows_carry_the_whole_live_candidate_contract(monkeypatch):
     assert set(rows[0]) == {
         "player_id", "position", "proj_points", "espn_rank", "espn_pos_rank",
         "espn_adp", "market_rank", "lasts_pct", "lasts_at_pick", "edge_pts",
-        "need", "favourite", "rank",
+        "edge_at_pick", "need", "favourite", "rank",
         "name", "team", "bye", "adp", "vs_adp", "board_rank",
     }
     # Seat 1 with nothing drafted is on the clock at pick 1; "lasts" is

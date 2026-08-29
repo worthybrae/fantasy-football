@@ -181,12 +181,18 @@ def test_the_payload_is_exactly_the_agreed_shape():
     assert turns[0]["pick_no"] == 6 and turns[0]["round"] == 1
     assert turns[1]["pick_no"] == 11 and turns[1]["round"] == 2
     target = turns[0]["target"]
-    assert set(target) == {"player_id", "lasts_pct", "edge_pts", "pros", "cons"}
+    assert set(target) == {"player_id", "lasts_pct", "edge_pts",
+                           "edge_at_pick", "pros", "cons"}
     assert len(turns[0]["alternates"]) == 2
     for alt in turns[0]["alternates"]:
         assert set(alt) == {"player_id", "lasts_pct", "edge_pts",
-                            "pros", "cons"}
+                            "edge_at_pick", "pros", "cons"}
         assert alt["pros"] == [] and alt["cons"] == []
+    # THE EDGE IS PRICED AT THE TURN AFTER THIS ONE, and says so: turn 6 is
+    # measured against pick 11, and the last turn against nothing.
+    assert target["edge_at_pick"] == 11
+    assert all(a["edge_at_pick"] == 11 for a in turns[0]["alternates"])
+    assert turns[1]["target"]["edge_at_pick"] is None
 
 
 def test_the_last_turn_has_no_next_pick_to_be_measured_against():
@@ -230,10 +236,12 @@ def test_reasons_come_in_the_order_the_spec_fixes():
         favourite=True, lasts=0.82, at_pick=11, edge=12.0, next_pick=22,
         position="RB", slot="RB1", espn_rank=10.0, espn_adp=12.0,
         bye=7, health=5, bye_mates=[])
+    # The rank comes first after the star because it is the first thing the
+    # order is built from; the cap at four is what drops "fills RB1".
     assert pros == ["★ favourite",
+                    "ESPN's #10 overall",
                     "82% still there at pick 11",
-                    "+12.0 pts over the next RB you'd get at pick 22",
-                    "fills RB1"]
+                    "+12.0 pts over the next RB you'd get at pick 22"]
     assert cons == []
 
 
@@ -242,7 +250,7 @@ def test_a_negative_edge_is_a_con_in_the_waiting_language():
         favourite=False, lasts=0.6, at_pick=11, edge=-4.2, next_pick=22,
         position="WR", slot=None, espn_rank=None, espn_adp=None,
         bye=None, health=None, bye_mates=[])
-    assert cons == ["−4.2 pts vs waiting for WR"]
+    assert cons == ["−4.2 pts vs waiting for WR at pick 22"]
 
 
 def test_an_adp_ahead_of_the_rank_says_he_may_go_earlier():
@@ -295,23 +303,40 @@ def test_the_plan_names_the_roster_mate_a_bye_would_stack_with():
     assert any("bye week 7" in c for c in third["cons"]), third["cons"]
 
 
-# --- the score is the roster's weight on what the pick GAINS -----------------
+# --- the order is ESPN's, moved by the roster and the stars -----------------
 
-def test_a_bench_quarterback_nine_points_clear_beats_a_receiver_two_clear():
-    """Round 12 of a twelve-team draft, roster QB1/RB4/WR3/TE2. Both are
-    bench needs at 0.35, so the pick is decided by what it gains: 9.1 points
-    against 2.2. Weighting the PROJECTION instead scored the quarterback
-    -185.9 and the receiver -110.2, and the plan took the receiver."""
-    ids = ["qb_hi", "qb_lo", "wr_hi", "wr_lo"]
+def test_the_edge_decides_between_neighbours_and_never_across_the_board():
+    """Round 12 of a twelve-team draft, roster QB1/RB4/WR3/TE2. The
+    quarterback gains 9.1 points over the next one and the receiver 2.2.
+
+    Two places apart on ESPN's list, that drop-off is the whole difference
+    between them and it takes the pick. Twenty places apart it takes
+    nothing: points are not comparable across positions, which is how a
+    quarterback ESPN ranks 26th came to be recommended over the 7th player
+    on the board."""
+    ids = ["wr_hi", "wr_lo", "qb_hi", "qb_lo"]
+    positions = ["WR", "WR", "QB", "QB"]
+    proj = [173.0, 170.8, 300.0, 290.9]
+    roster = {"QB": 1, "RB": 4, "WR": 3, "TE": 2}
     table = make_table(dict.fromkeys(ids, {}))
-    turns = pl.build_plan(**board_args(
-        table, ids, ["QB", "QB", "WR", "WR"], [300.0, 290.9, 173.0, 170.8],
-        roster_counts={"QB": 1, "RB": 4, "WR": 3, "TE": 2},
-        turns=[133, 145]))
-    assert turns[0]["target"]["player_id"] == "qb_hi"
-    assert turns[0]["target"]["edge_pts"] == pytest.approx(9.1)
-    assert [a["player_id"] for a in turns[0]["alternates"]] == ["wr_hi",
-                                                                "wr_lo"]
+
+    near = pl.build_plan(**board_args(
+        table, ids, positions, proj, roster_counts=roster,
+        turns=[133, 145]))[0]
+    assert near["target"]["player_id"] == "qb_hi"
+    assert near["target"]["edge_pts"] == pytest.approx(9.1)
+    assert ("biggest drop-off at QB before pick 145"
+            in near["target"]["pros"])
+
+    far = pl.build_plan(**board_args(
+        table, ids, positions, proj, roster_counts=roster,
+        espn_rank=[1.0, 2.0, 40.0, 41.0], espn_adp=[1.0, 2.0, 40.0, 41.0],
+        market_rank=[1.0, 2.0, 40.0, 41.0], turns=[133, 145]))[0]
+    assert far["target"]["player_id"] == "wr_hi"
+    assert far["target"]["edge_pts"] == pytest.approx(2.2)
+    # He led on ESPN's order too, so there is nothing to explain away.
+    assert not any("drop-off" in pro for pro in far["target"]["pros"])
+    assert [a["player_id"] for a in far["alternates"]] == ["wr_lo", "qb_hi"]
 
 
 def test_a_position_at_its_cap_is_not_a_candidate_at_any_turn():
@@ -348,18 +373,18 @@ def test_a_lone_tight_end_does_not_outrank_a_running_back_worth_more():
 
 
 def test_a_later_turn_is_not_priced_against_a_name_the_plan_already_spent():
-    """rb1 and rb2 are the target and an alternate at turn one. At turn two
-    the only running backs the plan can still expect are rb3 and rb4, so
-    rb3's edge is 280 - 100 = 180. Counting rb1 would price him at -20 and
-    the plan would take somebody else."""
-    ids = ["rb1", "rb2", "rb3", "rb4", "wr1"]
+    """rb1, rb2 and rb3 are the target and the alternates at turn one. At
+    turn two the only running backs the plan can still expect are rb4 and
+    rb5, so rb4's edge is 280 - 100 = 180. Counting rb1 would price him at
+    -20, and the card would argue against its own pick."""
+    ids = ["rb1", "rb2", "rb3", "rb4", "rb5", "rb6"]
     table = make_table(dict.fromkeys(ids, {}))
     turns = pl.build_plan(**board_args(
-        table, ids, ["RB", "RB", "RB", "RB", "WR"],
-        [300.0, 290.0, 280.0, 100.0, 50.0], turns=[6, 19, 30]))
+        table, ids, ["RB"] * 6,
+        [300.0, 290.0, 285.0, 280.0, 100.0, 90.0], turns=[6, 19, 30]))
     assert turns[0]["target"]["player_id"] == "rb1"
-    assert "rb2" in [a["player_id"] for a in turns[0]["alternates"]]
-    assert turns[1]["target"]["player_id"] == "rb3"
+    assert [a["player_id"] for a in turns[0]["alternates"]] == ["rb2", "rb3"]
+    assert turns[1]["target"]["player_id"] == "rb4"
     assert turns[1]["target"]["edge_pts"] == pytest.approx(180.0)
 
 
@@ -377,11 +402,11 @@ def test_the_pick_on_the_clock_is_certain_inside_the_plan_too():
 
 
 def test_the_roster_the_plan_builds_is_what_the_next_turn_needs():
-    ids = ["rb1", "rb2", "rb3", "wr1"]
+    ids = ["rb1", "rb2", "rb3", "rb4", "wr1"]
     table = make_table(dict.fromkeys(ids, {}))
     turns = pl.build_plan(**board_args(
-        table, ids, ["RB", "RB", "RB", "WR"],
-        [300.0, 290.0, 280.0, 50.0], turns=[6, 19, 30]))
+        table, ids, ["RB", "RB", "RB", "RB", "WR"],
+        [300.0, 290.0, 280.0, 270.0, 50.0], turns=[6, 19, 30]))
     assert "fills RB1" in turns[0]["target"]["pros"]
     assert "fills RB2" in turns[1]["target"]["pros"]
 
@@ -393,20 +418,167 @@ def test_health_level_bands_the_board_the_way_the_room_draws_it():
     assert np.isnan(pl.health_level([np.nan])[0])
 
 
-def test_being_a_favourite_never_costs_a_player_a_place():
-    """The score is signed, so a bonus applied below zero is a penalty. wr2
-    is a favourite eight points under water and rb2 is a stranger nine
-    under: wr2 stays ahead of him, where his projection puts him."""
-    ids = ["rb1", "rb2", "wr1", "wr2"]
+def test_the_favourite_bonus_is_exactly_eight_ranks():
+    """A tier, not a round. The starred receiver at ESPN 15 goes ahead of a
+    stranger at 8 and still behind a stranger at 6 -- all three the same
+    position, so the roster moves none of them."""
+    ids = ["wr6", "wr8", "wr15"]
     table = make_table(dict.fromkeys(ids, {}))
-    args = board_args(table, ids, ["RB", "RB", "WR", "WR"],
-                      [300.0, 290.0, 200.0, 191.0], favourites={"wr2"})
-    turns = pl.build_plan(**args)
-    assert turns[0]["target"]["player_id"] == "rb1"
-    assert [a["player_id"] for a in turns[0]["alternates"]] == ["wr1", "wr2"]
-    # Exactly what a stranger would have scored: the same order without him
-    # in the favourites set at all.
+    args = board_args(table, ids, ["WR", "WR", "WR"],
+                      [200.0, 190.0, 180.0], espn_rank=[6.0, 8.0, 15.0],
+                      espn_adp=[6.0, 8.0, 15.0], market_rank=[6.0, 8.0, 15.0],
+                      favourites={"wr15"}, turns=[6])
+    turn = pl.build_plan(**args)[0]
+    assert turn["target"]["player_id"] == "wr6"
+    assert [a["player_id"] for a in turn["alternates"]] == ["wr15", "wr8"]
+    # Seven ranks would not have been enough, which is what makes it a
+    # measured bonus rather than a thumb on the scale.
     plain = pl.build_plan(**board_args(
-        table, ids, ["RB", "RB", "WR", "WR"], [300.0, 290.0, 200.0, 191.0]))
-    assert ([a["player_id"] for a in plain[0]["alternates"]]
-            == [a["player_id"] for a in turns[0]["alternates"]])
+        table, ids, ["WR", "WR", "WR"], [200.0, 190.0, 180.0],
+        espn_rank=[6.0, 8.0, 15.0], espn_adp=[6.0, 8.0, 15.0],
+        market_rank=[6.0, 8.0, 15.0], turns=[6]))[0]
+    assert [a["player_id"] for a in plain["alternates"]] == ["wr8", "wr15"]
+
+
+def test_with_nothing_to_choose_on_the_drop_off_the_order_is_espns():
+    """The control for the window. Every man here is the last of his
+    position on the board, so nobody is priced (see `_best_other`) and every
+    edge is zero: with nothing for the drop-off to say, the target and the
+    alternates are ESPN's first three, in ESPN's order."""
+    ids = ["a", "b", "c", "d", "e"]
+    table = make_table(dict.fromkeys(ids, {}))
+    turn = pl.build_plan(**board_args(
+        table, ids, ["RB", "WR", "TE", "QB", "DST"],
+        [300.0, 280.0, 150.0, 260.0, 90.0], turns=[6, 19]))[0]
+    assert turn["target"]["edge_pts"] == pytest.approx(0.0)
+    assert turn["target"]["player_id"] == "a"
+    assert [x["player_id"] for x in turn["alternates"]] == ["b", "c"]
+
+
+# --- the owner's case ---------------------------------------------------------
+
+# The screenshot's four names, plus the next man at each of their three
+# positions -- the players the edge is measured against. A position with one
+# man left on it is not priced at all (see `_best_other`), so a board of
+# four names would have no drop-off to compare.
+OWNER_IDS = ["gibbs", "cmc", "arsb", "allen", "rb3", "wr2", "qb2"]
+OWNER_POS = ["RB", "RB", "WR", "QB", "RB", "WR", "QB"]
+OWNER_RANK = [1.0, 7.0, 8.0, 26.0, 40.0, 41.0, 42.0]
+# Josh Allen outprojects every one of them and his position falls off a
+# cliff behind him (+47), which is exactly why the old score put him first.
+# McCaffrey's own drop-off is bigger (+53.7) and St. Brown's smaller (+34).
+OWNER_PROJ = [310.0, 300.0, 290.0, 380.0, 245.0, 256.0, 333.0]
+# The screenshot's percentages, as counts out of a hundred recorded drafts:
+# taken before pick 6 in 98, 35, 9 and 1 of them.
+OWNER_TABLE = {"gibbs": {5: 98}, "cmc": {5: 35}, "arsb": {5: 9},
+               "allen": {5: 1}, "rb3": {}, "wr2": {}, "qb2": {}}
+
+
+def owner_args(**over):
+    """The live room before pick 1 of an 8-team draft, from seat 6."""
+    args = dict(
+        proj=list(OWNER_PROJ), positions=list(OWNER_POS),
+        player_ids=list(OWNER_IDS), espn_rank=list(OWNER_RANK),
+        espn_adp=list(OWNER_RANK), market_rank=list(OWNER_RANK),
+        byes=[5, 6, 7, 8, 9, 10, 11], health=[5] * 7,
+        names={p: p for p in OWNER_IDS}, roster_counts={},
+        settings=settings(), turns=[6, 11], picks_made=0,
+        favourites={"allen", "arsb"}, table=make_table(OWNER_TABLE))
+    args.update(over)
+    return args
+
+
+def test_the_room_does_not_target_a_quarterback_espn_ranks_twenty_sixth():
+    """THE OWNER'S SCREENSHOT. Seat 6, before a pick has been made. The room
+    recommended Josh Allen -- ESPN's 26th player, a starred favourite at 99%
+    to last, "+47 pts over the next QB" -- over Christian McCaffrey and
+    Amon-Ra St. Brown. Quarterback is deep in a one-quarterback league and
+    the edge said otherwise, which is what a raw point difference compared
+    across positions does.
+
+    Priority: St. Brown 8 - 8 = 0, McCaffrey 7, Allen 26 - 8 = 18. The
+    window is twelve ranks, so Allen is not in the argument at all; between
+    the two who are, McCaffrey's position falls off hardest (+53.7 against
+    +34) and he takes the card."""
+    turn = pl.build_plan(**owner_args())[0]
+    assert turn["pick_no"] == 6
+    assert turn["target"]["player_id"] == "cmc"
+    assert turn["target"]["edge_pts"] == pytest.approx(53.7)
+    assert [a["player_id"] for a in turn["alternates"]] == ["arsb", "allen"]
+    # The 2%-to-last consensus number one is not on the card at all.
+    assert turn["target"]["player_id"] != "gibbs"
+    assert "gibbs" not in [a["player_id"] for a in turn["alternates"]]
+    # The edge is priced at the NEXT turn, and every string that names a
+    # pick names the pick it was measured at.
+    assert turn["target"]["edge_at_pick"] == 11
+    assert turn["target"]["pros"][0] == "ESPN's #7 overall"
+    assert "+53.7 pts over the next RB you'd get at pick 11" in \
+        turn["target"]["pros"]
+    assert "biggest drop-off at RB before pick 11" in turn["target"]["pros"]
+    assert "65% still there at pick 6" in turn["target"]["pros"]
+
+
+def test_no_edge_carries_a_player_past_the_drop_off_window():
+    """Allen's +47 is the second biggest on this board and he is still not
+    the target, an alternate on the edge, or anywhere near the card: he is
+    eighteen ranks behind the best priority and the window is twelve."""
+    turn = pl.build_plan(**owner_args(
+        proj=[310.0, 300.0, 290.0, 900.0, 245.0, 256.0, 333.0]))[0]
+    assert turn["target"]["player_id"] == "cmc"
+    assert turn["alternates"][0]["player_id"] == "arsb"
+
+
+def test_a_quarterback_ranked_twenty_sixth_is_not_the_pick_over_the_field():
+    """The same board with nobody starred: the star was not what was wrong
+    with the recommendation. While a running back or a receiver ESPN ranks
+    inside the top fifteen is eligible, the quarterback is not the target at
+    any turn."""
+    turns = pl.build_plan(**owner_args(favourites=set()))
+    named = [t["target"]["player_id"] for t in turns if t["target"]]
+    assert named == ["cmc", "rb3"]
+    assert "allen" not in named
+    # He is an alternate at the first turn, which is the honest place for
+    # him: the third name, not the recommendation.
+    assert [a["player_id"] for a in turns[0]["alternates"]] == ["arsb",
+                                                                "allen"]
+
+
+def test_the_target_now_cards_follow_the_same_order():
+    """On the clock, with the same board. Nobody is filtered for being
+    unlikely to last -- they are all there this second -- and the same
+    window over the same priorities picks the same three names."""
+    cards = pl.target_now(**owner_args(turns=[6, 11], picks_made=5))
+    # The same three priorities inside the same window -- St. Brown (0),
+    # Gibbs (1) and McCaffrey (7) -- reordered by the drop-off each of them
+    # faces from HERE. Five picks in, Gibbs is 61% to last rather than 2%,
+    # which is most of what McCaffrey's running-back edge was made of: it
+    # falls from 53.7 to 15.1 and St. Brown's 34 takes the card.
+    assert [c["player_id"] for c in cards] == ["arsb", "cmc", "gibbs"]
+    assert cards[0]["edge_pts"] == pytest.approx(34.0)
+    assert cards[0]["edge_at_pick"] == 11
+    # Allen is eighteen ranks off the best priority: outside the window,
+    # and +47 buys him nothing.
+    assert "allen" not in [c["player_id"] for c in cards]
+
+
+def test_a_kicker_is_not_targeted_before_the_round_kickers_go_in():
+    """A deferred starter slot is 200 places back, which is "not on this
+    board" without pretending the slot is filled. When the roster's
+    remaining picks run down to its open slots, `need_kind` calls it a
+    starter and the same rule targets him."""
+    ids = ["k1", "wr1"]
+    table = make_table(dict.fromkeys(ids, {}))
+    args = dict(table=table, ids=ids, positions=["K", "WR"],
+                proj=[130.0, 120.0])
+    early = pl.build_plan(**board_args(
+        args["table"], ids, ["K", "WR"], [130.0, 120.0],
+        espn_rank=[5.0, 20.0], espn_adp=[5.0, 20.0], market_rank=[5.0, 20.0],
+        roster_counts={"QB": 1, "RB": 2, "WR": 2, "TE": 1, "DST": 1},
+        turns=[100, 112, 124]))
+    assert early[0]["target"]["player_id"] == "wr1"
+    late = pl.build_plan(**board_args(
+        table, ids, ["K", "WR"], [130.0, 120.0],
+        espn_rank=[5.0, 20.0], espn_adp=[5.0, 20.0], market_rank=[5.0, 20.0],
+        roster_counts={"QB": 1, "RB": 2, "WR": 2, "TE": 1, "DST": 1},
+        turns=[124]))
+    assert late[0]["target"]["player_id"] == "k1"
