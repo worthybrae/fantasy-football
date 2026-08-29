@@ -227,7 +227,55 @@ def _row(draft: dict) -> dict:
         # "no date set" rather than a countdown to nothing.
         "draft_at": None if at is None else at.isoformat().replace("+00:00", "Z"),
         "live": bool(draft.get("live")),
+        # WHICH SEAT THE ACCOUNT DRAFTS FROM, when ESPN has published the
+        # order. Null before the commissioner sets one, which is the ordinary
+        # August state -- see `_fill_my_slots`. The dashboard plans for this
+        # seat, so a guess here would be a plan for the wrong draft.
+        "my_slot": _int_or_none(draft.get("my_slot")),
     }
+
+
+# How many leagues one list will read a draft order for. The seat is one ESPN
+# call per league, and the list is otherwise ONE call for the whole account
+# (see `espn_drafts.league_entries`) -- so this is the bound that keeps a
+# reader sitting in thirty mock rooms from turning their dashboard into thirty
+# round trips. Soonest first, because that is the order the list arrives in
+# and the near draft is the one being planned for.
+SLOT_MAX_LEAGUES = 12
+
+
+def _fill_my_slots(rows: list, cookies: dict, fetch=None) -> list:
+    """Give each row the account's seat in that league, where ESPN says one.
+
+    ONE EXTRA CALL PER LEAGUE, AND IT IS THE ONLY WAY TO KNOW. The fan profile
+    that builds this whole list carries `entryId` -- the account's TEAM id --
+    and a team id is not a draft slot: team 4 is not drafting fourth. The
+    seating plan lives in the league's own `draftSettings.pickOrder`, which is
+    the view `league_draft` already reads for the draft date, so this asks for
+    nothing new beyond the call itself. Made inside the caller's 120 s cache
+    (see `_cached`), so a page refresh is not another round of them.
+
+    EVERY FAILURE IS "NOT KNOWN YET". A league that 401s (the account has left
+    it since), a league mid-migration, ESPN being slow -- none of those is a
+    reason to lose the reader's whole draft list, and none of them is worth
+    turning into a seat. The session itself was already proved by the profile
+    call that built these rows, so a refusal here is about one league.
+    """
+    for row in rows[:SLOT_MAX_LEAGUES]:
+        row["my_slot"] = _my_slot(row, cookies, fetch)
+    return rows
+
+
+def _my_slot(row: dict, cookies: dict, fetch=None):
+    if not row.get("team_id") or not row.get("season"):
+        return None
+    try:
+        settings = drafts.league_draft(row["league_id"], row["season"],
+                                       cookies, fetch=fetch)
+    except Exception:      # noqa: BLE001 -- see `_fill_my_slots`: one league
+        return None        # we could not read is a seat we do not know
+    return drafts.slot_in_pick_order(settings.get("pick_order"),
+                                     row.get("team_id"))
 
 
 class JoinBody(BaseModel):
@@ -292,8 +340,10 @@ def register_draft_routes(app, store=None, fetch=None, post=None):
         try:
             rows = _cached(
                 (session.key, year),
-                lambda: drafts.upcoming_drafts(session.swid, session.cookies,
-                                               year, fetch=fetch))
+                lambda: _fill_my_slots(
+                    drafts.upcoming_drafts(session.swid, session.cookies,
+                                           year, fetch=fetch),
+                    session.cookies, fetch))
         except drafts.SessionExpired as exc:
             _drop(session, response, store)
             return {"connected": False, "leagues": [],
@@ -326,8 +376,10 @@ def register_draft_routes(app, store=None, fetch=None, post=None):
         # actually asked -- "what can I do now" -- in one round trip.
         session = Session(body.swid, body.espn_s2, "connected")
         try:
-            rows = drafts.upcoming_drafts(body.swid, session.cookies,
-                                          str(CURRENT_SEASON), fetch=fetch)
+            rows = _fill_my_slots(
+                drafts.upcoming_drafts(body.swid, session.cookies,
+                                       str(CURRENT_SEASON), fetch=fetch),
+                session.cookies, fetch)
         except drafts.SessionExpired:
             # Verified a moment ago by `establish_custody` and rejected now:
             # nothing to do but say so. The row it just wrote is dropped, so a

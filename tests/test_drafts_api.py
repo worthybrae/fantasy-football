@@ -124,6 +124,71 @@ def test_an_expired_local_session_reads_as_signed_out(monkeypatch):
     assert body["connected"] is False and body["expired"] is True
 
 
+# -- which seat the account drafts from --------------------------------------
+#
+# The fan profile that builds the whole list names the account's TEAM, and a
+# team id is not a seat: team 88 is not drafting eighty-eighth. The seating
+# plan is `draftSettings.pickOrder`, read off the same settings view
+# `league_draft` already fetches for the draft date. The dashboard plans for
+# this seat, so the only alternatives to ESPN's own answer are the reader's
+# choice and silence -- never a guess.
+
+
+def _settings_body(pick_order=None, size=8):
+    """One league's mSettings view, with or without a published order."""
+    draft = {"type": "SNAKE", "date": 1_800_000_000_000}
+    if pick_order is not None:
+        draft["pickOrder"] = pick_order
+    return json.dumps({"settings": {"name": "Home league", "size": size,
+                                    "draftSettings": draft}})
+
+
+def _seat(monkeypatch, settings, team_id=88):
+    _local(monkeypatch)
+    fetch = _fetcher({
+        "fan.api": (200, _profile(_entry("111", name="Home league",
+                                         team_id=team_id))),
+        "view=mSettings": settings,
+    })
+    body = _client(fetch).get("/api/espn/drafts?season=2026").json()
+    return body["leagues"][0]
+
+
+def test_the_seat_is_the_teams_place_in_espns_order_not_its_id(monkeypatch):
+    """THE BUG THIS FIXES. The dashboard was planning for whatever seat the
+    reader had last set in a select -- seat 5 for an owner ESPN has sitting
+    sixth. `pickOrder[k]` is slot k+1, and team 88 sitting sixth in it is
+    seat 6 however large the id is."""
+    row = _seat(monkeypatch,
+                (200, _settings_body([30, 12, 45, 7, 61, 88, 19, 3])))
+    assert row["team_id"] == "88"
+    assert row["my_slot"] == 6
+
+
+def test_a_league_that_has_not_set_an_order_yet_has_no_seat(monkeypatch):
+    """The ordinary August state: the league exists, the draft has a date,
+    and nobody has been seated. Null, so the page can say so and offer the
+    reader the choice -- a first seat invented here would be a plan for
+    somebody else's draft."""
+    row = _seat(monkeypatch, (200, _settings_body()))
+    assert row["my_slot"] is None
+
+
+def test_an_order_that_does_not_carry_our_team_is_no_answer(monkeypatch):
+    """ESPN's two lists disagreeing -- a team the order has never heard of --
+    is exactly the case that must not be rounded to a seat."""
+    row = _seat(monkeypatch, (200, _settings_body([30, 12, 45, 7])))
+    assert row["my_slot"] is None
+
+
+def test_an_unreadable_league_costs_its_seat_and_not_the_list(monkeypatch):
+    """One league's settings read failing is one seat we do not know. The
+    session was already proved by the profile call that built these rows, so
+    it must not read as a signed-out account or take the list down."""
+    row = _seat(monkeypatch, (500, ""))
+    assert row["name"] == "Home league" and row["my_slot"] is None
+
+
 def test_the_token_is_minted_for_the_local_login(monkeypatch):
     _local(monkeypatch)
     fetch = _fetcher({"draftSecurity": (200, "8675309")})

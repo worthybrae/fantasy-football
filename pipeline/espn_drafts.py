@@ -339,6 +339,12 @@ def league_draft(league_id, season, cookies: dict, fetch=None) -> dict:
     rather than inferred from the clock: a draft can be over long before its
     scheduled time (everyone autopicked) and can start late, and a list that
     called a finished draft "upcoming" would send a user into a dead room.
+
+    `pick_order` is the seating plan, and it is the only thing here the fan
+    profile cannot supply: `entryId` names the account's TEAM and a team id is
+    not a seat. Empty until the commissioner sets the order -- ESPN publishes
+    the field the moment it exists and omits it entirely before -- so an empty
+    list means "not decided yet", never "you are drafting first".
     """
     fetch = fetch or http_fetch()
     url = (f"{BASE}/seasons/{season}/segments/0/leagues/{league_id}"
@@ -354,7 +360,46 @@ def league_draft(league_id, season, cookies: dict, fetch=None) -> dict:
         "draft_type": draft.get("type"),
         "draft_at": _epoch_ms(draft.get("date")),
         "drafted": bool(draft.get("drafted")),
+        # Team ids in seat order. Read here rather than in a caller so the one
+        # place that knows this view's shape stays the one place that parses
+        # it -- see `slot_in_pick_order` for what the order MEANS.
+        "pick_order": list(draft.get("pickOrder") or ()),
     }
+
+
+def slot_in_pick_order(pick_order, team_id) -> int | None:
+    """Which seat a team drafts from, out of ESPN's own published order.
+
+    ONE PLACE KNOWS THAT `pickOrder[k]` IS SLOT k+1. That fact is read by the
+    live room (`api/live._slot_from_pick_order`, which calls this), by the
+    board's column names (`pipeline/espn_teams.fetch_team_slots`) and now by
+    the dashboard's plan -- and a second copy of it that drifted by one would
+    hand somebody a plan for the seat next to theirs, which is a wrong answer
+    nothing downstream can detect.
+
+    TOLERANT ABOUT THE TYPE, STRICT ABOUT THE ANSWER. A team id arrives as an
+    int from a settings payload and as a string from the fan profile
+    (`league_entries` serves ESPN's `entryId` as text, because that is what a
+    url wants), so both are compared as integers. Anything that is not a
+    number -- on either side -- is skipped rather than guessed at.
+
+    None whenever it cannot answer: no order published, no team, or a team the
+    order does not carry. Never a guess; the caller says "not known yet",
+    which is a true sentence, and a fabricated seat is not.
+    """
+    if not pick_order or team_id is None:
+        return None
+    try:
+        wanted = int(team_id)
+    except (TypeError, ValueError):
+        return None
+    for slot, entry in enumerate(pick_order, start=1):
+        try:
+            if int(entry) == wanted:
+                return slot
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def upcoming_drafts(swid: str, cookies: dict, season=None, fetch=None,

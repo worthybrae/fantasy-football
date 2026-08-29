@@ -977,13 +977,15 @@ def _slot_from_pick_order(settings, team_id: int | None) -> int | None:
     one at all is exactly this fallthrough case, and both the older
     resolvers below still cover it.)
     """
-    if settings is None or team_id is None:
+    if settings is None:
         return None
-    pick_order = getattr(settings, "pick_order", None) or ()
-    try:
-        return pick_order.index(team_id) + 1
-    except ValueError:
-        return None
+    # The walk itself is `espn_drafts.slot_in_pick_order`, shared with the
+    # dashboard's plan (api/drafts.py), because "pickOrder[k] is slot k+1" is
+    # a fact about ESPN's payload rather than about this room -- and two
+    # copies of it that drifted by one would each hand somebody the seat next
+    # to theirs, silently.
+    return espn_drafts.slot_in_pick_order(
+        getattr(settings, "pick_order", None), team_id)
 
 
 def _slot_for_team(cur, team_id: int):
