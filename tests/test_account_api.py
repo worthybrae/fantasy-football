@@ -1024,3 +1024,51 @@ def test_me_is_a_503_when_the_store_cannot_answer(client, monkeypatch, seats):
     monkeypatch.setattr(billing, "_db", _broken)
 
     assert client.get("/api/account/me").status_code == 503
+
+
+# -- the machine the server runs on -------------------------------------------
+
+
+def _local_login(monkeypatch):
+    """No cookie, and the saved ESPN login answering instead.
+
+    Patched at `_local_swid` rather than by faking a loopback address: a
+    TestClient request comes from "testclient", so `is_local_request` would
+    refuse it and the branch under test would never run.
+    """
+    monkeypatch.setattr(billing, "custody_for",
+                        lambda request, store=None: None)
+    monkeypatch.setattr(billing, "_local_swid", lambda request: SWID)
+    monkeypatch.setattr(
+        billing, "_custody_store",
+        lambda store=None: type("S", (), {
+            "account_ids": staticmethod(lambda swid: [NEW_ID])})())
+
+
+def test_the_owners_own_machine_is_never_made_a_founder(client, monkeypatch,
+                                                        seats):
+    """It reads rows under a real id and is given nothing.
+
+    That id is computed from whatever custody key the machine happens to have
+    -- a local one on a checkout, even with the deployment's `.env` loaded and
+    the shared store underneath -- so a seat claimed here is one the
+    deployment can never match to a person, and one fewer for a real reader.
+    The first `make up` would have taken #1.
+    """
+    _local_login(monkeypatch)
+
+    body = client.get("/api/account/me").json()
+
+    # Connected, because it IS an account for everything else it does.
+    assert body == {"connected": True, "founder": False, "ordinal": None,
+                    "founders_left": SEATS}
+    assert billing.founders_taken() == 0
+
+
+def test_the_favourites_read_claims_nothing_for_a_local_login(
+        client, monkeypatch, seats):
+    """The other claiming route, under the same rule."""
+    _local_login(monkeypatch)
+
+    assert client.get("/api/account/favorites").status_code == 200
+    assert billing.founders_taken() == 0

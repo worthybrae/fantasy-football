@@ -4833,3 +4833,111 @@ def test_a_connect_with_history_fits_nobody(tmp_path, monkeypatch, _isolated_lea
         conn.close()
     assert session.managers == 2
     assert session.betas == {} and session.nested is None
+
+
+# -- what the room says a draft costs -----------------------------------------
+#
+# THE FAILURE THIS FILE'S SHARE OF THE FEATURE IS ABOUT. `_billing_state` is
+# what draws the room's buttons, and it used to answer the price question for
+# itself: entitlement or nothing. The gate had learned about founders and the
+# open founding period; this had not. So a reader the gate was letting through
+# free sat in a locked room being offered a $9.99 checkout for a draft nobody
+# was going to charge them for -- and the checkout would have taken it. One
+# decision (`billing.free_reason`) now answers all four callers, and these are
+# the room's half of it.
+
+
+@pytest.fixture
+def priced(tmp_path, monkeypatch):
+    """Billing switched on, a billing store of this test's own, five seats."""
+    from api import billing
+
+    monkeypatch.setenv(billing.KEY_ENV, "sk_test_not_a_real_key")
+    monkeypatch.setenv(billing.FOUNDERS_LIMIT_ENV, "5")
+    billing.reset_for_tests(str(tmp_path / "billing.duckdb"))
+    yield billing
+    billing.reset_for_tests(str(tmp_path / "billing.duckdb"))
+
+
+class _PricedRequest:
+    """Enough of a request for `_billing_state`: the account lookup is faked
+    around it and nothing else is read."""
+    cookies: dict = {}
+    headers: dict = {}
+
+    class client:
+        host = "203.0.113.7"
+
+
+class _PricedRoom:
+    """Enough of a session: `_billing_state` reads one attribute."""
+    league_id = "999"
+
+
+def _room_billing(monkeypatch, billing, ids, open_founders=True,
+                  source=None, mock=False):
+    from api import live
+
+    monkeypatch.setattr(billing, "FOUNDERS_OPEN", open_founders)
+    monkeypatch.setattr(
+        billing, "account_context",
+        lambda request, store=None: (ids, source or billing.CONNECTED))
+    monkeypatch.setattr(billing, "is_free_draft", lambda league_id: mock)
+    return live._billing_state(_PricedRequest(), _PricedRoom())
+
+
+def test_the_room_is_not_locked_while_the_founding_period_is_open(
+        monkeypatch, priced):
+    state = _room_billing(monkeypatch, priced, ["acct-hmac"])
+
+    assert state["required"] is False and state["entitled"] is True
+    assert state["reason"] == priced.FREE_FOUNDERS_OPEN
+    # And the poll that drew the room took the seat, which is the point of
+    # claiming from the requests that already hold the account.
+    assert priced.founder_ordinal(["acct-hmac"]) == 1
+
+
+def test_a_founders_room_stays_open_after_the_paywall_comes_back(
+        monkeypatch, priced):
+    """Stripe on, the founding period over, nothing bought. The room must draw
+    exactly what the gate does -- and the gate lets this reader in."""
+    priced.claim_founder(["acct-founder"])
+
+    state = _room_billing(monkeypatch, priced, ["acct-founder"],
+                          open_founders=False)
+
+    assert state["required"] is False and state["entitled"] is True
+    assert state["reason"] == priced.FREE_FOUNDER
+
+
+def test_a_strangers_room_locks_once_the_period_is_over(monkeypatch, priced):
+    """The same request, one row away: nobody claimed a seat for this account
+    and the list is closed."""
+    state = _room_billing(monkeypatch, priced, ["acct-stranger"],
+                          open_founders=False)
+
+    assert state["required"] is True and state["entitled"] is False
+    assert "reason" not in state
+
+
+def test_the_owners_own_machine_is_never_charged_and_never_claims(
+        monkeypatch, priced):
+    """The loopback login is an identity to read rows under, not one to give a
+    seat to: the id is computed from whatever custody key that machine has, so
+    a seat claimed there is one the deployment can never match to a person."""
+    state = _room_billing(monkeypatch, priced, ["owner-id"],
+                          open_founders=True, source=priced.LOCAL)
+
+    assert state["required"] is False
+    assert state["reason"] == priced.FREE_LOCAL
+    assert priced.founders_taken() == 0
+
+
+def test_a_mock_room_still_says_so(monkeypatch, priced):
+    """`reason: "mock"` is the one key this payload has always carried, and
+    the page has read it since before any of this existed."""
+    state = _room_billing(monkeypatch, priced, ["acct-stranger"],
+                          open_founders=False, mock=True)
+
+    assert state["required"] is False
+    assert state["reason"] == "mock"

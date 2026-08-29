@@ -1266,6 +1266,13 @@ def _billing_state(request, session) -> dict:
     session for some other season would be a draft nobody can run here
     anyway.
 
+    ONE DECISION, NOT THIS ROOM'S OWN. `billing.free_reason` is what the gate
+    itself acts on, so the buttons the room draws and the answer somebody gets
+    when they press them cannot disagree. They did: this function knew about
+    entitlements and nothing else, so while the founding period was open it
+    locked the room and offered checkout to readers the gate was letting
+    straight through -- $9.99 for a draft nobody was going to charge for.
+
     Never raises. A billing database that cannot be read must not take the
     draft room down mid-draft; an unreadable one answers "not required",
     which fails toward the drafter.
@@ -1274,13 +1281,16 @@ def _billing_state(request, session) -> dict:
         if not billing.enabled():
             return {"enabled": False, "required": False, "entitled": True}
         league_id = getattr(session, "league_id", None)
-        if billing.is_free_draft(league_id):
-            return {"enabled": True, "required": False, "entitled": True,
-                    "reason": "mock"}
-        paid = billing.entitled(billing._account_ids(request),
-                                league_id, CURRENT_SEASON)
-        return {"enabled": True, "required": not paid, "entitled": paid,
-                "league_id": str(league_id), "season": int(CURRENT_SEASON)}
+        ids, source = billing.account_context(request)
+        reason = billing.free_reason(ids, league_id, CURRENT_SEASON, source)
+        free = reason is not None
+        state = {"enabled": True, "required": not free, "entitled": free,
+                 "league_id": str(league_id), "season": int(CURRENT_SEASON)}
+        if reason is not None:
+            # `reason: "mock"` is the one this payload has always carried.
+            # The others are new and nothing branches on the value.
+            state["reason"] = reason
+        return state
     except Exception:      # noqa: BLE001 -- see the docstring
         return {"enabled": False, "required": False, "entitled": True}
 

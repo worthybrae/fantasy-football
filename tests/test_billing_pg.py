@@ -177,3 +177,36 @@ def test_a_full_list_hands_out_nothing_here_either(monkeypatch):
             billing._db().execute("DELETE FROM founder WHERE account_id = ?",
                                   [name])
         billing.reset_for_tests(None)
+
+
+def test_a_deleted_seat_does_not_lend_its_number_to_the_next_claim(monkeypatch):
+    """Ordinals are one past the HIGHEST, not one past the count.
+
+    This is the backend where it bites: the table is shared and every test in
+    this file deletes its own rows, so the count and the highest ordinal part
+    company on the first cleanup. With count + 1 the next claimer would be
+    handed a number somebody still holds, the unique constraint would refuse
+    the row, and `ON CONFLICT DO NOTHING` would turn that into an account with
+    no seat and no error.
+    """
+    first = "pg-test-" + uuid.uuid4().hex
+    second = "pg-test-" + uuid.uuid4().hex
+    third = "pg-test-" + uuid.uuid4().hex
+    monkeypatch.setenv(billing.FOUNDERS_LIMIT_ENV, str(10 ** 9))
+    billing.reset_for_tests(None)
+    try:
+        one = billing.claim_founder([first])
+        two = billing.claim_founder([second])
+        assert two == one + 1
+
+        billing._db().execute("DELETE FROM founder WHERE account_id = ?",
+                              [first])
+        three = billing.claim_founder([third])
+
+        assert three == two + 1
+        assert three != one
+    finally:
+        for name in (first, second, third):
+            billing._db().execute("DELETE FROM founder WHERE account_id = ?",
+                                  [name])
+        billing.reset_for_tests(None)

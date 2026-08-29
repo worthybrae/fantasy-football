@@ -341,13 +341,24 @@ def register_account_routes(app, conn, store=None):
     routes are safe in.
     """
 
-    def _account_ids(request: Request) -> list:
-        ids = billing._account_ids(request, store)
+    def _account(request: Request) -> tuple:
+        """`(ids, source)` for a request that must have an account, else 401.
+
+        The source matters to exactly one thing here -- whether a founder seat
+        may be claimed -- and it comes back with the ids because working it
+        out separately would mean resolving the cookie and reading the
+        credential store twice for one request.
+        """
+        ids, source = billing.account_context(request, store)
         if not ids:
             raise HTTPException(
                 status_code=401,
                 detail="Connect your ESPN account to keep a favourites list.")
-        return ids
+        return ids, source
+
+    def _account_ids(request: Request) -> list:
+        """The ids alone, for the two routes that give nothing away."""
+        return _account(request)[0]
 
     # PER APP, not per module. The key below carries the board's identity, so
     # two apps in one process could safely share a dictionary -- but the
@@ -417,11 +428,20 @@ def register_account_routes(app, conn, store=None):
         than an endpoint of its own.
         """
         http_cache.private(response)
-        ids = billing._account_ids(request, store)
+        ids, source = billing.account_context(request, store)
         try:
             # Ordered: the claim first, so a seat taken by THIS request is
             # already out of the count the same response reports.
-            ordinal = billing.claim_founder(ids) if ids else None
+            #
+            # AND ONLY FOR A CONNECTED ACCOUNT. The other source is the saved
+            # ESPN login on the machine this process runs on, which is an
+            # identity for reading and not one to give a seat to: on a
+            # checkout with the deployment's `.env` loaded, that id is
+            # computed from a LOCAL custody key and written to the SHARED
+            # store, so the seat would belong to nobody the deployment can
+            # ever recognise. See `billing.CONNECTED`.
+            ordinal = (billing.claim_founder(ids)
+                       if ids and source == billing.CONNECTED else None)
             left = billing.founders_left()
         except StoreError as exc:
             raise billing._unavailable(exc) from None
@@ -433,12 +453,14 @@ def register_account_routes(app, conn, store=None):
     @app.get("/api/account/favorites")
     def account_favorites(request: Request):
         """This account's list, in its own order. Empty until it saves one."""
-        ids = _account_ids(request)
-        # A founder's seat, taken on the way past. Quietly: this route exists
-        # to answer a different question, and a billing store that is briefly
-        # away is not a reason to refuse somebody their own list. The seat is
-        # still there on the next request.
-        billing.claim_founder_quietly(ids)
+        ids, source = _account(request)
+        # A founder's seat, taken on the way past, and only for a connected
+        # account -- see `/api/account/me` above for what the other source is
+        # and why it may not claim. Quietly: this route exists to answer a
+        # different question, and a billing store that is briefly away is not
+        # a reason to refuse somebody their own list.
+        if source == billing.CONNECTED:
+            billing.claim_founder_quietly(ids)
         try:
             return {"players": billing.favorites(ids)}
         except StoreError as exc:
