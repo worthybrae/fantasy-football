@@ -11,10 +11,9 @@ import { useRoomProbe } from '../lib/useRoomProbe'
 import { useDocumentMeta } from '../lib/documentMeta'
 import SetupWizard, { ACCOUNT_CHANNEL, CHANNEL_ACK, CHANNEL_CONNECTED } from '../components/SetupWizard'
 import ConnectScreen from '../components/ConnectScreen'
-import Benefits from '../components/Benefits'
 import Explainer from '../components/Explainer'
 import DemoRoom from '../components/DemoRoom'
-import Welcome from '../components/Welcome'
+import { Hero, Steps, WhatYouGet } from '../components/FrontDoor'
 import Dashboard, { previewingSignedOut } from '../components/Dashboard'
 // This page's own stylesheet, not App.css: see the header comment in it for
 // why, and for why every class below is `lp-` prefixed.
@@ -163,15 +162,6 @@ export default function Landing() {
   // named -- the two agree today, and a screen that charges for a draft
   // should not depend on that staying true.
   const [owed, setOwed] = useState<{ leagueId: string; season: number } | null>(null)
-  // What the room is showing: a draft going on now, or one from the archive
-  // being replayed because none is. Held here for one reason -- the welcome
-  // card says "running now", and it must stop saying it when that stops
-  // being true.
-  const [mode, setMode] = useState<'live' | 'replay' | 'none'>('none')
-  // Bumped when something on the page needs an account it does not have --
-  // the archive button under the corpus band. The welcome card reads it and
-  // raises itself with the reason.
-  const [askedAt, setAskedAt] = useState(0)
   // The account connect, which runs on its own clock: it is not a draft and
   // has no progress screen. `connected` is a counter rather than a flag so
   // the drafts card can be told to re-read (a key change) each time one
@@ -574,41 +564,36 @@ export default function Landing() {
         </section>
       )}
 
-      {/* -- the argument, and the proof of it, above the fold -- */}
-      {/* THE ROOM IS THE PAGE, and it is the first screen: a visitor lands
-          inside the product with a real ESPN mock draft running in it. No
-          headline above it, no lede explaining what they are about to see --
-          the room explains itself faster than a paragraph does, and a
-          paragraph would push it below the fold.
+      {/* THE ARGUMENT, ONCE, IN ORDER. It used to be made three times: a
+          welcome card floating over the room, a six-panel section saying the
+          same thing at length, and the explainer saying it a third time in
+          prose. The card also carried a full-page scrim, so a visitor's first
+          click on the board it was pointing at did nothing but dismiss it.
 
-          The pitch happens after: the ask is docked at the bottom of that
-          screen, and everything that argues the case is further down for
-          whoever wants it. */}
-      {/* `live` puts the way back to a running draft in the ROOM'S OWN top
+          Now: what this is, what you would do, the proof, what you get, the
+          long answers. See components/FrontDoor.tsx. */}
+      <Hero onStart={toSetup} />
+
+      <Steps onStart={toSetup} />
+
+      {/* THE PROOF, WITH NOTHING OVER IT. A real ESPN mock draft, running,
+          that a reader can click into -- which is the whole reason the scrim
+          had to go. The hero links here by id.
+
+          `live` puts the way back to a running draft in the ROOM'S OWN top
           bar, where the rest of this page's chrome lives. It used to be a
           band across the top of the page, which pushed the whole room down
           the moment it appeared and read as an alert about something that
-          had gone wrong. A link in the bar is the same offer without the
-          shove. */}
-      <DemoRoom onMode={setMode} live={gate === 'live'} />
+          had gone wrong. */}
+      <div id="demo" className="lp-demo-anchor">
+        <DemoRoom live={gate === 'live'} />
+      </div>
 
-      {/* The brand, and the way in. Over the room rather than instead of it,
-          and it never disappears -- dismissing moves it to the corner (see
-          Welcome). Rendered after the room so it stacks above without a
-          z-index argument. */}
-      <Welcome onStart={toSetup} live={mode === 'live'} askedAt={askedAt} />
+      <WhatYouGet />
 
-      {/* WHAT IT KNOWS, DRAWN. This was four cards of prose about the
-          model -- three hundred words a reader who has just watched the room
-          run itself is not going to read, every claim of which they had to
-          take on trust. Each panel now draws the thing it claims, in the
-          shape the room draws it, and arrives as it is scrolled to. */}
-      <Benefits onNeedAccount={() => setAskedAt((n) => n + 1)} />
-
-      {/* The page in plain words, for readers and crawlers alike: the only
-          <h1>, and the FAQ (also FAQPage structured data). Below the room
-          and the drawn figures, which make the case faster for anyone who
-          watched them. */}
+      {/* The page in plain words, for readers and crawlers alike: the FAQ,
+          which is also FAQPage structured data. Below everything that makes
+          the case faster. */}
       <Explainer onStart={toSetup} />
 
       <footer className="lp-foot">
@@ -631,7 +616,7 @@ export default function Landing() {
       </footer>
 
       {/* The guided setup, over everything. Rendered last so it stacks
-          without a z-index argument, exactly as Welcome does. `onConnected`
+          without a z-index argument. `onConnected`
           remembers the answer and seeds the page's own state, so the
           dashboard is already painted behind the wizard's finished screen
           the moment "See your drafts" closes it. */}

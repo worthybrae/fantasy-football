@@ -1084,9 +1084,10 @@ PROFILE_WARM = 40
 #
 # These pages are read by a crawler working through a 228-URL sitemap in a
 # burst and by a person on a phone on a train. The profile sections roughly
-# doubled one -- the heaviest measured against the real corpus is 56 KB, a
-# tight end with five seasons of history, a full game log and eight news
-# items -- and this ceiling is what stops the next section being added
+# doubled one -- the heaviest three measured against the real corpus (854
+# drafts, 203 pages) are 61.2 KB, against a 56.5 KB median and a 29.6 KB
+# page for a player the board carries no profile for -- and this ceiling is
+# what stops the next section being added
 # without anybody measuring. Enforced by the suite, not at render time: a
 # page that has grown past it is a thing to go and look at, not a thing to
 # truncate under a reader.
@@ -1284,6 +1285,30 @@ def _band_level(value, cuts) -> int | None:
     return 1
 
 
+def _place_level(rank, pool, ceils) -> int | None:
+    """The step a PLACE takes: `rank / pool` against ceilings, best first.
+
+    NOT `_band_level(1 - rank / pool, floors)`, WHICH IS THE SAME STATEMENT
+    ONLY IN EXACT ARITHMETIC. The app asks "is this place inside the top
+    fifth / quarter / half of its field" and asks it as `rank / pool <=
+    ceiling` -- `steadyTone` in web/src/components/draft/panels.ts and
+    `placeTone` in web/src/components/profile/LineQuality.tsx. Subtracted
+    from one and compared against the complement it stops agreeing at every
+    exact boundary: 1 - 24/30 is 0.19999999999999996, which is under a 0.2
+    floor that 24/30 sits exactly on. 24/30, 9/10, 18/20 and every other
+    place that lands on a cut were painted one step darker here than in the
+    room. Same rank, same pool, two colours.
+    """
+    rank, pool = _num_or_none(rank), _num_or_none(pool)
+    if rank is None or pool is None or pool <= 0:
+        return None
+    place = rank / pool
+    for i, ceiling in enumerate(ceils):
+        if place <= ceiling:
+            return 5 - i
+    return 1
+
+
 _ORDINALS = {1: "st", 2: "nd", 3: "rd"}
 
 
@@ -1359,13 +1384,27 @@ def _move_tone(now, prev, invert: bool = False) -> str:
         return ""
     move = ((now - prev) / abs(prev)) * (-1 if invert else 1)
     if move >= _USAGE_MOVE:
-        return "up"
+        return "pf-up"
     if move <= -_USAGE_MOVE:
         return "down"
     return ""
 
 
 _profile_failed = False
+
+
+def _profile_unavailable(exc: BaseException) -> None:
+    """Say once per process that the profile could not be had.
+
+    ONCE, because a profile failing on all 203 pages of a crawl is one fact
+    about the database, not two hundred -- and a log that repeats it two
+    hundred times is a log nobody reads the second line of.
+    """
+    global _profile_failed
+    if not _profile_failed:
+        _profile_failed = True
+        print(f"seo: profile enrichment unavailable, pages render "
+              f"without it: {exc!r}", flush=True)
 
 
 def cached_profile_or_none(conn, player_id: str, settings=None):
@@ -1375,9 +1414,7 @@ def cached_profile_or_none(conn, player_id: str, settings=None):
     of the corpus and needs nothing from the universal database; the profile
     is an enrichment on top, exactly like `scoring/adp_facts.attach`, and a
     universal database that cannot answer must cost the enrichment rather
-    than the page. So this swallows -- and says so once per process, because
-    a profile failing on all 203 pages of a crawl is one fact about the
-    database, not two hundred.
+    than the page. So this swallows -- and says so once per process.
 
     NOTHING IS HELD WHILE THIS RUNS. `cached_profile` single-flights on its
     own lock and takes one of `scoring.board_cache.BUILD_SLOTS`' two build
@@ -1386,7 +1423,6 @@ def cached_profile_or_none(conn, player_id: str, settings=None):
     neither `_pages_lock` nor `_adp_lock` held -- see `rendered` for why the
     page cache is written after the build rather than around it.
     """
-    global _profile_failed
     if conn is None:
         return None
     try:
@@ -1394,10 +1430,7 @@ def cached_profile_or_none(conn, player_id: str, settings=None):
         from scoring.profile_cache import cached_profile
         return cached_profile(conn, player_id, None, settings or league.load(conn))
     except Exception as exc:      # noqa: BLE001 -- see the docstring
-        if not _profile_failed:
-            _profile_failed = True
-            print(f"seo: profile enrichment unavailable, pages render "
-                  f"without it: {exc!r}", flush=True)
+        _profile_unavailable(exc)
         return None
 
 
@@ -1431,8 +1464,13 @@ def _meters(payload: dict) -> list:
             note = f"{played[0]['season']} finish, of {starters} starters"
     level = _finish_level(finish, starters)
     if level is not None:
+        # `of` so the page can say what the place is a place among. A
+        # DEFENSE HAS NOTHING ELSE THAT SAYS IT: it gets no season table, so
+        # the twelve-team caveat under that table -- the only place the
+        # yardstick was ever stated -- never renders on its page.
         out.append({"label": "Finish", "level": level, "cls": _PANEL_RAMP[level - 1],
-                    "value": f"{position}{int(finish)}", "note": note})
+                    "value": f"{position}{int(finish)}", "note": note,
+                    "of": starters})
 
     pct = _num_or_none(header.get("consistency_pct"))
     if pct is not None:
@@ -1481,9 +1519,10 @@ def _season_rows(payload: dict) -> dict | None:
                          else f"{int(s['pos_rank_ppg'])} of {int(s['pos_rank_ppg_n'])}"),
             "steady": ("—" if cv_rank is None or not cv_of
                        else f"{int(cv_rank)} of {int(cv_of)}"),
+            # `steadyTone`'s own ceilings, in its own order.
             "steady_cls": ("" if cv_rank is None or not cv_of else
-                           _PANEL_RAMP[_band_level(1 - cv_rank / cv_of,
-                                                   (0.75, 0.5, 0.25, 0.1)) - 1]),
+                           _PANEL_RAMP[_place_level(cv_rank, cv_of,
+                                                    (0.25, 0.5, 0.75, 0.9)) - 1]),
         })
     proj_ppg = _num_or_none((payload.get("summary") or {}).get("proj_ppg"))
     proj_finish = _num_or_none(payload["header"].get("proj_pos_finish"))
@@ -1690,8 +1729,8 @@ def _oline(payload: dict) -> dict | None:
         if not s.get("name"):
             continue
         rank, of = _num_or_none(s.get("avail_rank")), _num_or_none(s.get("avail_rank_of"))
-        level = None if rank is None or not of else _band_level(1 - rank / of,
-                                                                (0.8, 0.6, 0.4, 0.2))
+        # `placeTone`'s own ceilings: top fifth, top two fifths, and down.
+        level = _place_level(rank, of, (0.2, 0.4, 0.6, 0.8))
         starters.append({"position": s.get("position") or "—", "name": s["name"],
                          "place": "—" if rank is None or not of else f"{int(rank)}/{int(of)}",
                          "cls": "" if level is None else _PANEL_RAMP[level - 1]})
@@ -1728,7 +1767,7 @@ def _comparables(payload: dict, slugs: dict) -> dict | None:
             # Green up, red down, and nothing at all for a move that rounds
             # to nothing: the same two tokens the rest of the page spends on
             # "better" and "worse".
-            "tone": ("" if move is None else "up" if round(move, 1) > 0
+            "tone": ("" if move is None else "pf-up" if round(move, 1) > 0
                      else "down" if round(move, 1) < 0 else ""),
             "match": "—" if p.get("similarity") is None else f"{round(p['similarity'])}%",
         })
@@ -1745,7 +1784,8 @@ def _comparables(payload: dict, slugs: dict) -> dict | None:
                else _num_or_none(cohort.get("median_change")))
         if avg is not None:
             note = {"value": _signed(avg, 1),
-                    "tone": "up" if round(avg, 1) > 0 else "down" if round(avg, 1) < 0 else "",
+                    "tone": ("pf-up" if round(avg, 1) > 0
+                             else "down" if round(avg, 1) < 0 else ""),
                     "n": int(cohort["n"]), "declined": int(cohort.get("declined") or 0)}
     return {"rows": rows, "note": note,
             "age": (payload.get("similar") or {}).get("target_age")}
@@ -1768,7 +1808,7 @@ def _peers(payload: dict, slugs: dict) -> list:
                     # two players the same size, and colouring it would be
                     # the card claiming a choice nobody has to make.
                     "tone": ("" if gap is None or abs(gap) < 0.5
-                             else "up" if gap > 0 else "down")})
+                             else "pf-up" if gap > 0 else "down")})
     return out
 
 
@@ -1814,8 +1854,8 @@ def _market(payload: dict) -> dict:
             # `edgeTone` in profile/payload.ts: under ten slots the board and
             # the market take him in the same round of any league this tool
             # supports, so there is no decision in the gap.
-            "edge_tone": ("" if edge is None else "up" if round(edge) >= 10
-                          else "accent" if round(edge) > 0
+            "edge_tone": ("" if edge is None else "pf-up" if round(edge) >= 10
+                          else "pf-accent" if round(edge) > 0
                           else "" if round(edge) == 0 else "down")}
 
 
@@ -1836,6 +1876,20 @@ def _profile_news(payload: dict) -> list:
     return out
 
 
+def _link_or_none(url) -> str | None:
+    """A news url this page will hang an `<a href>` on, or None.
+
+    `player_news.url` is whatever the feed that filled the row put there,
+    and the page has no say in it. Anything that is not plain http(s) is
+    printed as text instead: `javascript:` and `data:` are a script the
+    page would be handing a reader on a click, and a bare path or an empty
+    string is a link into this site that goes nowhere. The headline is the
+    thing worth reading either way, so a row never disappears over its url.
+    """
+    url = (url or "").strip()
+    return url if url.lower().startswith(("http://", "https://")) else None
+
+
 def _merge_news(existing: list, extra: list) -> list:
     """One list, newest first, with nothing said twice.
 
@@ -1852,7 +1906,9 @@ def _merge_news(existing: list, extra: list) -> list:
         if not key or key in seen:
             continue
         seen.add(key)
-        out.append(item)
+        # Deduplicated on the url the feed gave, printed with the one the
+        # page is willing to link: a `javascript:` row is still that row.
+        out.append({**item, "url": _link_or_none(item.get("url"))})
     # ON A COMMON TYPE. `adp_facts` hands over a `date` and the profile a
     # `datetime`, which Python will not order against each other -- and the
     # first merged page raised rather than sorted.
@@ -1873,12 +1929,32 @@ def profile_view(conn, player: dict, slugs: dict, settings=None) -> dict | None:
 
     `slugs` maps player_id -> the slug of his own page, so a comparable or a
     board peer who is on this board becomes a link and one who is not stays
-    text. Returns None when there is no profile to draw -- an unknown id, or
-    a universal database that cannot answer.
+    text. Returns None when there is no profile to draw -- an unknown id, a
+    universal database that cannot answer, or a payload the shapers below
+    cannot make a section out of.
+
+    THE GUARD COVERS THE SHAPING, NOT ONLY THE FETCH. `cached_profile_or_none`
+    swallows everything the database can do wrong and then hands the payload
+    to fifteen shapers that swallow nothing: `_meters` and `_season_rows`
+    read `payload["header"]` and `payload["bio"]` by subscript, `_oline`
+    reads `int(oline["rank"])`, `_weeks` reads `int(g["week"])`. Every one of
+    those is a key the profile builder is entitled to leave null, and a null
+    in any of them used to be a 500 on a page that needs none of it. Same
+    bargain as the fetch, then, and the same one line per process.
     """
     payload = cached_profile_or_none(conn, player["player_id"], settings)
     if payload is None:
         return None
+    try:
+        return _profile_view(payload, slugs)
+    except Exception as exc:      # noqa: BLE001 -- see the docstring
+        _profile_unavailable(exc)
+        return None
+
+
+def _profile_view(payload: dict, slugs: dict) -> dict:
+    """`profile_view`'s shaping, split out so its guard can be one `try`
+    around the lot rather than fifteen."""
     header = payload.get("header") or {}
     status = payload.get("status") or {}
     slot = status.get("depth_chart_order")
@@ -2300,6 +2376,12 @@ def register_seo_routes(app, conn=None):
                              f"{d['updated'].year if d['updated'] else ''}".strip()),
                 description=desc, path=f"/adp/{p['slug']}", p=p, drafts=d["drafts"],
                 teams=d["teams"], rounds=d["rounds"], picks_total=d["teams"] * d["rounds"],
+                # The archive's scoring, beside its size: the two notes under
+                # the profile tables say what these drafts ARE, and half a
+                # shape is the half that misleads -- "8-team" over a
+                # standard-scoring corpus reads as the PPR one every other
+                # page on this site used to be.
+                scoring=league.format_label(d.get("format")),
                 near=near, headshot=social, face=thumb(p["headshot"], 256),
                 round_min=ROUND_MIN_SHARE, pron=pron, mover_floor=MOVER_MIN_SHARE,
                 corpus_seconds=d["seconds"], curve_picks=CURVE_PICKS,
@@ -2320,7 +2402,27 @@ def register_seo_routes(app, conn=None):
         p = d["by_slug"].get(key)
         if p is None:
             return _missing(f"/adp/{key}")
-        return page(render_player(conn, d, p))
+        # A CURSOR PER REQUEST, NEVER THE SHARED `conn`. `render_player`
+        # builds the profile off whatever connection it is handed, and a
+        # DuckDBPyConnection carries the statement and result state of the
+        # query running on it -- two request threads issuing queries on one
+        # connection do not queue, they overwrite each other. Six of these
+        # at once (which is how a crawler walks a 228-URL sitemap, and how
+        # `test_six_player_pages_at_once_each_get_their_whole_page` walks
+        # it) left five pages with every profile section missing, wrote
+        # those stripped pages into the page cache under the corpus's own
+        # stamp, and reported it once per process and never again.
+        #
+        # `conn.cursor()` shares the database and gives this request its own
+        # state -- the convention `api/main.py`'s handlers, its sim worker
+        # and the keep-warm loop below all already follow.
+        cur = conn.cursor() if conn is not None else None
+        try:
+            body = render_player(cur, d, p)
+        finally:
+            if cur is not None:
+                cur.close()
+        return page(body)
 
     @app.api_route("/sitemap.xml", methods=["GET", "HEAD"])
     def sitemap():

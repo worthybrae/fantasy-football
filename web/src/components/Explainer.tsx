@@ -2,9 +2,9 @@
 import { useEffect } from 'react'
 
 // The page in words, for the reader who wants them and the crawler that
-// needs them. The first screen is a live draft and the second is drawn
-// figures; neither says in plain text what this is. This does, once, below
-// both, and it is the only <h1> on the page.
+// needs them. The hero above states the claim in one sentence and owns the
+// page's only <h1>; this is the long version of the same argument, for
+// whoever scrolled this far, and the six answers people actually ask for.
 //
 // The FAQ is real <details> elements and also FAQPage structured data, so
 // the same six answers show under the result in a search as well as here.
@@ -31,7 +31,7 @@ const FAQ: { q: string; a: string; more?: { text: string; href: string; link: st
   },
   {
     q: 'What does it cost?',
-    a: 'Mock drafts are free, as many as you like. A real draft is $9.99, once, paid when you connect the league that is about to draft.',
+    a: 'Free for the first 100 accounts, for good. After that a real draft is $9.99 a season; mock drafts stay free.',
   },
   {
     q: 'Where do the rankings come from?',
@@ -69,9 +69,11 @@ export default function Explainer({ onStart }: { onStart: () => void }) {
           both columns near 60 characters and lets the section start and end
           on the same gutter as the footer. One column again under 900px. */}
       <div className="xp-say">
-        <h1 id="xp-h1" className="xp-h1">
+        {/* An h2, not an h1: the hero owns the page's heading now. The
+            sentence is unchanged -- it is what this page ranks for. */}
+        <h2 id="xp-h1" className="xp-h1">
           A draft assistant for ESPN fantasy football, trained on real ESPN mock drafts.
-        </h1>
+        </h2>
         <div className="xp-body">
           <p>
             ESPN Draft Assist is a live board that sits beside your ESPN draft room.
@@ -87,7 +89,8 @@ export default function Explainer({ onStart }: { onStart: () => void }) {
           <p>
             Setup is a bookmark. Drag it to your bar, click it once on ESPN, and your
             leagues appear here with a button to open the board when your draft starts.
-            Mock drafts are free; a real draft is $9.99, once.
+            Free for the first 100 accounts, for good. After that a real draft is
+            $9.99 a season; mock drafts stay free.
           </p>
         </div>
       </div>

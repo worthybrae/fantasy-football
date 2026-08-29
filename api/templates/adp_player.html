@@ -110,12 +110,21 @@
   </div>
 {% endfor %}
 </div>
+{# WHAT FINISH IS A FINISH AMONG, on the one page that has nowhere else to
+   say it. A defense gets no season table, and the note under that table was
+   the only place the yardstick was stated -- so its page showed "DST7" on a
+   five-step bar and never said seventh of what, or that the twelve is an
+   assumption these pages make because they have no league to ask. #}
+{% if not prof.seasons %}
+{% set fin = prof.meters | selectattr('label', 'equalto', 'Finish') | list | first %}
+{% if fin %}<p class="note">Finish is a place among {{ fin.of }} startable {{ prof.position }}s — a twelve-team league's shape, assumed because these pages have no league to ask. These drafts are {{ teams }}-team {{ scoring }}.</p>{% endif %}
+{% endif %}
 {% endif %}
 
 {% if prof.seasons %}
 <h2>Every season {{ pron.s }} has played</h2>
 <div class="scroll">
-<table>
+<table class="wide">
 <thead><tr><th>Season</th><th class="n">Age</th><th class="n">NFL yr</th><th class="n">Games</th><th class="n">Points / g</th><th class="n">{{ prof.seasons.position }} finish</th><th class="n">By points / g</th><th class="n">Steadiness</th></tr></thead>
 <tbody>
 {% for s in prof.seasons.rows %}
@@ -145,7 +154,7 @@
 </tbody>
 </table>
 </div>
-<p class="note">Finish is a place among {{ prof.seasons.starters }} startable {{ prof.seasons.position }}s, which is a twelve-team league's shape. Steadiness is {{ pron.p }} place on week-to-week swing among everyone measured at {{ pron.p }} position that season — lower is steadier.</p>
+<p class="note">Finish is a place among {{ prof.seasons.starters }} startable {{ prof.seasons.position }}s, which is a twelve-team league's shape — assumed, because these pages have no league to ask, while these drafts are {{ teams }}-team {{ scoring }}. Steadiness is {{ pron.p }} place on week-to-week swing among everyone measured at {{ pron.p }} position that season — lower is steadier.</p>
 {% endif %}
 
 {% if prof.weeks %}
@@ -166,7 +175,7 @@
 <figcaption>Every week of {{ prof.weeks.season }}, scored under this league's own rules{% if prof.weeks.avg %} — {{ prof.weeks.avg }} a game{% if prof.weeks.finish %}, which finished {{ pron.o }} {{ prof.weeks.finish }}{% endif %}{% endif %}. A mark on the baseline is a week with no game; the scale is the same for every player, so a good week is the same height on every page.</figcaption>
 </figure>
 <div class="scroll">
-<table>
+<table class="wide">
 <thead><tr><th class="n">Wk</th><th>Opp</th>{% for h in prof.weeks.heads %}<th class="n">{{ h }}</th>{% endfor %}<th class="n">Pts</th></tr></thead>
 <tbody>
 {% for g in prof.weeks.lines %}
@@ -293,7 +302,7 @@
 {% if prof and prof.market.edge is not none and p.consensus %}
 {# The gap between the first two rows, stated. It is arithmetic a reader
    could do, and doing it is the whole question the table exists to answer. #}
-<tr><td><b>vs consensus</b></td><td class="n {{ prof.market.edge_tone }}"><b>{{ prof.market.edge_text }}</b></td><td class="n"></td><td class="dim">Slots between this board and the consensus. Positive is the market leaving {{ pron.o }} later than the model would take {{ pron.o }}{% if prof.market.edge_tone == 'up' %} — a whole round in any league this tool supports{% endif %}</td></tr>
+<tr><td><b>vs consensus</b></td><td class="n {{ prof.market.edge_tone }}"><b>{{ prof.market.edge_text }}</b></td><td class="n"></td><td class="dim">Slots between this board and the consensus. Positive is the market leaving {{ pron.o }} later than the model would take {{ pron.o }}{% if prof.market.edge_tone == 'pf-up' %} — a whole round in any league this tool supports{% endif %}</td></tr>
 {% endif %}
 </tbody>
 </table>

@@ -1287,8 +1287,11 @@ def _billing_state(request, session) -> dict:
         state = {"enabled": True, "required": not free, "entitled": free,
                  "league_id": str(league_id), "season": int(CURRENT_SEASON)}
         if reason is not None:
-            # `reason: "mock"` is the one this payload has always carried.
-            # The others are new and nothing branches on the value.
+            # `reason: "mock"` is the one this payload has always carried, and
+            # it comes back once the founding period closes: while it is open
+            # `free_reason` answers `founders_open` first, so that is what a
+            # mock room reports today. The others are new and nothing has ever
+            # branched on the value.
             state["reason"] = reason
         return state
     except Exception:      # noqa: BLE001 -- see the docstring

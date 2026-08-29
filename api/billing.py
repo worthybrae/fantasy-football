@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
@@ -214,9 +215,11 @@ _SCHEMA = (
         created_at TIMESTAMP NOT NULL,
         PRIMARY KEY (account_id, player_id))""",
     # THE FIRST HUNDRED. One row per account that drafts free forever, and the
-    # order they arrived in -- `ordinal` is the count at the moment of the
-    # insert, so #37 really was the thirty-seventh, and the badge on the
-    # dashboard can say so.
+    # order they arrived in: `ordinal` is one past the highest ever handed out,
+    # so #37 really was the thirty-seventh seat given away and the badge on the
+    # dashboard can say so. Not the count of rows -- a seat withdrawn by hand
+    # leaves a gap, and the number that went with it is never given to anybody
+    # else. See `claim_founder`.
     #
     # Here rather than in the credential store for the reason the entitlement
     # table is here: it is keyed by `store.account_id(swid)`, it is a
@@ -600,6 +603,9 @@ def reset_for_tests(path: str | None = None) -> None:
         _seed_done.set()
         _known_mocks.clear()
         _warned.clear()
+    _forget_seats_left()
+    with _memo_lock:
+        _no_seat.clear()
     if path is not None:
         os.environ[DB_PATH_ENV] = path
 
@@ -1021,11 +1027,15 @@ def set_favorites(account_ids: list, player_ids) -> list:
 # under the same id) rather than derived from a signup date or a coupon.
 #
 # WHEN A SEAT IS TAKEN. Lazily, on any request that already has the account in
-# hand: the gate below, `GET /api/account/me`, and `GET /api/account/favorites`
+# hand. That is `free_reason` -- so the gate, every poll of a draft room's
+# state (`api/live._billing_state`), `GET /api/billing/status` and the checkout
+# -- plus `GET /api/account/me` and `GET /api/account/favorites`
 # (api/account.py). There is no "sign up" step in this product to hang it on --
 # connecting an ESPN account IS the signup -- and a claim that costs one
 # statement on a request that was already reading this store is cheaper than
-# any endpoint built to do it deliberately.
+# any endpoint built to do it deliberately. It has to stay that cheap: see the
+# memos beside `_founder_lock` for what those polls cost once the list is
+# full.
 
 # THE COUNT AND THE INSERT HAVE TO AGREE, and this is what makes them agree.
 #
@@ -1037,13 +1047,50 @@ def set_favorites(account_ids: list, player_ids) -> list:
 # would cause is 101 founders -- a promise made to somebody it was not meant
 # for, which cannot be withdrawn afterwards.
 #
-# ONE PROCESS IS THE WHOLE GUARANTEE, and the README says so where it says why
-# this service runs one replica. A second worker sharing a Postgres could
-# still slip a seat past the `WHERE` below under snapshot isolation; the
-# overshoot is bounded by how many claims land in the same instant, and the
-# alternative (a lock table, or a unique index on `ordinal` and a retry loop)
-# is machinery for a deployment shape this app does not have.
+# ONE PROCESS IS THE WHOLE GUARANTEE FOR THE COUNT, and the README says so
+# where it says why this service runs one replica. A second worker sharing a
+# Postgres could still slip a seat past the `WHERE` below under snapshot
+# isolation, and the overshoot is bounded by how many claims land in the same
+# instant. What it could NOT do is give two people the same number: `ordinal`
+# is unique in both schemas, so a second insert computing an ordinal somebody
+# already holds is refused by the database and becomes "no seat this time".
+# The remaining machinery for an exact count across processes -- a lock table,
+# or a retry loop around that refusal -- is for a deployment shape this app
+# does not have.
 _founder_lock = threading.Lock()
+
+# WHAT A FULL LIST COSTS A POLL, which is the reason these three exist.
+#
+# Every caller of `claim_founder` is on a path something asks constantly: the
+# room's state payload is polled every 2.5 seconds by every open room. Once
+# the hundred seats are gone, each of those polls used to take the process-wide
+# lock above and send a write transaction whose `WHERE` could never be true --
+# at 150 rooms, sixty pointless write transactions a second, all of them
+# serialised behind one lock, on the one path that must never be slow.
+#
+# So a claim that cannot succeed is answered from memory. Two memos, because
+# they answer two different questions and the cheap one is not always enough:
+# how many seats are left at all (process-wide, one count per interval), and
+# whether THIS account has already been told there are none (bounded, per
+# account). Thirty seconds is short enough that a limit raised by hand reaches
+# the next visitor within half a minute, and long enough that a busy room
+# polls it hundreds of times without a query.
+#
+# Both are cleared by `reset_for_tests`, and the seat count is dropped the
+# moment a claim actually lands, because that is the one event that changes it
+# from inside this process.
+_FULL_MEMO_SECONDS = 30.0
+
+# Bounded, because the key is an account id and the map would otherwise grow
+# with every visitor a full list turns away. 512 is more accounts than are
+# polling any one process at once; past that the oldest answer goes, and the
+# cost of losing one is a single query.
+_NO_SEAT_MAX = 512
+
+_memo_lock = threading.Lock()
+_no_seat: dict = {}
+_seats_left_read_at = 0.0
+_seats_left_value = None
 
 
 def founders_limit() -> int:
@@ -1079,6 +1126,53 @@ def founders_limit() -> int:
                    f"is switched off.")
         return DEFAULT_FOUNDERS_LIMIT
     return seats
+
+
+def _forget_seats_left() -> None:
+    """The count moved because we moved it. Read it again next time."""
+    global _seats_left_value
+    with _memo_lock:
+        _seats_left_value = None
+
+
+def _seats_left_cached() -> int:
+    """`founders_left()`, at most once every `_FULL_MEMO_SECONDS`.
+
+    Only the claim path reads this. `founders_left` itself stays exact,
+    because the number it answers with is printed on a page ("63 spots left")
+    and a figure that lags half a minute behind the seat somebody just took is
+    a figure that contradicts the badge beside it.
+    """
+    global _seats_left_read_at, _seats_left_value
+    now = time.monotonic()
+    with _memo_lock:
+        if (_seats_left_value is not None
+                and now - _seats_left_read_at < _FULL_MEMO_SECONDS):
+            return _seats_left_value
+    # Outside the lock: it is a query, and a second caller arriving during it
+    # should read the table rather than queue behind us. Two concurrent reads
+    # of a count cost one extra query and cannot disagree in a way that
+    # matters.
+    left = founders_left()
+    with _memo_lock:
+        _seats_left_read_at, _seats_left_value = now, left
+    return left
+
+
+def _told_no_seat(account_id: str) -> bool:
+    with _memo_lock:
+        at = _no_seat.get(account_id)
+    return at is not None and time.monotonic() - at < _FULL_MEMO_SECONDS
+
+
+def _remember_no_seat(account_id: str) -> None:
+    with _memo_lock:
+        # Re-inserted rather than updated in place, so the eviction below
+        # drops the least recently refused rather than the first ever seen.
+        _no_seat.pop(account_id, None)
+        _no_seat[account_id] = time.monotonic()
+        while len(_no_seat) > _NO_SEAT_MAX:
+            _no_seat.pop(next(iter(_no_seat)))
 
 
 def founder_ordinal(account_ids: list) -> int | None:
@@ -1151,6 +1245,13 @@ def claim_founder(account_ids: list) -> int | None:
     a claim that hits either one takes no seat and the next request tries
     again.
 
+    A FULL LIST NEVER REACHES THE LOCK. Every caller here is on a path that
+    runs constantly -- a draft room polls its state every 2.5 seconds -- and
+    once the seats are gone the write below is a transaction whose `WHERE` can
+    never be true. Answered from the two memos beside `_founder_lock` instead:
+    the seats left process-wide, and whether this account has already been
+    turned away. See there for the numbers that made this necessary.
+
     Best-effort in the sense that matters to a caller: it takes a seat or it
     does not, and it never invents one. A store that cannot be written raises
     `StoreError` like everything else here, and the routes decide.
@@ -1167,16 +1268,30 @@ def claim_founder(account_ids: list) -> int | None:
     limit = founders_limit()
     if limit <= 0:
         return None
+    account_id = str(account_ids[0])
+    # Both of these are memory, and between them they are what keeps a full
+    # list off the lock and out of the write path.
+    if _told_no_seat(account_id):
+        return None
+    if _seats_left_cached() <= 0:
+        _remember_no_seat(account_id)
+        return None
     with _founder_lock:
         _db().transaction([(
             """INSERT INTO founder (account_id, ordinal, granted_at)
                SELECT ?, (SELECT coalesce(max(ordinal), 0) + 1 FROM founder), ?
                 WHERE (SELECT count(*) FROM founder) < ?
                    ON CONFLICT DO NOTHING""",
-            [str(account_ids[0]), _now(), int(limit)])])
+            [account_id, _now(), int(limit)])])
         # Read back rather than computed here: the row that landed is the
         # answer, and on a full table there is no row and no ordinal.
-        return founder_ordinal(account_ids)
+        ordinal = founder_ordinal(account_ids)
+    # Either way the count we were working from is now stale: a seat landed,
+    # or somebody else took the one it said was there.
+    _forget_seats_left()
+    if ordinal is None:
+        _remember_no_seat(account_id)
+    return ordinal
 
 
 def claim_founder_quietly(account_ids: list) -> int | None:
@@ -1443,6 +1558,12 @@ def register_billing_routes(app, store=None):
             # 400 rather than the 409 below, and the message it has always
             # had: a mock is not "already free for you", it is free for
             # everybody and was never for sale.
+            #
+            # ONLY REACHABLE ONCE THE FOUNDING PERIOD CLOSES. `free_reason`
+            # answers `founders_open` above the mock test while it is running,
+            # so today every checkout for a mock gets the 409 instead. This is
+            # the answer that comes back when `FOUNDERS_OPEN` goes False, and
+            # it is the one this endpoint has always given.
             raise HTTPException(status_code=400,
                                 detail="Mock drafts are free.")
         if reason is not None:
