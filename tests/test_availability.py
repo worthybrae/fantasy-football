@@ -565,11 +565,14 @@ def test_the_table_counts_each_shape_as_well_as_the_pool(shaped):
     assert table.pooled[i] == 880
     assert table.shapes[(8, "ppr")].pooled[i] == 800
     assert table.shapes[(10, "ppr")].pooled[i] == 80
-    # The depth is the shape's own, not the corpus's: an 8-team room stops
-    # where its drafts stopped, whatever the 10-team ones did after it.
-    assert table.max_pick_observed == S_TEN_PICK
+    # Each shape's depth is its own: an 8-team room stops where its drafts
+    # stopped, whatever the 10-team ones did after it.
     assert table.shapes[(8, "ppr")].max_pick_observed == S_EIGHT_PICK
     assert table.shapes[(10, "ppr")].max_pick_observed == S_TEN_PICK
+    # And the POOLED depth is the shallowest of them, not the deepest pick in
+    # the file: the pooled counts mix both groups, and the 8-team drafts stop
+    # saying anything after pick 20.
+    assert table.max_pick_observed == S_EIGHT_PICK
 
 
 def test_a_shape_with_enough_drafts_answers_for_itself(shaped):
@@ -640,3 +643,138 @@ def test_the_fitted_curve_stays_pooled(corpus):
                                 teams=12, fmt="std")]
     assert asked[0][0] == asked[1][0] == asked[2][0]
     assert 0.0 < asked[0][0] < 1.0
+
+
+# ---------------------------------------------------------------------------
+# The pooled depth: how far the MIXED counts can speak.
+# ---------------------------------------------------------------------------
+#
+# The regression this file exists to keep out. `max_pick_observed` used to be
+# the deepest pick in the corpus, which is right while every draft is the same
+# shape and wrong the moment one is not: an 8-team draft records nothing after
+# pick 128 because it ENDED, not because the player lasted, and a single
+# 12-team draft reaching 192 would turn all 854 of them into evidence about
+# pick 150. Measured when it was wrong: 173 censored players flipped off the
+# curve and read ~90% still there at 150 against ~10% from the curve.
+
+# The 8-team drafts end here and the 12-team ones here. Both are the real
+# thing: 8x16 and 12x16.
+EIGHT_DEPTH = 128
+TWELVE_DEPTH = 192
+
+# The player the answer is about: pooled in every draft, taken in none, ESPN
+# rank 130 -- deep enough that his bucket is never fitted, so the curve reads
+# him off his own rank with FALLBACK_SIGMA and the expected number can be
+# worked out by hand (see the test).
+CENSORED = "censored"
+CENSORED_RANK = 130.0
+DEEP = "deep"
+
+
+def _shape_drafts(conn, teams: int, depth: int, drafts: int, tag: str) -> None:
+    """`drafts` drafts of one shape: two pooled players, one of them taken at
+    `depth` so the shape has a depth, and `CENSORED` never taken at all."""
+    pool = pd.DataFrame([_pool_row(DEEP, "RB", 100.0, 100.0),
+                         _pool_row(CENSORED, "WR", CENSORED_RANK,
+                                   CENSORED_RANK)])
+    picks = pd.DataFrame([_pick_row(depth, DEEP)])
+    for i in range(drafts):
+        dl.record(conn, dl.DraftRecord(
+            source=dl.SOURCE_MOCK, league_id="1", season=2026, teams=teams,
+            rounds=16, started_at=f"{tag}-{teams}-{i}",
+            scoring_json='{"receptions": 1.0}', picks=picks, pool=pool))
+
+
+@pytest.fixture(scope="module")
+def eight_team_corpus(tmp_path_factory):
+    """The corpus as it stands today: 854 8-team PPR drafts, nothing else."""
+    path = tmp_path_factory.mktemp("depth") / "corpus.duckdb"
+    conn = dl.corpus_conn(str(path))
+    try:
+        _shape_drafts(conn, 8, EIGHT_DEPTH, 854, "eight")
+    finally:
+        conn.close()
+    return str(path)
+
+
+def _plus_twelve(base: str, tmp_path, drafts: int) -> str:
+    """The same corpus with `drafts` 12-team drafts added."""
+    import shutil
+
+    path = str(tmp_path / f"plus-{drafts}.duckdb")
+    shutil.copy(base, path)
+    conn = dl.corpus_conn(path)
+    try:
+        _shape_drafts(conn, 12, TWELVE_DEPTH, drafts, "twelve")
+    finally:
+        conn.close()
+    return path
+
+
+def _at_150(path):
+    """P(still there at 150 | still there at 100) for the censored player,
+    pooled and as a 12-team room asks it."""
+    table = av.load_table(path)
+    ask = dict(espn_adp=[CENSORED_RANK])
+    return (table,
+            float(av.availability_at(table, [CENSORED], 100, 150, **ask)[0]),
+            float(av.availability_at(table, [CENSORED], 100, 150,
+                                     teams=12, fmt="ppr", **ask)[0]))
+
+
+@pytest.mark.parametrize("twelve", [0, 1, 59, 60])
+def test_one_deeper_draft_does_not_uncensor_the_pool(eight_team_corpus,
+                                                     tmp_path, twelve):
+    """THE POOLED ANSWER DOES NOT MOVE when 12-team drafts arrive.
+
+    854 drafts took the censored player in none of them and stopped at 128.
+    Asked about pick 150 he is right-censored, so the answer is the fitted
+    curve's: with his bucket unfitted it is read off his own rank (130) with
+    FALLBACK_SIGMA (12), conditioned on the depth rather than on pick 100 --
+    ndtr((130-149)/12) / ndtr((130-128)/12), or 10%.
+
+    Adding 12-team drafts that run to 192 must not change that by one point.
+    They are evidence about 12-team drafts; the 8-team ones still stopped at
+    128.
+    """
+    path = (eight_team_corpus if not twelve
+            else _plus_twelve(eight_team_corpus, tmp_path, twelve))
+    table, pooled, as_twelve = _at_150(path)
+
+    expected = float(ndtr((CENSORED_RANK - 149) / av.FALLBACK_SIGMA)
+                     / ndtr((CENSORED_RANK - EIGHT_DEPTH) / av.FALLBACK_SIGMA))
+    assert expected == pytest.approx(0.10, abs=0.01)
+    assert pooled == pytest.approx(expected, abs=1e-9)
+    # The pooled depth is the shallowest shape's, whatever the 12-team drafts
+    # reached.
+    assert table.max_pick_observed == EIGHT_DEPTH
+    if twelve:
+        assert table.shapes[(12, "ppr")].max_pick_observed == TWELVE_DEPTH
+
+
+@pytest.mark.parametrize("twelve,answers_for_itself", [
+    (1, False), (59, False), (60, True)])
+def test_a_twelve_team_room_reads_the_pool_until_its_shape_is_big_enough(
+        eight_team_corpus, tmp_path, twelve, answers_for_itself):
+    """And when it IS big enough the answer is the 12-team one: 150 is inside
+    a 12x16 draft, the player was taken in none of them, so he is there."""
+    path = _plus_twelve(eight_team_corpus, tmp_path, twelve)
+    _table, pooled, as_twelve = _at_150(path)
+
+    assert as_twelve == pytest.approx(1.0 if answers_for_itself else pooled)
+
+
+def test_the_answer_never_rises_as_the_pick_gets_later(eight_team_corpus,
+                                                       tmp_path):
+    """MONOTONICITY, pooled and per shape. A later pick cannot be more likely
+    to still hold him, and the seam between the counts and the curve is
+    exactly where a mistake would show as a jump upwards."""
+    path = _plus_twelve(eight_team_corpus, tmp_path, 60)
+    table = av.load_table(path)
+    for shape in ({}, {"teams": 8, "fmt": "ppr"}, {"teams": 12, "fmt": "ppr"}):
+        answers = [float(av.availability_at(table, [CENSORED], 20, n,
+                                            espn_adp=[CENSORED_RANK],
+                                            **shape)[0])
+                   for n in range(21, 260, 7)]
+        assert answers == sorted(answers, reverse=True), (shape, answers)
+        assert all(0.0 <= a <= 1.0 for a in answers)

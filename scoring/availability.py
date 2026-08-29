@@ -27,12 +27,18 @@ parametric curve fitted from the same rows (see `_fit_curve`):
   * A player the corpus has never seen. ESPN's board is longer than the pool
     the farm's mocks are drafted from.
   * A conditioned denominator under `MIN_DRAFTS`.
-  * A pick deeper than the deepest one ever recorded, FOR A PLAYER THE
-    CORPUS STOPPED WATCHING. The corpus is 8-team 16-round, so no pick past
-    128 exists in it and a player still on the board at the end of every
+  * A pick deeper than the counts can speak to, FOR A PLAYER THE CORPUS
+    STOPPED WATCHING. The 8-team drafts are 16 rounds, so no pick past 128
+    exists in them and a player still on the board at the end of every
     recorded draft would otherwise count as having lasted through pick 150 --
     which on a 12-team board at a round-13 turn printed 100% for well over
     half the list.
+
+    "How deep the counts speak" is the SHALLOWEST SHAPE's depth, not the
+    deepest pick in the file. Once the farm records a second shape the two
+    are different numbers, and taking the second would let one 12-team draft
+    turn 854 8-team drafts that merely stopped at 128 into evidence about
+    pick 150 (see `_shape_counts`).
 
     That is right-censoring, and it is not the same as having no evidence. A
     player every one of his pooled drafts TOOK inside that depth has complete
@@ -175,11 +181,17 @@ class ShapeCounts(NamedTuple):
     whether a shape gets a page), the arrays are not worth the megabyte.
 
     `max_pick_observed` IS PER SHAPE and not a copy of the table's. An 8-team
-    room stops at pick 128 and a 12-team one runs to 192, so the pooled depth
-    of a mixed corpus is the deepest of them -- and reading an 8-team shape's
-    counts at pick 150 against a depth of 192 would report everybody still on
-    the board at 128 as still there at 150. That is the censoring the module
-    docstring is about, arrived at from the shape side.
+    room stops at pick 128 and a 12-team one runs to 192, so reading an
+    8-team shape's counts at pick 150 against a 12-team depth would report
+    everybody still on the board at 128 as still there at 150. That is the
+    censoring the module docstring is about, arrived at from the shape side --
+    and it is why the POOLED depth is the shallowest shape's rather than the
+    deepest pick in the file (see `_shape_counts`).
+
+    It is carried for every shape, including the ones under
+    `MIN_SHAPE_DRAFTS` that hold no arrays: one 12-team draft is enough to
+    make the pooled counts censored past 128, and the pooled depth has to
+    know that before the shape is big enough to answer for itself.
     """
     pooled: np.ndarray | None
     taken_by: np.ndarray | None
@@ -207,9 +219,11 @@ class AvailabilityTable:
     (ESPN publishing a rank rather than an ADP, the pool storing something
     else) breaks the correspondence quietly, so it is written down here.
 
-    `max_pick_observed` is the deepest pick anyone in the corpus was ever
-    taken at. Past it the counts hold no evidence at all -- see the module
-    docstring.
+    `max_pick_observed` is how deep the POOLED counts can be trusted: the
+    shallowest shape's own deepest pick, not the deepest pick in the file.
+    See `_shape_counts` for why the two are different and what goes wrong
+    when the second is used. Past it the counts hold no evidence at all --
+    see the module docstring.
     """
     player_ids: np.ndarray
     pooled: np.ndarray
@@ -388,7 +402,8 @@ def load_table(corpus_path: str = dl.CORPUS_PATH) -> AvailabilityTable:
         heads = conn.execute(
             "SELECT draft_id, teams, "
             "coalesce(scoring_json, settings_json) AS scoring "
-            "FROM draft_log WHERE teams IS NOT NULL").fetchall()
+            "FROM draft_log WHERE teams IS NOT NULL "
+            "ORDER BY draft_id").fetchall()
     except Exception:      # noqa: BLE001 -- a file that is not a corpus yet
         return AvailabilityTable.empty()
     finally:
@@ -419,21 +434,43 @@ def load_table(corpus_path: str = dl.CORPUS_PATH) -> AvailabilityTable:
         "bucket": np.floor_divide(value[known], ADP_BUCKET).astype(np.int64),
         "pick": pick[known], "taken": was_taken[known],
         "player": codes[known]}))
-    shapes = _shape_counts(rows["draft_id"], heads, codes, n_players, pick,
-                           was_taken)
+    shapes, pooled_depth = _shape_counts(rows["draft_id"], heads, codes,
+                                         n_players, pick, was_taken)
     return AvailabilityTable(
         player_ids=np.asarray(ids, dtype=object), pooled=pooled,
         taken_by=taken_by, adp_curve=curve, corpus_mtime=mtime,
-        max_pick_observed=min(max_pick_observed, MAX_PICK), shapes=shapes)
+        max_pick_observed=min(pooled_depth or max_pick_observed, MAX_PICK),
+        shapes=shapes)
 
 
 def _shape_counts(draft_column, heads, codes, n_players: int, pick,
-                  was_taken) -> dict:
-    """The same counting as `load_table`'s, once per shape.
+                  was_taken) -> tuple:
+    """`({shape: ShapeCounts}, the pooled depth)`.
 
     `codes` are the player row indices of the pooled rows and `pick` /
     `was_taken` their picks, so every shape's arrays land on the SAME player
     index as the pooled ones and `table.index` answers for all of them.
+
+    THE POOLED DEPTH IS THE SHALLOWEST SHAPE'S, NOT THE DEEPEST PICK. This is
+    the whole reason the depth is computed here rather than off the pick
+    column, and getting it wrong is not a rounding error. The pooled counts
+    mix every shape together, so a player is "still on the board at pick 150"
+    in them only if every group of drafts they were pooled in actually
+    reached pick 150. An 8-team draft ends at 128 and records nothing after
+    it; a single 12-team draft reaching 192 would raise a corpus-wide maximum
+    to 192, and `availability_at` would then read `n = 150` as inside the
+    counts -- turning 854 8-team drafts that simply STOPPED at 128 into
+    evidence that the player lasted to 150. Measured on the real corpus when
+    this was wrong: 173 censored players flipped off the fitted curve and
+    read ~90% still there at pick 150, against ~10% from the curve.
+
+    So: one shape's drafts can only speak as far as that shape went, and the
+    pooled table can only speak as far as the shallowest of them. A shape
+    with a SINGLE draft counts -- it is in the pooled numerator and
+    denominator from its first row, so it bounds what the pool can say from
+    its first row too. Shapes whose drafts hold no picks at all are skipped
+    (they bound nothing), and a corpus where no shape can be read at all
+    leaves the caller its own maximum.
 
     A SHAPE'S DRAFTS ARE COUNTED FROM THE POOL, not from the head rows: a
     draft with no pool snapshot (every draft `draft_log.backfill_history`
@@ -444,7 +481,7 @@ def _shape_counts(draft_column, heads, codes, n_players: int, pick,
     questions.
 
     Arrays are built only for the shapes that will be used; the rest keep
-    their draft count and nothing else. On the real corpus this is one shape,
+    their draft count and their depth. On the real corpus this is one shape,
     so the extra work is one bincount over 200k rows.
     """
     shape_by_draft = {}
@@ -458,26 +495,37 @@ def _shape_counts(draft_column, heads, codes, n_players: int, pick,
     # A LIST, not an object array: numpy reads a list of 2-tuples as a 2-D
     # array of numbers, and every shape would then be a row rather than a key.
     per_draft = [shape_by_draft.get(str(d)) for d in draft_ids]
+    # Drafts whose shape cannot be read are a group of their own for the
+    # depth: they are in the pooled counts like everybody else, so they bound
+    # the pooled depth like everybody else. They are not a SHAPE -- nothing
+    # can ask for them by name -- so they never reach `out`.
+    groups = {x for x in per_draft}
     out: dict = {}
-    for shape in {x for x in per_draft if x is not None}:
+    depths = []
+    width = MAX_PICK + 1
+    for shape in groups:
         mine = np.array([x == shape for x in per_draft], dtype=bool)
+        rows_here = mine[draft_codes]
+        drafted = rows_here & was_taken
+        depth = min(int(pick[drafted].max()), MAX_PICK) if drafted.any() else 0
+        if depth:
+            depths.append(depth)
+        if shape is None:
+            continue
         drafts = int(mine.sum())
         if drafts < MIN_SHAPE_DRAFTS:
-            out[shape] = ShapeCounts(None, None, drafts)
+            out[shape] = ShapeCounts(None, None, drafts, depth)
             continue
-        rows_here = mine[draft_codes]
         pooled = np.bincount(codes[rows_here],
                              minlength=n_players).astype(np.int64)
-        drafted = rows_here & was_taken
-        width = MAX_PICK + 1
-        at = np.clip(pick[drafted], 1, MAX_PICK).astype(np.int64)
-        counts = np.bincount(codes[drafted] * width + at,
-                             minlength=n_players * width)
-        depth = int(pick[drafted].max()) if drafted.any() else 0
+        counts = np.bincount(
+            codes[drafted] * width + np.clip(pick[drafted], 1,
+                                             MAX_PICK).astype(np.int64),
+            minlength=n_players * width)
         out[shape] = ShapeCounts(
             pooled, np.cumsum(counts.reshape(n_players, width), axis=1),
-            drafts, min(depth, MAX_PICK))
-    return out
+            drafts, depth)
+    return out, (min(depths) if depths else 0)
 
 
 def _floats(series) -> np.ndarray:
