@@ -1568,8 +1568,21 @@ button.roster-row:focus-visible {
 .plan-turn {
   padding: 7px 8px;
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-md);
   background: var(--bg-1);
+  transition: border-color 120ms ease;
+}
+
+/* The whole turn lights, not just the name inside it: the row is what the
+   eye is on and the name is a four-word target inside a 340px column. */
+.plan-turn:hover {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .plan-turn {
+    transition: none;
+  }
 }
 
 /* The pick number leads, because the plan is a schedule: a reader finds his
@@ -1623,6 +1636,10 @@ button.plan-target:focus-visible .plan-name {
   white-space: nowrap;
   font-size: var(--text-sm);
   font-weight: 600;
+  /* A hair tighter than the rail's default. At 12px semibold in a 340px
+     column the name is the longest thing on the row, and the tracking is
+     what decides whether "Amon-Ra St. Brown" ellipsizes. */
+  letter-spacing: -0.005em;
   color: var(--text-1);
 }
 
@@ -1651,7 +1668,12 @@ button.plan-target:focus-visible .plan-name {
   font-size: var(--text-xs);
 }
 
+/* Both are toned by PlanPanel itself now -- survival on the room's
+   red-amber-green ramp, points by their sign -- so these rules carry only
+   what the tone does not: the fallback colour for a null, and the weight
+   that keeps survival the one being read first. */
 .plan-lasts {
+  font-weight: 600;
   color: var(--text-2);
 }
 
@@ -1679,25 +1701,36 @@ button.plan-target:focus-visible .plan-name {
   color: var(--text-3);
 }
 
-.plan-reason.is-pro::before {
-  content: '+ ';
-  color: var(--ok-soft);
+/* A fixed-width mark, matching `.target-reason-mark` on the cards: the plus
+   and the minus are not the same width in Inter, so as bare text they
+   started two reasons on two different left edges in a list read down. */
+.plan-reason::before {
+  display: inline-block;
+  width: 9px;
+  font-family: var(--font-mono);
   font-weight: 700;
+}
+
+.plan-reason.is-pro::before {
+  content: '+';
+  color: var(--ok-soft);
 }
 
 .plan-reason.is-con::before {
-  content: '− ';
+  content: '−';
   color: var(--accent);
-  font-weight: 700;
 }
 
+/* Smaller than the reasons above them, which is the whole point: these are
+   the names the plan did NOT choose for this turn. At the same 10px they
+   read as one more line of the argument rather than as its footnote. */
 .plan-alts {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
   gap: 5px;
-  margin-top: 5px;
-  font-size: 10px;
+  margin-top: 6px;
+  font-size: 9.5px;
   color: var(--text-3);
 }
 
@@ -1705,6 +1738,8 @@ button.plan-target:focus-visible .plan-name {
   text-transform: uppercase;
   letter-spacing: 0.06em;
   font-size: 9px;
+  color: var(--text-3);
+  opacity: 0.75;
 }
 
 .plan-alt:not(:last-child)::after {
@@ -2377,9 +2412,15 @@ button.plan-target:focus-visible .plan-name {
   border-bottom: 1px solid var(--border);
 }
 
+/* A column, so the meters can be pinned to the bottom of it -- see
+   `.target-meters`. The grid above already stretches all three cards to the
+   tallest; without this they were three cards of one height whose contents
+   all stopped at different places. */
 .target-card {
+  display: flex;
+  flex-direction: column;
   padding: var(--space-3);
-  border-radius: 4px;
+  border-radius: var(--radius-md);
   background: var(--bg-1);
   border: 1px solid var(--border);
 }
@@ -2396,6 +2437,27 @@ button.plan-target:focus-visible .plan-name {
   display: flex;
   align-items: center;
   gap: 7px;
+}
+
+/* THE RANK BECOMES AN EYEBROW ON A NARROW ROOM.
+
+   The head is one row of four things: TARGET/ALT 1, a 46px face, the name
+   with his position and team under it, and the Draft button. At 1280 that
+   row is about 300px wide, and the first, second and fourth are all fixed
+   -- so the name gets what is left, which was enough for "Javonte Willi..."
+   and not for the rest of him. The label is the one item that does not have
+   to be on that line: read down, TARGET / face+name / figures is the same
+   card with the eyebrow where an eyebrow goes. It costs one 13px row and
+   buys the name about 55px. Wide rooms keep the single line. */
+@media (max-width: 1500px) {
+  .target-card-head {
+    flex-wrap: wrap;
+    row-gap: 3px;
+  }
+
+  .target-rank {
+    flex: 0 0 100%;
+  }
 }
 
 .target-rank {
@@ -2473,7 +2535,14 @@ button.plan-target:focus-visible .plan-name {
 
 /* Position, team and bye on one quiet line under the name -- three facts
    that identify him and none that argue for him. */
+/* One line, ellipsized. Three facts that identify him wrapping onto a
+   second line made the three cards different heights inside their own
+   heads, and the part that fell to line two was whichever of position,
+   team and bye happened to be last. */
 .target-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 10px;
   letter-spacing: 0.04em;
   color: var(--text-3);
@@ -2545,12 +2614,17 @@ button.plan-target:focus-visible .plan-name {
 
 /* -- what kind of player he is ------------------------------------------- */
 
+/* ONE LINE ACROSS ALL THREE CARDS. The target carries the plan's reasons and
+   the two alternates carry none, so the three meter rows sat at three
+   different heights and the row of cards read as three unrelated panels.
+   `margin-top: auto` puts them on the floor of each card; the padding is
+   what keeps a minimum gap on the card that has no slack to give. */
 .target-meters {
   display: flex;
   align-items: flex-end;
   gap: var(--space-3);
-  margin-top: var(--space-3);
-  padding-top: var(--space-3);
+  margin-top: auto;
+  padding-top: var(--space-4);
   border-top: 1px solid var(--border);
 }
 
