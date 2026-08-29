@@ -1963,6 +1963,21 @@ button.plan-target:focus-visible .plan-name {
   }
 }
 
+/* THE ARITHMETIC, from the widths in this file (all border-box, and the
+   name column at its floor): 54 + 58 + 176 + 92 + 58 + 74 + 74 + 74 +
+   70x5 + 78 = 1088px for the full fourteen. At 1280 the column is 940px --
+   the viewport less the 340px rail -- and this tier plus the one above it
+   are both in force, so the table is 1088 - 70 (Cons) - 74 (Growth) - 74
+   (Reliable) = 870px, with 70px of slack.
+
+   The last of those three subtractions is new. `Reliable`'s header was
+   `.avail-col-steady` and its cell was `.avail-col-health` -- the same
+   74px, so the column looked right at every width -- which meant this rule
+   hid the header and left the cell standing: the table stayed 944px
+   against a 940px column (4px over, the Draft button clipped) AND the
+   header row was one cell short of the body from Growth rightward, so
+   every remaining label sat over the column to its left. Both rows carry
+   both classes now, and AvailableList.test.tsx holds them to it. */
 @media (max-width: 1360px) {
   .avail-table .avail-col-steady {
     display: none;

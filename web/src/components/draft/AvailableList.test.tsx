@@ -1,5 +1,5 @@
-import { cleanup, render, screen } from '@testing-library/react'
-import { afterEach, expect, test } from 'vitest'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, expect, test, vi } from 'vitest'
 import type { LiveCandidate, Player } from '../../api'
 import AvailableList from './AvailableList'
 
@@ -76,7 +76,7 @@ function draw() {
   )
 }
 
-afterEach(cleanup)
+afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 
 test('opens in ESPN rank order, with the unranked last', () => {
   const { container } = draw()
@@ -116,4 +116,84 @@ test('stars the reader\'s own guys, and only them', () => {
   // In HIS row, not merely somewhere on the page.
   const row = container.querySelector('tbody tr[data-pid="a"]')
   expect(row?.contains(stars[0])).toBe(true)
+})
+
+// THE HEADER ROW AND THE BODY ROW ARE ONE TABLE. Every column class in this
+// file is also a width in App.css and, for four of them, a `display: none`
+// in a compact tier -- so a class that is on the <th> and not on the <td>
+// (or the other way round) is a column the browser hides on one row and
+// keeps on the other. That is what happened: `Reliable`'s header was
+// `avail-col-steady` and its cell was `avail-col-health`, so under 1360px
+// the header row lost a cell the body still had, every label from Growth
+// rightward printed over the column to its left, and the Draft button's
+// header fell off the end of the row. jsdom applies no media queries, so
+// what is checked here is the thing the media queries key off: the two rows
+// agree, column for column, about what they are.
+const DROPS_AT: Record<string, number> = {
+  'avail-col-cons': 1500,
+  'avail-col-change': 1500,
+  'avail-col-steady': 1360,
+  'avail-col-finish': 1200,
+  'avail-col-games': 1120,
+}
+
+function colClasses(cell: Element): string[] {
+  return Array.from(cell.classList).filter((c) => c.startsWith('avail-col-')).sort()
+}
+
+test('every column class on a header is on its cell, and the reverse', () => {
+  const { container } = draw()
+  const heads = Array.from(container.querySelectorAll('thead th'))
+  const cells = Array.from(container.querySelectorAll('tbody tr:first-child td'))
+  expect(heads).toHaveLength(cells.length)
+
+  // Column for column, the classes that decide whether the column is on
+  // screen at this width have to match.
+  heads.forEach((th, i) => {
+    const dropped = (cell: Element) => colClasses(cell).filter((c) => c in DROPS_AT)
+    expect([i, dropped(th)]).toEqual([i, dropped(cells[i])])
+  })
+
+  // And no column class exists on one row alone.
+  const set = (cellList: Element[]) => new Set(cellList.flatMap(colClasses))
+  expect([...set(heads)].sort()).toEqual([...set(cells)].sort())
+})
+
+// The window, as the table asks about it: `matchMedia` with the max-width
+// out of the query, which is what the compact tiers are written in.
+function atWidth(width: number): void {
+  vi.stubGlobal('matchMedia', (query: string) => {
+    const max = Number(/max-width:\s*(\d+)px/.exec(query)?.[1] ?? Number.MAX_SAFE_INTEGER)
+    return {
+      matches: width <= max, media: query,
+      addEventListener: () => {}, removeEventListener: () => {},
+      addListener: () => {}, removeListener: () => {}, onchange: null,
+      dispatchEvent: () => false,
+    }
+  })
+}
+
+function sortedHeader(container: HTMLElement): string | null {
+  const th = container.querySelector('thead th[aria-sort]:not([aria-sort="none"])')
+  return th?.className.split(' ').find((c) => c.startsWith('avail-col-')) ?? null
+}
+
+// A SORT NEEDS A COLUMN TO POINT AT. Reliable is gone under 1360px, so a
+// table sorted by it had no caret anywhere on the header row and no header
+// left to click to put it back -- the rows were simply in an order nothing
+// on screen explained. Under that width the order falls back to ESPN's.
+test('a sort by a column the width has dropped falls back to ESPN', () => {
+  atWidth(1300)
+  const { container } = draw()
+  fireEvent.click(screen.getByRole('button', { name: 'Reliable' }))
+  expect(sortedHeader(container)).toBe('avail-col-rank')
+  expect(Array.from(container.querySelectorAll('tbody .avail-name')).map((el) => el.textContent))
+    .toEqual(['Ashton', 'Bijan', 'Chase', 'Dell'])
+})
+
+test('and takes it, on a window wide enough to show the column', () => {
+  atWidth(1600)
+  const { container } = draw()
+  fireEvent.click(screen.getByRole('button', { name: 'Reliable' }))
+  expect(sortedHeader(container)).toBe('avail-col-steady')
 })
