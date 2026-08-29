@@ -1359,39 +1359,48 @@ def profiled(tmp_path):
     from pipeline.db import get_conn, write_table
     from scoring import board_cache, profile_cache
 
+    # SIX, NOT TWO. `test_six_player_pages_at_once_each_get_their_whole_page`
+    # needs six pages that really build a profile, because the failure it
+    # guards -- six threads on one DuckDB connection -- does not show at two
+    # any more than a deadlock shows at one lock. The four after `mid` are
+    # the corpus fixture's own remaining ids, so every one of them is a real
+    # row on the ADP board rather than an orphan the pages would skip.
+    people = (("star", "D'Andre Swift", "CHI", 6), ("mid", "Amon-Ra St. Brown", "DET", 0),
+              ("twin_a", "Rhamondre Stevenson", "NE", 1),
+              ("twin_b", "Javonte Williams", "DEN", 2),
+              ("swing", "Tony Pollard", "TEN", 3),
+              ("late", "Jaylen Waddle", "MIA", 4))
     conn = get_conn(str(tmp_path / "universal.duckdb"))
     weekly = []
-    for pid, name, team in (("star", "D'Andre Swift", "CHI"),
-                            ("mid", "Amon-Ra St. Brown", "DET")):
+    for pid, name, team, bump in people:
         for season, per_week in ((2024, 5), (2025, 7)):
             for week in range(1, 13):
+                per = per_week + bump
                 weekly.append({
                     "player_id": pid, "player_display_name": name,
                     "position": "RB", "recent_team": team, "opponent_team": "GB",
                     "season": season, "week": week,
-                    "carries": per_week + 8, "rushing_yards": per_week * 9,
+                    "carries": per + 8, "rushing_yards": per * 9,
                     "rushing_tds": 1 if week % 4 == 0 else 0,
-                    "targets": per_week, "receptions": per_week - 2,
-                    "receiving_yards": per_week * 7,
+                    "targets": per, "receptions": max(0, per - 2),
+                    "receiving_yards": per * 7,
                     "receiving_tds": 1 if week % 6 == 0 else 0})
     write_table(conn, "weekly", pd.DataFrame(weekly))
     # `market._names` reads this one, which is what gives the pages their
     # slugs; the board and the profile read `weekly` above.
     write_table(conn, "players", pd.DataFrame([
-        {"gsis_id": "star", "display_name": "D'Andre Swift", "headshot": None,
-         "birth_date": "1999-01-14", "rookie_season": 2020, "height": 70.0,
-         "weight": 215.0},
-        {"gsis_id": "mid", "display_name": "Amon-Ra St. Brown", "headshot": None,
-         "birth_date": "1999-10-24", "rookie_season": 2021, "height": 72.0,
-         "weight": 197.0}]))
+        {"gsis_id": pid, "display_name": name, "headshot": None,
+         "birth_date": f"199{9 - bump % 9}-0{1 + bump % 9}-14",
+         "rookie_season": 2020 + bump % 4, "height": 70.0 + bump,
+         "weight": 215.0 - bump}
+        for pid, name, _team, bump in people]))
     write_table(conn, "schedules", pd.DataFrame([
-        {"home_team": "CHI", "away_team": "GB", "week": 1,
-         "total_line": 44.0, "spread_line": 2.0},
-        {"home_team": "DET", "away_team": "GB", "week": 1,
-         "total_line": 51.0, "spread_line": 3.0}]))
+        {"home_team": team, "away_team": "GB", "week": 1,
+         "total_line": 44.0 + bump, "spread_line": 2.0 + bump}
+        for _pid, _name, team, bump in people]))
     write_table(conn, "adp", pd.DataFrame([
-        {"adp_name": "D'Andre Swift", "position": "RB", "team": "CHI", "adp": 12.0},
-        {"adp_name": "Amon-Ra St. Brown", "position": "RB", "team": "DET", "adp": 5.1}]))
+        {"adp_name": name, "position": "RB", "team": team, "adp": 5.1 + 3 * i}
+        for i, (_pid, name, team, _bump) in enumerate(people)]))
     for name, columns in (
             ("depth_charts", ["gsis_id", "depth_team", "formation", "week", "position"]),
             ("snap_counts", ["player", "team", "season", "offense_pct"]),
@@ -1587,3 +1596,64 @@ def test_nothing_on_a_player_page_can_push_it_sideways():
     # Every wide thing the profile sections add is inside one of the two.
     assert '<div class="scroll">\n<table class="sched">' in page
     assert '<div class="xscroll">\n<svg viewBox="0 0 720 128"' in page
+
+
+def test_six_player_pages_at_once_each_get_their_whole_page(corpus, profiled):
+    """ONE CONNECTION IS NOT SIX. A DuckDBPyConnection carries the statement
+    and result state of the query running on it, and two threads issuing
+    queries on the same one do not queue -- they overwrite each other's
+    state. The route used to hand `render_player` the process-wide `conn`,
+    so a burst of player pages (which is exactly how a crawler walks a
+    228-URL sitemap) had six profile builds racing on one connection: five
+    of the six lost every section, the stripped page was then written into
+    the page cache under the corpus's own stamp, and `_profile_failed`
+    said so once and never again.
+
+    The fix is the cursor `api/main.py`'s profile route and the keep-warm
+    loop already take. This test is the reason it has to stay: a page built
+    concurrently must be byte for byte the page built alone.
+    """
+    from scoring import board_cache, profile_cache
+
+    slugs = [p["slug"] for p in seo.adp_data(profiled)["players"]][:6]
+    assert len(slugs) == 6, slugs
+    client = _client(profiled)
+
+    # COLD, AND ALL AT ONCE -- a warm profile cache answers without touching
+    # the connection at all, and the race is in the build.
+    board_cache.clear()
+    profile_cache.clear()
+    seo.clear_pages()
+    got, errors = {}, []
+    start = threading.Barrier(len(slugs))
+
+    def fetch(slug):
+        try:
+            start.wait(timeout=30)
+            got[slug] = client.get(f"/adp/{slug}").text
+        except Exception as exc:      # noqa: BLE001 -- reported, not swallowed
+            errors.append((slug, repr(exc)))
+
+    threads = [threading.Thread(target=fetch, args=(slug,)) for slug in slugs]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(60)
+    assert not errors, errors
+
+    # The same six, one at a time, as the yardstick.
+    seo.clear_pages()
+    alone = {slug: client.get(f"/adp/{slug}").text for slug in slugs}
+
+    for slug in slugs:
+        assert len(got[slug].encode()) == len(alone[slug].encode()), (
+            f"{slug}: {len(got[slug].encode())} bytes under six threads, "
+            f"{len(alone[slug].encode())} on its own")
+    # And the sections are really there in at least the pages that have a
+    # profile at all, so this cannot pass by every page losing them.
+    with_sections = [s for s in slugs if "How he grades" in html.unescape(alone[s])]
+    assert with_sections, "the fixture built no profile for any of these six"
+    for slug in with_sections:
+        body = html.unescape(got[slug])
+        for heading in ("How he grades", "Every season he has played"):
+            assert heading in body, f"{slug} lost {heading!r} to the race"

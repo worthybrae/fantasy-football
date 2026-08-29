@@ -2307,7 +2307,27 @@ def register_seo_routes(app, conn=None):
         p = d["by_slug"].get(key)
         if p is None:
             return _missing(f"/adp/{key}")
-        return page(render_player(conn, d, p))
+        # A CURSOR PER REQUEST, NEVER THE SHARED `conn`. `render_player`
+        # builds the profile off whatever connection it is handed, and a
+        # DuckDBPyConnection carries the statement and result state of the
+        # query running on it -- two request threads issuing queries on one
+        # connection do not queue, they overwrite each other. Six of these
+        # at once (which is how a crawler walks a 228-URL sitemap, and how
+        # `test_six_player_pages_at_once_each_get_their_whole_page` walks
+        # it) left five pages with every profile section missing, wrote
+        # those stripped pages into the page cache under the corpus's own
+        # stamp, and reported it once per process and never again.
+        #
+        # `conn.cursor()` shares the database and gives this request its own
+        # state -- the convention `api/main.py`'s handlers, its sim worker
+        # and the keep-warm loop below all already follow.
+        cur = conn.cursor() if conn is not None else None
+        try:
+            body = render_player(cur, d, p)
+        finally:
+            if cur is not None:
+                cur.close()
+        return page(body)
 
     @app.api_route("/sitemap.xml", methods=["GET", "HEAD"])
     def sitemap():
