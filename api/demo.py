@@ -1335,7 +1335,8 @@ def _build(conn, now: float | None = None) -> dict:
         "server_now": now,
         # The room's own settings, because `AvailableList` draws finish tiers
         # from them -- the last startable back is a different rank in an
-        # 8-team league than a 12-team one, and this IS an 8-team room.
+        # 8-team league than a 12-team one, and the farm now plays both. The
+        # scoring format comes off the live file for the same reason.
         "settings": _settings_payload(conn, teams, rounds,
                                       record.get("scoring_format")),
         # The grid and the roster, in the room's own shapes, so the landing

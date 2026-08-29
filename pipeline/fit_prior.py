@@ -945,8 +945,8 @@ _MODULE_TEMPLATE = '''"""The cold-start prior's coefficients. GENERATED -- do no
 
 `scoring.draft_model` imports `PRIOR` from here and binds it to
 `COLD_START_PRIOR`, the coefficient vector every opponent in a league with no
-draft history is simulated with. In a mock draft, where all eight opponents
-are strangers, this vector IS the entire model.
+draft history is simulated with. In a mock draft, where every opponent in the
+room is a stranger, this vector IS the entire model.
 
 Written by `pipeline/fit_prior.py` (`make fit-prior`), and ONLY when the fit
 it describes beat the incumbent on held-out top-1 accuracy. There is no way

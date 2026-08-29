@@ -369,3 +369,20 @@ def test_counting_an_unreadable_corpus_is_empty_rather_than_an_error(tmp_path):
     junk = tmp_path / "junk.duckdb"
     junk.write_text("not a database")
     assert dl.shape_counts(str(junk)) == {}
+
+
+def test_the_rotations_counts_are_mocks_only(corpus, tmp_path):
+    """An imported league history carries no scoring blob -- `backfill_history`
+    writes picks and nothing else -- so every one of its seasons would read as
+    PPR whatever the league actually scored. Six of them counted as six 8-team
+    PPR drafts is enough to nudge a rotation that is deliberately keeping its
+    shapes within a few drafts of each other."""
+    _head(corpus, 8, 1.0, 2)
+    _head(corpus, 12, 0.0, 3, source=dl.SOURCE_HISTORY)
+    corpus.close()
+    path = str(tmp_path / "corpus.duckdb")
+
+    assert dl.shape_counts(path) == {(8, "ppr"): 2}
+    # And a caller that wants the whole file can still have it.
+    assert dl.shape_counts(path, source=None) == {(8, "ppr"): 2,
+                                                  (12, "std"): 3}

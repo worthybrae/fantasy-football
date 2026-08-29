@@ -488,3 +488,97 @@ def test_report_main_on_a_missing_corpus_says_so_and_does_not_raise(tmp_path):
     surface a raw duckdb IO error."""
     missing = str(tmp_path / "does-not-exist.duckdb")
     assert mock_backfill.report_main([missing]) == 0
+
+
+# ---------------------------------------------------------------------------
+# A file that says it is a different shape.
+# ---------------------------------------------------------------------------
+
+
+def _say_shape(path, teams=8, receptions=1.0, bench=None):
+    """Give a seeded league file its own `league` row."""
+    import dataclasses
+
+    from scoring import league as league_mod
+
+    base = mock_backfill._mock_settings()
+    settings = dataclasses.replace(
+        base, teams=teams,
+        bench=base.bench if bench is None else bench,
+        scoring={**base.scoring, "receptions": receptions})
+    conn = get_conn(str(path))
+    try:
+        write_table(conn, "league", pd.DataFrame([
+            {"season": 2026, "settings_json": league_mod.to_json(settings)}]))
+    finally:
+        conn.close()
+    return settings
+
+
+@pytest.mark.parametrize("shape,why", [
+    ({"teams": 12}, "twelve seats, not eight"),
+    ({"receptions": 0.0}, "standard scoring, not PPR"),
+    ({"bench": 4}, "fifteen rounds, not sixteen"),
+])
+def test_a_file_that_says_another_shape_is_skipped(tmp_path, shape, why):
+    """Everything here is priced and recorded as 8x16 PPR. That was safe
+    while every mock was; now that the corpus is COUNTED per shape -- and the
+    pooled depth is bounded by the shallowest shape in it -- a 12-team file
+    recorded as 8x16 bends the answers for every other draft in the file."""
+    path = tmp_path / "12345.duckdb"
+    _seed_mock_league(path, N_PICKS_COMPLETE)
+    _say_shape(path, **shape)
+    corpus = dl.corpus_conn(str(tmp_path / "corpus.duckdb"))
+    try:
+        counts = mock_backfill.backfill([str(path)], corpus)
+        held = corpus.execute("SELECT count(*) FROM draft_log").fetchone()[0]
+    finally:
+        corpus.close()
+
+    assert counts["wrong_shape"] == 1, why
+    assert counts["drafts_recorded"] == 0
+    assert held == 0
+
+
+def test_a_file_that_says_the_shape_we_assume_is_recorded(tmp_path):
+    """The guard is about disagreement, not about having an opinion."""
+    path = tmp_path / "12345.duckdb"
+    _seed_mock_league(path, N_PICKS_COMPLETE)
+    _say_shape(path)
+    corpus = dl.corpus_conn(str(tmp_path / "corpus.duckdb"))
+    try:
+        counts = mock_backfill.backfill([str(path)], corpus)
+    finally:
+        corpus.close()
+
+    assert counts["wrong_shape"] == 0 and counts["drafts_recorded"] == 1
+
+
+def test_a_backfilled_draft_carries_its_scoring(tmp_path):
+    """The shape a reader groups by is (teams, format), and the format is one
+    number: written on its own rather than left inside the settings blob, the
+    same as the live farm writes it."""
+    path = tmp_path / "12345.duckdb"
+    _seed_mock_league(path, N_PICKS_COMPLETE)
+    corpus = dl.corpus_conn(str(tmp_path / "corpus.duckdb"))
+    try:
+        mock_backfill.backfill([str(path)], corpus)
+        blob = corpus.execute(
+            "SELECT scoring_json FROM draft_log").fetchone()[0]
+    finally:
+        corpus.close()
+
+    assert dl.draft_format(blob) == "ppr"
+
+
+def test_a_file_with_no_league_row_keeps_the_assumption(tmp_path):
+    """Which is every file `data/leagues/` actually holds. `league.load`
+    would answer `default_settings()` for one of these, which is exactly the
+    shape being assumed -- so the guard reads the table itself."""
+    path = tmp_path / "12345.duckdb"
+    _seed_mock_league(path, N_PICKS_COMPLETE)
+    conn = mock_backfill._open_read_only(str(path))
+    try:
+        assert mock_backfill.file_settings(conn) is None
+    finally:
+        conn.close()

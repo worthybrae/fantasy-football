@@ -93,6 +93,7 @@ autodraft repeating its own ranking back at itself.
 import dataclasses
 import glob
 import hashlib
+import json
 import shutil
 import tempfile
 from pathlib import Path
@@ -138,6 +139,32 @@ def _mock_settings() -> "league.LeagueSettings":
         f"{MOCK_TEAMS}x{MOCK_ROUNDS} -- default_settings() must have changed "
         "shape out from under this")
     return settings
+
+
+def file_settings(conn):
+    """The league settings this file carries, or None if it carries none.
+
+    NOT `league.load`, which answers `default_settings()` for a file with no
+    `league` row -- and that default is exactly the 8-team PPR shape this
+    module assumes, so a file that says nothing and a file that says "8-team
+    PPR" would be indistinguishable. The difference matters: one is an
+    assumption we are allowed to make and the other is a fact we should be
+    checking against.
+    """
+    from pipeline.db import read_table
+
+    try:
+        table = read_table(conn, "league")
+    except Exception:      # noqa: BLE001 -- a file without the table at all
+        return None
+    if table.empty or "settings_json" not in table.columns:
+        return None
+    try:
+        newest = table.sort_values("season").iloc[-1]
+        return league.from_json(newest["settings_json"])
+    except Exception:      # noqa: BLE001 -- a blob that will not read is
+        # not a shape we know, which is the same answer as no blob at all.
+        return None
 
 
 def _open_read_only(path: str):
@@ -333,6 +360,30 @@ def _backfill_file(path: str, settings, corpus) -> dict:
         if not complete:
             return {"status": "incomplete", "picks": count, "max_pick": max_pick}
 
+        # THE FILE'S OWN SHAPE, WHEN IT HAS ONE. Everything below is priced
+        # and recorded as 8x16 PPR (see the module docstring's "THE 8x16
+        # ASSUMPTION"), which was a safe assumption while every mock this
+        # project touched was that shape. It is not any more: the farm plays
+        # 10- and 12-team rooms and standard scoring, and the corpus is now
+        # COUNTED per shape -- `scoring.availability` conditions on it and
+        # the pooled depth is bounded by the shallowest shape present -- so a
+        # 12-team file recorded as 8x16 does not just mislabel itself, it
+        # bends the answers for every other draft in the file.
+        #
+        # A file that says nothing keeps the assumption. A file that says
+        # something else is skipped rather than reinterpreted: reading its
+        # real shape would mean pricing its pool under its own settings,
+        # which is a bigger change than this guard and is the reason the
+        # guard exists.
+        own = file_settings(conn)
+        if own is not None and (
+                int(own.teams) != MOCK_TEAMS
+                or int(own.rounds) != MOCK_ROUNDS
+                or league.scoring_format(own) != league.scoring_format(settings)):
+            return {"status": "wrong_shape", "teams": int(own.teams),
+                    "rounds": int(own.rounds),
+                    "format": league.scoring_format(own)}
+
         league_id = Path(path).stem
         # Content, not the file's mtime -- see the module docstring's
         # "DRAFT IDENTITY IS CONTENT, NOT A TIMESTAMP" for the duplication
@@ -354,6 +405,12 @@ def _backfill_file(path: str, settings, corpus) -> dict:
             # `draft_log.rounds` right here, a real column (alongside
             # `draft_log.teams`) on the very row this JSON rides along with.
             settings_json=league.to_json(settings),
+            # The scoring table on its own as well, the same as the live farm
+            # writes (`mock_farm.build_record`): a draft's shape is (teams,
+            # format), and every reader that groups by it -- the availability
+            # counts, the archive pages, the fitted prior -- should not have
+            # to parse a whole LeagueSettings to find one number.
+            scoring_json=json.dumps(dict(settings.scoring or {})),
             picks=picks_df, pool=pool_df, draft_id=draft_id))
         stale_removed = _reconcile_stale_ids(corpus, league_id, draft_id)
         return {"status": "recorded", "picks": len(picks_df), "dropped": dropped,
@@ -372,14 +429,14 @@ def backfill(paths: list, corpus) -> dict:
     settings = _mock_settings()
     counts = {
         "files_scanned": 0, "open_failed": 0, "no_rows": 0, "incomplete": 0,
-        "drafts_recorded": 0, "picks_recorded": 0, "picks_dropped": 0,
-        "stale_rows_removed": 0,
+        "wrong_shape": 0, "drafts_recorded": 0, "picks_recorded": 0,
+        "picks_dropped": 0, "stale_rows_removed": 0,
     }
     for path in paths:
         counts["files_scanned"] += 1
         result = _backfill_file(path, settings, corpus)
         status = result["status"]
-        if status in ("open_failed", "no_rows", "incomplete"):
+        if status in ("open_failed", "no_rows", "incomplete", "wrong_shape"):
             counts[status] += 1
         elif status == "recorded":
             counts["drafts_recorded"] += 1
@@ -394,6 +451,7 @@ def _print_summary(counts: dict) -> None:
     print(f"  open failed (locked/unreadable, skipped): {counts['open_failed']}")
     print(f"  no drafted rows (skipped):    {counts['no_rows']}")
     print(f"  incomplete draft (skipped):   {counts['incomplete']}")
+    print(f"  not an 8x16 PPR file (skipped): {counts['wrong_shape']}")
     print(f"drafts recorded:               {counts['drafts_recorded']}")
     print(f"picks recorded:                {counts['picks_recorded']}")
     print(f"picks dropped (no pool match): {counts['picks_dropped']}")

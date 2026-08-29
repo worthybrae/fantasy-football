@@ -37,10 +37,12 @@ that is not confirmed inside `SELECT_CONFIRM_SECONDS` is retried with the
 NEXT candidate rather than assumed.
 
 TEAM COUNT AND ROUND COUNT ARE READ, NEVER ASSUMED. The room-selection policy
-filters to `leagueSize == 8`, so in practice every room played is 8x16 -- but
-the shape is still taken from the room itself: `leagueSize` off the directory
-row, and the roster (and therefore `LeagueSettings.rounds`) out of the
-league's own `?view=mSettings`. A wrong team count does not fail, it shifts
+allows several sizes now (`espn_mock_lobby.FARM_SHAPES`), so a run plays 8-,
+10- and 12-team rooms in the same night -- but nothing here counts seats off
+the policy either way: the shape is taken from the room itself, `leagueSize`
+off the directory row and the roster (and therefore `LeagueSettings.rounds`)
+out of the league's own `?view=mSettings`, and the two are required to agree
+before a pick is recorded. A wrong team count does not fail, it shifts
 the snake: every pick lands on the wrong slot, every owner_key names the
 wrong seat, and the corpus is poisoned in a way nothing downstream can
 detect. `slot_team_map` below turns that from an unverifiable assumption into
