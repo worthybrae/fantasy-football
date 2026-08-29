@@ -813,8 +813,10 @@ a.draft-tab {
   gap: var(--space-3);
   /* Taller than the 34px it was, because it carries a face now -- and
      because at 34px the rail read as a status line rather than as the last
-     few picks of the draft, which is what it is. */
-  height: 52px;
+     few picks of the draft, which is what it is. The token, because the
+     welcome chip on the landing page has to clear this rail and was doing
+     it with its own copy of the number (`--ticker-h` in index.css). */
+  height: var(--ticker-h);
   padding: 0 var(--space-4);
   background: var(--bg-1);
   border-top: 1px solid var(--border);
@@ -1767,16 +1769,20 @@ button.plan-target:focus-visible .plan-name {
   align-items: baseline;
   gap: 5px;
   margin-top: 6px;
-  font-size: 9.5px;
+  font-size: 10px;
   color: var(--text-3);
 }
 
+/* No opacity. `--text-3` is already the quietest text this app has -- 2.73:1
+   on the rail -- and 0.75 of it is 2.06:1, which is a 9px uppercase label
+   that has to be looked for. The token on its own is the floor here; a
+   quieter one is spelled by picking a quieter colour, not by fading the
+   quietest one further. */
 .plan-alts-cap {
   text-transform: uppercase;
   letter-spacing: 0.06em;
   font-size: 9px;
   color: var(--text-3);
-  opacity: 0.75;
 }
 
 .plan-alt:not(:last-child)::after {
@@ -3069,7 +3075,7 @@ button.plan-target:focus-visible .plan-name {
 .confirm-error {
   margin: var(--space-3) 0 0;
   padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--fail-line);
+  border: 1px solid var(--fail);
   border-radius: var(--radius);
   background: var(--fail-bg);
   color: var(--text-1);
@@ -7139,7 +7145,7 @@ button.pp-pop-comp:focus-visible {
 .mocks-board-error {
   margin: var(--space-3) var(--space-4) 0;
   padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--fail-line);
+  border: 1px solid var(--fail);
   border-radius: var(--radius);
   background: var(--fail-bg);
   color: var(--text-1);

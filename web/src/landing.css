@@ -474,10 +474,13 @@
   position: fixed;
   right: 24px;
   /* Above the pick ticker, not on top of it. The room behind this chip ends
-     in a 52px rail of the last few picks, and at 24px the chip sat over its
+     in a rail of the last few picks, and at 24px the chip sat over its
      right-hand end -- covering three or four picks of the very thing the
-     chip is inviting the reader into. */
-  bottom: calc(52px + var(--space-4));
+     chip is inviting the reader into. The rail's height is `--ticker-h`
+     (index.css), which `.pick-ticker` in App.css sets itself from: the two
+     files were holding the same 52px separately, and a taller rail would
+     have put the chip back on top of it. */
+  bottom: calc(var(--ticker-h) + var(--space-4));
   z-index: 65;
   display: flex;
   align-items: center;
@@ -715,26 +718,26 @@
    below), which is a different page rather than a panel on this one. Same
    margin as the bands under it, because it is the same kind of object -- a
    line about YOU, above the pitch made to everybody. */
-/* This had no rule of its own, so a refused connect rendered as ordinary
-   body copy in the middle of a list of drafts -- an error that did not look
-   like one. */
-.lp-drafts-error {
-  margin: var(--space-3) 0 0;
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--fail-line);
-  border-radius: var(--radius);
-  background: var(--fail-bg);
-  color: var(--text-1);
-  font-size: var(--text-sm);
-  line-height: 1.5;
-}
-
 .lp-drafts {
   margin: var(--space-4) clamp(20px, 6vw, 88px) 0;
   padding: var(--space-3) var(--space-4);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg-1);
+}
+
+/* This had no rule of its own, so a refused connect rendered as ordinary
+   body copy in the middle of a list of drafts -- an error that did not look
+   like one. */
+.lp-drafts-error {
+  margin: var(--space-3) 0 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--fail);
+  border-radius: var(--radius);
+  background: var(--fail-bg);
+  color: var(--text-1);
+  font-size: var(--text-sm);
+  line-height: 1.5;
 }
 
 /* -- the signed-in dashboard (Dashboard.tsx, MockLobby.tsx) --------------
@@ -1679,9 +1682,16 @@
   background: color-mix(in srgb, var(--accent) 85%, #ffffff);
 }
 
+/* Off, and saying so twice: the fill drops to a flat surface with a plain
+   border rather than a half-transparent accent (0.5 of the accent is still
+   the brightest thing in the row, so the button read as live), and the
+   cursor names the refusal on the way past. `.fav-need` beside it says what
+   would turn it back on. */
 .fav-save:disabled {
-  opacity: 0.5;
-  cursor: default;
+  border-color: var(--border);
+  background: var(--bg-2);
+  color: var(--text-3);
+  cursor: not-allowed;
 }
 
 /* The quiet outline the lobby's own Join wears, so "the other one" looks the
@@ -1707,13 +1717,14 @@
 }
 
 /* One inline-error shape, shared with the paywall, the pick dialog, the
-   mock board and the archive -- see `--fail-bg`/`--fail-line` in index.css.
+   mock board and the archive -- see `--fail-bg` in index.css, and the
+   flat `--fail` edge every one of them draws.
    Before it, a refused save in this dialog was a line of red text while the
    same refusal one screen over was a bordered panel. */
 .fav-error {
   margin: 0;
   padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--fail-line);
+  border: 1px solid var(--fail);
   border-radius: var(--radius);
   background: var(--fail-bg);
   color: var(--text-1);
@@ -3394,7 +3405,7 @@ button.wr-seat:focus-visible {
 .pw-error {
   margin: 0 0 var(--space-3);
   padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--fail-line);
+  border: 1px solid var(--fail);
   border-radius: var(--radius);
   background: var(--fail-bg);
   color: var(--text-1);
@@ -3544,7 +3555,11 @@ button.wr-seat:focus-visible {
    down every time somebody crossed the minimum. */
 .fav-need {
   font-size: var(--text-xs);
-  color: var(--text-3);
+  /* `--text-2` (7.05:1), not `--text-3` (2.73:1): at 11px the quiet grey was
+     under half the contrast the row's other text has, and this is the line
+     that says why Save is refusing to work. The sentence a reader is sent to
+     when a control looks broken cannot be the faintest thing in the row. */
+  color: var(--text-2);
   white-space: nowrap;
 }
 

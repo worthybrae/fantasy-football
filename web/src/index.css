@@ -52,13 +52,19 @@
   --pos-k: #d55181;
   --pos-dst: #9085e9;
 
-  /* Two surfaces the whole app draws a failure on. Every inline error and
-     every banner is one of these two shapes -- a tinted panel with a fail
-     edge -- and before they were tokens each of the nine error classes had
-     picked its own mix by hand, so "an error" looked like four different
-     things depending on which screen you were on. */
+  /* The surface the whole app draws a failure on. Every inline error and
+     every banner is the same shape -- a tinted panel with a `--fail` edge --
+     and before this each of the nine error classes had picked its own mix by
+     hand, so "an error" looked like four different things depending on which
+     screen you were on.
+
+     The fill is a tint and the border is the flat token, not a mix of it.
+     `--fail-line` was `--fail` at 45%, which measured 1.77:1 against the
+     page -- under the 3:1 a non-text boundary needs, on the one shape whose
+     whole job is to be seen before it is read. Flat, the same edge is 3.6:1
+     against its own fill. The panel is quiet inside and definite at its
+     edge. */
   --fail-bg: color-mix(in srgb, var(--fail) 10%, var(--bg-1));
-  --fail-line: color-mix(in srgb, var(--fail) 45%, transparent);
 
   /* -- type -- */
   --font-ui: 'Inter Variable', system-ui, -apple-system, 'Segoe UI', sans-serif;
@@ -105,6 +111,12 @@
 
   /* Anything that floats over the page: tooltips, popovers, dialogs. */
   --shadow-pop: 0 8px 20px rgba(0, 0, 0, 0.45);
+
+  /* The room's bottom rail of last-drafted picks (`.pick-ticker`, App.css).
+     It is a token because a second stylesheet has to clear it: the landing
+     page's welcome chip is fixed to the same bottom-right corner and sat on
+     top of the rail while the height lived in one file as a literal. */
+  --ticker-h: 52px;
 
   color-scheme: dark;
   color: var(--text-2);
