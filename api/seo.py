@@ -191,9 +191,28 @@ def _team_fallback_from_espn(conn, ids: dict | None = None) -> dict:
         return {}
 
 
+# The picks the "still there at" strip reports, and the depth its curve is
+# drawn to. Eight readings rather than a table of a hundred: the first is one
+# turn away in an 8-team room, the last is round 12, and between them they
+# cover every question a drafter actually asks about a name ("can I wait a
+# round?"). The curve behind them is the continuous version.
+STILL_THERE_PICKS = (8, 16, 24, 36, 48, 60, 72, 96)
+CURVE_PICKS = 100
+
+# How far apart the mock rooms and ESPN's own ADP have to be before a player
+# is called a riser or a faller. Eight picks is a full turn in an 8-team room:
+# below it the two lists are saying the same thing with rounding, above it a
+# drafter reading ESPN's list would genuinely miss him.
+MOVE_PICKS = 8
+
+# How many of them either list holds.
+MOVERS = 10
+
+
 def _empty() -> dict:
     return {"players": [], "by_slug": {}, "drafts": 0, "teams": 0, "rounds": 0,
-            "updated": None, "stamp": ("empty",)}
+            "updated": None, "stamp": ("empty",), "risers": [], "fallers": [],
+            "runs": [], "round_mix": {}, "at_pick": {}, "seconds": None}
 
 
 def _stamp(conn, drafts: int, teams: int, rounds: int, updated) -> tuple:
@@ -252,6 +271,9 @@ def build_adp(conn) -> dict:
             " WHERE d.teams = ? AND d.rounds = ? AND pk.player_id IS NOT NULL"
             " AND pk.pick_no BETWEEN 1 AND ?",
             [teams, rounds, teams * rounds]).fetchall()
+        pooled = _pooled(corpus, teams, rounds)
+        clock, corpus_clock = _clock(corpus, teams, rounds)
+        runs = _runs(corpus, teams, rounds)
     finally:
         corpus.close()
     total = int(total or 0)
@@ -260,9 +282,14 @@ def build_adp(conn) -> dict:
 
     picks: dict = {}
     positions: dict = {}
+    # The position taken at every pick of every draft, so a round page can say
+    # what its own eight picks are made of without a second query.
+    mix: Counter = Counter()
     for pid, pos, pick_no in rows:
         picks.setdefault(str(pid), []).append(int(pick_no))
-        positions.setdefault(str(pid), str(pos or "").upper())
+        position = str(pos or "").upper()
+        positions.setdefault(str(pid), position)
+        mix[((int(pick_no) - 1) // teams + 1, position)] += 1
 
     names = market._names(conn)
     missing = {pid for pid in picks if pid not in names}
@@ -286,6 +313,13 @@ def build_adp(conn) -> dict:
         hist = [0] * (teams * rounds)
         for p in ordered:
             hist[p - 1] += 1
+        # THE HONEST DENOMINATOR, where the corpus has one. `draft_log_pool`
+        # records who was on the board in each draft, and a player ESPN added
+        # to its board in the middle of the summer was not available to be
+        # taken in the drafts before that. Counting him against every draft
+        # ever recorded understates how reliably rooms take him. Falls back
+        # to the draft count for a corpus with no pool rows at all.
+        of = pooled.get(pid) or total
         players.append({
             "player_id": pid,
             "name": name,
@@ -300,8 +334,15 @@ def build_adp(conn) -> dict:
             "high": ordered[-1],
             "taken": len(ordered),
             "share": round(share, 3),
+            "of": of,
+            "of_share": round(min(len(ordered) / of, 1.0), 3),
             "round_mode": Counter((p - 1) // teams + 1 for p in ordered).most_common(1)[0][0],
+            "round_low": (ordered[0] - 1) // teams + 1,
+            "round_p10": (_percentile(ordered, 0.10) - 1) // teams + 1,
+            "round_p90": (_percentile(ordered, 0.90) - 1) // teams + 1,
             "hist": hist,
+            "seconds": clock.get(pid),
+            "hist_peak": max(hist) or 1,
         })
 
     players.sort(key=lambda p: (p["adp"], -p["taken"], p["player_id"]))
@@ -317,6 +358,27 @@ def build_adp(conn) -> dict:
         if not p["team"]:
             p["team"] = espn_team.get(p["player_id"])
 
+    # Everything the universal database knows about these two hundred names:
+    # bye, tier, the five consensus sources, the season history, last season,
+    # this season's projection, the sportsbook, the injury report, the news.
+    # One pass over the whole list -- see scoring/adp_facts.py.
+    try:
+        from scoring import adp_facts
+        adp_facts.attach(conn, players)
+    except Exception:      # noqa: BLE001 -- the corpus's own figures are the
+        # headline of every one of these pages and none of them needs this.
+        # A universal database that cannot be read costs the enrichments.
+        pass
+    for p in players:
+        if p.get("seasons"):
+            p["spark"] = _spark(p["seasons"])
+    _espn_gap(players)
+    _availability(players, teams)
+    risers = sorted((p for p in players if (p.get("vs_espn") or 0) >= MOVE_PICKS),
+                    key=lambda p: -p["vs_espn"])[:MOVERS]
+    fallers = sorted((p for p in players if (p.get("vs_espn") or 0) <= -MOVE_PICKS),
+                     key=lambda p: p["vs_espn"])[:MOVERS]
+
     # Slugs: a collision takes -2, -3 in player_id order, so two players
     # with one name keep the same addresses from one snapshot to the next.
     by_base: dict = {}
@@ -331,7 +393,253 @@ def build_adp(conn) -> dict:
     updated = latest.date() if isinstance(latest, datetime) else None
     return {"players": players, "by_slug": by_slug, "drafts": total,
             "teams": teams, "rounds": rounds, "updated": updated,
-            "stamp": _stamp(conn, total, teams, rounds, updated)}
+            "stamp": _stamp(conn, total, teams, rounds, updated),
+            "risers": risers, "fallers": fallers, "runs": runs,
+            "round_mix": _round_mix(mix, rounds),
+            "at_pick": _at_pick(players, teams, rounds),
+            "seconds": corpus_clock}
+
+
+# ---------------------------------------------------------------------------
+# The corpus, past the picks themselves
+# ---------------------------------------------------------------------------
+
+def _pooled(corpus, teams: int, rounds: int) -> dict:
+    """player_id -> how many of these drafts he was on the board for.
+
+    An older corpus, or a fixture that only ever wrote picks, has no pool
+    rows; an empty answer means every share falls back to the draft count,
+    which is what these pages said before this existed.
+    """
+    try:
+        rows = corpus.execute(
+            "SELECT pl.player_id, count(DISTINCT pl.draft_id)"
+            " FROM draft_log_pool pl JOIN draft_log d USING (draft_id)"
+            " WHERE d.teams = ? AND d.rounds = ? AND pl.player_id IS NOT NULL"
+            " GROUP BY 1", [teams, rounds]).fetchall()
+    except Exception:      # noqa: BLE001 -- no pool table on this corpus
+        return {}
+    return {str(pid): int(n) for pid, n in rows if n}
+
+
+def _clock(corpus, teams: int, rounds: int) -> tuple:
+    """How long a room takes over him, and how long it takes over anybody.
+
+    HUMAN PICKS ONLY, unlike everything else on these pages. Where a player
+    GOES counts every pick, autodrafts included, because the autodrafter is
+    part of the market. How LONG a pick took is a question about a person
+    thinking, and an autodrafted seat answers it in a tenth of a second --
+    the median over every pick in the corpus is 1.4 seconds, which is not a
+    fact about anybody's deliberation.
+    """
+    where = ("d.teams = ? AND d.rounds = ? AND pk.seconds_to_pick IS NOT NULL"
+             " AND COALESCE(pk.autodrafted, FALSE) = FALSE"
+             " AND (d.my_slot IS NULL OR pk.slot <> d.my_slot)")
+    try:
+        rows = corpus.execute(
+            "SELECT pk.player_id, median(pk.seconds_to_pick), count(*)"
+            " FROM draft_log_pick pk JOIN draft_log d USING (draft_id)"
+            f" WHERE {where} GROUP BY 1", [teams, rounds]).fetchall()
+        overall = corpus.execute(
+            "SELECT median(pk.seconds_to_pick)"
+            " FROM draft_log_pick pk JOIN draft_log d USING (draft_id)"
+            f" WHERE {where}", [teams, rounds]).fetchone()
+    except Exception:      # noqa: BLE001 -- an older corpus without a clock
+        return {}, None
+    # Ten is enough for a median to be about him rather than about one
+    # drafter who walked away from the keyboard.
+    per_player = {str(pid): round(float(secs), 1)
+                  for pid, secs, n in rows if secs is not None and n >= 10}
+    median_all = None if not overall or overall[0] is None else round(float(overall[0]), 1)
+    return per_player, median_all
+
+
+def _runs(corpus, teams: int, rounds: int) -> list:
+    """When the first player at each position comes off the board.
+
+    The median over every draft, not the average: the question a reader has
+    is "when does the run start", and one room reaching for a kicker in round
+    four should not move the answer for the other 853.
+    """
+    try:
+        rows = corpus.execute(
+            "WITH firsts AS ("
+            "  SELECT pk.draft_id, pk.position, min(pk.pick_no) AS first_pick"
+            "  FROM draft_log_pick pk JOIN draft_log d USING (draft_id)"
+            "  WHERE d.teams = ? AND d.rounds = ? AND pk.position IS NOT NULL"
+            "  GROUP BY 1, 2)"
+            " SELECT position, median(first_pick), count(*) FROM firsts"
+            " GROUP BY 1 ORDER BY 2", [teams, rounds]).fetchall()
+    except Exception:      # noqa: BLE001
+        return []
+    out = []
+    for position, pick, drafts in rows:
+        name = str(position or "").upper()
+        if name not in POSITIONS or pick is None:
+            continue
+        at = int(round(float(pick)))
+        out.append({"position": name, "pick": at, "drafts": int(drafts),
+                    "round": (at - 1) // teams + 1})
+    return out
+
+
+def _round_mix(mix: Counter, rounds: int) -> dict:
+    """round -> the positions its picks were spent on, commonest first."""
+    out: dict = {}
+    for n in range(1, rounds + 1):
+        counts = [(pos, count) for (rnd, pos), count in mix.items()
+                  if rnd == n and pos]
+        total = sum(count for _pos, count in counts)
+        if not total:
+            continue
+        counts.sort(key=lambda item: (-item[1], item[0]))
+        out[n] = [{"position": pos, "share": round(count / total, 3),
+                   "pct": round(count * 100 / total, 1)}
+                  for pos, count in counts]
+    return out
+
+
+def _at_pick(players: list, teams: int, rounds: int) -> dict:
+    """overall pick -> the three names most often taken there.
+
+    Out of the histograms already computed, not a second query: `hist[p - 1]`
+    is exactly "how many drafts took him at pick p", and the top of that
+    column across the published players is who a seat at that pick sees.
+    """
+    out: dict = {}
+    for pick in range(1, teams * rounds + 1):
+        column = [(p["hist"][pick - 1], p) for p in players if p["hist"][pick - 1]]
+        if not column:
+            continue
+        total = sum(count for count, _p in column)
+        column.sort(key=lambda item: (-item[0], item[1]["adp"]))
+        out[pick] = [{"name": p["name"], "slug": p["slug"], "position": p["position"],
+                      "count": count, "pct": round(count * 100 / total)}
+                     for count, p in column[:3]]
+    return out
+
+
+def _espn_gap(players: list) -> None:
+    """Where ESPN's board would have taken him, against where the rooms did.
+
+    SUBTRACTING ESPN'S ADP FROM OURS IS THE WRONG SUM, and it was the first
+    thing tried. ESPN publishes a draft position measured in ESPN's own
+    leagues, over a universe of five hundred players; this corpus is 8-team
+    16-round mocks, 128 picks deep. Every kicker in the corpus therefore
+    reads as a hundred picks "early" -- an 8-team room has to fill 128 slots
+    and ESPN's leagues do not -- and the arithmetic produces 203 risers and
+    no fallers, which is a fact about league size and not about a player.
+
+    So the two lists are put on ONE SCALE first. Take the players ESPN ranks,
+    order them ESPN's way, and read off this corpus's own ADP at each
+    position: if you drafted straight down ESPN's board, its nth name would
+    go at the pick this corpus's nth name goes at. That implied pick is
+    comparable with his real one, the difference is in picks, and the
+    differences sum to zero -- so a riser is a player the rooms genuinely
+    move up, not a player two lists happened to count differently.
+
+    ESPN'S PUBLISHED ADP IS THE ORDERING KEY where there is one, because it
+    is drafting behaviour and so is the thing being compared; the expert PPR
+    rank stands in for the handful it does not reach.
+    """
+    covered = [p for p in players
+               if p.get("espn_adp") is not None or p.get("espn_rank") is not None]
+    if len(covered) < 2:
+        return
+    # `players` is already in this corpus's own draft order, so the picks
+    # come out ascending without another sort.
+    picks = [p["adp"] for p in covered]
+    order = sorted(covered, key=lambda p: (p["espn_adp"] if p.get("espn_adp") is not None
+                                           else float(p["espn_rank"]), p["adp"]))
+    for i, p in enumerate(order):
+        p["espn_pick"] = picks[i]
+        p["espn_order"] = i + 1
+        p["vs_espn"] = round(picks[i] - p["adp"], 1)
+
+
+# ---------------------------------------------------------------------------
+# Still there at pick N
+# ---------------------------------------------------------------------------
+
+def _availability(players: list, teams: int) -> None:
+    """"Will he still be there at pick N", measured, for every player at once.
+
+    `scoring.availability` counts the same corpus these pages are built from
+    -- how many of the drafts he was pooled in had taken him by each pick --
+    and it is already cached in the process for the live draft room, keyed on
+    the corpus file's mtime. So this costs one gather per pick, not a second
+    pass over 109k rows.
+
+    `k = 0` throughout: these pages are read before a draft, by somebody who
+    has not made a pick yet, so the question is the unconditional one.
+    """
+    if not players:
+        return
+    try:
+        import numpy as np
+        from pipeline import draft_log as dl
+        from scoring import availability as av
+        # The path at CALL time. `cached_table`'s default was bound when that
+        # module was imported, and the corpus these pages read is chosen by
+        # `market.dl.CORPUS_PATH`, which a test moves.
+        table = av.cached_table(dl.CORPUS_PATH)
+        if not table.pooled.size:
+            return
+        ids = [p["player_id"] for p in players]
+        positions = [p["position"] for p in players]
+        espn = np.array([p["espn_adp"] if p.get("espn_adp") is not None else np.nan
+                         for p in players], dtype=float)
+        readings = {n: av.availability_at(table, ids, k=0, n=n, espn_adp=espn,
+                                          positions=positions)
+                    for n in STILL_THERE_PICKS}
+        curve = np.stack([av.availability_at(table, ids, k=0, n=n, espn_adp=espn,
+                                             positions=positions)
+                          for n in range(1, CURVE_PICKS + 1)])
+    except Exception:      # noqa: BLE001 -- a corpus mid-write, or numpy
+        # missing on some future slimmer image. The strip disappears; every
+        # other figure on the page is unaffected.
+        return
+    for i, p in enumerate(players):
+        p["still_there"] = [{"pick": n, "pct": int(round(float(readings[n][i]) * 100)),
+                             "round": (n - 1) // teams + 1}
+                            for n in STILL_THERE_PICKS]
+        p["curve"] = _curve_path([float(v) for v in curve[:, i]])
+
+
+def _curve_path(values: list, width: int = 320, height: int = 60) -> str:
+    """A step curve as one SVG `path` d attribute.
+
+    A STEP, NOT A LINE, because the underlying thing is a step: he is there
+    until a pick takes him, and drawing a diagonal between two picks would
+    claim a player is 40% available halfway through pick 23.
+
+    Written out at render time for two hundred players, so it is emitted
+    once here and only when the value actually moves -- a curve that is flat
+    at 100 for sixty picks is six characters, not sixty.
+    """
+    if not values:
+        return ""
+    step = width / max(len(values) - 1, 1)
+
+    def y(v: float) -> float:
+        return round(height - v * height, 1)
+
+    parts = [f"M0,{y(values[0])}"]
+    last = values[0]
+    for i, value in enumerate(values[1:], start=1):
+        if abs(value - last) < 0.005 and i != len(values) - 1:
+            continue
+        parts.append(f"H{round(i * step, 1)}V{y(value)}")
+        last = value
+    return "".join(parts)
+
+
+def _spark(seasons: list) -> str | None:
+    from scoring.adp_facts import sparkline
+    try:
+        return sparkline(seasons)
+    except Exception:      # noqa: BLE001
+        return None
 
 
 _adp_lock = threading.Lock()
