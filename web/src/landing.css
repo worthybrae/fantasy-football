@@ -473,7 +473,11 @@
 .wc-corner {
   position: fixed;
   right: 24px;
-  bottom: 24px;
+  /* Above the pick ticker, not on top of it. The room behind this chip ends
+     in a 52px rail of the last few picks, and at 24px the chip sat over its
+     right-hand end -- covering three or four picks of the very thing the
+     chip is inviting the reader into. */
+  bottom: calc(52px + var(--space-4));
   z-index: 65;
   display: flex;
   align-items: center;
@@ -1655,28 +1659,33 @@
   color: var(--accent);
 }
 
+/* THE APP HAS ONE PRIMARY BUTTON and this is one of them. It used to be an
+   accent-tinted outline, which is the shape everything ELSE in this product
+   uses for a secondary action -- so the one control this dialog exists to
+   reach looked quieter than the "Join" on a lobby card. Same fill, same
+   weight and the same disabled treatment as `.db-go` and `.wc-start`. */
 .fav-save {
   padding: 6px 14px;
   border: 1px solid var(--accent-border);
   border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  background: var(--accent);
   font-size: var(--text-sm);
-  font-weight: 600;
-  color: var(--accent);
+  font-weight: 700;
+  color: #10110f;
   cursor: pointer;
 }
 
 .fav-save:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--accent) 28%, transparent);
+  background: color-mix(in srgb, var(--accent) 85%, #ffffff);
 }
 
 .fav-save:disabled {
-  border-color: var(--border);
-  background: none;
-  color: var(--text-3);
-  cursor: not-allowed;
+  opacity: 0.5;
+  cursor: default;
 }
 
+/* The quiet outline the lobby's own Join wears, so "the other one" looks the
+   same wherever it is offered. */
 .fav-cancel {
   padding: 6px 12px;
   border: 1px solid var(--border);
@@ -1685,6 +1694,16 @@
   font-size: var(--text-sm);
   color: var(--text-2);
   cursor: pointer;
+}
+
+.fav-cancel:hover:not(:disabled) {
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+.fav-cancel:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 /* One inline-error shape, shared with the paywall, the pick dialog, the
