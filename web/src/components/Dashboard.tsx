@@ -9,6 +9,7 @@ import { Logo } from './Logo'
 import MockLobby from './MockLobby'
 import { PickerBoundary, PickerFallback } from './PickerBoundary'
 import YourGuys from './YourGuys'
+import YourGuysByPick from './YourGuysByPick'
 
 // THE PICKER IS NOT IN THIS PAGE'S BUNDLE. It is a 250-row board with a photo
 // per row, opened by a fraction of the readers who load this page and never
@@ -287,6 +288,14 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom }: {
             this page cannot offer to save something it cannot load. */}
         {favorites !== null && (
           <YourGuys players={favorites} onOpen={openPicker} refresh={namesAt} />
+        )}
+
+        {/* And whether they can HAVE them. Directly under the list, and only
+            once there is a list: the card is an answer about somebody's
+            favourites, so with none saved it would be an empty grid asking a
+            question nobody had. */}
+        {favorites !== null && favorites.length > 0 && (
+          <YourGuysByPick players={favorites} />
         )}
 
         <MockLobby

@@ -3547,3 +3547,214 @@ button.wr-seat:focus-visible {
   color: var(--text-3);
   white-space: nowrap;
 }
+
+/* -- your guys, by pick ---------------------------------------------------
+   A row per favourite, a column per turn of the chosen seat. The grid is a
+   real <table>: rows and columns both carry meaning here, and a screen
+   reader that can say "Pick 16, Bijan Robinson, 4%" is reading the card the
+   way it is meant to be read.
+
+   It scrolls sideways rather than wrapping. Eight columns of chips do not
+   fit a phone, and a grid that reflowed would put pick 45 under pick 5. */
+
+.gbp-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-left: auto;
+}
+
+.gbp-ctl {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs);
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.gbp-select {
+  padding: 2px 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  font: var(--text-sm) / 1.4 var(--font-mono);
+  color: var(--text-1);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.gbp-select:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* The card owns the padding its own error strip has to break out of, so the
+   strip is full-bleed the way the dashboard's own is. */
+.gbp-card {
+  padding: 0;
+  overflow: hidden;
+}
+
+.gbp-error {
+  border-bottom: 0;
+}
+
+.gbp-scroll {
+  overflow-x: auto;
+}
+
+.gbp-grid {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+
+/* Present for a screen reader, absent for everybody else: the card's title
+   and the tints say the same thing to a sighted reader in a tenth of the
+   space. */
+.gbp-caption {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* App.css gives every `th` in the app a sticky top, a 32px height and a
+   bottom border, which is right for the draft room's full-height tables and
+   wrong for a card: the header would float over the lobby below as the page
+   scrolled. The three rules below undo exactly that much of it and keep the
+   rest (the uppercase, the mono, the letter-spacing). */
+.gbp-head {
+  position: static;
+  height: auto;
+  padding: var(--space-2) 6px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-1);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  color: var(--text-3);
+  text-align: center;
+  white-space: nowrap;
+}
+
+/* Sticky so the name stays put while the picks scroll past it -- a column of
+   percentages with the player scrolled off is a column of nothing. */
+.gbp-who {
+  position: sticky;
+  top: auto;
+  left: 0;
+  z-index: 1;
+  min-width: 168px;
+  height: auto;
+  padding: 5px var(--space-3) 5px var(--space-4);
+  border-bottom: 0;
+  background: var(--bg-1);
+  font-weight: 400;
+  color: var(--text-1);
+  text-align: left;
+}
+
+/* A player's name is a name. The uppercase belongs to the column headings,
+   which is where the rule below puts it back. */
+tbody .gbp-who {
+  font-size: var(--text-sm);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+thead .gbp-who {
+  border-bottom: 1px solid var(--border);
+  color: var(--text-3);
+  font-size: var(--text-xs);
+  font-weight: 500;
+}
+
+/* The flex lives on a span inside the cell, not on the cell: `display: flex`
+   on a `<th>` takes it out of table layout, and the columns stop lining up
+   with their headers. */
+.gbp-who-in {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.gbp-face {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--bg-2);
+  object-fit: cover;
+}
+
+.gbp-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gbp-cell {
+  height: auto;
+  padding: 3px 6px;
+  border-top: 1px solid var(--bg-2);
+  border-bottom: 0;
+  text-align: center;
+}
+
+.gbp-chip {
+  display: inline-block;
+  min-width: 40px;
+  padding: 2px 5px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Three bands, tinted at the weight of type rather than of signage: a card
+   that fills most of its cells with a saturated colour has no emphasis left
+   to spend on the one row that matters. */
+.gbp-likely {
+  background: color-mix(in srgb, var(--ramp-strong) 16%, transparent);
+  color: var(--ramp-strong);
+}
+
+.gbp-maybe {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+.gbp-thin {
+  background: color-mix(in srgb, var(--fail) 12%, transparent);
+  color: var(--fail-soft);
+}
+
+.gbp-none {
+  color: var(--text-3);
+}
+
+/* THE TURN TO PLAN ON. A border rather than a fourth colour, because the
+   best pick is usually already tinted and a second hue on the same chip
+   would be two claims about one number. */
+.gbp-best {
+  border-color: var(--accent-border);
+}
+
+.gbp-wait {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--space-3) var(--space-4);
+}
+
+.gbp-wait-row {
+  height: 22px;
+  border-radius: var(--radius);
+  background: var(--bg-2);
+}

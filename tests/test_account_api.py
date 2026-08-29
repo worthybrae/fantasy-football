@@ -527,3 +527,259 @@ def test_the_first_request_does_not_pay_for_the_corpus_backlog(
     released.set()
     assert billing._seed_done.wait(30)
     assert billing.is_free_draft("7") is True
+
+
+# -- your guys, by pick -------------------------------------------------------
+#
+# WHAT THE OUTLOOK IS FOR. The favourites list is a wish; the outlook is
+# whether the wish survives contact with a draft. Every number in it comes out
+# of the same counted table the live room reads, so the things worth pinning
+# here are the ones that are this ROUTE's rather than
+# `scoring/availability.py`'s:
+#
+#   * it needs a session, like every other route in this file -- the answer is
+#     one person's list and would otherwise be served to anybody who asked;
+#   * a seat that does not exist is refused rather than clamped. Two selects
+#     send these, so a value outside the bounds is a client bug;
+#   * the rows follow the SAVED order. The order is the preference, and an
+#     answer sorted by anything else -- rank, availability, the board -- is a
+#     different person's list;
+#   * a favourite the corpus always takes in the first three picks reads zero
+#     from pick five on. That is the whole product claim, and it is asserted
+#     against a corpus whose counts are known by construction.
+#
+# The corpus is synthetic and pinned at `cached_table` for exactly that last
+# reason: the real one is a data file, and a test whose expected value comes
+# out of it is a test that changes every time the farm plays a mock.
+
+from pipeline import draft_log as dl                            # noqa: E402
+from scoring import availability as av                          # noqa: E402
+
+# Enough drafts to clear `availability.MIN_DRAFTS`, or every ratio below falls
+# through to the fitted curve and stops being a count.
+OUTLOOK_DRAFTS = 30
+
+# Who the synthetic corpus takes, and when. `p11` at pick 55 is what gives the
+# corpus a depth worth conditioning on: without a deep pick nothing past the
+# third would be a counted answer at all.
+ALWAYS_EARLY = {"p7": 1, "p3": 2, "p19": 3}
+LATE = {"p11": 55}
+NEVER = "p25"
+OUTLOOK_SIX = ["p7", "p3", "p19", "p11", NEVER, "p2"]
+
+
+def _corpus(path, drafts=OUTLOOK_DRAFTS):
+    """A corpus with hand-countable histories, over the seeded board's ids.
+
+    Modelled on `tests/test_availability.py::_write_corpus` -- same recorder,
+    same row shapes -- but drafted from `p1..p30` so the ids line up with the
+    board this file seeds and the route can be asked about real favourites.
+    """
+    conn = dl.corpus_conn(str(path))
+    try:
+        for draft in range(drafts):
+            pool, picks = [], []
+            for i, player_id in enumerate(OUTLOOK_SIX):
+                pool.append({"player_id": player_id, "position": "RB",
+                             "team": "FA", "adp_rank": float(i + 1),
+                             "proj_points": 200.0, "espn_rank": float(i + 1),
+                             "espn_proj": 200.0, "bye": 5})
+            for player_id, pick_no in {**ALWAYS_EARLY, **LATE}.items():
+                picks.append({"pick_no": pick_no, "round": 1 + (pick_no - 1) // 8,
+                              "slot": 1, "owner_key": "o", "is_anonymous": False,
+                              "player_id": player_id, "position": "RB"})
+            dl.record(conn, dl.DraftRecord(
+                source=dl.SOURCE_MOCK, league_id="1", season=2026,
+                started_at=f"outlook-{draft}", teams=8, rounds=16,
+                picks=pd.DataFrame(picks), pool=pd.DataFrame(pool)))
+    finally:
+        conn.close()
+    return str(path)
+
+
+@pytest.fixture(scope="module")
+def outlook_table(tmp_path_factory):
+    """One counted table for the file. Nothing below writes to it."""
+    return av.load_table(
+        _corpus(tmp_path_factory.mktemp("outlook") / "corpus.duckdb"))
+
+
+@pytest.fixture
+def counted(monkeypatch, outlook_table):
+    """Pin the route's availability table to the synthetic corpus.
+
+    At `scoring.availability.cached_table`, which is where the route looks it
+    up -- `api/account.py` imports the name inside the function that uses it,
+    so the module attribute is what it reads.
+    """
+    monkeypatch.setattr(av, "cached_table", lambda *_a, **_k: outlook_table)
+    return outlook_table
+
+
+def _outlook(client, **params):
+    query = "&".join(f"{k}={v}" for k, v in params.items())
+    return client.get("/api/account/favorites/outlook"
+                      + (f"?{query}" if query else ""))
+
+
+def test_the_outlook_needs_a_session(client, monkeypatch):
+    """THE SAME GATE THE LIST ITSELF HAS. There is no account id to read
+    favourites under, and an outlook is those favourites with a number beside
+    each one."""
+    _signed_out(monkeypatch)
+
+    assert _outlook(client).status_code == 401
+
+
+@pytest.mark.parametrize("params", [
+    {"teams": 3}, {"teams": 17}, {"teams": 10, "slot": 0},
+    {"teams": 10, "slot": 11}, {"teams": 12, "slot": 13},
+])
+def test_a_seat_that_does_not_exist_is_refused(client, monkeypatch, counted,
+                                               params):
+    """422 with a sentence, not a clamp. The controls that send these are two
+    selects; a value outside the bounds means the client is confused, and
+    answering for some other seat would hide it."""
+    _sign_in(monkeypatch)
+    billing.set_favorites([NEW_ID], OUTLOOK_SIX)
+
+    res = _outlook(client, **params)
+
+    assert res.status_code == 422
+    assert isinstance(res.json()["detail"], str)
+
+
+def test_the_shape(client, monkeypatch, counted):
+    """Every key the card reads, and the picks belonging to the seat asked for.
+
+    Ten teams and the fifth seat is the default draft, and its first eight
+    turns are the snake's own: 5, then 16 (round two counts back), then 25.
+    """
+    _sign_in(monkeypatch)
+    billing.set_favorites([NEW_ID], OUTLOOK_SIX)
+
+    res = _outlook(client)
+
+    assert res.status_code == 200
+    assert res.headers["cache-control"] == "private, no-store"
+    body = res.json()
+    assert body["teams"] == 10 and body["slot"] == 5
+    assert body["picks"] == [5, 16, 25, 36, 45, 56, 65, 76]
+    assert len(body["players"]) == len(OUTLOOK_SIX)
+    for player in body["players"]:
+        assert set(player) == {
+            "player_id", "name", "position", "team", "headshot", "espn_rank",
+            "espn_adp", "market_rank", "avail", "best_pick"}
+        assert len(player["avail"]) == len(body["picks"])
+        assert all(chance is None or 0.0 <= chance <= 100.0
+                   for chance in player["avail"])
+        assert player["best_pick"] is None or player["best_pick"] in body["picks"]
+
+
+def test_the_seat_decides_the_picks(client, monkeypatch, counted):
+    """The first seat of an eight-team league turns at 1 and 16, not at 5."""
+    _sign_in(monkeypatch)
+    billing.set_favorites([NEW_ID], OUTLOOK_SIX)
+
+    body = _outlook(client, teams=8, slot=1).json()
+
+    assert body["picks"] == [1, 16, 17, 32, 33, 48, 49, 64]
+
+
+def test_a_player_the_corpus_always_takes_early_is_gone_by_pick_five(
+        client, monkeypatch, counted):
+    """THE CLAIM THE CARD MAKES. Thirty drafts, and every one of them took
+    `p7` with the first pick -- so the share of them in which he was still
+    there when pick 5 was made is zero, and it is zero at every turn after it.
+
+    `p25` is the control: pooled in all thirty and taken in none, so the same
+    arithmetic reads 100 and the zero cannot be the route answering zero for
+    everybody. Only as far as the corpus goes, though -- its deepest recorded
+    pick is 55, and a player it never saw taken is right-censored past that,
+    so picks 65 and 76 are the fitted curve's answer rather than a count (see
+    `scoring/availability.py` on censoring). The five turns inside the depth
+    are the counted ones.
+    """
+    _sign_in(monkeypatch)
+    billing.set_favorites([NEW_ID], OUTLOOK_SIX)
+
+    body = _outlook(client).json()
+    rows = {player["player_id"]: player for player in body["players"]}
+
+    assert body["picks"][:5] == [5, 16, 25, 36, 45]
+    assert rows["p7"]["avail"] == [0.0] * len(body["picks"])
+    assert rows["p7"]["best_pick"] is None
+    assert rows[NEVER]["avail"][:5] == [100.0] * 5
+    assert rows[NEVER]["best_pick"] is not None
+
+
+def test_the_rows_follow_the_saved_order(client, monkeypatch, counted):
+    """ORDER IS THE PREFERENCE (the same rule the GET above keeps). Sorting by
+    rank, or by how likely each one is to last, would be a different person's
+    list -- and the saved order here is deliberately neither."""
+    _sign_in(monkeypatch)
+    reversed_six = list(reversed(OUTLOOK_SIX))
+    billing.set_favorites([NEW_ID], reversed_six)
+
+    body = _outlook(client).json()
+
+    assert [player["player_id"] for player in body["players"]] == reversed_six
+
+
+def test_a_favourite_the_board_no_longer_names_carries_nulls(
+        client, monkeypatch, counted):
+    """A saved id can outlive the board that validated it -- the board is
+    rebuilt from new data and players leave it.
+
+    The row stays, with nulls. Dropping it would silently shorten somebody's
+    list; asking the counts about an id nothing has ranked returns "nobody is
+    about to draft him", which would print a player who no longer exists at
+    100% for every pick.
+    """
+    _sign_in(monkeypatch)
+    billing.set_favorites([NEW_ID], ["p7", "gone-from-the-board", "p3", "p19",
+                                     "p11"])
+
+    body = _outlook(client).json()
+    missing = body["players"][1]
+
+    assert missing["player_id"] == "gone-from-the-board"
+    assert missing["name"] is None and missing["market_rank"] is None
+    assert missing["avail"] == [None] * len(body["picks"])
+    assert missing["best_pick"] is None
+
+
+def test_the_same_question_is_answered_once(client, monkeypatch, counted):
+    """The board is the expensive half of this answer and none of its inputs
+    move while somebody slides two selects, so a repeat is served from the
+    cache. Counted at `_outlook_players`, which is everything downstream of
+    the board build."""
+    from api import account
+
+    _sign_in(monkeypatch)
+    billing.set_favorites([NEW_ID], OUTLOOK_SIX)
+    built = []
+    real = account._outlook_players
+    monkeypatch.setattr(account, "_outlook_players",
+                        lambda *a, **k: (built.append(1), real(*a, **k))[1])
+
+    first = _outlook(client, teams=14, slot=9).json()
+    second = _outlook(client, teams=14, slot=9).json()
+
+    assert first == second
+    assert len(built) == 1
+    # A different seat is a different question, so it is asked.
+    _outlook(client, teams=14, slot=10)
+    assert len(built) == 2
+
+
+def test_a_store_that_cannot_answer_is_a_503_here_too(client, monkeypatch,
+                                                      counted):
+    _sign_in(monkeypatch)
+
+    def _broken(*_a, **_k):
+        raise billing.StoreError("gone")
+
+    monkeypatch.setattr(billing, "_db", _broken)
+
+    assert _outlook(client).status_code == 503
