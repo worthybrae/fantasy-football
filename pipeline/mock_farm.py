@@ -1340,7 +1340,13 @@ def play_draft(conn, corpus_path, cookies, room, rng,
     The status vocabulary is deliberately explicit -- `recorded`,
     `incomplete`, `no_settings`, `no_slot`, `bad_shape`, `join_failed`,
     `socket_failed` -- because this runs unattended and "it did not work" is
-    not a usable morning report. Nothing here raises for an ordinary failure;
+    not a usable morning report.
+
+    `bad_shape` covers both ways a room can turn out not to be the room the
+    lobby advertised: a seat count the directory and the league disagree
+    about, and a scoring format that is not one of `FARM_SHAPES` once the
+    league's own settings are read. Neither is recoverable by drafting
+    anyway, and both are decided before the board is built. Nothing here raises for an ordinary failure;
     the caller counts statuses and moves on to the next room.
 
     `out` is wrapped in the credential scrubber here as well as in `farm`,
@@ -1403,8 +1409,29 @@ def play_draft(conn, corpus_path, cookies, room, rng,
         out(f"  the lobby says {listed} teams and the league says {teams} -- "
             "skipping rather than attributing picks to a guessed shape")
         return {"status": "bad_shape", "league_id": league_id}
-    out(f"  shape: {teams} teams x {rounds} rounds "
-        f"({league.scoring_format(settings)})")
+    fmt = league.scoring_format(settings)
+    out(f"  shape: {teams} teams x {rounds} rounds ({fmt})")
+    # THE REAL SHAPE, GATED. The directory row said what ESPN's lobby
+    # advertises; this is what the league itself is scored by, and they are
+    # not always the same thing. The directory publishes stat IDS and not
+    # point values, so a half-PPR room and a full-PPR one both read "PPR with
+    # receptions scored" from the lobby and only the settings can tell them
+    # apart -- which means the rotation can be handed a shape it never asked
+    # for, right after taking a seat.
+    #
+    # A draft is recorded under its REAL shape (`build_record` writes this
+    # same scoring table), so playing it anyway would file 128 picks under a
+    # shape nobody is farming, count towards nothing, and drag the pooled
+    # depth of the whole corpus down to whatever that room reached. Better to
+    # lose the seat.
+    #
+    # `league.scoring_format` and `draft_log.draft_format` are the same rule
+    # (both call `scoring.league.format_for_receptions`), so the shape gated
+    # here is exactly the shape the corpus will count it under.
+    if (teams, fmt) not in lobby.FARM_SHAPES:
+        out(f"  the room is really {teams}:{fmt}, which is not one of the "
+            f"shapes being farmed -- leaving without drafting")
+        return {"status": "bad_shape", "league_id": league_id}
 
     # Built BEFORE the wait below, not after: it is the only slow step left
     # (board + pool, measured 4-6s together) and the wait is dead time we

@@ -2184,3 +2184,82 @@ def test_the_live_file_goes_when_the_room_claim_does(monkeypatch, tmp_path):
     assert counts["by_status"] == {"crashed": 1, "recorded": 1}
     assert mf.live_drafts() == []
     assert mf.claims.claimed() == set()
+
+
+# ---------------------------------------------------------------------------
+# The gate after the join: the room's REAL shape, from its own settings.
+# ---------------------------------------------------------------------------
+
+
+def _room_settings(teams=8, receptions=1.0, rounds=16):
+    """A LeagueSettings the way `league.from_espn` would return one for a
+    mock room of this shape."""
+    import dataclasses
+
+    base = league.default_settings()
+    return dataclasses.replace(
+        base, teams=teams, bench=rounds - 10,
+        scoring={**base.scoring, "receptions": receptions})
+
+
+def _stub_join(monkeypatch, settings):
+    """Everything `play_draft` touches before the shape gate: the join, the
+    settings read, and nothing else. `build_tool` raises, so a test can tell
+    "got past the gate" from "stopped at it"."""
+    monkeypatch.setattr(mf, "http_fetch", lambda cookies: (lambda url: "{}"))
+    monkeypatch.setattr(lobby, "http_poster", lambda cookies: (lambda u, p: []))
+    monkeypatch.setattr(lobby, "join", lambda *a, **k: 3)
+    monkeypatch.setattr(mf, "fetch_league_settings", lambda *a, **k: {"raw": 1})
+    monkeypatch.setattr(mf.league, "from_espn", lambda raw: settings)
+
+    def _no_further(*a, **k):
+        raise AssertionError("built the board for a room it should have left")
+
+    monkeypatch.setattr(mf, "build_tool", _no_further)
+
+
+def _play(room):
+    return mf.play_draft(None, None, {"SWID": "{X}", "espn_s2": "s2"}, room,
+                         np.random.default_rng(0), season=2026,
+                         out=lambda *a: None)
+
+
+def test_a_room_whose_real_scoring_is_not_farmed_is_left_alone(monkeypatch):
+    """ESPN's directory publishes stat IDS, not point values, so a half-PPR
+    room and a full-PPR one both read "PPR, receptions scored" from the lobby.
+    Only the league's own settings tell them apart -- and by then we are in
+    the room.
+
+    Playing it anyway would file 128 picks under a shape nobody is farming
+    and drag the pooled depth of the whole corpus down to whatever that room
+    reached, so the seat is given up instead.
+    """
+    _stub_join(monkeypatch, _room_settings(teams=8, receptions=0.5))
+
+    result = _play(_live_room(leagueId=55, leagueSize=8))
+
+    assert result == {"status": "bad_shape", "league_id": 55}
+
+
+def test_a_room_that_really_is_the_advertised_shape_is_played(monkeypatch):
+    """The gate is the shape, not the settings read: a 10-team PPR room whose
+    settings agree with the lobby goes on to build its board."""
+    _stub_join(monkeypatch, _room_settings(teams=10, receptions=1.0))
+
+    with pytest.raises(AssertionError, match="should have left"):
+        _play(_live_room(leagueId=56, leagueSize=10))
+
+
+def test_the_gate_reads_the_same_rule_the_corpus_files_the_draft_under(
+        monkeypatch):
+    """`league.scoring_format` and `draft_log.draft_format` have to agree, or
+    the farm gates on one shape and records another."""
+    import json as _json
+
+    for receptions, fmt in ((1.0, "ppr"), (0.5, "half"), (0.0, "std")):
+        settings = _room_settings(teams=12, receptions=receptions)
+        assert league.scoring_format(settings) == fmt
+        assert dl.draft_format(_json.dumps(dict(settings.scoring))) == fmt
+    # 12:half is not farmed by default, 12:std and 12:ppr are.
+    assert (12, "half") not in lobby.FARM_SHAPES
+    assert (12, "std") in lobby.FARM_SHAPES
