@@ -450,8 +450,11 @@ this server anything takes the next seat.
 
 A seat is a row in `founder`, beside the entitlement it stands in for and
 keyed by the same custody account id. It is claimed lazily, by whichever
-request already had the account in hand: the gate, `GET /api/account/me`, or
-the favourites read. Reads span key versions like everything else in that
+request already had the account in hand. That is every caller of
+`billing.free_reason` — the gate, each poll of a draft room's state, `GET
+/api/billing/status` and the checkout — plus `GET /api/account/me` and the
+favourites read. Once the seats are gone those polls are answered from memory
+for half a minute at a time rather than by a write nothing can satisfy. Reads span key versions like everything else in that
 store, so a rotated custody key neither loses somebody their seat nor spends a
 second one on them. Ordinals are identities: one past the highest ever given,
 unique in the table, and never reused after a row is removed.

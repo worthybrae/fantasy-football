@@ -12,6 +12,8 @@ Nothing here talks to Stripe. The webhook's decisions are exercised through
 `stripe.Webhook.construct_event` returns once a signature has been verified --
 the verification itself is Stripe's library's job and is not re-tested here.
 """
+import threading
+
 import pytest
 
 from api import billing
@@ -1033,3 +1035,97 @@ def test_a_seat_that_could_not_be_claimed_is_said_once(monkeypatch, capsys):
     said = capsys.readouterr().out
     assert "founder seat could not be claimed" in said
     assert said.count("\n") == 1
+
+
+# -- what a poll costs once the seats are gone --------------------------------
+
+
+class _CountingLock:
+    """A stand-in for `_founder_lock` that says how often it was taken."""
+
+    def __init__(self):
+        self.taken = 0
+        self._real = threading.Lock()
+
+    def __enter__(self):
+        self.taken += 1
+        return self._real.__enter__()
+
+    def __exit__(self, *exc):
+        return self._real.__exit__(*exc)
+
+
+def _watch_writes_and_lock(monkeypatch):
+    """Every transaction the store is sent, and every take of the claim lock.
+
+    The transaction is the write: `claim_founder` is the only thing in this
+    module that sends one, and the SELECTs around it go through `execute`.
+    """
+    store = billing._db()
+    sent: list = []
+    real = store.transaction
+
+    def watched(statements):
+        sent.append(list(statements))
+        return real(statements)
+
+    monkeypatch.setattr(store, "transaction", watched)
+    lock = _CountingLock()
+    monkeypatch.setattr(billing, "_founder_lock", lock)
+    return sent, lock
+
+
+def test_a_full_list_costs_a_poll_no_lock_and_no_write(monkeypatch, capsys):
+    """WHAT THIS IS ABOUT, AND WHY IT IS WORTH A TEST OF ITS OWN.
+
+    Every caller of `claim_founder` is on a path something asks constantly:
+    a draft room polls its state every 2.5 seconds, and that poll asks
+    `free_reason`. Once the hundred seats are gone, the claim's insert is a
+    transaction whose `WHERE` can never be true -- and it was being sent on
+    every one of those polls, each one serialised behind the process-wide
+    lock. At 150 open rooms that is sixty pointless write transactions a
+    second, in a queue, on the one path in this app that must never be slow.
+
+    Three polls, because the first is allowed to discover the list is full and
+    the memo has to hold for the rest. Zero of them may write, and none of
+    them may take the lock -- not even the first, since the seat count is a
+    read and reads do not need it.
+    """
+    _limit(monkeypatch, 1)
+    assert billing.claim_founder(["acct-first"]) == 1
+
+    writes, lock = _watch_writes_and_lock(monkeypatch)
+    for _ in range(3):
+        assert billing.claim_founder_quietly(["acct-latecomer"]) is None
+
+    assert writes == [], f"{len(writes)} write transactions for a full list"
+    assert lock.taken == 0
+    # And nothing was swallowed on the way to that answer, which would look
+    # the same from outside.
+    assert capsys.readouterr().out == ""
+
+
+def test_a_seat_that_is_there_is_still_handed_out_at_once(monkeypatch):
+    """The memo answers "no", never "not yet". A reader arriving while seats
+    remain must not be told to come back in thirty seconds."""
+    _limit(monkeypatch, 3)
+    billing.claim_founder(["acct-first"])
+
+    assert billing.claim_founder(["acct-second"]) == 2
+    assert billing.claim_founder(["acct-third"]) == 3
+    assert billing.claim_founder(["acct-fourth"]) is None
+
+
+def test_a_full_list_is_re_read_when_the_memo_expires(monkeypatch):
+    """Thirty seconds, not forever. A limit raised by hand reaches the next
+    visitor within half a minute rather than at the next deploy."""
+    _limit(monkeypatch, 1)
+    billing.claim_founder(["acct-first"])
+    assert billing.claim_founder(["acct-second"]) is None
+
+    _limit(monkeypatch, 5)
+    # Still refused from memory...
+    assert billing.claim_founder(["acct-second"]) is None
+    # ...and asked again once the memos have aged out.
+    monkeypatch.setattr(billing, "_FULL_MEMO_SECONDS", 0.0)
+    assert billing.claim_founder(["acct-second"]) == 2
