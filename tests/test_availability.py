@@ -25,6 +25,18 @@ from scoring import availability as av
 # hand rather than read off the generator.
 DRAFTS = 42
 
+# HOW DEEP THIS FIXTURE'S COUNTS SPEAK. A shape's depth is the MEDIAN of its
+# drafts' last picks (see `availability._shape_counts`), and this corpus is
+# deliberately ragged: five drafts end at 40 where D is taken and the other
+# thirty-seven end at B's pick, 10 to 30. The median of those forty-two last
+# picks is 22.
+#
+# A real corpus is not ragged -- every complete 8x16 room ends at 128, so its
+# median, maximum and minimum are the same number -- which is exactly why the
+# median is what the pooled depth is built from: it is the corpus-shaped
+# answer that one broken room cannot move.
+FIXTURE_DEPTH = 22
+
 # The eight players who fill ESPN rank bucket 0. A bucket needs
 # MIN_BUCKET_PLAYERS distinct players before it is fitted at all, so one
 # player cannot be his own curve.
@@ -112,8 +124,9 @@ def test_table_counts_pooled_and_taken_drafts(corpus):
     assert t.taken_by[idx["a0"], 1] == DRAFTS
     assert t.taken_by[idx["n0"], av.MAX_PICK] == 0
     assert (np.diff(t.taken_by[idx["B"]]) >= 0).all()
-    # The deepest pick anyone was ever taken at: D, at 40.
-    assert t.max_pick_observed == 40
+    # How deep the counts speak: the median draft's last pick (see
+    # FIXTURE_DEPTH), not the deepest pick anyone ever made, which is D at 40.
+    assert t.max_pick_observed == FIXTURE_DEPTH
 
 
 def test_the_ratio_is_the_share_that_survived_the_picks_before_n(corpus):
@@ -236,8 +249,8 @@ def test_every_id_is_answered_in_one_vectorised_call(corpus):
 
 def test_past_the_deepest_recorded_pick_only_the_censored_go_to_the_curve(
         corpus):
-    """An 8-team corpus stops at pick 128 (here, 40), and what that means is
-    different for two kinds of player.
+    """An 8-team corpus stops at pick 128 (here, FIXTURE_DEPTH), and what that
+    means is different for two kinds of player.
 
     A player every one of his pooled drafts took inside that depth has
     COMPLETE evidence: "he is gone by 41" is a fact about him, not a gap in
@@ -248,17 +261,18 @@ def test_past_the_deepest_recorded_pick_only_the_censored_go_to_the_curve(
     at rank 240 went 0.00 at pick 128 and 1.00 at pick 129, and six real
     defenses read 1% at pick 126 and 50% at 139."""
     t = av.load_table(corpus)
-    assert t.max_pick_observed == 40
+    assert t.max_pick_observed == FIXTURE_DEPTH
 
-    # B goes at 10-30 in every draft he is pooled in. Nothing about him is
-    # censored, so pick 60 is answered by the counts: he is not there.
+    # B goes at 10-30 in every draft he is pooled in. Every one of those
+    # drafts took him before pick 60, which is a fact and not a gap, so the
+    # counts answer: he is not there.
     assert _at(t, ["B"], 10, 60, np.array([20.0]))[0] == pytest.approx(0.0)
     # n0 was still on the board when every one of those drafts ended.
     censored = _at(t, ["n0"], 10, 60, np.array([100.0]))[0]
     assert censored > 0.5, "the corpus never saw him taken"
     assert censored == pytest.approx(
         ndtr((100.0 - 59) / av.FALLBACK_SIGMA)
-        / ndtr((100.0 - 40) / av.FALLBACK_SIGMA))
+        / ndtr((100.0 - FIXTURE_DEPTH) / av.FALLBACK_SIGMA))
 
 
 def test_the_curve_takes_over_from_where_the_counts_left_him(corpus):
@@ -697,18 +711,24 @@ def eight_team_corpus(tmp_path_factory):
     return str(path)
 
 
-def _plus_twelve(base: str, tmp_path, drafts: int) -> str:
-    """The same corpus with `drafts` 12-team drafts added."""
+def _plus(base: str, tmp_path, teams: int, depth: int, drafts: int,
+          tag: str) -> str:
+    """A copy of `base` with `drafts` more drafts of one shape added."""
     import shutil
 
-    path = str(tmp_path / f"plus-{drafts}.duckdb")
+    path = str(tmp_path / f"plus-{tag}-{teams}-{depth}-{drafts}.duckdb")
     shutil.copy(base, path)
     conn = dl.corpus_conn(path)
     try:
-        _shape_drafts(conn, 12, TWELVE_DEPTH, drafts, "twelve")
+        _shape_drafts(conn, teams, depth, drafts, tag)
     finally:
         conn.close()
     return path
+
+
+def _plus_twelve(base: str, tmp_path, drafts: int) -> str:
+    """The same corpus with `drafts` full-length 12-team drafts added."""
+    return _plus(base, tmp_path, 12, TWELVE_DEPTH, drafts, "twelve")
 
 
 def _at_150(path):
@@ -745,8 +765,9 @@ def test_one_deeper_draft_does_not_uncensor_the_pool(eight_team_corpus,
                      / ndtr((CENSORED_RANK - EIGHT_DEPTH) / av.FALLBACK_SIGMA))
     assert expected == pytest.approx(0.10, abs=0.01)
     assert pooled == pytest.approx(expected, abs=1e-9)
-    # The pooled depth is the shallowest shape's, whatever the 12-team drafts
-    # reached.
+    # The pooled depth is the shallowest VOTING shape's, whatever the 12-team
+    # drafts reached. At one draft that shape has no vote yet (see
+    # MIN_DEPTH_DRAFTS); at 59 and 60 it has one and is deeper anyway.
     assert table.max_pick_observed == EIGHT_DEPTH
     if twelve:
         assert table.shapes[(12, "ppr")].max_pick_observed == TWELVE_DEPTH
@@ -778,3 +799,66 @@ def test_the_answer_never_rises_as_the_pick_gets_later(eight_team_corpus,
                    for n in range(21, 260, 7)]
         assert answers == sorted(answers, reverse=True), (shape, answers)
         assert all(0.0 <= a <= 1.0 for a in answers)
+
+
+# The pick a room that fell over stops at: the socket dropped, everybody
+# left, and the draft was recorded with what it had.
+BROKEN_DEPTH = 30
+
+
+def test_one_short_room_does_not_drop_everybodys_depth(eight_team_corpus,
+                                                       tmp_path):
+    """THE OTHER WAY THE POOLED DEPTH CAN GO WRONG. It is a minimum over the
+    shapes present, so where one deep draft could once have raised it, one
+    BROKEN draft could drop it -- and a 12-team mock that died at pick 30
+    would hand most of the board to the parametric curve for everybody, on
+    the strength of one bad night.
+
+    A shape gets a vote once it holds `MIN_DEPTH_DRAFTS` drafts, so one does
+    nothing.
+    """
+    path = _plus(eight_team_corpus, tmp_path, 12, BROKEN_DEPTH, 1, "broken")
+    table, pooled, _as_twelve = _at_150(path)
+
+    assert table.shapes[(12, "ppr")].drafts == 1
+    assert table.shapes[(12, "ppr")].max_pick_observed == BROKEN_DEPTH
+    assert table.max_pick_observed == EIGHT_DEPTH
+    expected = float(ndtr((CENSORED_RANK - 149) / av.FALLBACK_SIGMA)
+                     / ndtr((CENSORED_RANK - EIGHT_DEPTH) / av.FALLBACK_SIGMA))
+    assert pooled == pytest.approx(expected, abs=1e-9)
+
+
+@pytest.mark.parametrize("short_rooms,votes", [
+    (av.MIN_DEPTH_DRAFTS - 1, False),
+    (av.MIN_DEPTH_DRAFTS, True),
+])
+def test_a_shape_that_really_ends_early_does_bound_the_pool(
+        eight_team_corpus, tmp_path, short_rooms, votes):
+    """The threshold is a bar for evidence, not a way of ignoring shapes. Five
+    12-team drafts that all stopped at pick 30 are a fact about those drafts,
+    and the pooled counts genuinely cannot speak past it: those five say
+    nothing about pick 31 and they are in every pooled denominator."""
+    assert av.MIN_DEPTH_DRAFTS == 5
+    path = _plus(eight_team_corpus, tmp_path, 12, BROKEN_DEPTH, short_rooms,
+                 "broken")
+    table, _pooled, _as_twelve = _at_150(path)
+
+    assert table.max_pick_observed == (BROKEN_DEPTH if votes else EIGHT_DEPTH)
+
+
+def test_one_truncated_draft_does_not_move_its_shapes_depth(eight_team_corpus,
+                                                            tmp_path):
+    """And the same protection INSIDE a shape that already votes. The 8-team
+    shape has 854 drafts ending at 128 and one that fell over at 30; its
+    depth is the median of their last picks, so the broken one is a rounding
+    error rather than a cliff. A maximum would ignore it and a minimum would
+    obey it; only the median is a statement about the shape."""
+    path = _plus(eight_team_corpus, tmp_path, 8, BROKEN_DEPTH, 1, "broken")
+    table, pooled, _as_twelve = _at_150(path)
+
+    assert table.shapes[(8, "ppr")].drafts == 855
+    assert table.shapes[(8, "ppr")].max_pick_observed == EIGHT_DEPTH
+    assert table.max_pick_observed == EIGHT_DEPTH
+    expected = float(ndtr((CENSORED_RANK - 149) / av.FALLBACK_SIGMA)
+                     / ndtr((CENSORED_RANK - EIGHT_DEPTH) / av.FALLBACK_SIGMA))
+    assert pooled == pytest.approx(expected, abs=1e-9)

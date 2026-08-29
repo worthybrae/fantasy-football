@@ -102,6 +102,21 @@ MIN_DRAFTS = 25
 # handing most of the board to the curve.
 MIN_SHAPE_DRAFTS = 60
 
+# How many drafts of a shape it takes before that shape gets a vote on how
+# deep the POOLED counts can speak (see `_shape_counts`). The pooled depth is
+# the shallowest shape's, which is right when a shape's depth is a fact about
+# the shape and wrong when it is a fact about one room: a single 12-team mock
+# that fell over at pick 30 -- the socket dropped, everybody left -- would
+# otherwise pull every player's depth down to 30 and hand most of the board
+# to the parametric curve.
+#
+# Five, the same size of evidence `MIN_COMPLETE_DRAFTS` asks for and for the
+# same kind of reason: this is not a ratio anybody prints, it is the bar for
+# "this is where drafts of this shape end" being a statement about the shape
+# rather than about a bad night. Deliberately a different constant, since
+# what they bound has nothing else in common.
+MIN_DEPTH_DRAFTS = 5
+
 # Width of the ADP buckets the fallback curve is fitted in. Narrow enough
 # that the top of the board (where one pick of ADP is a real difference in
 # when a player goes) is not averaged flat, wide enough that every bucket in
@@ -189,9 +204,17 @@ class ShapeCounts(NamedTuple):
     deepest pick in the file (see `_shape_counts`).
 
     It is carried for every shape, including the ones under
-    `MIN_SHAPE_DRAFTS` that hold no arrays: one 12-team draft is enough to
-    make the pooled counts censored past 128, and the pooled depth has to
-    know that before the shape is big enough to answer for itself.
+    `MIN_SHAPE_DRAFTS` that hold no arrays: a handful of 12-team drafts is
+    enough to make the pooled counts censored past 128, and the pooled depth
+    has to know that long before the shape is big enough to answer for
+    itself.
+
+    IT IS THE MEDIAN of the shape's drafts' last picks, not the deepest pick
+    anybody in it ever made. A shape's depth is meant to say where drafts of
+    this shape END, and one room that ran to 192 while the rest stopped at
+    128 is not evidence that they all did -- nor is one room that fell over
+    at pick 30 evidence that none of them got past it. The median moves only
+    when most of the shape moves.
     """
     pooled: np.ndarray | None
     taken_by: np.ndarray | None
@@ -451,9 +474,10 @@ def _shape_counts(draft_column, heads, codes, n_players: int, pick,
     `was_taken` their picks, so every shape's arrays land on the SAME player
     index as the pooled ones and `table.index` answers for all of them.
 
-    THE POOLED DEPTH IS THE SHALLOWEST SHAPE'S, NOT THE DEEPEST PICK. This is
-    the whole reason the depth is computed here rather than off the pick
-    column, and getting it wrong is not a rounding error. The pooled counts
+    THE POOLED DEPTH IS THE SHALLOWEST SHAPE'S, NOT THE DEEPEST PICK -- and a
+    shape's own depth is the MEDIAN of its drafts' last picks. This is the
+    whole reason the depth is computed here rather than off the pick column,
+    and getting it wrong is not a rounding error. The pooled counts
     mix every shape together, so a player is "still on the board at pick 150"
     in them only if every group of drafts they were pooled in actually
     reached pick 150. An 8-team draft ends at 128 and records nothing after
@@ -465,12 +489,18 @@ def _shape_counts(draft_column, heads, codes, n_players: int, pick,
     read ~90% still there at pick 150, against ~10% from the curve.
 
     So: one shape's drafts can only speak as far as that shape went, and the
-    pooled table can only speak as far as the shallowest of them. A shape
-    with a SINGLE draft counts -- it is in the pooled numerator and
-    denominator from its first row, so it bounds what the pool can say from
-    its first row too. Shapes whose drafts hold no picks at all are skipped
-    (they bound nothing), and a corpus where no shape can be read at all
-    leaves the caller its own maximum.
+    pooled table can only speak as far as the shallowest of them.
+
+    TWO THINGS KEEP ONE BAD ROOM OUT OF THAT MINIMUM, because the rule above
+    is a floor and a floor is exactly what a single broken draft can drag
+    down. A shape votes only once it holds `MIN_DEPTH_DRAFTS` drafts -- one
+    12-team mock that died at pick 30 says nothing yet about where 12-team
+    mocks end -- and a shape's depth is the median of its drafts' last picks
+    rather than the deepest or the shallowest, so one truncated room among
+    hundreds does not move it either. Shapes whose drafts hold no picks at
+    all are skipped (they bound nothing), and a corpus where no shape can
+    vote leaves the caller its own maximum, which is where this was before
+    shapes existed.
 
     A SHAPE'S DRAFTS ARE COUNTED FROM THE POOL, not from the head rows: a
     draft with no pool snapshot (every draft `draft_log.backfill_history`
@@ -500,6 +530,14 @@ def _shape_counts(draft_column, heads, codes, n_players: int, pick,
     # the pooled depth like everybody else. They are not a SHAPE -- nothing
     # can ask for them by name -- so they never reach `out`.
     groups = {x for x in per_draft}
+    # Each draft's OWN last pick, which is what a shape's depth is a median
+    # of. Grouped once here rather than per shape: it is one pass over the
+    # picks either way, and every group below is a slice of the answer.
+    last_pick = np.zeros(len(draft_ids), dtype=float)
+    if was_taken.any():
+        by_draft = pd.Series(pick[was_taken]).groupby(
+            draft_codes[was_taken]).max()
+        last_pick[by_draft.index.to_numpy()] = by_draft.to_numpy()
     out: dict = {}
     depths = []
     width = MAX_PICK + 1
@@ -507,12 +545,19 @@ def _shape_counts(draft_column, heads, codes, n_players: int, pick,
         mine = np.array([x == shape for x in per_draft], dtype=bool)
         rows_here = mine[draft_codes]
         drafted = rows_here & was_taken
-        depth = min(int(pick[drafted].max()), MAX_PICK) if drafted.any() else 0
-        if depth:
+        drafts = int(mine.sum())
+        # The median of this shape's drafts' last picks, over the drafts that
+        # made a pick at all -- a draft with a pool and no picks says nothing
+        # about where the shape ends. Floored (`int` of a .5 median on an
+        # even count), which errs shallow, which is the safe direction: the
+        # cost of a depth one pick short is one pick answered by the curve.
+        ended = last_pick[mine]
+        ended = ended[ended > 0]
+        depth = min(int(np.median(ended)), MAX_PICK) if ended.size else 0
+        if depth and ended.size >= MIN_DEPTH_DRAFTS:
             depths.append(depth)
         if shape is None:
             continue
-        drafts = int(mine.sum())
         if drafts < MIN_SHAPE_DRAFTS:
             out[shape] = ShapeCounts(None, None, drafts, depth)
             continue
