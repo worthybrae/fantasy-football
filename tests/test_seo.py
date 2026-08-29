@@ -35,24 +35,62 @@ def _no_warm_thread(monkeypatch):
 
 @pytest.fixture
 def corpus(tmp_path, monkeypatch):
-    """Ten drafts, 4 teams x 2 rounds (8 picks each), so shares are round
-    numbers. `star` goes first in every draft; `mid` goes 2nd, 3rd or 4th
-    (picks 2,3,4,2,3,4,2,3,4,2 -- mean 2.9); `late` is taken in two drafts
-    (20%); `once` is taken in the last draft only (10%, still above
-    MIN_SHARE's 2%). `twin_a` and `twin_b` share a display name to exercise
-    slug collisions. `ghost` is taken in every draft (TE) but never gets a
-    name in the `board` fixture -- an unresolved name, to prove such a
-    player gets no page."""
+    """Ten drafts, 4 teams x 6 rounds (24 picks each), so shares are round
+    numbers -- and so that every behaviour these pages have can be told
+    apart from the plausible wrong version of it.
+
+    WHO IS IN IT, AND WHAT EACH ONE IS FOR.
+
+    `star` (RB) goes first in every draft: the concentrated player, and the
+    ten human picks the deliberation clock needs to say anything at all.
+
+    `mid` (RB) goes 2nd, 3rd or 4th (2,3,4,2,3,4,2,3,4,2): mean 2.9 against
+    a median of 3.0, so a page that prints the mean where it says median is
+    a page that fails.
+
+    `swing` (QB) is the awkward one, and deliberately: picks 9, 10, 11, 14,
+    15, 17, 18, 22, 23, 24. Mean 16.3 against a median of 16.0. p10 is 10 and
+    p20 is 11. Rounds 3 and 6 hold three of his picks each and round 4 holds
+    two -- so the modal round is a tie that is NOT the median's round, and
+    the median's round is the answer.
+
+    `ghost` goes at pick 8 in eight drafts and pick 24 in two, which puts the
+    median of the first tight end taken at 8 where the average would say 11.
+
+    `late` (WR) is taken in two drafts and POOLED IN FOUR: the honest
+    denominator, 50% of the drafts he was on the board for against 20% of
+    the drafts. `once` (WR) is taken in the last draft only (10%, still
+    above MIN_SHARE's 2%) and carries a sentinel ESPN ADP on the board
+    fixture.
+
+    `twin_a` and `twin_b` share a display name, to exercise slug collisions
+    -- and they are the corpus's two robots: `twin_a` is autodrafted in
+    every draft and `twin_b` is taken by slot 2, which is `my_slot`, the
+    farm's own seat. Both are 88 and 99 seconds where every human pick is
+    30, so a clock that counts them says something different from a clock
+    that does not.
+
+    `ghost` (TE) is taken in every draft but never gets a name in the
+    `board` fixture -- an unresolved name, to prove such a player gets no
+    page. He is also where the tight end run starts, above.
+ `adp_seattle_defense` is the same problem one step worse: a
+    synthetic id with no `players` row at all, the way every D/ST and every
+    rookie reaches these pages.
+    """
     path = tmp_path / "corpus.duckdb"
     conn = dl.corpus_conn(str(path))
+    # The awkward quarterback, one pick per draft. See the docstring.
+    swing = [9, 10, 11, 14, 15, 17, 18, 22, 23, 24]
+    # The tight end, whose first-pick median (8) and average (11.2) differ.
+    ghost = [8, 8, 8, 8, 24, 24, 8, 8, 8, 8]
     for i in range(10):
         conn.execute(
             "INSERT INTO draft_log (draft_id, source, league_id, season,"
             " recorded_at, teams, rounds, my_slot, scoring_json, settings_json,"
-            " human_seats) VALUES (?, 'mock', '1', 2026, ?::TIMESTAMP, 4, 2,"
-            " NULL, NULL, NULL, 3)", [f"d{i}", f"2026-08-24 {i:02d}:00:00"])
+            " human_seats) VALUES (?, 'mock', '1', 2026, ?::TIMESTAMP, 4, 6,"
+            " 2, NULL, NULL, 3)", [f"d{i}", f"2026-08-24 {i:02d}:00:00"])
         picks = [("star", 1), ("mid", 2 + (i % 3)), ("twin_a", 5), ("twin_b", 6),
-                 ("ghost", 8)]
+                 ("ghost", ghost[i]), ("swing", swing[i])]
         if i < 2:
             picks.append(("late", 7))
         if i == 9:
@@ -68,29 +106,45 @@ def corpus(tmp_path, monkeypatch):
                 position = "TE"
             elif pid in ("star", "mid"):
                 position = "RB"
+            elif pid == "swing":
+                position = "QB"
             elif pid.startswith("adp_"):
                 position = "DST"
             else:
                 position = "WR"
+            # THE TWO KINDS OF PICK THE CLOCK MUST NOT COUNT. `twin_a` is
+            # the autodrafter and `twin_b` is the farm's own seat; every
+            # other pick here is a person, and every person takes 30
+            # seconds.
+            autodrafted = pid == "twin_a"
+            seconds = 88.0 if pid == "twin_a" else 99.0 if pid == "twin_b" else 30.0
             conn.execute(
                 "INSERT INTO draft_log_pick (draft_id, pick_no, round, slot,"
                 " owner_key, is_anonymous, player_id, position, adp_rank,"
                 " proj_points, autodrafted, had_owner, seconds_to_pick,"
                 " clock_seconds) VALUES (?, ?, ?, ?, 'o', FALSE, ?, ?, 1.0,"
-                " 100.0, FALSE, TRUE, 5.0, 30.0)",
+                " 100.0, ?, TRUE, ?, 120.0)",
                 [f"d{i}", pick_no, (pick_no - 1) // 4 + 1, (pick_no - 1) % 4 + 1,
-                 pid, position])
+                 pid, position, autodrafted, seconds])
         # THE POOL, which is what `of` and the availability strip count
-        # against. Everybody is on the board in every draft here, so the
-        # honest denominator and the draft count agree and every share above
-        # stays what it was before the pool existed.
-        for pid in ("star", "mid", "twin_a", "twin_b", "ghost", "late", "once",
+        # against. Everybody is on the board in every draft except `late`,
+        # who is on it in four -- ESPN added him to its board in the middle
+        # of the summer, and the drafts before that could not have taken
+        # him. He is taken in two, which is 20% of the drafts and 50% of the
+        # drafts he could have gone in.
+        for pid in ("star", "mid", "twin_a", "twin_b", "ghost", "once", "swing",
                     "adp_seattle_defense"):
             conn.execute(
                 "INSERT INTO draft_log_pool (draft_id, player_id, position,"
                 " team, adp_rank, proj_points, espn_rank, espn_proj, bye)"
                 " VALUES (?, ?, 'RB', 'CHI', 1.0, 100.0, 1.0, 100.0, 9)",
                 [f"d{i}", pid])
+        if i < 4:
+            conn.execute(
+                "INSERT INTO draft_log_pool (draft_id, player_id, position,"
+                " team, adp_rank, proj_points, espn_rank, espn_proj, bye)"
+                " VALUES (?, 'late', 'WR', 'NYJ', 1.0, 100.0, 1.0, 100.0, 9)",
+                [f"d{i}"])
     conn.close()
     monkeypatch.setattr(market.dl, "CORPUS_PATH", str(path))
     market._CACHE.clear()
@@ -129,6 +183,7 @@ def board():
         # ESPN id anywhere below: he is the player every crosswalk misses.
         ("late", "Late Guy", None, None, None, None, None),
         ("once", "Once Guy", None, None, None, None, None),
+        ("swing", "Swing Guy", None, None, None, None, None),
         ("twin_a", "Josh Allen", None, None, None, None, None),
         ("twin_b", "Josh Allen", None, None, None, None, None),
         ("ghost", None, None, None, None, None, None),
@@ -196,6 +251,11 @@ def board():
     conn.executemany("INSERT INTO espn_adp VALUES (?, ?, ?, ?, ?)", [
         (4259545, "D'Andre Swift", "RB", "CHI", 61.0),
         (999, "Amon-Ra St. Brown", "RB", "DET", 5.5),   # RB in the fixture corpus
+        # THE SENTINEL. ESPN publishes five hundred players and parks
+        # everybody its lobby never drafts just under 170 -- 329 rows of the
+        # real five hundred sit above 165. It is not a draft position and
+        # must not be read as one.
+        (555, "Once Guy", "WR", "NYJ", 169.5),
     ])
     yield conn
     conn.close()
@@ -215,7 +275,7 @@ def test_slugs_are_ascii_lowercase_and_stable():
 
 def test_build_adp_places_every_player_by_average_pick(corpus, board):
     data = seo.build_adp(board)
-    assert data["drafts"] == 10 and data["teams"] == 4 and data["rounds"] == 2
+    assert data["drafts"] == 10 and data["teams"] == 4 and data["rounds"] == 6
     assert str(data["updated"]) == "2026-08-24"
     ranked = [p["player_id"] for p in data["players"]]
     assert ranked[:2] == ["star", "mid"]
@@ -223,10 +283,110 @@ def test_build_adp_places_every_player_by_average_pick(corpus, board):
     star = data["by_slug"]["dandre-swift"]
     assert star["adp"] == 1.0 and star["taken"] == 10 and star["share"] == 1.0
     assert star["usual_round"] == 1 and star["rank"] == 1 and star["pos_rank"] == 1
-    assert star["hist"][0] == 10 and len(star["hist"]) == 8
+    assert star["hist"][0] == 10 and len(star["hist"]) == 24
     mid = data["by_slug"]["amon-ra-st-brown"]
     assert mid["adp"] == 2.9 and mid["p10"] == 2 and mid["p90"] == 4
     assert mid["low"] == 2 and mid["high"] == 4
+
+
+# -- the six behaviours the fixture exists to tell apart ---------------------
+#
+# Each of these fails if the obvious wrong version of the code is written
+# instead, and the docstring names which wrong version. A fixture where every
+# player is pooled in every draft, every pick is human and every pick is in
+# round 1 passes all six either way, which is what this corpus was rebuilt to
+# stop being.
+
+def test_the_denominator_is_the_drafts_he_was_on_the_board_for(corpus, board):
+    """MUTATION: `of = total`. `late` was taken in two drafts and was on the
+    board in four -- ESPN added him in the middle of the summer. He goes in
+    half the drafts that could have taken him and a fifth of all of them."""
+    late = seo.build_adp(board)["by_slug"]["late-guy"]
+    assert late["taken"] == 2 and late["of"] == 4
+    assert late["share"] == 0.2 and late["of_share"] == 0.5
+    body = _client(board).get("/adp/late-guy").text
+    assert "50% of the 4 drafts" in body
+
+
+def test_the_middle_of_his_picks_is_a_median_not_an_average(corpus, board):
+    """MUTATION: median -> mean. `mid` averages 2.9 with a median of 3;
+    `swing` averages 14.7 with a median of 14."""
+    d = seo.build_adp(board)
+    mid = d["by_slug"]["amon-ra-st-brown"]
+    assert mid["adp"] == 2.9 and mid["median"] == 3.0
+    swing = d["by_slug"]["swing-guy"]
+    assert swing["adp"] == 16.3 and swing["median"] == 16.0
+    assert "median 3" in _client(board).get("/adp/amon-ra-st-brown").text
+
+
+def test_the_range_is_the_tenth_percentile_not_the_twentieth(corpus, board):
+    """MUTATION: p10 -> p20. `swing` goes at 9, 10, 11, 14, 15, 17, 18, 22,
+    23, 24: the tenth percentile of that is 10 and the twentieth is 11."""
+    swing = seo.build_adp(board)["by_slug"]["swing-guy"]
+    assert swing["p10"] == 10 and swing["p90"] == 23
+    assert swing["low"] == 9 and swing["high"] == 24
+
+
+def test_the_usual_round_is_the_median_round_not_the_modal_one(corpus, board):
+    """MUTATION: the median rule -> `Counter(...).most_common(1)`. Three of
+    `swing`'s ten picks are in round 3 and three are in round 6, so the mode
+    is a tie neither side of which is where the middle of his picks falls:
+    round 4, on two picks. A player the rooms really do concentrate keeps his
+    round either way, which is the other half of the rule."""
+    d = seo.build_adp(board)
+    swing = d["by_slug"]["swing-guy"]
+    assert swing["usual_round"] == 4 and swing["usual_share"] == 0.2
+    assert d["by_slug"]["dandre-swift"]["usual_round"] == 1
+
+
+def test_a_position_run_starts_at_the_median_first_pick(corpus, board):
+    """MUTATION: `_runs` median -> avg. `ghost` is the only tight end here,
+    so the first TE off the board is his own pick: 8 in eight drafts and 24
+    in two, which is a median of 8 and an average of 11.2. One room reaching
+    for a position in the last round does not move where the run starts."""
+    runs = {r["position"]: r for r in seo.build_adp(board)["runs"]}
+    assert runs["TE"]["pick"] == 8 and runs["TE"]["round"] == 2
+    assert runs["TE"]["drafts"] == 10
+
+
+def test_the_deliberation_clock_counts_people_only(corpus, board):
+    """MUTATION: drop `autodrafted` and `my_slot` from `_clock`. Every human
+    pick in this corpus takes 30 seconds. `twin_a` is autodrafted in every
+    draft (88 seconds) and `twin_b` is taken by the farm's own seat (99), and
+    neither number is a fact about anybody deliberating."""
+    d = seo.build_adp(board)
+    assert d["seconds"] == 30.0
+    assert d["by_slug"]["dandre-swift"]["seconds"] == 30.0
+    assert d["by_slug"]["josh-allen"]["seconds"] is None      # autodrafted
+    assert d["by_slug"]["josh-allen-2"]["seconds"] is None    # the farm's seat
+
+
+def test_a_seat_snakes_back_on_an_even_round(corpus, board):
+    """MUTATION: drop the snake from `_seats`. Round 2 of a 4-team draft runs
+    backwards: seat 1 picks last at pick 8 and seat 4 picks first at pick 5.
+    Round 3 runs out again."""
+    d = seo.build_adp(board)
+    assert [(s["slot"], s["pick"]) for s in seo._seats(d, 2)] == [(1, 8), (2, 7), (4, 5)]
+    assert [(s["slot"], s["pick"]) for s in seo._seats(d, 3)] == [(1, 9), (2, 10), (4, 12)]
+    body = html.unescape(_client(board).get("/adp/round/2").text)
+    assert "Seat 1 — pick 8" in body and "Seat 4 — pick 5" in body
+
+
+def test_espns_undrafted_sentinel_is_not_a_draft_position(corpus, board):
+    """MUTATION: read a sentinel ADP as a rank. `once` carries ESPN's
+    169.5, which is where ESPN parks a player its lobby never drafts -- 329
+    of its five hundred rows are up there. He has no place on the vs-ESPN
+    scale, and his page says so instead of comparing him with a placeholder.
+    """
+    d = seo.build_adp(board)
+    once = d["by_slug"]["once-guy"]
+    assert once["espn_adp"] == 169.5 and once["espn_undrafted"] is True
+    assert once["vs_espn"] is None and once["espn_pick"] is None
+    body = _client(board).get("/adp/once-guy").text
+    assert "undrafted on ESPN's board" in body
+    assert "comes off it around pick" not in body
+    # ...and the players ESPN really does rank still get the comparison.
+    assert d["by_slug"]["dandre-swift"]["vs_espn"] is not None
 
 
 def test_build_adp_resolves_name_team_and_espn_adp(corpus, board):
@@ -420,8 +580,8 @@ def test_the_sitemap_lists_every_page_once(corpus, board):
     assert "https://espnfantasydraft.com/adp" in locs
     assert "https://espnfantasydraft.com/adp/dandre-swift" in locs
     assert "https://espnfantasydraft.com/adp/josh-allen-2" in locs
-    assert "https://espnfantasydraft.com/adp/round/2" in locs
-    assert "https://espnfantasydraft.com/adp/round/3" not in locs   # two rounds
+    assert "https://espnfantasydraft.com/adp/round/6" in locs
+    assert "https://espnfantasydraft.com/adp/round/7" not in locs   # six rounds
     assert "https://espnfantasydraft.com/adp/rb" in locs
     assert "https://espnfantasydraft.com/adp/k" not in locs   # no K in the fixture at all
     assert "https://espnfantasydraft.com/adp/te" not in locs  # `ghost` is TE, but never published
@@ -615,7 +775,7 @@ def test_a_new_draft_in_the_corpus_retires_every_rendered_page(corpus, board):
         "INSERT INTO draft_log (draft_id, source, league_id, season,"
         " recorded_at, teams, rounds, my_slot, scoring_json, settings_json,"
         " human_seats) VALUES ('d10', 'mock', '1', 2026,"
-        " '2026-08-25 00:00:00'::TIMESTAMP, 4, 2, NULL, NULL, NULL, 3)")
+        " '2026-08-25 00:00:00'::TIMESTAMP, 4, 6, NULL, NULL, NULL, 3)")
     conn.execute(
         "INSERT INTO draft_log_pick (draft_id, pick_no, round, slot,"
         " owner_key, is_anonymous, player_id, position, adp_rank,"
