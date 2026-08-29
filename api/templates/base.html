@@ -14,60 +14,192 @@
 <meta property="og:description" content="{{ description }}">
 <meta property="og:url" content="{{ site }}{{ path }}">
 <meta property="og:image" content="{{ headshot or (site ~ '/demo-poster.jpg') }}">
-<meta name="twitter:card" content="summary">
+{# A large card needs an image of its own to be worth asking for. A player
+   page has one (a 320px face); an index has the product's poster, which is
+   already wide, so both take the large card and only a page with neither
+   falls back to the small one. #}
+<meta name="twitter:card" content="{% if headshot or not noindex %}summary_large_image{% else %}summary{% endif %}">
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 {% if breadcrumbs %}<script type="application/ld+json">{{ breadcrumbs | tojson }}</script>{% endif %}
+{% if person_schema %}<script type="application/ld+json">{{ person_schema | tojson }}</script>{% endif %}
 {% if faq_schema %}<script type="application/ld+json">{{ faq_schema | tojson }}</script>{% endif %}
 <style>
-:root{--bg-0:#0a0b0e;--bg-1:#121319;--bg-2:#1b1d25;--border:#262932;--text-1:#e8eaef;--text-2:#98a0b0;--text-3:#565b69;--accent:#ffb454;--ok:#0ca30c;--fail:#d03b3b;--radius:3px;--mono:'JetBrains Mono',ui-monospace,'SFMono-Regular',Menlo,Consolas,monospace}
+/* The app's own tokens (web/src/index.css), so a reader who arrives here from
+   a search and then opens the draft room does not meet two products. No
+   webfont is linked: these pages are read by crawlers and by people on slow
+   connections, and a face nobody has installed is not worth a round trip. */
+:root{
+--bg-0:#0a0b0e;--bg-1:#121319;--bg-2:#1b1d25;--border:#262932;
+--text-1:#e8eaef;--text-2:#98a0b0;--text-3:#565b69;
+--accent:#ffb454;--accent-bg:rgba(255,180,84,.12);--accent-border:rgba(255,180,84,.5);
+--ok:#4eb850;--fail:#d56262;
+--qb:#3987e5;--rb:#d95926;--wr:#199e70;--te:#c98500;--k:#d55181;--dst:#9085e9;
+--sans:'Inter Variable',system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;
+--mono:'JetBrains Mono',ui-monospace,'SFMono-Regular',Menlo,Consolas,monospace;
+--t-micro:10px;--t-xs:11px;--t-sm:12px;--t-base:13px;--t-md:15px;--t-lg:18px;--t-xl:22px;
+--r:3px}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg-0);color:var(--text-2);font:15px/1.5 -apple-system,BlinkMacSystemFont,'Inter','Segoe UI',Helvetica,Arial,sans-serif}
-a{color:var(--text-1);text-decoration:none}a:hover{text-decoration:underline}
-.bar{display:flex;align-items:center;gap:16px;padding:10px 20px;background:var(--bg-1);border-bottom:1px solid var(--border)}
-.bar .mark{font-family:var(--mono);font-weight:600;letter-spacing:.06em;color:var(--text-1)}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg-0);color:var(--text-2);
+ font:var(--t-md)/1.6 var(--sans);font-variant-numeric:tabular-nums}
+a{color:var(--text-1);text-decoration:none}
+a:hover{color:var(--accent)}
+:focus-visible{outline:2px solid var(--accent-border);outline-offset:2px;border-radius:2px}
+
+/* -- shell ---------------------------------------------------------------- */
+.bar{display:flex;align-items:center;gap:10px 18px;flex-wrap:wrap;
+ padding:10px 20px;background:var(--bg-1);border-bottom:1px solid var(--border)}
+.bar .mark{font-family:var(--mono);font-weight:600;font-size:var(--t-base);
+ letter-spacing:.06em;color:var(--text-1)}
 .bar .mark span{color:var(--accent)}
-.bar nav{display:flex;gap:14px;font-size:13px;color:var(--text-2)}
-.bar .cta{margin-left:auto;background:var(--accent);color:#1a1200;font-weight:600;font-size:13px;padding:7px 12px;border-radius:var(--radius)}
-main{max-width:960px;margin:0 auto;padding:28px 20px 48px}
-h1{margin:0 0 6px;font-size:26px;line-height:1.2;color:var(--text-1);letter-spacing:-.01em}
-h2{margin:32px 0 10px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-3)}
-.prov{margin:0 0 22px;font-family:var(--mono);font-size:12px;color:var(--text-3)}
-.crumbs{font-family:var(--mono);font-size:12px;color:var(--text-3);margin-bottom:14px}
-.crumbs a{color:var(--text-2)}
-table{width:100%;border-collapse:collapse;font-size:14px}
-th{text-align:left;font-family:var(--mono);font-weight:500;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3);padding:6px 8px;border-bottom:1px solid var(--border)}
-td{padding:7px 8px;border-bottom:1px solid var(--border);vertical-align:middle}
-td.n,th.n{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
-.pos{display:inline-block;min-width:34px;text-align:center;font-family:var(--mono);font-size:11px;padding:1px 5px;border-radius:var(--radius);background:var(--bg-2);color:var(--text-2)}
-.figs{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin:18px 0}
-.fig{background:var(--bg-1);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px}
-.fig .k{font-family:var(--mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3)}
-.fig .v{font-family:var(--mono);font-size:24px;color:var(--text-1);margin-top:2px;white-space:nowrap}
-.fig .v small{font-size:13px;color:var(--text-2)}
-.head{display:flex;align-items:center;gap:16px}
-.head img{width:72px;height:72px;border-radius:50%;object-fit:cover;background:var(--bg-2)}
-.chart{background:var(--bg-1);border:1px solid var(--border);border-radius:var(--radius);padding:12px}
-.chart svg{display:block;width:100%;height:auto}
-.near{display:flex;flex-wrap:wrap;gap:8px}
-.near a{background:var(--bg-1);border:1px solid var(--border);border-radius:var(--radius);padding:6px 10px;font-size:13px}
-.near a b{font-family:var(--mono);font-weight:500;color:var(--accent);margin-right:6px}
-.links{display:flex;flex-wrap:wrap;gap:8px 14px;font-size:13px;margin-top:8px}
-.links a{color:var(--text-2)}
-.intro{max-width:66ch;margin:0 0 22px;color:var(--text-2)}
-.faq{max-width:66ch}
-.faq details{border-bottom:1px solid var(--border);padding:10px 0}
-.faq summary{cursor:pointer;color:var(--text-1);font-size:14px;list-style:none}
-.faq summary::-webkit-details-marker{display:none}
-.faq summary::before{content:'+';font-family:var(--mono);color:var(--accent);margin-right:8px}
-.faq details[open] summary::before{content:'\2212'}
-.faq p{margin:8px 0 2px 18px;font-size:14px}
-.ask{margin-top:40px;padding:20px;background:var(--bg-1);border:1px solid var(--border);border-radius:var(--radius)}
-.ask p{margin:0 0 12px;color:var(--text-2)}
-footer{max-width:960px;margin:0 auto;padding:0 20px 32px;font-size:12px;color:var(--text-3)}
+.bar nav{display:flex;gap:16px;font-family:var(--mono);font-size:var(--t-xs);
+ letter-spacing:.08em;text-transform:uppercase;color:var(--text-2)}
+.bar nav a{color:var(--text-2)}
+.bar nav a[aria-current]{color:var(--accent)}
+.cta{background:var(--accent);color:#1a1200;font-weight:600;font-size:var(--t-base);
+ padding:8px 14px;border-radius:var(--r);white-space:nowrap;display:inline-block}
+.cta:hover{color:#1a1200;filter:brightness(1.08)}
+.bar .cta{margin-left:auto}
+main{max-width:1040px;margin:0 auto;padding:26px 20px 56px}
+footer{max-width:1040px;margin:0 auto;padding:0 20px 40px;font-size:var(--t-sm);color:var(--text-3)}
 footer a{color:var(--text-2)}
+
+/* -- type ----------------------------------------------------------------- */
+h1{margin:0 0 4px;font-size:clamp(24px,5vw,34px);line-height:1.15;color:var(--text-1);
+ letter-spacing:-.02em;font-weight:650}
+h2{display:flex;align-items:center;gap:12px;margin:38px 0 12px;
+ font-family:var(--mono);font-size:var(--t-xs);font-weight:500;letter-spacing:.12em;
+ text-transform:uppercase;color:var(--text-3)}
+h2::after{content:"";flex:1;height:1px;background:var(--border)}
+h3{margin:0 0 8px;font-size:var(--t-base);color:var(--text-1);font-weight:600}
+p{margin:0 0 12px}
+.prov{margin:0;font-family:var(--mono);font-size:var(--t-sm);color:var(--text-3)}
+.crumbs{font-family:var(--mono);font-size:var(--t-sm);color:var(--text-3);margin:0 0 16px}
+.crumbs a{color:var(--text-2)}
+.intro{max-width:68ch;margin:14px 0 4px;color:var(--text-2)}
+.note{font-size:var(--t-sm);color:var(--text-3);max-width:68ch}
+.mono{font-family:var(--mono)}
+
+/* -- tables --------------------------------------------------------------- */
+/* `overflow-y:clip` rather than the default `auto` a single-axis overflow
+   would otherwise compute to: an auto scrollport of its own would take the
+   sticky header out of the page's, and the header would never stick. */
+.scroll{overflow-x:auto;overflow-y:clip;margin:0 -20px;padding:0 20px}
+table{width:100%;border-collapse:collapse;font-size:var(--t-base)}
+th{position:sticky;top:0;z-index:1;text-align:left;background:var(--bg-1);
+ font-family:var(--mono);font-weight:500;font-size:var(--t-micro);letter-spacing:.09em;
+ text-transform:uppercase;color:var(--text-3);padding:8px;border-bottom:1px solid var(--border);
+ white-space:nowrap}
+td{padding:7px 8px;border-bottom:1px solid var(--border);vertical-align:middle}
+tbody tr:hover{background:var(--bg-1)}
+td.n,th.n{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
+td.who{white-space:nowrap}
+td.who img{width:24px;height:24px;border-radius:50%;object-fit:cover;
+ background:var(--bg-2);vertical-align:middle;margin-right:8px}
+.sortable th[data-k]{cursor:pointer;user-select:none}
+.sortable th[data-k]:hover{color:var(--text-2)}
+.sortable th[aria-sort]{color:var(--accent)}
+.sortable th[aria-sort="ascending"]::after{content:" \2191"}
+.sortable th[aria-sort="descending"]::after{content:" \2193"}
+
+/* -- badges and signs ----------------------------------------------------- */
+.pos{display:inline-block;min-width:36px;text-align:center;font-family:var(--mono);
+ font-size:var(--t-micro);letter-spacing:.05em;padding:2px 5px;border-radius:var(--r);
+ background:var(--bg-2);border:1px solid var(--border);color:var(--text-2)}
+.pos.QB{color:var(--qb)}.pos.RB{color:var(--rb)}.pos.WR{color:var(--wr)}
+.pos.TE{color:var(--te)}.pos.K{color:var(--k)}.pos.DST{color:var(--dst)}
+.up{color:var(--ok)}
+.down{color:var(--fail)}
+.dim{color:var(--text-3)}
+
+/* -- cards ---------------------------------------------------------------- */
+.figs{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:8px;margin:18px 0}
+.fig{background:var(--bg-1);border:1px solid var(--border);border-radius:var(--r);padding:11px 13px}
+.fig .k{font-family:var(--mono);font-size:var(--t-micro);letter-spacing:.09em;
+ text-transform:uppercase;color:var(--text-3)}
+.fig .v{font-family:var(--mono);font-size:var(--t-xl);color:var(--text-1);
+ margin-top:3px;line-height:1.15;white-space:nowrap}
+.fig .v small{font-size:var(--t-base);color:var(--text-3)}
+.fig .s{font-size:var(--t-sm);color:var(--text-3);margin-top:2px}
+.card{background:var(--bg-1);border:1px solid var(--border);border-radius:var(--r);padding:14px 16px}
+.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px}
+.cols ol{margin:0;padding:0;list-style:none;font-size:var(--t-base)}
+.cols li{display:flex;align-items:baseline;gap:8px;padding:3px 0;
+ border-bottom:1px solid var(--bg-2)}
+.cols li:last-child{border-bottom:0}
+.cols li .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cols li .d{font-family:var(--mono);font-size:var(--t-sm)}
+
+/* -- the hero ------------------------------------------------------------- */
+.hero{display:flex;align-items:flex-start;gap:18px;flex-wrap:wrap}
+.hero img{width:128px;height:128px;border-radius:var(--r);object-fit:cover;
+ background:var(--bg-2);border:1px solid var(--border)}
+.hero .who{flex:1;min-width:min(100%,260px)}
+.facts{display:flex;flex-wrap:wrap;gap:6px 14px;margin:8px 0 0;padding:0;list-style:none;
+ font-family:var(--mono);font-size:var(--t-sm);color:var(--text-3)}
+.facts b{color:var(--text-2);font-weight:500}
+.lede{max-width:64ch;margin:16px 0 0;font-size:var(--t-lg);line-height:1.5;color:var(--text-1)}
+.lede b{color:var(--accent);font-weight:650;font-family:var(--mono)}
+
+/* -- still there ---------------------------------------------------------- */
+.chips{display:grid;grid-template-columns:repeat(auto-fit,minmax(78px,1fr));gap:6px;margin:0 0 10px}
+.chip{background:var(--bg-1);border:1px solid var(--border);border-radius:var(--r);
+ padding:8px 9px 7px}
+.chip .k{font-family:var(--mono);font-size:var(--t-micro);color:var(--text-3);
+ letter-spacing:.06em;text-transform:uppercase}
+.chip .v{font-family:var(--mono);font-size:var(--t-lg);color:var(--text-1);line-height:1.2}
+.chip .track{height:3px;margin-top:6px;background:var(--bg-2);border-radius:2px;overflow:hidden}
+.chip .track i{display:block;height:100%;background:var(--accent)}
+.chart{background:var(--bg-1);border:1px solid var(--border);border-radius:var(--r);padding:12px}
+.chart svg{display:block;width:100%;height:auto}
+.chart figcaption{font-size:var(--t-sm);color:var(--text-3);margin-top:8px}
+.mix{display:flex;height:24px;border-radius:var(--r);overflow:hidden;border:1px solid var(--border)}
+.mix i{display:block;height:100%}
+.mix .QB{background:var(--qb)}.mix .RB{background:var(--rb)}.mix .WR{background:var(--wr)}
+.mix .TE{background:var(--te)}.mix .K{background:var(--k)}.mix .DST{background:var(--dst)}
+.key{display:flex;flex-wrap:wrap;gap:6px 14px;margin:8px 0 0;padding:0;list-style:none;
+ font-family:var(--mono);font-size:var(--t-sm);color:var(--text-3)}
+
+/* -- lists ---------------------------------------------------------------- */
+.near{display:flex;flex-wrap:wrap;gap:6px}
+.near a{background:var(--bg-1);border:1px solid var(--border);border-radius:var(--r);
+ padding:6px 10px;font-size:var(--t-base);display:flex;align-items:center;gap:8px}
+.near a b{font-family:var(--mono);font-weight:500;color:var(--accent)}
+.links{display:flex;flex-wrap:wrap;gap:6px}
+.links a{background:var(--bg-1);border:1px solid var(--border);border-radius:var(--r);
+ padding:5px 10px;font-size:var(--t-sm);font-family:var(--mono);color:var(--text-2)}
+.links a:hover{border-color:var(--accent-border);color:var(--accent)}
+.news{margin:0;padding:0;list-style:none}
+.news li{padding:9px 0;border-bottom:1px solid var(--border);font-size:var(--t-base)}
+.news li:last-child{border-bottom:0}
+.news .meta{font-family:var(--mono);font-size:var(--t-sm);color:var(--text-3);display:block}
+
+/* -- faq and cta ---------------------------------------------------------- */
+.faq{max-width:68ch}
+.faq details{border-bottom:1px solid var(--border);padding:11px 0}
+.faq summary{cursor:pointer;color:var(--text-1);font-size:var(--t-md);list-style:none}
+.faq summary::-webkit-details-marker{display:none}
+.faq summary::before{content:'+';font-family:var(--mono);color:var(--accent);margin-right:10px}
+.faq details[open] summary::before{content:'\2212'}
+.faq p{margin:8px 0 2px 20px;font-size:var(--t-base)}
+.ask{margin-top:44px;padding:20px;background:var(--bg-1);border:1px solid var(--border);
+ border-radius:var(--r)}
+.ask p{margin:0 0 14px;max-width:64ch}
+
+@media (max-width:720px){
+  main{padding:20px 16px 44px}
+  .scroll{margin:0 -16px;padding:0 16px}
+  .scroll table{min-width:660px}
+  .hero img{width:88px;height:88px}
+  .bar{padding:10px 16px}
+  .bar .cta{margin-left:0;order:3;width:100%;text-align:center}
+}
+@media (prefers-reduced-motion:reduce){
+  *{animation:none!important;transition:none!important;scroll-behavior:auto!important}
+}
 </style>
-{# Google tag (gtag.js). These pages are otherwise script-free by design --
-   see the design doc -- and this stays the one exception: it is guarded on
+{# Google tag (gtag.js). These pages carry no application JavaScript -- see
+   the design doc -- and this stays the one exception: it is guarded on
    hostname, appended asynchronously, and nothing on the page waits for it.
    Without it every ADP page, which is most of what a search engine sees of
    this site, would be invisible in analytics. #}
@@ -88,7 +220,11 @@ if (location.hostname === 'espnfantasydraft.com') {
 <body>
 <header class="bar">
   <a class="mark" href="/">ESPN <span>DRAFT ASSIST</span></a>
-  <nav><a href="/adp">ADP</a><a href="/mocks">Mock drafts</a></nav>
+  <nav>
+    <a href="/">Home</a>
+    <a href="/adp"{% if path and path.startswith('/adp') %} aria-current="page"{% endif %}>ADP</a>
+    <a href="/mocks">Mocks</a>
+  </nav>
   <a class="cta" href="/">Try it on your draft</a>
 </header>
 <main>
