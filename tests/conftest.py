@@ -24,7 +24,16 @@ import pytest
 # test's collection -- `api/main.py` guards its own loader against pytest,
 # but the shell's variable needs no loader. `_no_shared_postgres` below
 # repeats this per test, for a test that sets it and forgets.
-os.environ.pop("SUPABASE_DB_URL", None)
+#
+# ALL FOUR, not just the DSN. `pipeline/pgstore.dsn()` will now COMPOSE a
+# pooler DSN out of a project URL and a database password when no connection
+# string is set, which is the whole point of it -- and which means a
+# developer with `SUPABASE_URL` and `SUPABASE_DB_PASSWORD` in their shell,
+# and no `SUPABASE_DB_URL` at all, would have handed this suite a live
+# database that the old one-name scrub had nothing to catch.
+for _leaked in ("SUPABASE_DB_URL", "SUPABASE_URL", "SUPABASE_DB_PASSWORD",
+                "SUPABASE_DB_REGION"):
+    os.environ.pop(_leaked, None)
 
 # AND THE WARM-UPS, AT IMPORT, which the two session fixtures below cannot
 # reach. `api/main.py` ends with `app = create_app()` at module scope, so
@@ -103,9 +112,9 @@ def _boot_warm_off():
 def _no_shared_postgres(monkeypatch):
     """No test reaches a shared Postgres unless it switches one on itself.
 
-    SUPABASE_DB_URL is the only thing that chooses between a DuckDB file and
-    Postgres, in every store that has both -- custody, billing, live-session
-    records. So a developer with that variable exported in their shell, which
+    The Supabase variables are the only thing that chooses between a DuckDB
+    file and Postgres, in every store that has both -- custody, billing,
+    live-session records. So a developer with them exported in their shell, which
     is exactly what they need to run the `*_pg.py` files or a local server
     against Supabase, would otherwise point this entire suite at whatever
     database a deployment uses. `tests/test_billing.py` would then grant and
@@ -113,9 +122,15 @@ def _no_shared_postgres(monkeypatch):
 
     The `*_pg.py` files read SUPABASE_TEST_DB_URL instead and set this one
     themselves, in their own autouse fixture, which runs after this.
+
+    The other three go with it: a project URL and a password compose a DSN
+    just as well as one written out, so leaving them behind would leave the
+    same shared database reachable under a different spelling.
     """
     from pipeline import pgstore
-    monkeypatch.delenv(pgstore.DSN_ENV, raising=False)
+    for name in (pgstore.DSN_ENV, pgstore.PROJECT_URL_ENV,
+                 pgstore.PASSWORD_ENV, pgstore.REGION_ENV):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture(autouse=True)
