@@ -1810,6 +1810,99 @@ button.plan-target:focus-visible {
   white-space: nowrap;
 }
 
+/* AND A FLOOR UNDER IT, which is the half `max-width: 0` was missing.
+   Measured on the live room: at 1440 the name column came out 119px wide
+   and at 1280 it was 80px, so the table read "Javonte Willi...",
+   "Tetairoa Mc", "DeVonta Sm" -- every name clipped, the team and bye gone
+   entirely, in the one column the whole table is scanned by. That is what
+   `max-width: 0` buys: it makes the column's own minimum zero, so the name
+   pays for all thirteen other columns down to nothing.
+
+   `min-width` on both the header and the cells puts the minimum back. It is
+   a minimum, not a width: on a wide room the column still takes every pixel
+   the others leave, which is how it got to 359px at 1680 and still does. On
+   a narrow one the table would rather be wide than illegible -- and the
+   compact tiers below make sure it never has to be, by dropping columns
+   instead. 176px holds the longest name on the board plus the meta. */
+.avail-table th.avail-col-name,
+.avail-table td.avail-col-name {
+  min-width: 176px;
+}
+
+/* -- COMPACT MODE: FOUR TIERS, LEAST USEFUL COLUMN FIRST --
+   Fourteen columns do not fit a 1280px window. Measured before this
+   existed: `.draft-main` is the viewport less the 340px rail, so 940px at
+   1280 -- and the table's own minimum was 1039px. It overflowed by 99px,
+   and what fell off the right edge was the Draft button, so at that width
+   the room could not be drafted from without scrolling sideways for a
+   control that was invisible.
+
+   So the columns drop in order of what they are worth under a pick clock,
+   and the room keeps a table that fits at every width instead of a wider
+   one that has to be scrolled:
+
+     Cons     the five-source consensus rank -- a second opinion on ADP,
+              which is still in the table beside where it was
+     Growth   points per game against last season, a meter
+     Reliable week-to-week consistency, a meter
+     Rank     where he finished at his position in past seasons
+
+   All four are on the player's own profile, which the name opens, and the
+   first three are also on the target cards above the table. What never
+   drops is the nine that answer "who, how good, will he last, what does he
+   cost, take him": ESPN, Pos, Player, the season's scores, Health, Proj/G,
+   Lasts, Edge, ADP, and the Draft button.
+
+   `display: none`, not `visibility`, so a dropped column leaves the
+   accessibility tree with the pixels rather than being read out as an empty
+   cell in every one of 250 rows. */
+@media (max-width: 1500px) {
+  .avail-table .avail-col-cons,
+  .avail-table .avail-col-change {
+    display: none;
+  }
+}
+
+@media (max-width: 1360px) {
+  .avail-table .avail-col-steady {
+    display: none;
+  }
+}
+
+@media (max-width: 1200px) {
+  .avail-table .avail-col-finish {
+    display: none;
+  }
+}
+
+/* The last thing to go, and the only one that is a chart rather than a
+   rating: below this the room is narrower than the product is designed for
+   and the nine columns that decide a pick are what is left. */
+@media (max-width: 1120px) {
+  .avail-table .avail-col-games {
+    display: none;
+  }
+
+  /* And the name's floor comes down with it. Below this width the rail
+     alone is a third of the window and there is no arrangement of nine
+     columns that is comfortable; 140px still holds every first name and
+     most full ones, and it is what keeps the Draft button on screen rather
+     than behind a sideways scroll. */
+  .avail-table th.avail-col-name,
+  .avail-table td.avail-col-name {
+    min-width: 140px;
+  }
+}
+
+/* Tighter than the table's own 10px, and only on the columns that hold a
+   right-aligned number. Four digits do not need the gutter a sentence does,
+   and the 6px this returns per column is 30px back into the name. */
+.avail-table th.avail-col-num,
+.avail-table td.avail-col-num {
+  padding-left: 6px;
+  padding-right: 8px;
+}
+
 /* -- last season's per-game bars --
 
    THE ONE RULE THIS COLUMN HAS TO OBEY: it must not make the row taller. The

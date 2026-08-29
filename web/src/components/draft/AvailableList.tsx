@@ -829,7 +829,13 @@ const AvailableRow = memo(function AvailableRow({
                   )}
                 </td>
                 <td className="avail-col-num mono avail-adp">{fmtRank(c.espn_adp)}</td>
-                <td className="avail-col-num mono avail-adp">{fmtRank(c.market_rank)}</td>
+                {/* `avail-col-cons` carries no width of its own -- it is the
+                    handle the compact-mode media queries in App.css need to
+                    drop this column on a narrow room, which is the whole
+                    reason it is not just another `avail-col-num`. */}
+                <td className="avail-col-num avail-col-cons mono avail-adp">
+                  {fmtRank(c.market_rank)}
+                </td>
                 <td className="avail-col-btn">
                   <button
                     type="button"
@@ -1472,7 +1478,7 @@ export default function AvailableList({
                 two markets can be read against each other -- the owner
                 asked to see where ESPN disagrees with everyone else without
                 going into the profile for it. */}
-            {sortableTh('cons', 'Cons', 'avail-col-num')}
+            {sortableTh('cons', 'Cons', 'avail-col-num avail-col-cons')}
             <th
               className="avail-col-btn"
               onMouseEnter={(e) => scheduleTip('draft', e.currentTarget)}
