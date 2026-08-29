@@ -3,7 +3,7 @@ import { fetchMarketOverview, fetchPlanPreview,
          type MarketOverview, type PlanPreview } from '../api'
 import FounderBadge from './FounderBadge'
 import { Logo } from './Logo'
-import { CorpusNote, PickRule } from './PlanPreview'
+import { CorpusNote, PickRule, shapeLabel } from './PlanPreview'
 
 // THE FRONT DOOR, for somebody who has connected nothing.
 //
@@ -140,14 +140,15 @@ export function Hero({ onStart }: { onStart: () => void }) {
           <p className="fd-seat-say">
             <strong className="mono">{Math.round(opening.share * 100)}%</strong>
             {' '}of {plan.corpus.drafts.toLocaleString()} recorded
-            {' '}{plan.corpus.teams}-team drafts open this way from here.
+            {' '}{shapeLabel(plan.corpus.teams, plan.corpus.format)} drafts
+            {' '}open this way from here.
           </p>
           {/* The seat drawn is the corpus's own, so the picks and the
               positions under them are one draft. The visitor's league is
               probably a different size, and the page says which size this
               one is in the same words the dashboard uses. */}
           {plan.corpus.teams !== DEMO_TEAMS && (
-            <CorpusNote teams={plan.corpus.teams} />
+            <CorpusNote corpus={plan.corpus} readerTeams={DEMO_TEAMS} />
           )}
         </aside>
       )}

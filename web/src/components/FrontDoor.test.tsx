@@ -51,7 +51,7 @@ const ASKED: PlanPreview = {
   opening_rounds: 5,
   opening_observed: 854,
   position_runs: { QB: 41, TE: 33, K: 120, DST: 118 },
-  corpus: { teams: 8, rounds: 16, drafts: 854 },
+  corpus: { teams: 8, rounds: 16, format: 'ppr', drafts: 854 },
   targets: [
     { pick_no: 6, round: 1, target: player('Bijan Robinson', 'RB'),
       alternates: [player('Ja’Marr Chase', 'WR')] },
@@ -118,7 +118,7 @@ test('the hero draws the seat it is talking about', async () => {
   expect(within(seat).getByText('Seat 6 of 8 · every turn you own')).toBeTruthy()
   const rule = within(seat).getByRole('img', { name: 'Picks 6, 11, 22, 27' })
   expect(within(rule).getByText('27')).toBeTruthy()
-  expect(within(seat).getByText(/854 recorded 8-team drafts open this way/))
+  expect(within(seat).getByText(/854 recorded 8-team PPR drafts open this way/))
     .toBeTruthy()
 })
 
@@ -139,14 +139,14 @@ test('the seat drawn names the drafts it came out of, being nobody\u2019s league
 
        const seat = await screen.findByLabelText('One seat, drawn')
        expect(within(seat).getByText(
-         /Counted in 8-team drafts, the only shape recorded so far/))
+         /Counted in 8-team PPR drafts — the shape with the most on record; your 10-team league will get its own numbers once enough are recorded/))
          .toBeTruthy()
      })
 
 test('an archive already of the shape asked about is asked once, and unqualified',
      async () => {
        fetchPlanPreview.mockResolvedValue(
-         { ...ASKED, corpus: { teams: 10, rounds: 16, drafts: 412 } })
+         { ...ASKED, corpus: { teams: 10, rounds: 16, format: 'ppr', drafts: 412 } })
        render(<Hero onStart={() => {}} />)
 
        const seat = await screen.findByLabelText('One seat, drawn')

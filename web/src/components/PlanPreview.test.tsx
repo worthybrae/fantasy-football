@@ -37,7 +37,7 @@ const PLAN: Preview = {
   opening_rounds: 5,
   opening_observed: 854,
   position_runs: { QB: 41, TE: 33, K: null, DST: null },
-  corpus: { teams: 8, rounds: 16, drafts: 854 },
+  corpus: { teams: 8, rounds: 16, format: 'ppr', drafts: 854 },
   targets: [
     {
       pick_no: 6, round: 1,
@@ -100,7 +100,7 @@ test('the opening sentence names the share and the drafts it counted',
        expect(said.textContent).toMatch(/6th seat of 8/)
        expect(said.textContent).toMatch(/RB–WR–WR–RB–TE/)
        expect(said.textContent).toMatch(/31%/)
-       expect(said.textContent).toMatch(/854 recorded 8-team ESPN drafts/)
+       expect(said.textContent).toMatch(/854 recorded 8-team PPR ESPN drafts/)
      })
 
 test('the runs are quoted in the round of the drafts they were counted in',
@@ -120,7 +120,8 @@ test('a seat asking about a shape the archive has not recorded is told so',
        render(<PlanPreview teams={12} slot={6} />)
 
        await screen.findByText(/usually opens/)
-       expect(screen.getByText(/Counted in 8-team drafts, the only shape/))
+       expect(screen.getByText(
+         /Counted in 8-team PPR drafts — the shape with the most on record; your 12-team league will get its own numbers once enough are recorded/))
          .toBeTruthy()
        // And the sentence stops claiming the seat is "of 12", since the path
        // it is about was not walked in a twelve-team room.

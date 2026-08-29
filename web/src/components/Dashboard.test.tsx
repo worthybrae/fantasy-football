@@ -62,7 +62,7 @@ const PLAN = {
   opening: [{ path: ['RB', 'WR', 'WR', 'RB', 'TE'], count: 265, share: 0.31 }],
   opening_rounds: 5, opening_observed: 854,
   position_runs: { QB: 41, TE: 33, K: null, DST: null },
-  corpus: { teams: 8, rounds: 16, drafts: 854 },
+  corpus: { teams: 8, rounds: 16, format: 'ppr', drafts: 854 },
   targets: [{
     pick_no: 5, round: 1,
     target: {

@@ -2120,6 +2120,11 @@ export interface PreviewTurn {
 export interface PreviewCorpus {
   teams: number
   rounds: number
+  /** `'ppr'` | `'half'` | `'std'` -- `pipeline/draft_log.draft_format`'s own
+   *  three values. Named alongside `teams` everywhere the corpus's shape is
+   *  shown: a size on its own says nothing about when a receiver comes off
+   *  the board. */
+  format: string
   drafts: number
 }
 

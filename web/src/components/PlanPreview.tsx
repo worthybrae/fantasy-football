@@ -82,8 +82,29 @@ export function PickRule({ picks, path }: { picks: number[]; path: string[] }) {
   )
 }
 
-/** WHICH DRAFTS THE PICTURE WAS COUNTED IN, when that is not the shape the
- *  reader is looking at their own league through.
+/** The word a reader would use for a corpus format. Matches the three values
+ *  `pipeline/draft_log.draft_format` returns; anything else prints as itself
+ *  rather than crashing on a shape this build has not been taught the name
+ *  of yet. */
+const FORMAT_LABELS: Record<string, string> = {
+  ppr: 'PPR', half: 'half-PPR', std: 'standard',
+}
+
+function formatLabel(format: string): string {
+  return FORMAT_LABELS[format] ?? format
+}
+
+/** "8-team PPR", "10-team standard": the one phrase used everywhere a
+ *  corpus's shape is named, so a reader is told which scoring the numbers
+ *  were counted in and not just how many teams. */
+export function shapeLabel(teams: number, format: string): string {
+  return `${teams}-team ${formatLabel(format)}`
+}
+
+/** WHICH DRAFTS THE PICTURE WAS COUNTED IN -- named every time, because the
+ *  farm now rotates over more than one shape and a caller that only spoke up
+ *  on a mismatch would go quiet the day its own two happened to agree on
+ *  team count alone while disagreeing on format.
  *
  *  One sentence, in one place, because both surfaces need it and two
  *  wordings of the same caveat is how one of them quietly goes stale. The
@@ -91,13 +112,24 @@ export function PickRule({ picks, path }: { picks: number[]; path: string[] }) {
  *  is drawing the reader's league with the corpus's paths on it, so it adds
  *  the half that matters there -- the pick numbers are still theirs.
  */
-export function CorpusNote({ teams, ownPicks = false }: {
-  teams: number
+export function CorpusNote({ corpus, readerTeams, ownPicks = false }: {
+  corpus: { teams: number; format: string }
+  /** The team count the reader actually asked about -- the seat's own
+   *  league on the dashboard, the seat the page opened with on the landing
+   *  page. Compared against `corpus.teams` to say whether this is the
+   *  reader's own shape or a stand-in for it. */
+  readerTeams: number
   ownPicks?: boolean
 }) {
+  const shape = shapeLabel(corpus.teams, corpus.format)
+  const sameShape = corpus.teams === readerTeams
   return (
     <p className="pp-note">
-      Counted in {teams}-team drafts, the only shape recorded so far.
+      {sameShape
+        ? `Counted in ${shape} drafts.`
+        : `Counted in ${shape} drafts — the shape with the most on record; `
+          + `your ${readerTeams}-team league will get its own numbers once `
+          + 'enough are recorded.'}
       {ownPicks && <> Your pick numbers above are your own league&rsquo;s.</>}
     </p>
   )
@@ -133,14 +165,16 @@ function Opening({ plan }: { plan: Preview }) {
         <strong className="pp-path">{top.path.join('–')}</strong>
         {' — '}
         {pct(top.share)} of {corpus.drafts.toLocaleString()} recorded
-        {' '}{corpus.teams}-team ESPN drafts.
+        {' '}{shapeLabel(corpus.teams, corpus.format)} ESPN drafts.
       </p>
       {runs.length > 0 && (
         <p className="pp-say pp-say-2">
           In those drafts the board empties in this order: {runs.join(', and ')}.
         </p>
       )}
-      {!sameShape && <CorpusNote teams={corpus.teams} ownPicks />}
+      {!sameShape && (
+        <CorpusNote corpus={corpus} readerTeams={plan.teams} ownPicks />
+      )}
     </>
   )
 }
