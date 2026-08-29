@@ -1377,6 +1377,46 @@ WARM_ON_REGISTER = os.environ.get("DEMO_WARM", "1") != "0"
 _REFRESH: dict = {"running": False, "warming": False}
 
 
+def refresh_in_background(build) -> bool:
+    """Rebuild off the request path, one at a time. Returns whether it started.
+
+    THE READER NEVER WAITS FOR A BUILD. That is the whole rule: a build is
+    seconds of real work, and a page that puts one in front of a visitor
+    spends those seconds showing an empty room with a spinner in it -- which
+    is what this endpoint used to do to the first person through the door
+    after every restart.
+
+    The single-flight guard is not an optimisation. Without it a burst of
+    readers arriving on a stale entry would each start a build of the same
+    answer, and the machine would spend its cores computing one board several
+    times over.
+
+    A MODULE-LEVEL FUNCTION, not the closure it used to be, and that is the
+    point of it being here rather than inside `register_demo_routes`. A test
+    that needs the page to hold still has to be able to stop the rebuild, and
+    a closure cannot be patched: `mock.patch.object(demo, "refresh_behind",
+    create=True)` invented an attribute nothing read, the real thread started
+    anyway, and the test then failed or passed depending on which of the two
+    got there first. The flag is set AND cleared in here for the same reason
+    -- a replacement that does nothing leaves no state behind for the next
+    test in the process to trip over.
+    """
+    with _LOCK:
+        if _REFRESH["running"]:
+            return False
+        _REFRESH["running"] = True
+
+    def run():
+        try:
+            build()
+        finally:
+            with _LOCK:
+                _REFRESH["running"] = False
+
+    threading.Thread(target=run, name="demo-refresh", daemon=True).start()
+    return True
+
+
 def _persist(payload: dict) -> None:
     """Keep the built answer, so the next process start is not a cold one."""
     try:
@@ -1497,34 +1537,6 @@ def register_demo_routes(app, conn=None):
             _persist(built)
         return built
 
-    def refresh_behind():
-        """Rebuild off the request path, one at a time.
-
-        THE READER NEVER WAITS FOR A BUILD. That is the whole rule: a build is
-        seconds of real work, and a page that puts one in front of a visitor
-        spends those seconds showing an empty room with a spinner in it --
-        which is what this endpoint used to do to the first person through the
-        door after every restart.
-
-        The guard is not an optimisation. Without it a burst of readers
-        arriving on a stale entry would each start a build of the same
-        answer, and the machine would spend its cores computing one board
-        several times over.
-        """
-        with _LOCK:
-            if _REFRESH["running"]:
-                return
-            _REFRESH["running"] = True
-
-        def run():
-            try:
-                build_now()
-            finally:
-                with _LOCK:
-                    _REFRESH["running"] = False
-
-        threading.Thread(target=run, name="demo-refresh", daemon=True).start()
-
     @app.get("/api/demo/live")
     def demo_live(response: Response):
         # The landing page's hero, anonymous and the same for everybody. Five
@@ -1572,8 +1584,10 @@ def register_demo_routes(app, conn=None):
             # Stale, so somebody should rebuild -- but not this reader, and
             # not while they wait. They get the answer that exists; the next
             # one along gets the new one, and the event stream will have
-            # already told them to come back for it.
-            refresh_behind()
+            # already told them to come back for it. Through the module-level
+            # `refresh_in_background`, which is the seam a test can hold
+            # still; see it for why that is not a detail.
+            refresh_in_background(build_now)
         return payload
 
     @app.get("/api/demo/events")

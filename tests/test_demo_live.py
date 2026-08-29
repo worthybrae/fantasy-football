@@ -444,12 +444,24 @@ def test_a_stale_answer_is_served_rather_than_rebuilt(farm):
         started.append(True)
         raise AssertionError("a request thread must never build")
 
+    # THE REBUILD IS HELD AT ITS OWN SEAM, `demo.refresh_in_background`, and
+    # that has to be a module-level function for this to work at all. It was a
+    # closure inside `register_demo_routes` once, and this test patched a name
+    # nothing read (`refresh_behind`, with `create=True`, which invents the
+    # attribute rather than failing) -- so the real background thread started
+    # every time and the assertion below came down to whether it reached
+    # `_build` before the request finished. It usually did not, and under load
+    # it did.
+    asked = []
     with mock.patch.object(demo, "_build", explode), \
-            mock.patch.object(demo, "refresh_behind", create=True):
+            mock.patch.object(demo, "refresh_in_background", asked.append):
         with TestClient(app) as client:
             body = client.get("/api/demo/live").json()
     assert body == standing
-    assert not started
+    assert not started, "a request thread built the answer"
+    # And the rebuild WAS asked for -- the reader gets the stale answer
+    # because somebody else will do the work, not because nobody will.
+    assert len(asked) == 1
 
 
 def test_a_restart_starts_from_the_last_answer(tmp_path, monkeypatch):
@@ -856,3 +868,50 @@ def test_the_rooms_settings_payload_names_its_own_scoring(monkeypatch):
     assert room["scoring_format"] == "std"
     # And a room that did not say gets this deployment's own.
     assert demo._settings_payload(None, 12, 16, None)["scoring_format"] == "ppr"
+
+
+# The build below raises ON PURPOSE (the `finally` is the thing under test),
+# and pytest reports an exception that reaches the top of a thread as a
+# warning. Silenced here rather than left to look like a real one.
+@pytest.mark.filterwarnings(
+    "ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_the_background_rebuild_runs_once_at_a_time_and_lets_go():
+    """The seam the test above holds still, exercised for real: one build at a
+    time, and the flag is cleared however the build ends.
+
+    Without the guard a burst of readers arriving on a stale entry would each
+    start a build of the same answer; without the `finally` one failed build
+    would stop the page ever rebuilding again."""
+    import threading
+
+    release = threading.Event()
+    done = threading.Event()
+    runs = []
+
+    def slow():
+        runs.append(True)
+        release.wait(5)
+        raise RuntimeError("even a build that fails must let go")
+
+    try:
+        assert demo.refresh_in_background(slow) is True
+        # While it is in flight, a second reader is turned away rather than
+        # starting the same work again.
+        assert demo._REFRESH["running"] is True
+        assert demo.refresh_in_background(slow) is False
+        release.set()
+        for _ in range(500):
+            if not demo._REFRESH["running"]:
+                done.set()
+                break
+            time.sleep(0.01)
+        assert done.is_set(), "the flag was never cleared"
+        assert len(runs) == 1
+        # And the next reader can start one.
+        assert demo.refresh_in_background(lambda: None) is True
+    finally:
+        for _ in range(500):
+            if not demo._REFRESH["running"]:
+                break
+            time.sleep(0.01)
+        demo._REFRESH["running"] = False
