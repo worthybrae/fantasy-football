@@ -21,8 +21,16 @@ def _no_warm_thread(monkeypatch):
     corpus (or racing `market._CACHE.clear()` in the next test's fixture
     setup) once per test, for a whole suite that runs in a couple of
     seconds. Off for the duration of this file; production keeps the
-    default."""
+    default.
+
+    The remembered board goes with it. `seo._board_facts` holds the last
+    board it managed to build, so that a page never disappears when one
+    build fails (see its docstring), and that memory is module state:
+    without this, the fake board one test below hands it would still be
+    there for the next test whose board is supposed to fail.
+    """
     monkeypatch.setattr(seo, "WARM_ON_REGISTER", False)
+    monkeypatch.setattr(seo, "_last_board_facts", {})
 
 
 @pytest.fixture
@@ -49,11 +57,19 @@ def corpus(tmp_path, monkeypatch):
             picks.append(("late", 7))
         if i == 9:
             picks.append(("once", 7))
+        # A SYNTHETIC ID, which is what every defense and every rookie is on
+        # this board: no `players` row anywhere, so the only thing that can
+        # name him is the board itself. Forty of the two hundred published
+        # players are these.
+        if 2 <= i <= 8:
+            picks.append(("adp_seattle_defense", 7))
         for pid, pick_no in picks:
             if pid == "ghost":
                 position = "TE"
             elif pid in ("star", "mid"):
                 position = "RB"
+            elif pid.startswith("adp_"):
+                position = "DST"
             else:
                 position = "WR"
             conn.execute(
@@ -68,7 +84,8 @@ def corpus(tmp_path, monkeypatch):
         # against. Everybody is on the board in every draft here, so the
         # honest denominator and the draft count agree and every share above
         # stays what it was before the pool existed.
-        for pid in ("star", "mid", "twin_a", "twin_b", "ghost", "late", "once"):
+        for pid in ("star", "mid", "twin_a", "twin_b", "ghost", "late", "once",
+                    "adp_seattle_defense"):
             conn.execute(
                 "INSERT INTO draft_log_pool (draft_id, player_id, position,"
                 " team, adp_rank, proj_points, espn_rank, espn_proj, bye)"
@@ -698,6 +715,90 @@ def test_a_reader_is_not_made_to_wait_for_the_warm_rebuild(corpus, board):
     assert res.status_code == 200
     assert "10 real ESPN mock drafts" in res.text
     assert waited < 0.1, f"a reader waited {waited:.2f}s behind the rebuild"
+
+
+# -- the board, and what happens when it will not build ----------------------
+
+def _board_frame(name: str = "Seattle Defense"):
+    """What `cached_build_board` hands back, cut down to the columns these
+    pages read. One row, for the id `players` cannot name."""
+    import pandas as pd
+    return pd.DataFrame([{
+        "player_id": "adp_seattle_defense", "name": name, "headshot": None,
+        "team": "SEA", "bye": 9, "tier": 3, "market_rank": 88.0,
+        "espn_ppr_rank": 140, "proj_points": 96.0, "rookie": False,
+        "espn_id": None, "market_sources": {"fp_tier": 6, "espn": 140.0},
+        "stats": None}])
+
+
+def test_a_board_that_fails_twice_is_asked_a_third_time(corpus, board, monkeypatch):
+    """THE COLD-START RACE. `cached_build_board` raises when another thread
+    is part-way through building the same board on the same connection,
+    which is what a keep-warm pass landing on a request looks like. Forty of
+    the two hundred published players -- every D/ST, every rookie -- have no
+    `players` row and no name without it, and a player who cannot be named
+    gets no page: the sitemap went 228 to 187 and stayed there until the
+    next warm pass."""
+    from scoring import board_cache
+    calls = []
+
+    def flaky(conn, *args, **kwargs):
+        calls.append(1)
+        if len(calls) < 3:
+            raise RuntimeError("another thread is building this board")
+        return _board_frame()
+
+    monkeypatch.setattr(board_cache, "cached_build_board", flaky)
+    d = seo.build_adp(board)
+    assert len(calls) == 3, "the board was not retried"
+    seattle = d["by_slug"]["seattle-defense"]
+    assert seattle["player_id"] == "adp_seattle_defense"
+    assert seattle["bye"] == 9 and seattle["tier"] == 3
+
+
+def test_a_board_that_stops_answering_does_not_cost_a_page(corpus, board, monkeypatch):
+    """And when the retries run out, the last board this process saw stands
+    in. A stale tier beside a fresh ADP is a smaller lie than a page that is
+    not there."""
+    from scoring import board_cache
+    calls = []
+
+    def once_then_never(conn, *args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            return _board_frame()
+        raise RuntimeError("gone")
+
+    monkeypatch.setattr(board_cache, "cached_build_board", once_then_never)
+    first = seo.build_adp(board)
+    assert "seattle-defense" in first["by_slug"]
+    second = seo.build_adp(board)
+    assert len(calls) == 4, "the second build did not retry three times"
+    assert set(second["by_slug"]) == set(first["by_slug"])
+    assert second["by_slug"]["seattle-defense"]["bye"] == 9
+
+
+def test_a_board_that_never_builds_costs_the_board_fields_and_no_more(corpus, board):
+    """The fixture board is a partial database that cannot build a board at
+    all, and nothing has ever been remembered. The corpus's own figures --
+    the headline of every one of these pages -- do not depend on it."""
+    d = seo.build_adp(board)
+    assert "seattle-defense" not in d["by_slug"]     # nothing can name him
+    star = d["by_slug"]["dandre-swift"]
+    assert star["adp"] == 1.0 and star["taken"] == 10
+    assert star["bye"] is None and star["tier"] is None
+
+
+def test_the_board_is_fetched_once_per_build(corpus, board, monkeypatch):
+    """Names and facts come off ONE frame. `market._board_names` used to
+    build a second one, which on a cold process is a second chance to lose
+    the defenses."""
+    from scoring import board_cache
+    calls = []
+    monkeypatch.setattr(board_cache, "cached_build_board",
+                        lambda conn, *a, **k: calls.append(1) or _board_frame())
+    seo.build_adp(board)
+    assert len(calls) == 1
 
 
 def test_the_facts_land_on_the_right_player(corpus, board):

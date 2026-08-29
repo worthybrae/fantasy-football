@@ -76,6 +76,13 @@ WARM_SECONDS = 240.0
 # the copy it is trying to replace.
 ADP_KEY = "seo-adp"
 
+# How hard `build_adp` tries to get the board, and how long it waits between
+# tries. See `_board_facts`: the failure this defends against is another
+# thread part-way through building the same board on the same connection,
+# which clears in about a second.
+BOARD_ATTEMPTS = 3
+BOARD_RETRY_SECONDS = 2.0
+
 # How many rendered pages to keep. The sitemap is 232 URLs and a crawler
 # works through it in a burst, so this holds a whole crawl and then some.
 PAGE_CACHE_MAX = 400
@@ -295,6 +302,72 @@ def _stamp(conn, drafts: int, teams: int, rounds: int, updated) -> tuple:
     return (int(drafts), int(teams), int(rounds), str(updated), universal)
 
 
+_last_board_facts: dict = {}
+_board_lock = threading.Lock()
+
+
+def _board_facts(conn) -> dict:
+    """The board's row per player: fetched once per build, retried, remembered.
+
+    A PAGE MUST NOT DISAPPEAR BECAUSE TWO THREADS WANTED THE BOARD AT ONCE.
+    Forty of the two hundred published players -- every D/ST and every rookie
+    -- exist only on the board: `scoring/board._add_adp_only_players` invents
+    their ids and their names, and `players` has no row to fall back on. When
+    `cached_build_board` raised (a keep-warm build and a request landing on
+    one DuckDB connection at the same moment, which is what a cold start
+    looks like), those forty lost their names, `build_adp` drops a player it
+    cannot name, and the sitemap went from 228 URLs to 187 until the next
+    keep-warm pass. A crawler that walks a sitemap missing a fifth of its
+    pages does not come back for them.
+
+    So: three attempts two seconds apart, which is longer than any board
+    build takes, and if it still will not come, the last board this process
+    saw. Its bye weeks and tiers are a few minutes old at worst -- and a
+    stale tier beside a fresh ADP is a smaller lie than a page that is not
+    there.
+    """
+    global _last_board_facts
+    if conn is None:
+        return {}
+    from scoring import adp_facts
+    for attempt in range(1, BOARD_ATTEMPTS + 1):
+        try:
+            rows = adp_facts.board_rows(conn)
+        except Exception:      # noqa: BLE001 -- see the docstring; the next
+            # attempt is the answer, and the remembered board after that.
+            if attempt < BOARD_ATTEMPTS:
+                time.sleep(BOARD_RETRY_SECONDS)
+            continue
+        if rows:
+            with _board_lock:
+                _last_board_facts = rows
+        return rows
+    with _board_lock:
+        return dict(_last_board_facts)
+
+
+def _names_from_board(board: dict, missing: set) -> dict:
+    """The names `players` does not carry, off the board already in hand.
+
+    `market._board_names` does the same job by building its own board, which
+    is a second call to `cached_build_board` and a second chance to lose the
+    defenses on a cold process. This one reads the frame `_board_facts`
+    already fought for.
+    """
+    out = {}
+    for pid in missing:
+        row = board.get(pid)
+        if row is None:
+            continue
+        name = getattr(row, "name", None)
+        shot = getattr(row, "headshot", None)
+        # Already sized: `headshot` is a board column and the board sizes it
+        # at build (scoring/board.py).
+        out[pid] = {"name": None if name is None or name != name else str(name),
+                    "headshot": None if shot is None or shot != shot else str(shot)}
+    return out
+
+
 def build_adp(conn) -> dict:
     """Every player's draft position out of the corpus, in one pass.
 
@@ -343,10 +416,13 @@ def build_adp(conn) -> dict:
         positions.setdefault(str(pid), position)
         mix[((int(pick_no) - 1) // teams + 1, position)] += 1
 
+    # ONE FETCH OF THE BOARD FOR THE WHOLE BUILD. The names below and every
+    # board-derived field in `adp_facts.attach` come off this one frame.
+    board = _board_facts(conn)
     names = market._names(conn)
     missing = {pid for pid in picks if pid not in names}
     if missing:
-        names.update(market._board_names(conn, missing))
+        names.update(_names_from_board(board, missing))
     teams_by = _teams_by_player(conn)
 
     players = []
@@ -422,7 +498,7 @@ def build_adp(conn) -> dict:
     # One pass over the whole list -- see scoring/adp_facts.py.
     try:
         from scoring import adp_facts
-        adp_facts.attach(conn, players)
+        adp_facts.attach(conn, players, board=board)
     except Exception:      # noqa: BLE001 -- the corpus's own figures are the
         # headline of every one of these pages and none of them needs this.
         # A universal database that cannot be read costs the enrichments.

@@ -134,31 +134,29 @@ def _in_clause(ids):
 # ---------------------------------------------------------------------------
 
 def board_rows(conn) -> dict:
-    """player_id -> the board's row for him, or nothing.
+    """player_id -> the board's row for him.
 
     The board is the single richest source these pages have and it is keyed
-    the way the corpus is, so no matching is involved at all. It is also
-    already built: `api/market._board_names` asks for it on every one of
-    these builds to name the defenses, and `scoring/board_cache` hands the
-    second caller the same frame.
+    the way the corpus is, so no matching is involved at all. It is also the
+    only source for forty of the two hundred names -- every defense and every
+    rookie is a synthetic id `players` has never heard of -- which is why
+    this one RAISES where every other helper here swallows.
+
+    A board that will not build is usually a board that is being built: two
+    threads on one DuckDB connection, and the loser sees an exception rather
+    than a frame. Swallowing it dropped those forty names, and dropping a
+    name drops the page. `api/seo._board_facts` is the caller, and it retries
+    and then falls back to the last board it saw.
     """
     if conn is None:
         return {}
-    try:
-        from scoring.board_cache import cached_build_board
-        board = cached_build_board(conn)
-    except Exception:      # noqa: BLE001 -- a board that will not build costs
-        # the bye, the tier and the consensus. The corpus's own figures --
-        # which are the headline of every page here -- do not depend on it.
-        return {}
+    from scoring.board_cache import cached_build_board
+    board = cached_build_board(conn)
     out = {}
-    try:
-        for row in board.itertuples():
-            pid = _text(getattr(row, "player_id", None))
-            if pid:
-                out[pid] = row
-    except Exception:      # noqa: BLE001 -- a frame with a surprising shape
-        return {}
+    for row in board.itertuples():
+        pid = _text(getattr(row, "player_id", None))
+        if pid:
+            out[pid] = row
     return out
 
 
@@ -495,7 +493,7 @@ def _status(conn, ids: list) -> dict:
 # The one pass
 # ---------------------------------------------------------------------------
 
-def attach(conn, players: list) -> None:
+def attach(conn, players: list, board: dict | None = None) -> None:
     """Hang every universal fact onto every player dict, in place.
 
     `players` is `build_adp`'s list: each entry already carries
@@ -503,10 +501,15 @@ def attach(conn, players: list) -> None:
     Nothing is returned -- the aggregate is the dict the pages render, and a
     parallel structure keyed the same way would only be a second thing to
     keep in step with it.
+
+    `board` is `board_rows`' answer when the caller already has one, which
+    `api/seo.build_adp` does: it fetches the board ONCE for the whole build,
+    names the defenses off it, and hands it here rather than asking for a
+    second copy under a second chance of failing.
     """
     if not players:
         return
-    board = board_rows(conn)
+    board = board_rows(conn) if board is None else board
     for player in players:
         row = board.get(player["player_id"])
         if row is not None:
