@@ -243,7 +243,12 @@ export default function DemoRoom({ onMode, live = false, site = false }: {
       // Nobody's guys: this is somebody else's draft, watched from outside.
       favourite: false,
       rank: row.rank ?? 0,
-    })),
+    }))
+    // In the room's own order, because the card leads with the first of
+    // these and the list sorts by `rank`; a shortlist that arrived in any
+    // other order would put one name on the card and another at the top of
+    // the list under it.
+    .sort((a, b) => a.rank - b.rank),
     [room],
   )
 
