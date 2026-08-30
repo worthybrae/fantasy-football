@@ -28,9 +28,10 @@ import Dashboard from './Dashboard'
 
 const renders = { guys: 0, leagues: 0 }
 
-vi.mock('./YourGuys', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./YourGuys')>()
+vi.mock('./MyGuysTable', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./MyGuysTable')>()
   return {
+    ...actual,
     default: (props: ComponentProps<typeof actual.default>) => {
       renders.guys += 1
       return <actual.default {...props} />
@@ -38,8 +39,8 @@ vi.mock('./YourGuys', async (importOriginal) => {
   }
 })
 
-vi.mock('./LeagueCards', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./LeagueCards')>()
+vi.mock('./OtherDrafts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./OtherDrafts')>()
   return {
     default: (props: ComponentProps<typeof actual.default>) => {
       renders.leagues += 1
@@ -48,16 +49,16 @@ vi.mock('./LeagueCards', async (importOriginal) => {
   }
 })
 
-const { fetchFavorites, fetchPlayers, fetchLeagueReports, fetchMockRooms,
+const { fetchFavorites, fetchPlayers, fetchMockRooms,
         fetchRoomProgress, fetchFavoritesOutlook, fetchPlanPreview } = vi.hoisted(() => ({
-  fetchFavorites: vi.fn(), fetchPlayers: vi.fn(), fetchLeagueReports: vi.fn(),
+  fetchFavorites: vi.fn(), fetchPlayers: vi.fn(),
   fetchMockRooms: vi.fn(), fetchRoomProgress: vi.fn(),
   fetchFavoritesOutlook: vi.fn(), fetchPlanPreview: vi.fn(),
 }))
 
 vi.mock('../api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../api')>()),
-  fetchFavorites, fetchPlayers, fetchLeagueReports, fetchMockRooms,
+  fetchFavorites, fetchPlayers, fetchMockRooms,
   fetchRoomProgress, fetchFavoritesOutlook, fetchPlanPreview,
 }))
 
@@ -67,13 +68,18 @@ const LEAGUES: UpcomingDraft[] = [{
   league_id: '1', name: 'A League', team_id: '2', team_name: 'Mine',
   season: 2026, teams: 10, draft_type: 'Snake', live: false,
   draft_at: new Date(Date.now() + 30 * 60_000).toISOString(),
+} as UpcomingDraft, {
+  // A second league, so the compact list below the hero has a row to draw --
+  // the hero's own draft is not repeated in it.
+  league_id: '2', name: 'Another League', team_id: '3', team_name: 'Mine too',
+  season: 2026, teams: 10, draft_type: 'Snake', live: false,
+  draft_at: new Date(Date.now() + 90 * 60_000).toISOString(),
 } as UpcomingDraft]
 
 beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true })
   renders.guys = 0
   renders.leagues = 0
-  fetchLeagueReports.mockResolvedValue([])
   fetchMockRooms.mockResolvedValue({ rooms: [], next: null })
   fetchRoomProgress.mockResolvedValue([])
   fetchFavorites.mockResolvedValue(['p1', 'p2', 'p3', 'p4', 'p5'])
@@ -91,7 +97,8 @@ test('a second passing renders the countdown and nothing else', async () => {
   render(
     <Profiler id="db" onRender={onRender}>
       <MemoryRouter>
-        <Dashboard leagues={LEAGUES} onJoin={() => {}} onOpenRoom={() => {}} />
+        <Dashboard leagues={LEAGUES} onJoin={() => {}} onOpenRoom={() => {}}
+                   onConnect={() => {}} />
       </MemoryRouter>
     </Profiler>,
   )
@@ -127,7 +134,8 @@ test('a second passing renders the countdown and nothing else', async () => {
 test('the board is never fetched by the page itself', async () => {
   render(
     <MemoryRouter>
-      <Dashboard leagues={LEAGUES} onJoin={() => {}} onOpenRoom={() => {}} />
+      <Dashboard leagues={LEAGUES} onJoin={() => {}} onOpenRoom={() => {}}
+                   onConnect={() => {}} />
     </MemoryRouter>,
   )
   await waitFor(() => expect(fetchFavorites).toHaveBeenCalled())

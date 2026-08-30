@@ -4,10 +4,17 @@ import { useEffect } from 'react'
 // The page in words, for the reader who wants them and the crawler that
 // needs them. The hero above states the claim in one sentence and owns the
 // page's only <h1>; this is the long version of the same argument, for
-// whoever scrolled this far, and the six answers people actually ask for.
+// whoever scrolled this far.
+//
+// THREE QUESTIONS, NOT SIX. The three a normal drafter actually asks before
+// they will click anything: will it work with my league, can it see my
+// password, and what does it cost. The other three were answers to questions
+// the page had already answered above -- what the bookmark does, where the
+// rankings come from -- and a FAQ that repeats the page is a page nobody
+// finishes.
 //
 // The FAQ is real <details> elements and also FAQPage structured data, so
-// the same six answers show under the result in a search as well as here.
+// the same three answers show under the result in a search as well as here.
 
 // `more` is a sentence that ends the answer with a link out to the ADP pages.
 // It is spliced into the structured data too, so what a search engine reads as
@@ -18,25 +25,13 @@ const FAQ: { q: string; a: string; more?: { text: string; href: string; link: st
     a: 'Yes, any ESPN fantasy football league whose draft room you can open in a browser — public or private, snake or auction-free formats, any roster settings. It reads your league’s scoring and roster slots and ranks for those.',
   },
   {
-    q: 'Is this allowed?',
-    a: 'It is a second browser tab beside your draft. It never picks for you, never touches the draft room, and never logs in as you anywhere. ESPN’s own draft tools do the same job with worse numbers.',
-  },
-  {
-    q: 'What does the bookmark do?',
-    a: 'One click on any ESPN fantasy page hands this site the draft session ESPN already gave your browser, so the board here follows every pick in your room live. Nothing is installed.',
-  },
-  {
     q: 'Does it see my ESPN password?',
-    a: 'No. It never sees a password. It holds the same session cookie ESPN gave your browser, encrypted, and only for as long as your draft needs it. You can revoke it from the dashboard at any time.',
+    a: 'No. It never sees a password. One click of the bookmark hands it the same session cookie ESPN already gave your browser, encrypted, and only for as long as your draft needs it. It never picks for you and never touches the draft room. You can revoke it from your home page at any time.',
   },
   {
     q: 'What does it cost?',
     a: 'Free for the first 100 accounts, for good. After that a real draft is $9.99 a season; mock drafts stay free.',
-  },
-  {
-    q: 'Where do the rankings come from?',
-    a: 'From hundreds of real ESPN mock drafts this site records every day, plus consensus ADP and projections. It knows who actually goes at pick 41 in an ESPN room, not just who a list says should.',
-    more: { text: 'The draft position those mocks produce is public: see', link: 'ADP for every player', href: '/adp' },
+    more: { text: 'The draft position those mock drafts produce is public: see', link: 'ADP for every player', href: '/adp' },
   },
 ]
 
@@ -86,12 +81,6 @@ export default function Explainer({ onStart }: { onStart: () => void }) {
             of real ESPN mock drafts every day, so when it says a player usually goes
             at pick 41, that is where he has been going this week, in rooms like yours.
           </p>
-          <p>
-            Setup is a bookmark. Drag it to your bar, click it once on ESPN, and your
-            leagues appear here with a button to open the board when your draft starts.
-            Free for the first 100 accounts, for good. After that a real draft is
-            $9.99 a season; mock drafts stay free.
-          </p>
         </div>
       </div>
 
@@ -115,7 +104,7 @@ export default function Explainer({ onStart }: { onStart: () => void }) {
       </div>
 
       <button type="button" className="lp-cta xp-cta" onClick={onStart}>
-        Try a mock draft
+        Try a mock draft — free
       </button>
     </section>
   )

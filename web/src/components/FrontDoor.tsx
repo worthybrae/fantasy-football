@@ -1,265 +1,171 @@
 import { useEffect, useState } from 'react'
 import { fetchMarketOverview, fetchPlanPreview,
          type MarketOverview, type PlanPreview } from '../api'
+import DraftPlanRounds from './DraftPlanRounds'
 import FounderBadge from './FounderBadge'
 import { Logo } from './Logo'
-import { CorpusNote, PickRule, shapeLabel } from './PlanPreview'
+import { ordinal, SIZES } from '../lib/seat'
 
 // THE FRONT DOOR, for somebody who has connected nothing.
 //
-// WHAT THIS REPLACES, AND WHY. The page used to open with a live draft room
-// and then argue with itself: a welcome card floated over the room saying what
-// the product was, a six-panel "under the board" section said it again at
-// length, and the explainer below said it a third time in prose. Three
-// components, one argument, and a scrim over the top that swallowed the first
-// click a visitor made on the very board it was pointing at.
+// WHO IT IS FOR. Somebody who drafts once a year on ESPN, has done a couple
+// of mocks, and thinks in rankings, sleepers and "my guys". They want, in
+// order: who to take right now and why; whether their guys will still be
+// there; proof it works before they trust it; and nothing to learn.
 //
-// So the argument is made once, in order, and each part does one job:
+// So the page is that, in that order:
 //
 //   the sentence   -- what this is, in the words a drafter would use
-//   three steps    -- what you would actually do, in the order you do it
+//   TRY IT NOW     -- their league size, their seat, four rounds of a plan
 //   the live room  -- the proof, running, with nothing over it
-//   four cards     -- what you get, each with a number off this deployment
-//   the FAQ        -- the long answers, for whoever wants them
+//   three lines    -- what you get, one number each
+//   the FAQ        -- three questions, and the price
+//
+// TRY IT NOW IS THE THESIS, NOT A DEMO. Every other front door in this
+// category asks you to sign up to find out whether the thing is any good.
+// Two selects here and the real planner answers, for the real seat, with the
+// real board -- no account, no email, nothing installed. If the plan is not
+// worth having, that is the fastest possible way to find out.
 //
 // EVERY NUMBER IS READ, NOT WRITTEN. Two endpoints supply all of them: the
 // archive's own size (`/api/market/overview`) and one seat's plan
 // (`/api/plan/preview`), which is the same planner the draft room runs. A
 // figure that has quietly gone stale is worse than a weaker claim that is
 // still true, so nothing on this page is a literal.
-//
-// THE SEAT THE PAGE READS FROM. Six of ten to start with: the most common
-// league size and a middle seat, which is the one a visitor is most likely to
-// recognise as theirs. Named here rather than buried in three call sites.
-//
-// THE SIZE IS A FIRST GUESS, NOT THE ANSWER. The archive is one league size at
-// a time -- whatever the farm has played most -- and the endpoint answers a
-// ten-team question with eight-team paths, saying so in `corpus`. That is the
-// right call for a signed-in reader, whose league really is ten teams. It is
-// the wrong one here: this page has no reader's league to be faithful to, and
-// a ten-team snake drawn with an eight-team room's opening on it is a picture
-// of a draft that never happened. So the shape the corpus names is asked for
-// second, and it is that answer the page draws.
+
+// The seat the page opens on: the most common league size and a middle seat,
+// which is the one a visitor is most likely to recognise as theirs.
 const DEMO_TEAMS = 10
 const DEMO_SLOT = 6
+// The sizes the "try it now" select offers. Fewer than the seat store's full
+// menu on purpose: this is a taste of the product, and three options is a
+// choice while five is a form.
+const TRY_SIZES = SIZES.slice(0, 3)
+// Four rounds. Long enough to be a plan rather than a pick, short enough to
+// read before deciding whether to bother connecting anything.
+const TRY_TURNS = 4
 
-/** The shared read. Both sections below want the same two answers and mount
- *  together, so they ask through the same deduplicated cache (see
- *  `cachedGet`) -- the second request is one round trip for the page, not one
- *  per section -- and neither owns the other's state. */
-function useFrontDoorFigures() {
+/** The archive's own size, for the one number in the hero. */
+function useOverview() {
   const [overview, setOverview] = useState<MarketOverview | null>(null)
-  const [plan, setPlan] = useState<PlanPreview | null>(null)
   useEffect(() => {
     let cancelled = false
     fetchMarketOverview()
       .then((body) => { if (!cancelled) setOverview(body) })
       .catch(() => { /* the line says less, and still says something true */ })
-    fetchPlanPreview(DEMO_TEAMS, DEMO_SLOT)
-      .then((body) => {
-        if (cancelled) return
-        const shape = body.corpus?.teams ?? null
-        // Already the counted shape, or nothing counted at all: this is the
-        // answer. With no corpus the hero draws no seat anyway, and the cards
-        // below still have a plan to read.
-        if (shape === null || shape === body.teams) {
-          setPlan(body)
-          return
-        }
-        // Ask again for the drafts the numbers came out of. Not a fallback to
-        // the first answer if it fails: the first answer is the mismatch, and
-        // this page would rather draw nothing than draw one draft's picks
-        // under another draft's positions.
-        return fetchPlanPreview(shape, Math.min(DEMO_SLOT, shape))
-          .then((counted) => { if (!cancelled) setPlan(counted) })
-      })
-      .catch(() => { /* the cards fall back to what they can say without it */ })
     return () => { cancelled = true }
   }, [])
-  return { overview, plan }
+  return overview
 }
 
-/** THE SENTENCE, THE COUNT AND THE WAY IN.
+/** THE SENTENCE, THE COUNT AND THE TWO WAYS IN.
  *
  *  No stat tiles and no gradient. The one piece of ornament is the wordmark,
- *  because the page has to say whose tool this is before it says what it does.
- */
+ *  because the page has to say whose tool this is before it says what it
+ *  does. */
 export function Hero({ onStart }: { onStart: () => void }) {
-  const { overview, plan } = useFrontDoorFigures()
-  const opening = plan?.opening[0] ?? null
+  const overview = useOverview()
   return (
     <section className="fd-hero">
-      <div className="fd-hero-say">
       <p className="fd-mark">
         <Logo size={22} />
         ESPN Draft Assist
       </p>
-      <h1 className="fd-h1">
-        Draft with what real ESPN drafts do: who lasts to your pick, and a
-        plan for every round.
-      </h1>
+      <h1 className="fd-h1">Your ESPN draft, with a plan.</h1>
       <p className="fd-sub">
+        Who to take at every pick, and whether your guys will still be there —
         {overview === null
-          ? 'Read from real ESPN drafts this site records every day.'
+          ? ' from real ESPN drafts, recorded every day.'
           : (
             <>
-              Read from{' '}
+              {' '}from{' '}
               <strong className="mono">{overview.drafts.toLocaleString()}</strong>
-              {' '}recorded ESPN drafts —{' '}
-              <strong className="mono">{overview.picks.toLocaleString()}</strong>
-              {' '}picks, counted. Updated daily.
+              {' '}real ESPN drafts.
             </>
           )}
       </p>
       <div className="fd-act">
         <button type="button" className="lp-cta fd-cta" onClick={onStart}>
-          Connect ESPN — free for the first 100
+          Try a mock draft — free
         </button>
-        <FounderBadge variant="open" />
+        <button type="button" className="lp-cta fd-cta fd-cta-2"
+                onClick={onStart}>
+          Connect your ESPN league
+        </button>
       </div>
+      {/* THE TWO BUTTONS SHARE ONE MECHANISM, and saying so is better than
+          hiding it. They are two intentions -- practise, or draft for real --
+          and one setup, which takes a click. A reader who works that out for
+          themselves after clicking has been mildly tricked. */}
       <p className="fd-alt">
-        {/* A real anchor to the room below, so the answer to "what IS this"
-            is one keystroke away and not a scroll somebody has to guess at. */}
-        or <a className="lp-bar-link" href="#demo">watch a draft happening now</a>
+        Both start the same way: drag one bookmark to your bar and click it on
+        ESPN. No password, nothing installed.
       </p>
-      </div>
-
-      {/* THE THESIS, DRAWN. One seat of one draft, with its four turns at
-          their real spacing and the positions people take at each. It is the
-          sentence above restated as the thing itself, and it is the only
-          picture on this page that could not belong to another product.
-
-          Absent rather than faked when the plan cannot be read: a rule with
-          invented picks on it would be the one dishonest thing here. */}
-      {plan !== null && opening !== null && plan.corpus !== null && (
-        <aside className="fd-seat" aria-label="One seat, drawn">
-          <p className="lp-cap">
-            Seat {plan.slot} of {plan.teams} · every turn you own
-          </p>
-          <PickRule picks={plan.picks} positions={opening.path} />
-          <p className="fd-seat-say">
-            <strong className="mono">{Math.round(opening.share * 100)}%</strong>
-            {' '}of {plan.corpus.drafts.toLocaleString()} recorded
-            {' '}{shapeLabel(plan.corpus.teams, plan.corpus.format)} drafts
-            {' '}open this way from here.
-          </p>
-          {/* The seat drawn is the corpus's own, so the picks and the
-              positions under them are one draft. The visitor's league is
-              probably a different size, and the page says which size this
-              one is in the same words the dashboard uses. */}
-          {plan.corpus.teams !== DEMO_TEAMS && (
-            <CorpusNote corpus={plan.corpus} readerTeams={DEMO_TEAMS} />
-          )}
-        </aside>
-      )}
     </section>
   )
 }
 
-/** The three steps, with a drawing each.
- *
- *  NUMBERED, because this genuinely is a sequence: you cannot pick your guys
- *  before the site knows who you are, and the room is no use until both. The
- *  drawings are diagrams of the action rather than screenshots of it -- a
- *  screenshot at this size is a grey rectangle, and the point of each one is
- *  the single gesture it takes.
- */
-export function Steps({ onStart }: { onStart: () => void }) {
+/** TRY IT NOW: their league, their seat, four rounds, no login. */
+export function TryItNow() {
+  const [teams, setTeams] = useState(DEMO_TEAMS)
+  const [slot, setSlot] = useState(DEMO_SLOT)
+
   return (
-    <section className="fd-steps" aria-labelledby="fd-steps-h">
-      <h2 className="fd-h2" id="fd-steps-h">Three things, once.</h2>
-      <ol className="fd-step-list">
-        <li className="fd-step">
-          <span className="fd-step-no mono" aria-hidden="true">1</span>
-          <div className="fd-step-fig">
-            <svg viewBox="0 0 120 64" role="img"
-                 aria-label="A bookmark dragged to the browser's bar">
-              <rect x="2" y="4" width="116" height="13" rx="3"
-                    className="fd-svg-bar" />
-              <rect x="7" y="8" width="26" height="5" rx="2"
-                    className="fd-svg-dim" />
-              <rect x="38" y="8" width="18" height="5" rx="2"
-                    className="fd-svg-dim" />
-              <rect x="62" y="7" width="34" height="7" rx="2"
-                    className="fd-svg-chip" />
-              <path d="M79 24 L79 44" className="fd-svg-drag" />
-              <path d="M75 39 L79 45 L83 39" className="fd-svg-drag" />
-              <rect x="2" y="50" width="116" height="12" rx="3"
-                    className="fd-svg-panel" />
-            </svg>
-          </div>
-          <h3 className="fd-step-h">Connect ESPN</h3>
-          <p className="fd-step-p">
-            Drag one bookmark to your bar and click it on any ESPN fantasy
-            page. Your leagues appear here. Nothing is installed, and it never
-            sees your password.
-          </p>
-        </li>
-
-        <li className="fd-step">
-          <span className="fd-step-no mono" aria-hidden="true">2</span>
-          <div className="fd-step-fig">
-            <svg viewBox="0 0 120 64" role="img"
-                 aria-label="A short list of players, three of them starred">
-              {[0, 1, 2, 3].map((i) => (
-                <g key={i}>
-                  <rect x="4" y={6 + i * 14} width="9" height="9" rx="2"
-                        className={i < 3 ? 'fd-svg-pos' : 'fd-svg-dim'} />
-                  <rect x="18" y={9 + i * 14} width={62 - i * 9} height="4"
-                        rx="2" className="fd-svg-dim" />
-                  {i < 3 && (
-                    <path d="M0 -4 L1.2 -1.2 L4 -1.2 L1.8 0.6 L2.6 3.4 L0 1.8 L-2.6 3.4 L-1.8 0.6 L-4 -1.2 L-1.2 -1.2 Z"
-                          transform={`translate(104 ${11 + i * 14})`}
-                          className="fd-svg-star" />
-                  )}
-                </g>
-              ))}
-            </svg>
-          </div>
-          <h3 className="fd-step-h">Pick your guys</h3>
-          <p className="fd-step-p">
-            Star five to twenty-five players you want this year. The board
-            stars them in the room, and the plan reaches for them a round
-            earlier than it would for anybody else.
-          </p>
-        </li>
-
-        <li className="fd-step">
-          <span className="fd-step-no mono" aria-hidden="true">3</span>
-          <div className="fd-step-fig">
-            <svg viewBox="0 0 120 64" role="img"
-                 aria-label="A draft board with one pick marked as yours">
-              {Array.from({ length: 24 }, (_, i) => (
-                <rect key={i} x={4 + (i % 8) * 14.5} y={6 + Math.floor(i / 8) * 18}
-                      width="12" height="14" rx="2"
-                      className={i === 13 ? 'fd-svg-mine' : 'fd-svg-cell'} />
-              ))}
-              <path d="M4 58 H116" className="fd-svg-rule" />
-            </svg>
-          </div>
-          <h3 className="fd-step-h">Open the room</h3>
-          <p className="fd-step-p">
-            On draft night the board sits beside your ESPN room and follows
-            every pick. It says who to take, who will still be there next
-            round, and who will not.
-          </p>
-        </li>
-      </ol>
-      <button type="button" className="lp-cta fd-steps-cta" onClick={onStart}>
-        Start with a free mock draft
-      </button>
+    <section className="fd-try" aria-labelledby="fd-try-h">
+      <h2 className="fd-h2" id="fd-try-h">Try it now</h2>
+      <p className="fd-try-say">
+        Pick your league size and where you sit. This is the same plan the
+        draft room builds, for that seat, right now.
+      </p>
+      <div className="fd-try-ctl">
+        <label className="fd-try-lab">
+          League
+          <select className="fd-try-select" value={teams}
+                  aria-label="League size"
+                  onChange={(e) => {
+                    const size = Number(e.target.value)
+                    setTeams(size)
+                    setSlot((s) => Math.min(s, size))
+                  }}>
+            {TRY_SIZES.map((n) => (
+              <option key={n} value={n}>{n} teams</option>
+            ))}
+          </select>
+        </label>
+        <label className="fd-try-lab">
+          My seat
+          <select className="fd-try-select" value={slot}
+                  aria-label="Your seat"
+                  onChange={(e) => setSlot(Number(e.target.value))}>
+            {Array.from({ length: teams }, (_, i) => i + 1).map((n) => (
+              <option key={n} value={n}>{ordinal(n)}</option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <DraftPlanRounds teams={teams} slot={slot} turns={TRY_TURNS}
+                       heading="Your first four rounds"
+                       note={`Seat ${slot} of ${teams}`} />
     </section>
   )
 }
 
-/** WHAT YOU GET, four cards, each carrying one reading off this deployment.
+/** WHAT YOU GET: three lines, one number each.
  *
  *  The number leads and the sentence explains it, rather than the other way
- *  round: a card whose figure is an illustration of its heading is a card the
- *  reader can skip.
- */
+ *  round: a line whose figure is an illustration of its heading is a line the
+ *  reader can skip. Three, not four -- the ADP pages are a side route and
+ *  they were the one card here that was not about draft night. */
 export function WhatYouGet() {
-  const { overview, plan } = useFrontDoorFigures()
+  const [plan, setPlan] = useState<PlanPreview | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    fetchPlanPreview(DEMO_TEAMS, DEMO_SLOT, '', TRY_TURNS)
+      .then((body) => { if (!cancelled) setPlan(body) })
+      .catch(() => { /* the lines fall back to what they can say without it */ })
+    return () => { cancelled = true }
+  }, [])
+
   const first = plan?.targets[0]?.target ?? null
   const second = plan?.targets[1] ?? null
   const lasts = second?.target?.lasts_pct ?? null
@@ -270,64 +176,55 @@ export function WhatYouGet() {
       <h2 className="fd-h2" id="fd-get-h">What you get</h2>
       <ul className="fd-get-list">
         <li className="fd-get-card">
-          <p className="lp-cap">Lasts %</p>
           <p className="fd-get-num mono">
             {lasts === null ? '—' : `${Math.round(lasts)}%`}
           </p>
-          <h3 className="fd-get-h3">Who is still there at your pick</h3>
+          <h3 className="fd-get-h3">Will he be there?</h3>
           <p className="fd-get-p">
             {second?.target && lasts !== null
-              ? `${second.target.name}'s chance of reaching pick ${second.pick_no} from seat ${seat}, counted in recorded drafts rather than guessed from a ranking.`
-              : 'Every player\u2019s chance of reaching each of your turns, counted in recorded drafts rather than guessed from a ranking.'}
+              ? `${second.target.name}'s chance of reaching pick ${second.pick_no} from seat ${seat} — counted in real ESPN drafts, not guessed from a ranking.`
+              : 'Every player’s chance of reaching each of your turns — counted in real ESPN drafts, not guessed from a ranking.'}
           </p>
         </li>
 
         <li className="fd-get-card">
-          <p className="lp-cap">The plan</p>
           <p className="fd-get-num mono">
             {plan ? `Pick ${plan.picks[0]}` : '—'}
           </p>
           <h3 className="fd-get-h3">One name a round, and why</h3>
           <p className="fd-get-p">
             {first
-              ? `From seat ${seat} it opens with ${first.name}${first.position ? ` (${first.position})` : ''}, with two alternates and the reasons for and against each.`
-              : 'A target and two alternates for every turn you own, with the reasons for and against each.'}
+              ? `From seat ${seat} the plan opens with ${first.name}${first.position ? ` (${first.position})` : ''}, one sentence saying why, and two backups if he goes.`
+              : 'A name for every turn you own, one sentence saying why, and two backups if he goes.'}
           </p>
         </li>
 
         <li className="fd-get-card">
-          <p className="lp-cap">Your guys by pick</p>
-          {/* The seat, not its picks: the rule in the hero already draws
-              those, and printing them twice would spend the page's one
-              memorable figure on a repeat. */}
-          <p className="fd-get-num mono">
-            {plan ? `${plan.slot} of ${plan.teams}` : '—'}
-          </p>
-          <h3 className="fd-get-h3">Which of your players you can have</h3>
+          <p className="fd-get-num mono">5–25</p>
+          <h3 className="fd-get-h3">My guys</h3>
           <p className="fd-get-p">
             {plan
-              ? `Star five to twenty-five players and the grid says which of them reach the turns seat ${seat} owns — ${plan.picks.slice(0, 4).join(', ')}.`
-              : 'Star the players you want and the grid says which of them reach each of your turns.'}
-          </p>
-        </li>
-
-        <li className="fd-get-card">
-          <p className="lp-cap">ADP pages</p>
-          <p className="fd-get-num mono">
-            {overview ? overview.human_picks.toLocaleString() : '—'}
-          </p>
-          <h3 className="fd-get-h3">Where players actually go</h3>
-          <p className="fd-get-p">
-            {overview
-              ? `Picks made by people, not by ESPN's autodrafter, out of ${overview.picks.toLocaleString()} recorded.`
-              : 'Every pick a person made in the drafts this site recorded.'}
-            {' '}
-            {/* A plain anchor: /adp is rendered by FastAPI from the corpus and
-                is not a route this app's router knows. */}
-            <a className="lp-bar-link" href="/adp">See ADP for every player</a>.
+              ? `Star the players you want and the plan takes them a round early — and says which of them reach the turns seat ${seat} owns: ${plan.picks.slice(0, 4).join(', ')}.`
+              : 'Star the players you want and the plan takes them a round early — and says which of them reach your turns.'}
           </p>
         </li>
       </ul>
+    </section>
+  )
+}
+
+/** The price, at the bottom, where somebody has finished deciding. */
+export function FounderLine({ onStart }: { onStart: () => void }) {
+  return (
+    <section className="fd-founder">
+      <p className="fd-founder-say">
+        Free for the first 100 accounts, for good. After that a real draft is
+        $9.99 a season; mock drafts stay free.
+      </p>
+      <FounderBadge variant="open" />
+      <button type="button" className="lp-cta" onClick={onStart}>
+        Connect your ESPN league
+      </button>
     </section>
   )
 }

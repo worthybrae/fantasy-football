@@ -1269,6 +1269,10 @@ export interface OutlookPlayer {
    *  on taking him at, rather than the one to reach at. Null when there is
    *  none. */
   best_pick: number | null
+  /** The round this seat's own plan would spend on him -- what "when to take
+   *  him" prints. Null for a favourite the plan never reaches for, which is
+   *  the ordinary answer for most of a twenty-five-name list. */
+  plan_round: number | null
 }
 
 /** The saved list against one seat's first eight turns. */
@@ -2110,6 +2114,9 @@ export interface PreviewPlayer {
   favourite: boolean
   pros: string[]
   cons: string[]
+  /** The plan's own first two reasons as one sentence -- what the card prints
+   *  under the name. Null when the plan had no reason to give. */
+  reason: string | null
 }
 
 export interface PreviewTurn {
@@ -2117,6 +2124,8 @@ export interface PreviewTurn {
   round: number
   target: PreviewPlayer | null
   alternates: PreviewPlayer[]
+  /** The alternates by name -- what "if he's gone: A, B" prints. */
+  backups: string[]
 }
 
 /** The shape of draft the corpus numbers were counted over. Not necessarily
@@ -2137,7 +2146,10 @@ export interface PreviewCorpus {
 export interface PlanPreview {
   teams: number
   slot: number
-  /** The first four overall picks this seat owns. */
+  /** How many turns were planned. */
+  turns: number
+  /** The overall picks this seat owns, as many as were planned and never
+   *  fewer than four. */
   picks: number[]
   /** The position paths most walked from this seat, most common first. */
   opening: { path: string[]; count: number; share: number }[]
@@ -2158,10 +2170,11 @@ export interface PlanPreview {
  *  `tag` exists for the same reason the outlook's does, to keep a save from
  *  being followed by five seconds of the pre-save answer. */
 export function fetchPlanPreview(
-  teams: number, slot: number, tag = '',
+  teams: number, slot: number, tag = '', turns = 3,
 ): Promise<PlanPreview> {
-  return cachedGet(`plan/preview/${teams}/${slot}/${tag}`, async () => {
-    const res = await fetch(`/api/plan/preview?teams=${teams}&slot=${slot}`)
+  return cachedGet(`plan/preview/${teams}/${slot}/${turns}/${tag}`, async () => {
+    const res = await fetch(
+      `/api/plan/preview?teams=${teams}&slot=${slot}&turns=${turns}`)
     if (!res.ok) throw new Error(await detailText(res))
     return res.json() as Promise<PlanPreview>
   })
