@@ -365,9 +365,13 @@ export default function Dashboard({ leagues, onJoin, onOpenRoom, onConnect }: {
         )}
 
 
-        {favorites !== null && planSeat !== null && (
-          <MyGuysTable players={favorites} teams={planSeat.teams}
-                       slot={planSeat.slot} onEdit={openPicker} />
+        {/* MY GUYS SURVIVES A SEAT THE PLAN CANNOT READ. The two columns
+            need one; the list, the Edit button and the picker do not, and a
+            reader in an eighteen-team league losing the only place their
+            saved list is edited would be a worse answer than two dashes. */}
+        {favorites !== null && (
+          <MyGuysTable players={favorites} teams={planSeat?.teams ?? null}
+                       slot={planSeat?.slot ?? null} onEdit={openPicker} />
         )}
 
         <OtherDrafts live={liveOthers} upcoming={others} joining={joining}

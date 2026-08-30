@@ -1292,11 +1292,18 @@ export interface FavoritesOutlook {
  *  without it a save would be followed by five seconds of the old answer.
  *  The caller passes something that changes when the list does. */
 export function fetchFavoritesOutlook(
-  teams: number, slot: number, tag = '',
+  /** No seat is a real caller, not a missing argument. A league outside the
+   *  four-to-sixteen teams the plan reads still has a saved list, and the
+   *  names, faces and positions in this answer do not depend on a seat -- so
+   *  the request is made without one and the endpoint answers for its own
+   *  default. Whatever DOES depend on a seat (the round, the chances) is the
+   *  caller's to leave undrawn: see MyGuysTable.tsx, which does. */
+  teams: number | null, slot: number | null, tag = '',
 ): Promise<FavoritesOutlook> {
+  const seat = teams !== null && slot !== null
+    ? `?teams=${teams}&slot=${slot}` : ''
   return cachedGet(`account/outlook/${teams}/${slot}/${tag}`, async () => {
-    const res = await fetch(
-      `/api/account/favorites/outlook?teams=${teams}&slot=${slot}`)
+    const res = await fetch(`/api/account/favorites/outlook${seat}`)
     if (!res.ok) throw new Error(await detailText(res))
     return res.json() as Promise<FavoritesOutlook>
   })

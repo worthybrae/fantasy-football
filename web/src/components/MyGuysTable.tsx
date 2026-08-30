@@ -32,10 +32,10 @@ const MAYBE = 40
  *  raw value instead put 69.6% in a green chip reading 70% and 39.5% in an
  *  amber one reading 40%, which is a card disagreeing with itself. */
 export function tintFor(chance: number | null): string {
-  if (chance === null) return 'gbp-none'
-  if (chance >= LIKELY) return 'gbp-likely'
-  if (chance >= MAYBE) return 'gbp-maybe'
-  return 'gbp-thin'
+  if (chance === null) return 'myg-chip-none'
+  if (chance >= LIKELY) return 'myg-chip-hi'
+  if (chance >= MAYBE) return 'myg-chip-mid'
+  return 'myg-chip-lo'
 }
 
 export default function MyGuysTable({ players, teams, slot, onEdit }: {
@@ -45,15 +45,26 @@ export default function MyGuysTable({ players, teams, slot, onEdit }: {
   players: string[]
   /** The seat this whole page is about. Handed down rather than picked here:
    *  the plan above reads the same seat, and two answers about "your next
-   *  draft" that disagreed about which seat it was would be worse than one. */
-  teams: number
-  slot: number
+   *  draft" that disagreed about which seat it was would be worse than one.
+   *
+   *  NULL IS A LEAGUE THE PLAN CANNOT READ -- fewer than four teams or more
+   *  than sixteen. The list is still theirs and this is still where it is
+   *  edited, so the section stays: what goes is the two columns that need a
+   *  seat to be true, which print a dash. Deleting the whole card instead
+   *  took the Edit button and the picker with it, which is a reader locked
+   *  out of their own list by the size of their league. */
+  teams: number | null
+  slot: number | null
   /** Opens the picker. */
   onEdit: () => void
 }) {
   const [outlook, setOutlook] = useState<FavoritesOutlook | null>(null)
   const [error, setError] = useState<string | null>(null)
   const tag = useMemo(() => players.join(','), [players])
+  // Whether there is a seat to answer "when" and "will he" for. The request
+  // still goes out without one -- a name and a face are the same at every
+  // seat -- and everything that is not is left undrawn below.
+  const seated = teams !== null && slot !== null
 
   useEffect(() => {
     if (players.length === 0) return
@@ -69,10 +80,11 @@ export default function MyGuysTable({ players, teams, slot, onEdit }: {
   // The turn "will he be there?" is asked about. Before a draft your next
   // pick is your first one, and naming it in the header is what keeps the
   // column from reading as a fact about the player.
-  const nextPick = outlook?.picks[0] ?? null
+  const nextPick = seated ? outlook?.picks[0] ?? null : null
   // The last turn the plan covers. A favourite it never reaches for is one
   // to take after all of them, which is a sentence rather than a dash.
-  const lastPick = outlook?.picks[outlook.picks.length - 1] ?? null
+  const lastPick = seated
+    ? outlook?.picks[outlook.picks.length - 1] ?? null : null
 
   return (
     <section className="db-sec myg" aria-labelledby="myg-h">
@@ -90,6 +102,16 @@ export default function MyGuysTable({ players, teams, slot, onEdit }: {
           {players.length === 0 ? 'Pick my guys' : 'Edit'}
         </button>
       </div>
+
+      {/* Said once, above the dashes, rather than left for a reader to work
+          out from two columns of nothing. */}
+      {!seated && players.length > 0 && (
+        <p className="db-sec-say">
+          Your league is not a size the plan reads yet, so there is no seat to
+          say when to take these players or whether they will last. The list
+          itself is unaffected, and so is the draft room.
+        </p>
+      )}
 
       {/* AN EMPTY SCREEN IS AN INVITATION. One sentence saying what starring
           does for them, and the button that does it -- not a table of nothing
@@ -130,9 +152,13 @@ export default function MyGuysTable({ players, teams, slot, onEdit }: {
                 {outlook.players.map((row) => {
                   // Rounded ONCE, then banded and printed from the same
                   // number, so the tint can never contradict the text.
-                  const raw = row.avail[0]
+                  const raw = seated ? row.avail[0] : null
                   const chance = raw === null || raw === undefined
                     ? null : Math.round(raw)
+                  // The server answered for ITS default seat when this page
+                  // had none to send; the round it named is about that seat
+                  // and not this reader's, so it is not printed.
+                  const round = seated ? row.plan_round : null
                   return (
                     <tr key={row.player_id}>
                       <th scope="row" className="myg-who">
@@ -152,8 +178,8 @@ export default function MyGuysTable({ players, teams, slot, onEdit }: {
                         </span>
                       </th>
                       <td className="myg-when">
-                        {row.plan_round !== null
-                          ? <span className="myg-round">Round {row.plan_round}</span>
+                        {round !== null
+                          ? <span className="myg-round">Round {round}</span>
                           : (
                             <span className="myg-late">
                               {lastPick === null
@@ -163,7 +189,7 @@ export default function MyGuysTable({ players, teams, slot, onEdit }: {
                           )}
                       </td>
                       <td className="myg-will">
-                        <span className={`gbp-chip mono ${tintFor(chance)}`}>
+                        <span className={`myg-chip mono ${tintFor(chance)}`}>
                           {chance === null ? '—' : `${chance}%`}
                         </span>
                       </td>

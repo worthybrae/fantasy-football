@@ -2,9 +2,13 @@ import { cleanup, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import FounderBadge from './FounderBadge'
 
-// The badge makes a promise ("every draft free") and an offer ("connect ESPN
-// to claim one"), and the failure that matters is showing the wrong one of
-// them to the wrong reader. Each row below is one reader.
+// The badge makes a promise ("free for good") and an offer ("connect ESPN to
+// claim one"), and the failure that matters is showing the wrong one of them
+// to the wrong reader. Each row below is one reader.
+//
+// The words are checked whole, on purpose. "Founder" is the name of the
+// mechanism and not a word a reader arriving cold knows, so what these lines
+// say is "free" and "account" -- see the component's header.
 
 const { fetchMe } = vi.hoisted(() => ({ fetchMe: vi.fn() }))
 
@@ -23,13 +27,13 @@ beforeEach(() => {
 
 afterEach(cleanup)
 
-test('a founder is told which one they are', async () => {
+test('a founder is told which account they hold', async () => {
   fetchMe.mockResolvedValue(
     { connected: true, founder: true, ordinal: 37, founders_left: 63 })
 
   render(<FounderBadge />)
 
-  expect(await screen.findByText('Founding member #37 — every draft free'))
+  expect(await screen.findByText('Free for good — account #37 of the first 100'))
     .toBeTruthy()
 })
 
@@ -37,19 +41,19 @@ test('a signed-out reader is told what is left and how to take it', async () => 
   render(<FounderBadge />)
 
   expect(await screen.findByText(
-    '63 founder spots left — connect ESPN to claim one')).toBeTruthy()
+    '63 free accounts left — connect ESPN to claim one')).toBeTruthy()
 })
 
-test('the last seat is a spot, not spots', async () => {
+test('the last one left is an account, not accounts', async () => {
   fetchMe.mockResolvedValue({ ...NOBODY, founders_left: 1 })
 
   render(<FounderBadge />)
 
   expect(await screen.findByText(
-    '1 founder spot left — connect ESPN to claim one')).toBeTruthy()
+    '1 free account left — connect ESPN to claim one')).toBeTruthy()
 })
 
-test('a signed-out reader with no seats left is offered nothing', async () => {
+test('a signed-out reader with none left is offered nothing', async () => {
   fetchMe.mockResolvedValue({ ...NOBODY, founders_left: 0 })
 
   const { container } = render(<FounderBadge />)
@@ -84,7 +88,7 @@ test('a page that already has the answer is not asked to fetch it again',
   render(<FounderBadge me={{ connected: true, founder: true, ordinal: 2,
                              founders_left: 98 }} />)
 
-  expect(await screen.findByText('Founding member #2 — every draft free'))
+  expect(await screen.findByText('Free for good — account #2 of the first 100'))
     .toBeTruthy()
   expect(fetchMe).not.toHaveBeenCalled()
 })

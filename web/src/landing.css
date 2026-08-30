@@ -55,10 +55,6 @@
   flex-wrap: wrap;
 }
 
-.lp-bar-price .mono {
-  color: var(--text-1);
-}
-
 /* The one link into /mocks -- a reading room for drafts already played,
    not part of the pitch, so it sits past the price rather than beside the
    wordmark. Underlined like a link rather than buttoned like a CTA: it is
@@ -84,17 +80,6 @@
   .lp-hero {
     grid-template-columns: minmax(0, 1fr);
   }
-}
-
-/* Both hero columns sit above the backdrop, and both are opaque enough to
-   carry their own text: the copy over the scrim's darkest band, the live
-   panel (or the proof panel behind it) on its own --bg-1 fill.
-   Kept for the pages that still use them; the landing's own hero is the
-   room now (`.lp-room`), which has no backdrop behind it to climb over. */
-.lp-hero-copy,
-.lp-proof {
-  position: relative;
-  z-index: 1;
 }
 
 /* -- the room, as the page (DemoRoom.tsx) -------------------------------
@@ -217,42 +202,12 @@
   background: color-mix(in srgb, var(--accent) 85%, #ffffff);
 }
 
-/* The rows where waiting is expensive -- the picks the tool would actually
-   make. A tint, not a badge: it groups two rows without adding a fifth thing
-   to read. */
-.lp-proof-row.is-take {
-  background: color-mix(in srgb, var(--ok) 5%, transparent);
-}
-
-/* 118px above is sized so both captions hold one line: "Over replacement"
-   set to wrap put its number on a third line and left the two columns
-   visibly out of step with each other. */
-.lp-proof-fig .lp-cap {
-  font-size: 9px;
-  white-space: nowrap;
-}
-
-.lp-proof-num.is-good { color: var(--ok); }
-.lp-proof-num.is-bad { color: var(--fail); }
-
-/* Below this the two 104px figure columns stop fitting next to a name, so
-   the figures drop to their own line and share the width instead of the
-   name truncating to three characters. */
-@media (max-width: 620px) {
-  .lp-proof-row {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    row-gap: 9px;
-  }
-
-}
-
 @media (max-width: 1040px) {
   .lp-split {
     grid-template-columns: minmax(0, 1fr);
   }
 }
 
-.lp-step kbd,
 .lp-copy-hint kbd {
   padding: 1px 5px;
   border: 1px solid var(--border);
@@ -1767,7 +1722,6 @@ button.wr-seat:focus-visible {
 }
 
 .lp-cta:focus-visible,
-.lp-plan-btn:focus-visible,
 .lp-band-action:focus-visible,
 .lp-bookmark:focus-visible,
 .lp-copy-link:focus-visible {
@@ -1821,8 +1775,8 @@ button.wr-seat:focus-visible {
 .lp-copy-status.is-fail { color: var(--fail-soft); }
 
 /* -- the live lobby strip: ESPN's own numbers, next to the CTA ---------- */
-/* See components/LobbyStrip.tsx. Sits inside `.lp-hero-copy` (max-width
-   620px), directly under the CTA row, so it reads as the CTA's own receipt
+/* See components/LobbyStrip.tsx. Sat inside the hero's copy column (max-width
+   620px), directly under the CTA row, so it read as the CTA's own receipt
    rather than a separate section -- small type, no border of its own,
    nothing competing with the headline above it. */
 
@@ -2584,7 +2538,7 @@ button.wr-seat:focus-visible {
   white-space: nowrap;
 }
 
-.gbp-chip {
+.myg-chip {
   display: inline-block;
   min-width: 40px;
   padding: 2px 5px;
@@ -2597,22 +2551,22 @@ button.wr-seat:focus-visible {
 /* Three bands, tinted at the weight of type rather than of signage: a card
    that fills most of its cells with a saturated colour has no emphasis left
    to spend on the one row that matters. */
-.gbp-likely {
+.myg-chip-hi {
   background: color-mix(in srgb, var(--ramp-strong) 16%, transparent);
   color: var(--ramp-strong);
 }
 
-.gbp-maybe {
+.myg-chip-mid {
   background: var(--accent-bg);
   color: var(--accent);
 }
 
-.gbp-thin {
+.myg-chip-lo {
   background: color-mix(in srgb, var(--fail) 12%, transparent);
   color: var(--fail-soft);
 }
 
-.gbp-none {
+.myg-chip-none {
   color: var(--text-3);
 }
 

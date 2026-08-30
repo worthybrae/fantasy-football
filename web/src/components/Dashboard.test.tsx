@@ -242,3 +242,21 @@ test('a league neither endpoint reads keeps its section and says why',
          .toBeTruthy()
        expect(fetchPlanPreview).not.toHaveBeenCalled()
      })
+
+test('a league with no seat still gets its list, edited from the same button',
+     async () => {
+       // The plan cannot walk a twenty-four-team snake, and the two columns
+       // that need a seat go blank. The list itself is not the plan's: taking
+       // "My guys" away with it would lock a reader out of the only place
+       // their saved players are edited.
+       fetchFavorites.mockResolvedValue(['p1', 'p2'])
+       const { container } = draw([{ ...SOON, teams: 24 }])
+
+       expect(await screen.findByText('My guys')).toBeTruthy()
+       expect(screen.getByText(/not a size the plan reads yet/)).toBeTruthy()
+       fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+       // The picker is a lazy chunk, so what is on screen the instant it is
+       // asked for is its backdrop. That it mounted at all is the property:
+       // the button is wired to the same modal it always was.
+       expect(container.querySelector('.fav-modal-backdrop')).toBeTruthy()
+     })

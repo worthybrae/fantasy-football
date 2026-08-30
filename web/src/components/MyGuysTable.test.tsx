@@ -87,11 +87,11 @@ test('the chance is the one at the reader’s next pick, rounded once', async ()
 })
 
 test('the tint is banded off the number the chip prints', () => {
-  expect(tintFor(70)).toBe('gbp-likely')
-  expect(tintFor(69)).toBe('gbp-maybe')
-  expect(tintFor(40)).toBe('gbp-maybe')
-  expect(tintFor(39)).toBe('gbp-thin')
-  expect(tintFor(null)).toBe('gbp-none')
+  expect(tintFor(70)).toBe('myg-chip-hi')
+  expect(tintFor(69)).toBe('myg-chip-mid')
+  expect(tintFor(40)).toBe('myg-chip-mid')
+  expect(tintFor(39)).toBe('myg-chip-lo')
+  expect(tintFor(null)).toBe('myg-chip-none')
 })
 
 test('nothing saved is an invitation, and it costs no request', async () => {
@@ -116,3 +116,46 @@ test('the seat it is asked about is the page’s, not one of its own', async () 
   // disagreed about which seat it was would be worse than one.
   expect(screen.queryByRole('combobox')).toBeNull()
 })
+
+// -- a league the plan cannot read -------------------------------------------
+//
+// Below four teams or above sixteen there is no seat to walk, so "when to
+// take him" and "will he be there" have no answer. The list is still theirs.
+
+test('a league with no seat keeps the list, the names and the Edit button',
+     async () => {
+       const onEdit = vi.fn()
+       render(<MyGuysTable players={IDS} teams={null} slot={null}
+                           onEdit={onEdit} />)
+
+       // The names are the same at every seat, so they are still drawn.
+       expect(await screen.findByText('Planned Man')).toBeTruthy()
+       fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+       expect(onEdit).toHaveBeenCalled()
+       expect(screen.getByText(/not a size the plan reads yet/)).toBeTruthy()
+     })
+
+test('a league with no seat prints no round and no chance', async () => {
+  render(<MyGuysTable players={IDS} teams={null} slot={null}
+                      onEdit={() => {}} />)
+
+  await screen.findByText('Planned Man')
+  // The payload carries round 2 for `p1` and 88% for everyone -- answered for
+  // the endpoint's own default seat, which is not this reader's.
+  expect(screen.queryByText('Round 2')).toBeNull()
+  expect(screen.queryByText('88%')).toBeNull()
+  expect(screen.queryByText(/Later than pick/)).toBeNull()
+  expect(screen.getAllByText('—').length).toBe(IDS.length * 2)
+  // And the header does not name a pick it cannot know.
+  const will = screen.getAllByRole('columnheader').at(-1)
+  expect(will?.textContent).toBe('Will he be there?')
+})
+
+test('a league with no seat asks without one rather than inventing a seat',
+     async () => {
+       render(<MyGuysTable players={IDS} teams={null} slot={null}
+                           onEdit={() => {}} />)
+
+       await waitFor(() => expect(fetchFavoritesOutlook).toHaveBeenCalled())
+       expect(fetchFavoritesOutlook).toHaveBeenCalledWith(null, null, 'p1,p2,p3')
+     })

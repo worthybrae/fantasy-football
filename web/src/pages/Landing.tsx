@@ -143,6 +143,50 @@ function sessionFromHash(hash: string) {
 // reading, not an adjective; `note` is the part that makes the reading mean
 // something, and in two cases it is the caveat rather than the boast.
 
+/** THE PROOF, WITH NOTHING OVER IT. A real ESPN mock draft, running, that a
+ *  reader can click into -- which is the whole reason the scrim had to go.
+ *
+ *  THE CAPTION IS A CLAIM, SO IT WAITS FOR THE ROOM. `DemoRoom` draws "No
+ *  mock draft is running, and there is none on file to replay" whenever the
+ *  farm is between drafts, and a fixed line above it saying a draft was in
+ *  progress would be the page contradicting its own board -- on the one
+ *  section whose whole job is to be believed. So the room reports what it
+ *  found (`onMode`, which it has always announced and nothing was listening
+ *  to) and the sentence is drawn from that: absent until there is something
+ *  to point at, and it says "played back" for a replay rather than claiming
+ *  a live draft that is not running.
+ *
+ *  Its own component so that behaviour can be tested without standing up the
+ *  whole landing page, which connects accounts and probes for rooms.
+ *
+ *  `live` puts the way back to a running draft in the ROOM'S OWN top bar,
+ *  where the rest of this page's chrome lives. It used to be a band across
+ *  the top of the page, which pushed the whole room down the moment it
+ *  appeared and read as an alert about something that had gone wrong. */
+export function DemoSection({ live }: { live: boolean }) {
+  // `null` until the room has read something, which is not the same as
+  // "nothing is running": before the first payload lands the page has no
+  // grounds for either sentence.
+  const [mode, setMode] = useState<'live' | 'replay' | 'none' | null>(null)
+
+  return (
+    <section id="demo" className="lp-demo-anchor" aria-labelledby="lp-demo-h">
+      <h2 className="fd-h2" id="lp-demo-h">Live right now</h2>
+      {(mode === 'live' || mode === 'replay') && (
+        <p className="lp-demo-say">
+          {mode === 'live'
+            ? 'A real ESPN mock draft in progress — this is what the draft room looks like.'
+            : 'A real ESPN mock draft, played back — this is what the draft room looks like.'}
+        </p>
+      )}
+      {/* `setMode` and not a fresh closure: DemoRoom captures this prop once,
+          on its first render, and a state setter is the one callback that is
+          stable enough to be captured. */}
+      <DemoRoom live={live} onMode={setMode} />
+    </section>
+  )
+}
+
 export default function Landing() {
   const [gate, setGate] = useState<Gate>('idle')
 
@@ -608,23 +652,7 @@ export default function Landing() {
           already used. */}
       <TryItNow />
 
-      {/* THE PROOF, WITH NOTHING OVER IT. A real ESPN mock draft, running,
-          that a reader can click into -- which is the whole reason the scrim
-          had to go.
-
-          `live` puts the way back to a running draft in the ROOM'S OWN top
-          bar, where the rest of this page's chrome lives. It used to be a
-          band across the top of the page, which pushed the whole room down
-          the moment it appeared and read as an alert about something that
-          had gone wrong. */}
-      <section id="demo" className="lp-demo-anchor" aria-labelledby="lp-demo-h">
-        <h2 className="fd-h2" id="lp-demo-h">Live right now</h2>
-        <p className="lp-demo-say">
-          A real ESPN mock draft in progress — this is what the draft room
-          looks like.
-        </p>
-        <DemoRoom live={gate === 'live'} />
-      </section>
+      <DemoSection live={gate === 'live'} />
 
       <WhatYouGet />
 
