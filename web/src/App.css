@@ -7336,3 +7336,504 @@ button.pp-pop-comp:focus-visible {
   min-height: 100vh;
   background: var(--bg-0);
 }
+
+/* -- THE SIMPLE ROOM (TakeNowCard, RoomSimpleList, CheatSheetToggle) -------
+
+   The room's default view, and the one visual departure in this stylesheet:
+   everywhere else this is a terminal -- 11 to 13px, uppercase captions, mono
+   figures, information packed to the pixel -- because everywhere else the
+   reader is comparing things. Here he is being told one thing. So the take-
+   now card is the only place in the product where type is set to be READ:
+   a 28px name and a 15px sentence, on a card with room around them.
+
+   That is the whole risk, and it is spent in one place. The list under it
+   stays exactly as dense as the room has always been; it just carries four
+   facts instead of fourteen. */
+
+/* The view switch, in a row of its own above both views so it cannot move
+   when it is used. */
+.room-view {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  justify-content: flex-end;
+  padding: var(--space-3) var(--space-4) 0;
+}
+
+/* The recompute indicator, sharing the switch's row rather than taking one
+   of its own -- and always in the DOM (DraftRoom renders it empty when there
+   is nothing to say). `margin-right: auto` parks it at the far left, so its
+   own width changes push nothing: there is nothing to its left. `min-width:
+   0` plus nowrap and an ellipsis is what stops a long sentence wrapping and
+   growing the row that sits directly above the Draft button. */
+.room-recompute {
+  margin-right: auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: var(--text-xs);
+  line-height: 1.45;
+  color: var(--accent);
+}
+
+/* The room's own spinner idiom (`.target-recompute-dot`, `.cs-glyph-run`),
+   restated rather than shared: those two sit in different rows with
+   different flex rules, and joining a third to their selector list would
+   make a change to any one of them a change to all three. */
+.room-recompute-dot {
+  flex-shrink: 0;
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: landing-spin 0.8s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .room-recompute-dot {
+    animation: none;
+  }
+}
+
+.room-view-toggle {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+
+.room-view-btn {
+  padding: 3px 12px;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  cursor: pointer;
+}
+
+.room-view-btn:hover {
+  color: var(--text-2);
+}
+
+.room-view-btn.is-active {
+  background: var(--bg-2);
+  color: var(--accent);
+}
+
+.room-view-btn:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-offset);
+}
+
+/* -- the take-now card -- */
+
+.takenow {
+  flex-shrink: 0;
+  margin: var(--space-3) var(--space-4);
+  padding: var(--space-4);
+  background: var(--bg-1);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-lg);
+}
+
+/* Waiting is not a recommendation, and the card says so before it is read:
+   the accent edge belongs to the pick you are actually holding.
+
+   NOT `is-waiting`, which is already a spinner in this stylesheet (see
+   `.is-waiting::before`, the room's own "reading the draft room" state) --
+   this card wore one for a while, floating over its own caption. */
+.takenow.is-forecast {
+  border-color: var(--border);
+  padding: var(--space-3) var(--space-4);
+}
+
+.takenow-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.takenow.is-forecast .takenow-head {
+  margin-bottom: var(--space-2);
+}
+
+.takenow-cap {
+  color: var(--accent);
+}
+
+.takenow-hint {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+.takenow-body {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.takenow-shot {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 2px solid;
+  background: var(--bg-2);
+  flex-shrink: 0;
+}
+
+/* The badge stands in for a face nobody has a photograph of, centred in the
+   same circle so the card's left edge does not move between players. */
+.takenow-shot.is-none {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-color: var(--border);
+}
+
+.takenow-id {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.takenow-name-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.takenow-star {
+  font-size: var(--text-md);
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+/* The name, at the size of the decision. Stripped to look like text -- the
+   room's own bargain for a name that opens a profile (see
+   `.avail-name-btn`) -- with the affordance on hover and focus only. */
+.takenow-name-btn {
+  display: block;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  font-family: var(--font-ui);
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.015em;
+  color: var(--text-1);
+  cursor: pointer;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.takenow-name-btn:hover,
+.takenow-name-btn:focus-visible {
+  color: var(--accent);
+}
+
+/* --text-2, not --text-3: position, team and bye are the only identity on a
+   card whose whole job is telling one player from another, and at 11px
+   uppercase the tertiary grey was the quietest thing on the screen. */
+.takenow-sub {
+  font-size: var(--text-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+
+/* Bigger than the table's button, and only here: this is the one control on
+   the screen that sends a pick, and on a thirty-second clock it should be
+   the thing the cursor finds without aiming. */
+.avail-draft-btn.takenow-draft {
+  flex-shrink: 0;
+  padding: 9px 22px;
+  font-size: var(--text-base);
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+.avail-draft-btn.takenow-draft:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.avail-draft-btn.takenow-draft:disabled {
+  border-color: var(--border);
+  color: var(--text-3);
+}
+
+/* THE SENTENCE. The only reading-size type in the room, and the hairline
+   rule is what says it is a quotation from the plan rather than a caption
+   this page wrote. */
+.takenow-why {
+  margin: var(--space-3) 0 0;
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--accent-border);
+  font-size: var(--text-lg);
+  line-height: 1.5;
+  color: var(--text-1);
+  font-weight: 400;
+}
+
+/* THE ONE CON, under the reason and quieter than it. Same size as the
+   backups line: this is a caveat on the pick, not an argument against making
+   it, and a card that draws the doubt at the size of the recommendation is a
+   card nobody acts on. */
+.takenow-watch {
+  margin: 6px 0 0;
+  padding-left: var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+
+.takenow-watch-cap {
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+/* Plain inline text, deliberately NOT the flex row the forecast line below
+   is: a flex gap between "if he's gone:" and the first name also opens one
+   in front of the comma after it, and "Chase , Nacua" is a sentence with a
+   typo in it. */
+.takenow-backups {
+  margin: var(--space-3) 0 0;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+
+.takenow-likely {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+
+.takenow-backups-cap,
+.takenow-likely-cap {
+  color: var(--text-3);
+}
+
+.takenow-likely-row {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+/* An alternate's name: the same text-that-opens-a-profile bargain as the
+   lead's, at the size of the line it sits in. */
+.takenow-alt {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--text-1);
+  cursor: pointer;
+}
+
+.takenow-alt:hover,
+.takenow-alt:focus-visible {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.takenow-alt:disabled {
+  color: var(--text-3);
+  cursor: default;
+  text-decoration: none;
+}
+
+.takenow-sep {
+  color: var(--text-3);
+}
+
+.takenow-none {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+
+/* -- will he be there?, as a chip --
+   Three bands (tone.ts's `lastsBand`), not a ramp: the card and the list
+   both print one of these at a time, and a reader has to be able to name
+   what he is looking at. A dash carries no tint -- nobody computed it. */
+.lasts-chip {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.lasts-chip.is-high {
+  background: color-mix(in srgb, var(--ok) 16%, transparent);
+  color: var(--ok-soft);
+}
+
+.lasts-chip.is-mid {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+.lasts-chip.is-low {
+  background: color-mix(in srgb, var(--fail) 14%, transparent);
+  color: var(--fail-soft);
+}
+
+.lasts-chip.is-none {
+  padding-left: 0;
+  color: var(--text-3);
+}
+
+/* -- the simple list -- */
+
+/* The "likely gone by your next pick" filter. Red when it is on, the same
+   red the chips it selects are tinted with -- the filter and the rows it
+   leaves behind have to look like the same claim. */
+.rsl-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-1);
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
+  color: var(--text-3);
+  cursor: pointer;
+}
+
+.rsl-chip:hover {
+  color: var(--text-2);
+}
+
+.rsl-chip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--fail) 45%, transparent);
+}
+
+.rsl-chip.is-active .rsl-chip-dot {
+  background: var(--fail);
+}
+
+.rsl-chip.is-active {
+  border-color: color-mix(in srgb, var(--fail) 55%, transparent);
+  background: color-mix(in srgb, var(--fail) 10%, transparent);
+  color: var(--fail-soft);
+}
+
+.rsl-chip:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-offset);
+}
+
+/* SENTENCE CASE, and the one table in the app that is. These headers are
+   questions in the reader's own words -- "Will he be there?" -- and a
+   question set in 12px uppercase tracking reads as a label for a field
+   rather than as a thing being asked. */
+.rsl-table th {
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+/* Beats the global `th:first-child`/`td:first-child` rule (0,1,1), which
+   pins a first column to shrink-to-content with no right padding -- see the
+   same fight `.avail-col-rank` had to win. The name column is the one that
+   flexes here. */
+.rsl-table th.rsl-col-name,
+.rsl-table td.rsl-col-name {
+  width: auto;
+  padding-left: var(--space-4);
+  padding-right: 10px;
+}
+
+.rsl-table td {
+  height: 38px;
+}
+
+.rsl-col-pos { width: 64px; }
+.rsl-col-lasts { width: 148px; }
+.rsl-col-edge { width: 172px; }
+.rsl-col-star { width: 76px; text-align: center; }
+.rsl-table th.rsl-col-star { text-align: center; }
+.rsl-col-btn { width: 92px; }
+
+.rsl-name-btn {
+  display: inline-block;
+  vertical-align: baseline;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  font-family: var(--font-ui);
+  font-size: var(--text-md);
+  font-weight: 500;
+  color: var(--text-1);
+  cursor: pointer;
+}
+
+.rsl-name-btn:hover,
+.rsl-name-btn:focus-visible {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.rsl-meta {
+  margin-left: 8px;
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+/* Worth grabbing now. Only one column on this row carries colour, and it is
+   the chip to the left -- a points figure that went green as well would give
+   the reader two things to weigh where the room means to give him one. So:
+   present when it is a reason to pick him, muted when it is not. */
+.rsl-col-edge {
+  font-size: var(--text-sm);
+  color: var(--text-1);
+}
+
+.rsl-col-edge.is-flat {
+  color: var(--text-3);
+}
+
+.rsl-col-star {
+  font-size: var(--text-md);
+  color: var(--accent);
+}
