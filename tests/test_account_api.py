@@ -36,6 +36,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api import billing
+from api.account import OUTLOOK_ROUNDS
 from api.main import create_app
 from pipeline.db import get_conn, write_table
 
@@ -49,13 +50,20 @@ NEW_ID = "acct-key2"
 OLD_ID = "acct-key1"
 
 
-def _seed(path, n=30):
-    """A board with enough players to fill a 25-long favourites list.
+def _seed(path, n=130):
+    """A board deep enough to fill a 25-long favourites list AND to plan
+    eight turns out of.
 
-    Thirty rather than the one `tests/test_api.py` seeds, because the bounds
-    this endpoint enforces are 5 and 25: a fixture that could not supply 26
-    REAL ids would leave the upper bound tested only against ids the board
-    check would have refused anyway, which proves nothing about the bound.
+    The list bounds this endpoint enforces are 5 and 25, so a fixture that
+    could not supply 26 REAL ids would leave the upper bound tested only
+    against ids the board check would have refused anyway. The outlook's
+    `plan_round` needs far more than that: `build_plan` strikes a turn's three
+    names off every later turn and only reaches for players the availability
+    table still expects to be there, so a short board runs out before round
+    eight and the round column would be null for reasons the fixture invented.
+    Eight turns of a ten-team draft reach pick 86, which is where a hundred
+    and thirty comes from -- the same number, for the same reason, as
+    `tests/test_plan_preview_api.py`.
     """
     conn = get_conn(path)
     rows = []
@@ -681,7 +689,7 @@ def test_the_shape(client, monkeypatch, counted):
     for player in body["players"]:
         assert set(player) == {
             "player_id", "name", "position", "team", "headshot", "espn_rank",
-            "espn_adp", "market_rank", "avail", "best_pick"}
+            "espn_adp", "market_rank", "avail", "best_pick", "plan_round"}
         assert len(player["avail"]) == len(body["picks"])
         assert all(chance is None or 0.0 <= chance <= 100.0
                    for chance in player["avail"])
@@ -905,7 +913,7 @@ def test_a_store_that_cannot_answer_is_a_503_here_too(client, monkeypatch,
 # -- founders, over the same routes -------------------------------------------
 #
 # `GET /api/account/me` is the one route in this file that answers an
-# anonymous browser, and the reason is the landing page: "N founder spots
+# anonymous browser, and the reason is the landing page: "N free accounts
 # left -- connect ESPN to claim one" is an offer, and an offer that 401s is a
 # page that cannot make it. Everything else here is the claim itself, which is
 # a side effect of routes that exist to answer other questions (see
@@ -1125,3 +1133,94 @@ def test_the_outlook_players_pass_the_shape_straight_through(monkeypatch):
     account._outlook_players(board, ["p7"], [1, 16], teams=12, fmt="std")
 
     assert asked == [(12, "std"), (12, "std")]
+
+
+# -- when to take him ---------------------------------------------------------
+#
+# "62% still there at pick 27" is half an answer. The other half is whether
+# the plan wants him at all, and at which turn -- which the planner already
+# decides, walking these same eight turns with these same favourites.
+
+
+def test_every_row_says_which_round_the_plan_would_take_him(
+        client, monkeypatch, counted):
+    """A round, or null. Null is the truthful answer for a favourite the plan
+    never reaches for: eight turns cannot hold twenty-five names."""
+    _sign_in(monkeypatch)
+    billing.set_favorites([NEW_ID], OUTLOOK_LIST)
+
+    body = _outlook(client).json()
+
+    rounds = [row["plan_round"] for row in body["players"]]
+    assert any(r is not None for r in rounds)
+    assert all(r is None or 1 <= r <= 8 for r in rounds)
+
+
+# THE FAVOURITE THE PLAN ONLY REACHES FOR ON ITS LAST TURN. From the first
+# seat of a ten-team draft the eighth round lands on `p90` -- but only when
+# the walk is priced the way the plan page prices it, with one turn beyond the
+# eight it prints. The last turn of a walk has no next pick, so nothing is
+# waitable, nothing has a drop-off and one fewer turn is left to fill the
+# roster with: a walk that STOPS at eight prices its eighth round differently
+# and names somebody else. `p90` is what makes that difference visible through
+# the endpoint, since the grid only reports rounds for favourites.
+LAST_TURN_FAVOURITE = "p90"
+PLAN_LIST = OUTLOOK_LIST + [LAST_TURN_FAVOURITE]
+
+
+def test_the_round_is_the_round_the_home_page_s_plan_prints(
+        client, monkeypatch, counted):
+    """ONE WALK, NOT TWO. The grid's "when to take him" and the plan's own
+    rounds are the same answer, so they are read off the same function -- a
+    page that said round 2 in one card and round 4 in the next would be
+    arguing with itself in front of the reader.
+
+    THE WHOLE MAPPING, BOTH WAYS. A round the grid prints that the plan does
+    not, and a round the plan spends on a favourite that the grid leaves
+    blank, are one bug seen from two sides -- so every favourite is compared,
+    including the ones the plan never reaches for.
+    """
+    _sign_in(monkeypatch)
+    billing.set_favorites([NEW_ID], PLAN_LIST)
+
+    body = _outlook(client, teams=10, slot=1).json()
+    plan = client.get("/api/plan/preview?teams=10&slot=1&turns=8").json()
+
+    planned = {turn["target"]["player_id"]: turn["round"]
+               for turn in plan["targets"] if turn["target"]}
+    assert len(planned) == OUTLOOK_ROUNDS       # all eight rounds named a man
+    assert planned[LAST_TURN_FAVOURITE] == OUTLOOK_ROUNDS   # and one is his
+    printed = {row["player_id"]: row["plan_round"] for row in body["players"]}
+    assert printed == {pid: planned.get(pid) for pid in PLAN_LIST}
+
+
+def test_no_row_is_planned_twice(client, monkeypatch, counted):
+    """The plan strikes a target off every later turn, so a favourite it takes
+    is taken once. Two rounds against one name would be a reader told to spend
+    two picks on the same man."""
+    _sign_in(monkeypatch)
+    billing.set_favorites([NEW_ID], OUTLOOK_LIST)
+
+    rounds = [row["plan_round"] for row in _outlook(client).json()["players"]
+              if row["plan_round"] is not None]
+
+    assert len(rounds) == len(set(rounds))
+
+
+def test_a_planner_that_cannot_walk_costs_the_round_and_not_the_card(
+        client, monkeypatch, counted):
+    """The grid's percentages are this endpoint's promise; the plan's round is
+    the sentence beside them. A board the planner refuses should cost a reader
+    that sentence rather than the whole card."""
+    _sign_in(monkeypatch)
+    billing.set_favorites([NEW_ID], OUTLOOK_LIST)
+    monkeypatch.setattr(
+        "api.plan_preview.plan_for_seat",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("no board")))
+
+    res = _outlook(client, slot=4)
+
+    assert res.status_code == 200
+    body = res.json()
+    assert all(row["plan_round"] is None for row in body["players"])
+    assert any(row["avail"][0] is not None for row in body["players"])

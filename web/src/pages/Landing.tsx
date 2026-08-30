@@ -13,7 +13,7 @@ import SetupWizard, { ACCOUNT_CHANNEL, CHANNEL_ACK, CHANNEL_CONNECTED } from '..
 import ConnectScreen from '../components/ConnectScreen'
 import Explainer from '../components/Explainer'
 import DemoRoom from '../components/DemoRoom'
-import { Hero, Steps, WhatYouGet } from '../components/FrontDoor'
+import { FounderLine, Hero, TryItNow, WhatYouGet } from '../components/FrontDoor'
 import Dashboard, { previewingSignedOut } from '../components/Dashboard'
 // This page's own stylesheet, not App.css: see the header comment in it for
 // why, and for why every class below is `lp-` prefixed.
@@ -143,6 +143,52 @@ function sessionFromHash(hash: string) {
 // reading, not an adjective; `note` is the part that makes the reading mean
 // something, and in two cases it is the caveat rather than the boast.
 
+/** THE PROOF, WITH NOTHING OVER IT. A real ESPN mock draft, running, that a
+ *  reader can click into -- which is the whole reason the scrim had to go.
+ *
+ *  THE CAPTION IS A CLAIM, SO IT WAITS FOR THE ROOM. `DemoRoom` draws "No
+ *  mock draft is running, and there is none on file to replay" whenever the
+ *  farm is between drafts, and a fixed line above it saying a draft was in
+ *  progress would be the page contradicting its own board -- on the one
+ *  section whose whole job is to be believed. So the room reports what it
+ *  found (`onMode`, which it has always announced and nothing was listening
+ *  to) and the sentence is drawn from that: absent until there is something
+ *  to point at, and it says "played back" for a replay rather than claiming
+ *  a live draft that is not running.
+ *
+ *  Its own component so that behaviour can be tested without standing up the
+ *  whole landing page, which connects accounts and probes for rooms.
+ *
+ *  `live` puts the way back to a running draft in the ROOM'S OWN top bar,
+ *  where the rest of this page's chrome lives. It used to be a band across
+ *  the top of the page, which pushed the whole room down the moment it
+ *  appeared and read as an alert about something that had gone wrong. */
+export function DemoSection({ live }: { live: boolean }) {
+  // `null` until the room has read something, which is not the same as
+  // "nothing is running": before the first payload lands the page has no
+  // grounds for either sentence.
+  const [mode, setMode] = useState<'live' | 'replay' | 'none' | null>(null)
+
+  return (
+    <section id="demo" className="lp-demo-anchor" aria-labelledby="lp-demo-h">
+      <h2 className="fd-h2" id="lp-demo-h">Live right now</h2>
+      {/* The paragraph is always in the flow, at its one-line height, so the
+          room does not drop a line when the sentence arrives a second after
+          paint. Only the words wait for the mode. */}
+      <p className="lp-demo-say">
+        {mode === 'live' &&
+          'A real ESPN mock draft in progress — this is what the draft room looks like.'}
+        {mode === 'replay' &&
+          'A real ESPN mock draft, played back — this is what the draft room looks like.'}
+      </p>
+      {/* `setMode` and not a fresh closure: DemoRoom captures this prop once,
+          on its first render, and a state setter is the one callback that is
+          stable enough to be captured. */}
+      <DemoRoom live={live} onMode={setMode} />
+    </section>
+  )
+}
+
 export default function Landing() {
   const [gate, setGate] = useState<Gate>('idle')
 
@@ -181,6 +227,16 @@ export default function Landing() {
   // screen is showing the same fact, and the page swapping underneath it
   // would yank the dialog's ground away mid-sentence.
   const [wizard, setWizard] = useState(false)
+  // WHERE THE WIZARD WAS OPENED FROM, which decides what is behind it.
+  //
+  // Opened from the pitch, the pitch stays: the wizard's finished screen is
+  // saying the same thing the dashboard would, and swapping the page under a
+  // dialog yanks its ground away mid-sentence. Opened from the SIGNED-IN
+  // home -- the checklist's first row, or a hero with no draft to be ready
+  // for -- the home page stays, for exactly the same reason. Without this
+  // the second case threw a connected reader back to the marketing page with
+  // a dialog over it.
+  const [wizardOverHome, setWizardOverHome] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [progress, setProgress] = useState<ConnectProgress | null>(null)
   const [live, setLive] = useState<LiveState | null>(null)
@@ -191,7 +247,7 @@ export default function Landing() {
   const navigate = useNavigate()
   useDocumentMeta({
     title: 'ESPN Draft Assist – a live draft assistant for ESPN fantasy football',
-    description: 'A live draft assistant for ESPN fantasy football. It sits beside your ESPN draft room and ranks the board from real recorded ESPN mock drafts.',
+    description: 'Your ESPN draft, with a plan. Who to take at every pick, and whether your guys will still be there — read from real ESPN drafts. Free for the first 100 accounts.',
     canonical: 'https://espnfantasydraft.com/',
   })
 
@@ -444,7 +500,14 @@ export default function Landing() {
   // last step watching for the click and finishing itself. The setup block
   // stays on the page as the readable reference for anyone who would rather
   // scroll than be walked.
-  const toSetup = useCallback(() => setWizard(true), [])
+  const toSetup = useCallback(() => {
+    setWizardOverHome(false)
+    setWizard(true)
+  }, [])
+  const toSetupFromHome = useCallback(() => {
+    setWizardOverHome(true)
+    setWizard(true)
+  }, [])
 
   // The screen this whole task is about. It replaces the page rather than
   // sitting above it, and it stays up until the work is genuinely finished --
@@ -511,15 +574,26 @@ export default function Landing() {
   // the back button leaves it. Its join navigates back here with the token
   // in the hash -- the exact door the bookmarklet uses -- so this page still
   // owns the one connect path.
-  if (account?.connected && !previewingSignedOut() && !wizard) {
+  if (account?.connected && !previewingSignedOut()
+      && (!wizard || wizardOverHome)) {
     return (
-      <Dashboard
-        leagues={account.leagues}
-        onJoin={joinDraft}
-        onOpenRoom={(leagueId) => navigate(
-          `/room/${encodeURIComponent(leagueId)}`
-          + (account.season ? `?season=${account.season}` : ''))}
-      />
+      <>
+        <Dashboard
+          leagues={account.leagues}
+          onJoin={joinDraft}
+          onOpenRoom={(leagueId) => navigate(
+            `/room/${encodeURIComponent(leagueId)}`
+            + (account.season ? `?season=${account.season}` : ''))}
+          onConnect={toSetupFromHome}
+        />
+        {wizard && (
+          <SetupWizard
+            onClose={() => setWizard(false)}
+            onConnected={(body) => { rememberAccount(body); setAccount(body) }}
+            onDone={() => setWizard(false)}
+          />
+        )}
+      </>
     )
   }
 
@@ -574,20 +648,13 @@ export default function Landing() {
           long answers. See components/FrontDoor.tsx. */}
       <Hero onStart={toSetup} />
 
-      <Steps onStart={toSetup} />
+      {/* TRY IT NOW, ABOVE THE PROOF AND ABOVE THE PITCH. Two selects and the
+          real planner answers for the reader's own seat, with no account.
+          Everything under it is an argument for a thing they have by then
+          already used. */}
+      <TryItNow />
 
-      {/* THE PROOF, WITH NOTHING OVER IT. A real ESPN mock draft, running,
-          that a reader can click into -- which is the whole reason the scrim
-          had to go. The hero links here by id.
-
-          `live` puts the way back to a running draft in the ROOM'S OWN top
-          bar, where the rest of this page's chrome lives. It used to be a
-          band across the top of the page, which pushed the whole room down
-          the moment it appeared and read as an alert about something that
-          had gone wrong. */}
-      <div id="demo" className="lp-demo-anchor">
-        <DemoRoom live={gate === 'live'} />
-      </div>
+      <DemoSection live={gate === 'live'} />
 
       <WhatYouGet />
 
@@ -595,6 +662,8 @@ export default function Landing() {
           which is also FAQPage structured data. Below everything that makes
           the case faster. */}
       <Explainer onStart={toSetup} />
+
+      <FounderLine onStart={toSetup} />
 
       <footer className="lp-foot">
         <span>

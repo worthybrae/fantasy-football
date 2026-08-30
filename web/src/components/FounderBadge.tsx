@@ -16,6 +16,14 @@ import { fetchMe, type Me } from '../api'
 //     the one that just answered -- so "connect ESPN to claim one" would be
 //     an instruction they have already followed.
 //
+// "FOUNDER" IS OUR WORD, NOT THE READER'S. It names the mechanism in
+// api/billing.py and it names this file, and on screen it buys nothing: a
+// stranger off a search result does not know what a founding member of this
+// would be, and what they are actually being offered is a free account. So
+// the two lines below say "free" and "account" -- the same two numbers, in
+// the words the rest of the page already uses ("Free for the first 100
+// accounts, for good", FrontDoor.tsx).
+//
 // IT RENDERS NOTHING UNTIL IT KNOWS, and nothing at all unless a well-formed
 // 200 came back. The badge is a claim about what somebody has been given; a
 // placeholder that resolves into "0 spots left" is worse than a line that was
@@ -77,7 +85,7 @@ export default function FounderBadge({ me: given, variant = 'open' }: {
   if (me.founder && me.ordinal !== null) {
     return (
       <p className="fb fb-member founder-badge" data-founder="member">
-        Founding member #{me.ordinal} — every draft free
+        Free for good — account #{me.ordinal} of the first 100
       </p>
     )
   }
@@ -91,8 +99,8 @@ export default function FounderBadge({ me: given, variant = 'open' }: {
     const seats = me.founders_left
     return (
       <p className="fb fb-open founder-badge" data-founder="offer">
-        {seats} founder {seats === 1 ? 'spot' : 'spots'} left — connect ESPN to
-        claim one
+        {seats} free {seats === 1 ? 'account' : 'accounts'} left — connect ESPN
+        to claim one
       </p>
     )
   }

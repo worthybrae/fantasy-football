@@ -83,6 +83,12 @@ MAX_FAVORITES = 25
 # nobody is drafting yet and there is no board state to condition on. That is
 # also why pick 1 reads 100% for everybody and why it should: the first pick
 # of a draft cannot have taken anyone away.
+#
+# AND WHEN TO TAKE HIM. Each row also carries `plan_round`: the round the
+# seat's own plan would spend on him, read off the same walk the home page's
+# draft plan is drawn from (`api/plan_preview.plan_for_seat`). "62% at pick
+# 27" is only half an answer without it -- the other half is whether the plan
+# wants him at all.
 
 # Eight turns, i.e. the first eight rounds. Far enough that a favourite the
 # corpus never lets past round two has visibly run out, short enough that the
@@ -162,19 +168,21 @@ def _quote(ids) -> str:
     return f"{text} and {extra} more" if extra > 0 else text
 
 
-def _picks_for(teams: int, slot: int) -> list:
-    """The overall pick numbers this seat owns in the first `OUTLOOK_ROUNDS`
-    rounds of a snake.
+def _picks_for(teams: int, slot: int, rounds: int = OUTLOOK_ROUNDS) -> list:
+    """The overall pick numbers this seat owns in the first `rounds` rounds of
+    a snake.
 
-    The same derivation the live room uses (`api/live.py`'s `rank_and_plan`):
-    lay the snake out slot by slot and take the offsets that are mine. Overall
-    pick numbers, never round numbers, because that is the axis
+    Overall pick numbers, never round numbers, because that is the axis
     `availability_at` measures on.
-    """
-    from scoring.draft_sim import snake_slots
 
-    snake = snake_slots(int(teams), OUTLOOK_ROUNDS)
-    return [i + 1 for i, seat in enumerate(snake) if seat == int(slot)]
+    BORROWED, NOT RE-DERIVED. `api/plan_preview.snake_picks` lays out the same
+    snake for the plan the home page prints, and the grid this endpoint draws
+    sits directly under that plan -- so a second copy of the arithmetic here
+    would be a second place for the two to drift apart by a pick.
+    """
+    from api.plan_preview import snake_picks
+
+    return snake_picks(int(teams), int(slot), int(rounds))
 
 
 def _float_or_none(value):
@@ -249,8 +257,69 @@ def _ranked_board(cur):
     return _attach_espn_rank(cur, board)
 
 
+def _plan_rounds(board, cur, teams: int, slot: int, saved: list) -> dict:
+    """player id -> the round this seat\'s plan would take him in.
+
+    WHY THE OUTLOOK RUNS THE PLANNER. "Will he be there?" and "when do I take
+    him?" are different questions and the grid only answered the first. A
+    reader looking at 62% at pick 27 still has to work out whether the plan
+    wants him at all, and the plan already knows: it walks these same eight
+    turns with these same favourites and names somebody at each.
+
+    ONE WALK, NOT TWO. `api/plan_preview.plan_for_seat` is the walk the home
+    page\'s draft plan is drawn from, so the round printed beside a favourite
+    here is the round his name appears in there. A second implementation would
+    be two answers to one question on one page.
+
+    WHICH MEANS THE SAME TURNS, ONE PAST THE LAST ONE SHOWN. Calling the same
+    function is not enough: `build_plan` prices its final turn as a turn with
+    nothing after it -- no next pick, so nobody is waitable, no drop-off
+    breaks a tie, and `turns_left` is one smaller -- and it reads how many
+    turns are left off the list it was handed. Walking eight turns to print
+    eight would therefore name a different man in round eight than
+    `/api/plan/preview?turns=8`, which walks nine and throws the ninth away.
+    So this walks nine too, and maps rounds off the first eight. The ninth
+    turn exists to be discarded.
+
+    A favourite the plan never reaches for is simply absent from the answer,
+    which is the truthful thing: the plan has eight turns and a list may hold
+    twenty-five names.
+
+    Empty rather than fatal when anything in the walk fails. The grid\'s own
+    numbers are the endpoint\'s promise; the plan\'s round is the extra
+    sentence beside them, and a board the planner cannot walk should cost a
+    reader that sentence rather than the card.
+    """
+    from dataclasses import replace
+
+    try:
+        from api.plan_preview import plan_for_seat
+        from scoring import league as league_mod
+
+        # THE STORED LEAGUE\'S SCORING, THE CALLER\'S SIZE -- the same pairing
+        # `api/plan_preview.py` makes, and for the same reason: roster slots
+        # and scoring come from whatever league this deployment has imported,
+        # and the team count is the seat being asked about.
+        settings = replace(league_mod.load(cur), teams=int(teams))
+        # The seat\'s own picks, cut the way the preview cuts them: the
+        # league\'s rounds first, then one turn more than is printed. A league
+        # shorter than nine rounds is cut by its own length in both places.
+        walked = _picks_for(teams, slot, settings.rounds)[:OUTLOOK_ROUNDS + 1]
+        plan = plan_for_seat(board, settings, walked, set(saved))
+    except Exception:          # noqa: BLE001 -- see the docstring
+        return {}
+
+    rounds: dict = {}
+    for turn in plan[:OUTLOOK_ROUNDS]:
+        target = turn.get("target")
+        if target is None:
+            continue
+        rounds.setdefault(str(target["player_id"]), int(turn["round"]))
+    return rounds
+
+
 def _outlook_players(board, saved: list, picks: list,
-                     teams=None, fmt=None) -> list:
+                     teams=None, fmt=None, plan_rounds=None) -> list:
     """One row per saved favourite, in the saved order.
 
     THE ORDER IS THE PREFERENCE (see `billing.favorites`), so the answer is
@@ -312,6 +381,7 @@ def _outlook_players(board, saved: list, picks: list,
 
     known_rows = {} if rows is None else {
         pid: row for pid, row in zip(known, rows.to_dict("records"))}
+    plan_rounds = plan_rounds or {}
     players = []
     for pid in saved:
         row = known_rows.get(pid)
@@ -327,6 +397,9 @@ def _outlook_players(board, saved: list, picks: list,
             "market_rank": None if row is None else _int_or_none(row.get("market_rank")),
             "avail": curve,
             "best_pick": _best(curve),
+            # The round the seat\'s own plan takes him in, or null for a
+            # favourite it never reaches for. See `_plan_rounds`.
+            "plan_round": plan_rounds.get(pid),
         })
     return players
 
@@ -436,7 +509,7 @@ def register_account_routes(app, conn, store=None):
         200 WITHOUT A SESSION, and that is the whole reason this route reads
         the account the quiet way rather than through the `_account_ids` above.
         The landing page is the main caller and its reader is by definition not
-        connected yet -- "N founder spots left, connect to claim one" is an
+        connected yet -- "N free accounts left, connect to claim one" is an
         offer, and an offer that 401s is a page that cannot make it. So an
         anonymous caller gets `connected: false`, `founder: false`, and the
         same honest count of seats as everybody else.
@@ -592,12 +665,15 @@ def register_account_routes(app, conn, store=None):
                     return hit[1]
 
             picks = _picks_for(teams, slot)
+            board = _ranked_board(cur)
             answer = {
                 "teams": int(teams),
                 "slot": int(slot),
                 "picks": picks,
-                "players": _outlook_players(_ranked_board(cur), saved, picks,
-                                            teams=int(teams), fmt=fmt),
+                "players": _outlook_players(
+                    board, saved, picks, teams=int(teams), fmt=fmt,
+                    plan_rounds=_plan_rounds(board, cur, int(teams),
+                                             int(slot), saved)),
             }
         finally:
             cur.close()

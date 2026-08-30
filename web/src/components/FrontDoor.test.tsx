@@ -1,18 +1,22 @@
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import type { MarketOverview, PlanPreview } from '../api'
-import { Hero, Steps, WhatYouGet } from './FrontDoor'
+import { FounderLine, Hero, TryItNow, WhatYouGet } from './FrontDoor'
 import { forgetRequests } from '../api'
 
-// WHAT THIS FILE IS FOR. The landing page's whole job is to be believed, and
-// what makes it believable is that every figure on it is a reading off this
+// WHAT THIS FILE IS FOR. The front door's job is to be believed, and what
+// makes it believable is that everything on it is a reading off this
 // deployment rather than a number somebody typed. So these tests are about
-// provenance, not layout: given a payload, does the page print THAT number,
-// and does it say where it came from.
+// provenance and about the one flow that matters:
 //
-// The second thing they guard is the failure: both endpoints can be down on a
-// deployment whose archive is mid-write, and a front door that renders an
-// error where a claim should be is worse than one that says less.
+//   * the hero says what the tool does, counts the drafts it read, and offers
+//     two doors -- and both of them go to the same setup, which the page says
+//     out loud rather than letting a reader discover after clicking;
+//   * TRY IT NOW is the whole pitch: two selects, no login, and the real
+//     planner answers for the seat the reader picked. Changing either select
+//     asks again, for that seat;
+//   * every "what you get" line carries a reading, and falls back to a
+//     weaker sentence that is still true when the endpoint is down.
 
 const { fetchMarketOverview, fetchPlanPreview } = vi.hoisted(() => ({
   fetchMarketOverview: vi.fn(),
@@ -35,61 +39,36 @@ function player(name: string, position: string, extra = {}) {
   return {
     player_id: name.toLowerCase().replace(/\W/g, ''), name, position,
     team: 'DET', headshot: null, lasts_pct: null, edge_pts: null,
-    edge_at_pick: null, favourite: false, pros: [], cons: [], ...extra,
+    edge_at_pick: null, favourite: false, pros: [], cons: [],
+    reason: `${name} is the pick.`, ...extra,
   }
 }
 
-// TWO ANSWERS, BECAUSE THE PAGE ASKS TWICE. It opens by asking about the seat
-// a visitor is most likely to recognise -- six of ten -- and the endpoint
-// answers with ten-team pick numbers over paths counted in the only shape the
-// farm has recorded, which is eight. That answer is a mismatch, and the page
-// throws it away: it asks again for the corpus's own shape and draws THAT.
-const ASKED: PlanPreview = {
-  teams: 10, slot: 6,
-  picks: [6, 15, 26, 35],
-  opening: [{ path: ['RB', 'WR', 'WR', 'RB', 'TE'], count: 265, share: 0.31 }],
-  opening_rounds: 5,
-  opening_observed: 854,
-  position_runs: { QB: 41, TE: 33, K: 120, DST: 118 },
-  corpus: { teams: 8, rounds: 16, format: 'ppr', drafts: 854 },
-  targets: [
-    { pick_no: 6, round: 1, target: player('Bijan Robinson', 'RB'),
-      alternates: [player('Ja’Marr Chase', 'WR')] },
-    { pick_no: 15, round: 2,
-      target: player('Puka Nacua', 'WR', { lasts_pct: 38.4 }),
-      alternates: [] },
-    { pick_no: 26, round: 3, target: player('Trey McBride', 'TE'),
-      alternates: [] },
-  ],
-}
-
-/** The one the page ends up with: seat 6 of an eight-team draft, whose turns
- *  really are 6, 11, 22 and 27 -- the same drafts the paths were counted in,
- *  so every number on the page belongs to one league shape. */
-const PLAN: PlanPreview = {
-  ...ASKED,
-  teams: 8,
-  picks: [6, 11, 22, 27],
-  targets: [
-    { pick_no: 6, round: 1, target: player('Bijan Robinson', 'RB'),
-      alternates: [player('Ja’Marr Chase', 'WR')] },
-    { pick_no: 11, round: 2,
-      target: player('Puka Nacua', 'WR', { lasts_pct: 38.4 }),
-      alternates: [] },
-    { pick_no: 22, round: 3, target: player('Trey McBride', 'TE'),
-      alternates: [] },
-  ],
+function planFor(teams: number, slot: number): PlanPreview {
+  const first = slot
+  const second = teams * 2 - slot + 1
+  return {
+    teams, slot, turns: 4, picks: [first, second, first + teams * 2,
+                                   second + teams * 2],
+    opening: [], opening_rounds: 5, opening_observed: 0,
+    position_runs: {}, corpus: null,
+    targets: [
+      { pick_no: first, round: 1, target: player('Bijan Robinson', 'RB'),
+        alternates: [player('Ja’Marr Chase', 'WR')],
+        backups: ['Ja’Marr Chase'] },
+      { pick_no: second, round: 2,
+        target: player('Puka Nacua', 'WR', { lasts_pct: 38.4 }),
+        alternates: [], backups: [] },
+    ],
+  }
 }
 
 beforeEach(() => {
   forgetRequests()
-  // Call counts, not just implementations: the hero asks the plan endpoint
-  // twice on purpose, and a history that carried over from the test above
-  // would make "twice" unreadable.
   vi.clearAllMocks()
   fetchMarketOverview.mockResolvedValue(OVERVIEW)
   fetchPlanPreview.mockImplementation(
-    async (teams: number) => (teams === PLAN.teams ? PLAN : ASKED))
+    async (teams: number, slot: number) => planFor(teams, slot))
   // FounderBadge asks for /api/account/me directly. Absent on a deployment
   // that predates the founders work, which is the case these tests run in.
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
@@ -103,188 +82,123 @@ afterEach(() => {
 
 // -- the hero -----------------------------------------------------------------
 
-test('the page opens with one sentence saying what the tool does', () => {
+test('the page opens with one sentence saying what the tool is', () => {
   render(<Hero onStart={() => {}} />)
 
-  const h1 = screen.getByRole('heading', { level: 1 })
-  expect(h1.textContent).toMatch(/who lasts to your pick/)
-  expect(h1.textContent).toMatch(/plan for every round/)
+  expect(screen.getByRole('heading', { level: 1 }).textContent)
+    .toBe('Your ESPN draft, with a plan.')
 })
 
-test('the hero draws the seat it is talking about', async () => {
-  render(<Hero onStart={() => {}} />)
-
-  const seat = await screen.findByLabelText('One seat, drawn')
-  expect(within(seat).getByText('Seat 6 of 8 · every turn you own')).toBeTruthy()
-  const rule = within(seat).getByRole('img', { name: 'Picks 6, 11, 22, 27' })
-  expect(within(rule).getByText('27')).toBeTruthy()
-  expect(within(seat).getByText(/854 recorded 8-team PPR drafts open this way/))
-    .toBeTruthy()
-})
-
-test('the seat drawn is the shape the paths were counted in, not the one asked',
-     async () => {
-       // The bug this replaces: an eight-team room's opening hung under a
-       // ten-team seat's pick numbers, drawn as though it were one draft.
-       render(<Hero onStart={() => {}} />)
-
-       await screen.findByLabelText('One seat, drawn')
-       expect(fetchPlanPreview.mock.calls.map((c) => c.slice(0, 2)))
-         .toEqual([[10, 6], [8, 6]])
-     })
-
-test('the seat drawn names the drafts it came out of, being nobody\u2019s league',
+test('the sub-line counts the drafts it read, in the reader’s words',
      async () => {
        render(<Hero onStart={() => {}} />)
 
-       const seat = await screen.findByLabelText('One seat, drawn')
-       expect(within(seat).getByText(
-         /Counted in 8-team PPR drafts — the shape with the most on record; your 10-team league will get its own numbers once enough are recorded/))
-         .toBeTruthy()
+       await waitFor(() => expect(fetchMarketOverview).toHaveBeenCalled())
+       const said = await screen.findByText(/real ESPN drafts/)
+       expect(said.textContent).toMatch(/854/)
+       expect(said.textContent).toMatch(/whether your guys will still be there/)
      })
 
-test('an archive already of the shape asked about is asked once, and unqualified',
-     async () => {
-       fetchPlanPreview.mockResolvedValue(
-         { ...ASKED, corpus: { teams: 10, rounds: 16, format: 'ppr', drafts: 412 } })
-       render(<Hero onStart={() => {}} />)
-
-       const seat = await screen.findByLabelText('One seat, drawn')
-       expect(within(seat).getByText('Seat 6 of 10 · every turn you own'))
-         .toBeTruthy()
-       expect(fetchPlanPreview).toHaveBeenCalledTimes(1)
-       expect(screen.queryByText(/Counted in/)).toBeNull()
-     })
-
-test('a second read that fails draws no seat rather than the mismatched one',
-     async () => {
-       fetchPlanPreview.mockImplementation(async (teams: number) => {
-         if (teams === 10) return ASKED
-         throw new Error('the corpus went away')
-       })
-       render(<Hero onStart={() => {}} />)
-
-       await waitFor(() => expect(fetchPlanPreview).toHaveBeenCalledTimes(2))
-       expect(screen.queryByLabelText('One seat, drawn')).toBeNull()
-     })
-
-test('with no plan to read, the hero draws no seat rather than a made-up one',
-     async () => {
-       fetchPlanPreview.mockRejectedValue(new Error('no board'))
-       render(<Hero onStart={() => {}} />)
-
-       await waitFor(() => expect(fetchPlanPreview).toHaveBeenCalled())
-       expect(screen.queryByLabelText('One seat, drawn')).toBeNull()
-       expect(screen.getByRole('heading', { level: 1 })).toBeTruthy()
-     })
-
-test('the sub-line counts the archive it is read from', async () => {
-  render(<Hero onStart={() => {}} />)
-
-  expect(await screen.findByText('854')).toBeTruthy()
-  expect(screen.getByText('109,312')).toBeTruthy()
-})
-
-test('the call to action names the offer', () => {
-  render(<Hero onStart={() => {}} />)
-
-  expect(screen.getByRole('button',
-    { name: /Connect ESPN — free for the first 100/ })).toBeTruthy()
-})
-
-test('an archive that will not answer costs the count, not the page', async () => {
-  fetchMarketOverview.mockRejectedValue(new Error('busy'))
+test('an archive that cannot be read still says something true', async () => {
+  fetchMarketOverview.mockRejectedValue(new Error('no corpus'))
   render(<Hero onStart={() => {}} />)
 
   await waitFor(() => expect(fetchMarketOverview).toHaveBeenCalled())
-  expect(screen.getByRole('heading', { level: 1 })).toBeTruthy()
-  expect(screen.getByRole('button', { name: /Connect ESPN/ })).toBeTruthy()
-  expect(screen.queryByText('854')).toBeNull()
+  expect(screen.getByText(/from real ESPN drafts, recorded every day/)).toBeTruthy()
+  expect(screen.queryByText(/854/)).toBeNull()
 })
 
-// -- the three steps ----------------------------------------------------------
+test('two doors, one setup, and the page says so', () => {
+  const onStart = vi.fn()
+  render(<Hero onStart={onStart} />)
 
-test('three steps, in the order somebody does them', () => {
-  render(<Steps onStart={() => {}} />)
-
-  const steps = screen.getAllByRole('listitem')
-  expect(steps).toHaveLength(3)
-  expect(steps.map((s) => within(s).getByRole('heading').textContent))
-    .toEqual(['Connect ESPN', 'Pick your guys', 'Open the room'])
+  fireEvent.click(screen.getByRole('button', { name: 'Try a mock draft — free' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Connect your ESPN league' }))
+  expect(onStart).toHaveBeenCalledTimes(2)
+  expect(screen.getByText(/Both start the same way/)).toBeTruthy()
+  expect(screen.getByText(/No password, nothing installed/)).toBeTruthy()
 })
 
-test('each step carries one drawing of the thing it asks for', () => {
-  render(<Steps onStart={() => {}} />)
+// -- try it now ---------------------------------------------------------------
 
-  const figures = screen.getAllByRole('img')
-  expect(figures).toHaveLength(3)
-  // Named, not decorative: the drawings carry the instruction as much as the
-  // sentences do, and a screen reader that got three empty boxes would be
-  // reading a shorter page than everybody else.
-  for (const figure of figures) {
-    expect(figure.getAttribute('aria-label')).toBeTruthy()
-  }
+test('try it now opens on a seat and draws the real plan for it', async () => {
+  render(<TryItNow />)
+
+  await waitFor(() => expect(fetchPlanPreview).toHaveBeenCalled())
+  // Ten teams, sixth seat, four rounds, no login.
+  expect(fetchPlanPreview).toHaveBeenCalledWith(10, 6, '', 4)
+  expect(await screen.findByText('Bijan Robinson')).toBeTruthy()
+  expect(screen.getByText('Round 1')).toBeTruthy()
+  expect(screen.getByText('Bijan Robinson is the pick.')).toBeTruthy()
 })
+
+test('changing the league size asks again, for that size', async () => {
+  render(<TryItNow />)
+
+  await screen.findByText('Bijan Robinson')
+  fireEvent.change(screen.getByLabelText('League size'), { target: { value: '12' } })
+
+  await waitFor(() => expect(fetchPlanPreview.mock.calls.at(-1)?.slice(0, 2))
+    .toEqual([12, 6]))
+  expect(screen.getByText('Seat 6 of 12')).toBeTruthy()
+})
+
+test('changing the seat asks again, for that seat', async () => {
+  render(<TryItNow />)
+
+  await screen.findByText('Bijan Robinson')
+  fireEvent.change(screen.getByLabelText('Your seat'), { target: { value: '2' } })
+
+  await waitFor(() => expect(fetchPlanPreview.mock.calls.at(-1)?.slice(0, 2))
+    .toEqual([10, 2]))
+  // The seat's own picks, not the ones the page opened with.
+  expect(await screen.findByText('pick 2')).toBeTruthy()
+})
+
+test('a seat that does not exist in a smaller league is pulled inside it',
+     async () => {
+       render(<TryItNow />)
+
+       await screen.findByText('Bijan Robinson')
+       fireEvent.change(screen.getByLabelText('Your seat'), { target: { value: '9' } })
+       await waitFor(() => expect(fetchPlanPreview.mock.calls.at(-1)?.slice(0, 2))
+         .toEqual([10, 9]))
+
+       fireEvent.change(screen.getByLabelText('League size'), { target: { value: '8' } })
+       await waitFor(() => expect(fetchPlanPreview.mock.calls.at(-1)?.slice(0, 2))
+         .toEqual([8, 8]))
+     })
 
 // -- what you get -------------------------------------------------------------
 
-test('four cards, each leading with a number off this deployment', async () => {
+test('three lines, each carrying a reading off this deployment', async () => {
   render(<WhatYouGet />)
 
-  await screen.findByText('38%')
-  const cards = screen.getAllByRole('listitem')
-  expect(cards).toHaveLength(4)
-  expect(cards.map((c) => within(c).getByRole('heading').textContent)).toEqual([
-    'Who is still there at your pick',
-    'One name a round, and why',
-    'Which of your players you can have',
-    'Where players actually go',
-  ])
+  expect(await screen.findByText('Will he be there?')).toBeTruthy()
+  expect(screen.getByText('38%')).toBeTruthy()
+  expect(screen.getByText('One name a round, and why')).toBeTruthy()
+  expect(screen.getByText('Pick 6')).toBeTruthy()
+  expect(screen.getByText('My guys')).toBeTruthy()
+  expect(screen.getAllByRole('listitem')).toHaveLength(3)
 })
 
-test('the lasts figure is the plan’s own, for a named player and pick',
-     async () => {
-       render(<WhatYouGet />)
+test('a plan that cannot be read leaves the lines weaker but true', async () => {
+  fetchPlanPreview.mockRejectedValue(new Error('no board'))
+  render(<WhatYouGet />)
 
-       expect(await screen.findByText('38%')).toBeTruthy()
-       expect(screen.getByText(/Puka Nacua.s chance of reaching pick 11/)).toBeTruthy()
-     })
+  await waitFor(() => expect(fetchPlanPreview).toHaveBeenCalled())
+  expect(screen.getAllByText('—')).toHaveLength(2)
+  expect(screen.getByText(/counted in real ESPN drafts/)).toBeTruthy()
+})
 
-test('the plan card names the seat’s first pick and who it opens with',
-     async () => {
-       render(<WhatYouGet />)
+// -- the price ----------------------------------------------------------------
 
-       expect(await screen.findByText('Pick 6')).toBeTruthy()
-       expect(screen.getByText(/opens with Bijan Robinson \(RB\)/)).toBeTruthy()
-     })
+test('the founder line names the offer in the words the product uses', () => {
+  const onStart = vi.fn()
+  render(<FounderLine onStart={onStart} />)
 
-test('the by-pick card names the seat, and its turns in the sentence',
-     async () => {
-       render(<WhatYouGet />)
-
-       // The seat, not its picks: the hero's rule already draws those, and
-       // the page's one memorable figure should not be printed twice.
-       expect(await screen.findByText('6 of 8')).toBeTruthy()
-       expect(screen.getByText(/the turns seat 6 of 8 owns — 6, 11, 22, 27/))
-         .toBeTruthy()
-     })
-
-test('the ADP card counts the picks people made, and links to the pages',
-     async () => {
-       render(<WhatYouGet />)
-
-       expect(await screen.findByText('71,204')).toBeTruthy()
-       expect(screen.getByText(/out of 109,312 recorded/)).toBeTruthy()
-       expect(screen.getByRole('link', { name: /See ADP for every player/ })
-         .getAttribute('href')).toBe('/adp')
-     })
-
-test('with no plan to read, the cards say the general thing rather than break',
-     async () => {
-       fetchPlanPreview.mockRejectedValue(new Error('no board'))
-       render(<WhatYouGet />)
-
-       await waitFor(() => expect(fetchPlanPreview).toHaveBeenCalled())
-       expect(screen.getAllByRole('listitem')).toHaveLength(4)
-       expect(screen.getAllByText('—').length).toBeGreaterThan(0)
-     })
+  expect(screen.getByText(/Free for the first 100 accounts, for good/)).toBeTruthy()
+  expect(screen.getByText(/\$9\.99 a season/)).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: 'Connect your ESPN league' }))
+  expect(onStart).toHaveBeenCalled()
+})
