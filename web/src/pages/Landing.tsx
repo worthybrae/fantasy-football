@@ -172,13 +172,15 @@ export function DemoSection({ live }: { live: boolean }) {
   return (
     <section id="demo" className="lp-demo-anchor" aria-labelledby="lp-demo-h">
       <h2 className="fd-h2" id="lp-demo-h">Live right now</h2>
-      {(mode === 'live' || mode === 'replay') && (
-        <p className="lp-demo-say">
-          {mode === 'live'
-            ? 'A real ESPN mock draft in progress — this is what the draft room looks like.'
-            : 'A real ESPN mock draft, played back — this is what the draft room looks like.'}
-        </p>
-      )}
+      {/* The paragraph is always in the flow, at its one-line height, so the
+          room does not drop a line when the sentence arrives a second after
+          paint. Only the words wait for the mode. */}
+      <p className="lp-demo-say">
+        {mode === 'live' &&
+          'A real ESPN mock draft in progress — this is what the draft room looks like.'}
+        {mode === 'replay' &&
+          'A real ESPN mock draft, played back — this is what the draft room looks like.'}
+      </p>
       {/* `setMode` and not a fresh closure: DemoRoom captures this prop once,
           on its first render, and a state setter is the one callback that is
           stable enough to be captured. */}

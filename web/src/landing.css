@@ -2888,6 +2888,8 @@ button.wr-seat:focus-visible {
 
 .lp-demo-say {
   max-width: 60ch;
+  /* one line reserved: the text arrives after the room reads its mode */
+  min-height: calc(var(--text-md) * 1.5);
   font-size: var(--text-md);
   line-height: 1.5;
   color: var(--text-2);
