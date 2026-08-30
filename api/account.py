@@ -83,6 +83,12 @@ MAX_FAVORITES = 25
 # nobody is drafting yet and there is no board state to condition on. That is
 # also why pick 1 reads 100% for everybody and why it should: the first pick
 # of a draft cannot have taken anyone away.
+#
+# AND WHEN TO TAKE HIM. Each row also carries `plan_round`: the round the
+# seat's own plan would spend on him, read off the same walk the home page's
+# draft plan is drawn from (`api/plan_preview.plan_for_seat`). "62% at pick
+# 27" is only half an answer without it -- the other half is whether the plan
+# wants him at all.
 
 # Eight turns, i.e. the first eight rounds. Far enough that a favourite the
 # corpus never lets past round two has visibly run out, short enough that the
@@ -249,8 +255,55 @@ def _ranked_board(cur):
     return _attach_espn_rank(cur, board)
 
 
+def _plan_rounds(board, cur, teams: int, picks: list, saved: list) -> dict:
+    """player id -> the round this seat\'s plan would take him in.
+
+    WHY THE OUTLOOK RUNS THE PLANNER. "Will he be there?" and "when do I take
+    him?" are different questions and the grid only answered the first. A
+    reader looking at 62% at pick 27 still has to work out whether the plan
+    wants him at all, and the plan already knows: it walks these same eight
+    turns with these same favourites and names somebody at each.
+
+    ONE WALK, NOT TWO. `api/plan_preview.plan_for_seat` is the walk the home
+    page\'s draft plan is drawn from, so the round printed beside a favourite
+    here is the round his name appears in there. A second implementation would
+    be two answers to one question on one page.
+
+    A favourite the plan never reaches for is simply absent from the answer,
+    which is the truthful thing: the plan has eight turns and a list may hold
+    twenty-five names.
+
+    Empty rather than fatal when anything in the walk fails. The grid\'s own
+    numbers are the endpoint\'s promise; the plan\'s round is the extra
+    sentence beside them, and a board the planner cannot walk should cost a
+    reader that sentence rather than the card.
+    """
+    from dataclasses import replace
+
+    try:
+        from api.plan_preview import plan_for_seat
+        from scoring import league as league_mod
+
+        # THE STORED LEAGUE\'S SCORING, THE CALLER\'S SIZE -- the same pairing
+        # `api/plan_preview.py` makes, and for the same reason: roster slots
+        # and scoring come from whatever league this deployment has imported,
+        # and the team count is the seat being asked about.
+        settings = replace(league_mod.load(cur), teams=int(teams))
+        plan = plan_for_seat(board, settings, picks, set(saved))
+    except Exception:          # noqa: BLE001 -- see the docstring
+        return {}
+
+    rounds: dict = {}
+    for turn in plan:
+        target = turn.get("target")
+        if target is None:
+            continue
+        rounds.setdefault(str(target["player_id"]), int(turn["round"]))
+    return rounds
+
+
 def _outlook_players(board, saved: list, picks: list,
-                     teams=None, fmt=None) -> list:
+                     teams=None, fmt=None, plan_rounds=None) -> list:
     """One row per saved favourite, in the saved order.
 
     THE ORDER IS THE PREFERENCE (see `billing.favorites`), so the answer is
@@ -312,6 +365,7 @@ def _outlook_players(board, saved: list, picks: list,
 
     known_rows = {} if rows is None else {
         pid: row for pid, row in zip(known, rows.to_dict("records"))}
+    plan_rounds = plan_rounds or {}
     players = []
     for pid in saved:
         row = known_rows.get(pid)
@@ -327,6 +381,9 @@ def _outlook_players(board, saved: list, picks: list,
             "market_rank": None if row is None else _int_or_none(row.get("market_rank")),
             "avail": curve,
             "best_pick": _best(curve),
+            # The round the seat\'s own plan takes him in, or null for a
+            # favourite it never reaches for. See `_plan_rounds`.
+            "plan_round": plan_rounds.get(pid),
         })
     return players
 
@@ -592,12 +649,15 @@ def register_account_routes(app, conn, store=None):
                     return hit[1]
 
             picks = _picks_for(teams, slot)
+            board = _ranked_board(cur)
             answer = {
                 "teams": int(teams),
                 "slot": int(slot),
                 "picks": picks,
-                "players": _outlook_players(_ranked_board(cur), saved, picks,
-                                            teams=int(teams), fmt=fmt),
+                "players": _outlook_players(
+                    board, saved, picks, teams=int(teams), fmt=fmt,
+                    plan_rounds=_plan_rounds(board, cur, int(teams), picks,
+                                             saved)),
             }
         finally:
             cur.close()

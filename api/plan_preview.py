@@ -14,8 +14,9 @@ shows somebody whose draft is on Thursday.
 
 FOUR THINGS COME BACK, and they answer different questions:
 
-  * `picks`   -- the overall pick numbers this seat owns, first four. Pure
-                 arithmetic on the snake; no data behind it at all.
+  * `picks`   -- the overall pick numbers this seat owns, as many as were
+                 planned and never fewer than four. Pure arithmetic on the
+                 snake; no data behind it at all.
   * `opening` -- what people actually DO from this seat, counted: the three
                  most-walked position paths over the first five rounds. Read
                  off the recorded corpus, human picks only, exactly the query
@@ -23,8 +24,12 @@ FOUR THINGS COME BACK, and they answer different questions:
   * `position_runs` -- when each of the four positions a drafter waits on
                  first comes off the board, as a median over recorded drafts.
                  "QBs go in round 6" is this number.
-  * `targets` -- `scoring/plan.py`'s own answer for the first three turns,
-                 with the caller's favourites folded in if they have any.
+  * `targets` -- `scoring/plan.py`'s own answer for the first `turns` turns
+                 (three by default, up to eight), with the caller's favourites
+                 folded in if they have any. Each turn carries the plan's
+                 target, its two alternates, a one-sentence `reason` off the
+                 target's own first two reasons, and `backups`, the
+                 alternates' names.
 
 THE CORPUS IS OPTIONAL AND THE BOARD IS NOT. A fresh install has no recorded
 drafts and this endpoint still has something true to say: the plan is built
@@ -66,17 +71,22 @@ DEFAULT_TEAMS = 10
 # so `?teams=4` with no slot is answered rather than refused.
 DEFAULT_SLOT = 5
 
-# How many turns the preview shows. Three is the shape of a draft's opening --
-# who you take, what you take next, and what the two of those leave you needing
-# -- and it is as many cards as fit on a phone without a scroll.
+# How many turns the preview shows when the caller does not say. Three is the
+# shape of a draft's opening -- who you take, what you take next, and what the
+# two of those leave you needing.
 PREVIEW_TURNS = 3
 
-# How many turns are actually PLANNED, which is one more than are shown. Every
-# turn's `edge_pts` is priced against the turn after it ("what taking him now
-# beats waiting for"), so the last turn of a plan has no edge at all. Planning
-# a fourth turn and throwing it away is what stops the third card printing a
-# dash where every other card prints a number.
-PLAN_TURNS = PREVIEW_TURNS + 1
+# The most turns anyone may ask for. Eight is the signed-in home page's
+# "your draft plan": eight rounds is where a redraft league stops being a plan
+# and starts being a list, it is the same depth the favourites outlook reads
+# (`api/account.OUTLOOK_ROUNDS`), and it caps the work one query string can
+# ask for -- each turn is a walk of the whole board.
+MAX_TURNS = 8
+
+# How many picks the answer names whatever the caller asked for. The landing
+# page draws four turns on a rule; asking for one turn should not shorten the
+# rule under it.
+MIN_PICKS = 4
 
 # How many opening paths to name. Three is a shape ("this seat opens RB-heavy,
 # or WR-heavy, or balanced"); eight is a table, which is what the archive's own
@@ -295,37 +305,54 @@ def _column(frame, name):
     return pd.to_numeric(frame[name], errors="coerce").to_numpy(dtype=float)
 
 
-def _plan_rows(board, settings, turns: list, favourites: set) -> list:
-    """`scoring/plan.py`'s answer for `turns`, with the players named.
+# The one reason fragment that is not a phrase. Everything else
+# `scoring.plan.reasons_for` writes reads as part of a sentence already; a
+# star does not, and "★ favourite, and ESPN\'s #4 overall" is a card talking
+# about its own glyphs. See `_reason`.
+REASON_WORDS = {"\u2605 favourite": "one of your guys"}
 
-    NOTHING IS RE-RANKED HERE. The target and its two alternates are whoever
-    `build_plan` named, in the order it named them, with the reasons it wrote.
-    This function's whole job is to turn player ids into rows a card can draw:
-    a second implementation of "what should I take" that disagreed with the
-    draft room by one name would be worse than no preview at all.
+
+def _reason(pros: list) -> str | None:
+    """The plan\'s first two reasons, as one sentence somebody would say.
+
+    NOT A NEW ARGUMENT FOR THE PICK. `scoring/plan.py` already wrote the
+    reasons, in priority order, and the first two are the two it led with --
+    ESPN\'s rank on him and how long he lasts, most often. This joins them
+    and nothing else: a preview that invented its own sentence would be a
+    second opinion about a pick the draft room has already explained.
+
+    Null when there are no reasons at all, which is a card with a name and no
+    claim under it rather than a card with an empty line.
+    """
+    said = [REASON_WORDS.get(pro, pro) for pro in list(pros)[:2]]
+    if not said:
+        return None
+    sentence = said[0] if len(said) == 1 else f"{said[0]}, and {said[1]}"
+    return sentence[0].upper() + sentence[1:] + "."
+
+
+def plan_for_seat(board, settings, turns: list, favourites: set) -> list:
+    """`scoring/plan.py`\'s own answer for `turns`, raw.
 
     `picks_made = 0` and an empty roster, which is what makes this a pre-draft
     answer: every probability is "from the start of the draft", nobody has
     been taken, and the plan drafts into an empty roster as it walks.
+
+    Public because `api/account.py`\'s outlook needs the same walk to say
+    which round the plan would take a favourite in, and two walks that
+    disagreed about that would be two answers on one page.
     """
     import numpy as np
-    import pandas as pd
 
     from scoring.availability import cached_table
     from scoring.plan import build_plan, health_level
 
     ids = [str(pid) for pid in board["player_id"]]
     positions = np.asarray([str(p) for p in board["position"]], dtype=object)
-    index = pd.Index(ids)
-    frame = board.set_index(index)
-    frame = frame[~frame.index.duplicated(keep="first")]
-
-    names_col = frame.reindex(ids).get("name")
     names = {pid: (_text_or_none(n) or pid)
-             for pid, n in zip(ids, [] if names_col is None else names_col)}
-
+             for pid, n in zip(ids, board.get("name", []))}
     proj = np.nan_to_num(_column(board, "proj_points"), nan=0.0)
-    plan = build_plan(
+    return build_plan(
         proj=proj, positions=positions, player_ids=ids,
         espn_rank=_column(board, "espn_rank"),
         espn_adp=_column(board, "espn_adp"),
@@ -336,6 +363,31 @@ def _plan_rows(board, settings, turns: list, favourites: set) -> list:
         favourites=set(favourites), table=cached_table(), names=names,
     )
 
+
+def _plan_rows(board, settings, turns: list, favourites: set,
+               shown: int) -> list:
+    """`plan_for_seat`\'s answer, with the players named.
+
+    NOTHING IS RE-RANKED HERE. The target and its two alternates are whoever
+    `build_plan` named, in the order it named them, with the reasons it wrote.
+    This function\'s whole job is to turn player ids into rows a card can draw:
+    a second implementation of "what should I take" that disagreed with the
+    draft room by one name would be worse than no preview at all.
+
+    `shown` is how many of the walked turns come back. It is always one fewer
+    than were walked: every turn\'s `edge_pts` is priced against the turn after
+    it ("what taking him now beats waiting for"), so the last turn of a walk
+    has no edge at all. Walking one extra turn and throwing it away is what
+    stops the last card printing a dash where every other card prints a
+    number.
+    """
+    import pandas as pd
+
+    ids = [str(pid) for pid in board["player_id"]]
+    frame = board.set_index(pd.Index(ids))
+    frame = frame[~frame.index.duplicated(keep="first")]
+
+    plan = plan_for_seat(board, settings, turns, favourites)
     rows = {} if frame.empty else frame.to_dict("index")
 
     def _card(row):
@@ -356,14 +408,24 @@ def _plan_rows(board, settings, turns: list, favourites: set) -> list:
             "favourite": pid in favourites,
             "pros": list(row.get("pros") or ()),
             "cons": list(row.get("cons") or ()),
+            "reason": _reason(row.get("pros") or ()),
         }
 
-    return [{
-        "pick_no": int(turn["pick_no"]),
-        "round": int(turn["round"]),
-        "target": _card(turn.get("target")),
-        "alternates": [_card(alt) for alt in (turn.get("alternates") or [])],
-    } for turn in plan[:PREVIEW_TURNS]]
+    def _turn(turn):
+        alternates = [_card(alt) for alt in (turn.get("alternates") or [])]
+        return {
+            "pick_no": int(turn["pick_no"]),
+            "round": int(turn["round"]),
+            "target": _card(turn.get("target")),
+            "alternates": alternates,
+            # WHO ELSE, BY NAME. The card says "if he\'s gone: A, B", and a
+            # reader scanning eight rounds should not have to open a card to
+            # find the two names in it. The same players as `alternates`,
+            # named rather than described.
+            "backups": [alt["name"] for alt in alternates if alt],
+        }
+
+    return [_turn(turn) for turn in plan[:shown]]
 
 
 def register_plan_preview_routes(app, conn, store=None):
@@ -399,8 +461,13 @@ def register_plan_preview_routes(app, conn, store=None):
 
     @app.get("/api/plan/preview")
     def plan_preview(request: Request, response: Response,
-                     teams: int = DEFAULT_TEAMS, slot: int | None = None):
+                     teams: int = DEFAULT_TEAMS, slot: int | None = None,
+                     turns: int = PREVIEW_TURNS):
         """What this seat would be told, before a draft exists.
+
+        `turns` is how many of the seat\'s own picks to plan: four for the
+        landing page\'s "try it now", eight for the signed-in home\'s draft
+        plan, three for a caller that says nothing.
 
         422 with a plain sentence for a seat that does not exist, matching the
         favourites outlook: the controls that send these are a pair of
@@ -423,6 +490,11 @@ def register_plan_preview_routes(app, conn, store=None):
             raise HTTPException(
                 status_code=422,
                 detail=f"Slot {slot} does not exist in a {teams}-team league.")
+        if not 1 <= turns <= MAX_TURNS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"A plan covers 1 to {MAX_TURNS} turns. That one asks "
+                       f"for {turns}.")
 
         # Signed out is not an error (see the docstring): no ids, no stars.
         account = billing._account_ids(request, store)
@@ -443,7 +515,8 @@ def register_plan_preview_routes(app, conn, store=None):
         try:
             # The board's identity completes the key and is read BEFORE the
             # board is built: on a hit it is the only work the request does.
-            key = (int(teams), int(slot), tuple(saved), _board_identity(cur))
+            key = (int(teams), int(slot), int(turns), tuple(saved),
+                   _board_identity(cur))
             with preview_lock:
                 hit = preview_cache.get(key)
                 if hit is not None and time.monotonic() - hit[0] < PREVIEW_TTL_SECONDS:
@@ -466,10 +539,14 @@ def register_plan_preview_routes(app, conn, store=None):
             answer = {
                 "teams": int(teams),
                 "slot": int(slot),
-                "picks": picks[:4],
+                "turns": int(turns),
+                "picks": picks[:max(MIN_PICKS, int(turns))],
                 **_openings(int(slot)),
+                # One turn more than is shown, then thrown away -- see
+                # `_plan_rows`, which does the throwing.
                 "targets": _plan_rows(_ranked_board(cur), settings,
-                                      picks[:PLAN_TURNS], set(saved)),
+                                      picks[:int(turns) + 1], set(saved),
+                                      int(turns)),
             }
         finally:
             cur.close()

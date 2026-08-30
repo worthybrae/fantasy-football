@@ -681,7 +681,7 @@ def test_the_shape(client, monkeypatch, counted):
     for player in body["players"]:
         assert set(player) == {
             "player_id", "name", "position", "team", "headshot", "espn_rank",
-            "espn_adp", "market_rank", "avail", "best_pick"}
+            "espn_adp", "market_rank", "avail", "best_pick", "plan_round"}
         assert len(player["avail"]) == len(body["picks"])
         assert all(chance is None or 0.0 <= chance <= 100.0
                    for chance in player["avail"])
@@ -1125,3 +1125,75 @@ def test_the_outlook_players_pass_the_shape_straight_through(monkeypatch):
     account._outlook_players(board, ["p7"], [1, 16], teams=12, fmt="std")
 
     assert asked == [(12, "std"), (12, "std")]
+
+
+# -- when to take him ---------------------------------------------------------
+#
+# "62% still there at pick 27" is half an answer. The other half is whether
+# the plan wants him at all, and at which turn -- which the planner already
+# decides, walking these same eight turns with these same favourites.
+
+
+def test_every_row_says_which_round_the_plan_would_take_him(
+        client, monkeypatch, counted):
+    """A round, or null. Null is the truthful answer for a favourite the plan
+    never reaches for: eight turns cannot hold twenty-five names."""
+    _sign_in(monkeypatch)
+    billing.set_favorites([NEW_ID], OUTLOOK_LIST)
+
+    body = _outlook(client).json()
+
+    rounds = [row["plan_round"] for row in body["players"]]
+    assert any(r is not None for r in rounds)
+    assert all(r is None or 1 <= r <= 8 for r in rounds)
+
+
+def test_the_round_is_the_round_the_home_page_s_plan_prints(
+        client, monkeypatch, counted):
+    """ONE WALK, NOT TWO. The grid's "when to take him" and the plan's own
+    rounds are the same answer, so they are read off the same function -- a
+    page that said round 2 in one card and round 4 in the next would be
+    arguing with itself in front of the reader."""
+    _sign_in(monkeypatch)
+    billing.set_favorites([NEW_ID], OUTLOOK_LIST)
+
+    body = _outlook(client, teams=10, slot=5).json()
+    plan = client.get("/api/plan/preview?teams=10&slot=5&turns=8").json()
+
+    planned = {turn["target"]["player_id"]: turn["round"]
+               for turn in plan["targets"] if turn["target"]}
+    for row in body["players"]:
+        if row["plan_round"] is not None:
+            assert planned.get(row["player_id"]) == row["plan_round"]
+
+
+def test_no_row_is_planned_twice(client, monkeypatch, counted):
+    """The plan strikes a target off every later turn, so a favourite it takes
+    is taken once. Two rounds against one name would be a reader told to spend
+    two picks on the same man."""
+    _sign_in(monkeypatch)
+    billing.set_favorites([NEW_ID], OUTLOOK_LIST)
+
+    rounds = [row["plan_round"] for row in _outlook(client).json()["players"]
+              if row["plan_round"] is not None]
+
+    assert len(rounds) == len(set(rounds))
+
+
+def test_a_planner_that_cannot_walk_costs_the_round_and_not_the_card(
+        client, monkeypatch, counted):
+    """The grid's percentages are this endpoint's promise; the plan's round is
+    the sentence beside them. A board the planner refuses should cost a reader
+    that sentence rather than the whole card."""
+    _sign_in(monkeypatch)
+    billing.set_favorites([NEW_ID], OUTLOOK_LIST)
+    monkeypatch.setattr(
+        "api.plan_preview.plan_for_seat",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("no board")))
+
+    res = _outlook(client, slot=4)
+
+    assert res.status_code == 200
+    body = res.json()
+    assert all(row["plan_round"] is None for row in body["players"])
+    assert any(row["avail"][0] is not None for row in body["players"])

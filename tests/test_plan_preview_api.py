@@ -41,12 +41,15 @@ SWID = "{7A1F9C34-BEEF-4D01-9A55-C0FFEE001122}"
 ACCOUNT = "acct-preview"
 
 
-def _seed(path, n=40):
-    """A board with enough players to plan four turns out of.
+def _seed(path, n=130):
+    """A board with enough players to plan eight turns out of.
 
-    Forty rather than a handful: `build_plan` strikes a turn's three names off
-    every later turn, so a board of ten would run out of eligible players
-    before the fourth turn and the test would be measuring the fixture.
+    A hundred and thirty rather than a handful, and rather than the forty this
+    started at: `build_plan` strikes a turn's three names off every later
+    turn, and only players the availability table still expects to be there
+    are eligible at all -- so a short board runs out before the last turn and
+    the test would be measuring the fixture. Eight turns of a ten-team draft
+    reach pick 86, which is where the number comes from.
     """
     conn = get_conn(path)
     rows = []
@@ -514,3 +517,135 @@ def test_a_different_seat_is_a_different_answer(client, monkeypatch):
     assert first["picks"] != second["picks"]
     assert first["targets"][0]["pick_no"] == 1
     assert second["targets"][0]["pick_no"] == 10
+
+
+# -- how many turns, and what a card says about each --------------------------
+#
+# The signed-in home reads this endpoint as "your draft plan": eight rounds,
+# one name each, a sentence under the name and two backups beside it. Three
+# things had to arrive for that, and each is a claim a page makes out loud.
+
+
+def test_eight_turns_when_eight_are_asked_for(client, monkeypatch):
+    """The home page's plan is eight rounds deep. Seat 6 of ten turns at 6,
+    15, 26, 35, 46, 55, 66 and 75, and every one of them gets a card."""
+    _signed_out(monkeypatch)
+
+    body = client.get("/api/plan/preview?teams=10&slot=6&turns=8").json()
+
+    assert body["turns"] == 8
+    assert [t["pick_no"] for t in body["targets"]] == [
+        6, 15, 26, 35, 46, 55, 66, 75]
+    assert [t["round"] for t in body["targets"]] == [1, 2, 3, 4, 5, 6, 7, 8]
+    assert all(turn["target"] is not None for turn in body["targets"])
+
+
+def test_three_turns_is_still_what_a_caller_who_says_nothing_gets(
+        client, monkeypatch):
+    """The landing page asked for no turns for months and must keep getting
+    the answer it was written against."""
+    _signed_out(monkeypatch)
+
+    body = client.get("/api/plan/preview?teams=10&slot=6").json()
+
+    assert body["turns"] == 3 and len(body["targets"]) == 3
+
+
+def test_the_picks_never_shorten_below_the_four_the_rule_draws(
+        client, monkeypatch):
+    """The rule under the hero draws four marks. A caller asking for one turn
+    is asking for one card, not for a shorter rule."""
+    _signed_out(monkeypatch)
+
+    body = client.get("/api/plan/preview?teams=10&slot=6&turns=1").json()
+
+    assert body["picks"] == [6, 15, 26, 35]
+    assert len(body["targets"]) == 1
+
+
+def test_the_picks_reach_as_far_as_the_plan_does(client, monkeypatch):
+    """Eight cards want eight pick numbers: the page draws the turns it is
+    about to describe."""
+    _signed_out(monkeypatch)
+
+    body = client.get("/api/plan/preview?teams=10&slot=6&turns=8").json()
+
+    assert body["picks"] == [6, 15, 26, 35, 46, 55, 66, 75]
+
+
+@pytest.mark.parametrize("turns", [0, 9, -1])
+def test_a_plan_longer_than_a_draft_s_opening_is_refused(client, monkeypatch,
+                                                         turns):
+    """Named, not clamped, for the same reason a seat is: every caller of this
+    is our own code, and a number outside the bounds is a bug in it."""
+    _signed_out(monkeypatch)
+
+    res = client.get(f"/api/plan/preview?teams=10&slot=6&turns={turns}")
+
+    assert res.status_code == 422
+    assert "8" in res.json()["detail"]
+
+
+def test_the_last_turn_asked_for_still_has_an_edge(client, monkeypatch):
+    """One more turn is walked than is shown, whatever `turns` says -- so the
+    eighth card carries a price like the seven above it."""
+    _signed_out(monkeypatch)
+
+    body = client.get("/api/plan/preview?teams=10&slot=6&turns=8").json()
+
+    last = body["targets"][-1]["target"]
+    assert last["edge_pts"] is not None
+    assert last["edge_at_pick"] == 86
+
+
+def test_every_target_carries_one_sentence_a_reader_could_repeat(
+        client, monkeypatch):
+    """The reason is a SENTENCE, not a list of fragments. It is the plan's own
+    first two reasons joined and punctuated: a preview that wrote its own
+    argument would be a second opinion about a pick the room has explained."""
+    _signed_out(monkeypatch)
+
+    body = client.get("/api/plan/preview?teams=10&slot=6&turns=8").json()
+
+    for turn in body["targets"]:
+        reason = turn["target"]["reason"]
+        assert isinstance(reason, str) and reason.endswith(".")
+        assert reason[0] == reason[0].upper()
+        # Built from the plan's own words rather than beside them.
+        assert turn["target"]["pros"][0].rstrip(".").lower() in reason.lower()
+
+
+def test_a_starred_player_is_called_one_of_your_guys(client, monkeypatch):
+    """The plan writes "★ favourite", which is a glyph beside a name and not
+    half a sentence. The reader's own words go in the sentence."""
+    from api import plan_preview
+
+    assert plan_preview._reason(["★ favourite", "ESPN's #4 overall"]) == (
+        "One of your guys, and ESPN's #4 overall.")
+    assert plan_preview._reason([]) is None
+
+
+def test_the_backups_are_the_alternates_by_name(client, monkeypatch):
+    """"If he's gone: A, B" is on every row of an eight-round plan, and a
+    reader scanning it should not have to open a card to find the two names.
+    The same players as `alternates`, named rather than described."""
+    _signed_out(monkeypatch)
+
+    body = client.get("/api/plan/preview?teams=10&slot=6&turns=8").json()
+
+    for turn in body["targets"]:
+        assert turn["backups"] == [alt["name"] for alt in turn["alternates"]]
+        assert len(turn["backups"]) == 2
+        assert all(name != "" for name in turn["backups"])
+
+
+def test_a_longer_plan_is_not_served_out_of_a_shorter_one_s_cache(
+        client, monkeypatch):
+    """`turns` is in the key. Without it the dashboard's eight rounds would be
+    whatever the landing page asked for a moment earlier."""
+    _signed_out(monkeypatch)
+
+    short = client.get("/api/plan/preview?teams=10&slot=4&turns=3").json()
+    long = client.get("/api/plan/preview?teams=10&slot=4&turns=8").json()
+
+    assert len(short["targets"]) == 3 and len(long["targets"]) == 8
