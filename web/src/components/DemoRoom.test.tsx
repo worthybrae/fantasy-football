@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
 import type { LiveMock, Player } from '../api'
@@ -85,4 +85,30 @@ test('the landing room draws a real board, and nothing on it can be drafted', as
   const draft = screen.getAllByRole('button', { name: 'Draft' }) as HTMLButtonElement[]
   expect(draft.length).toBeGreaterThan(0)
   expect(draft.every((b) => b.disabled)).toBe(true)
+})
+
+test('the landing room opens on the Take-now card, says why its buttons are off, and keeps the cheat sheet behind the same toggle', async () => {
+  window.localStorage.clear()
+  render(<MemoryRouter><DemoRoom /></MemoryRouter>)
+  await waitFor(() => expect(screen.getAllByText('Ashton').length).toBeGreaterThan(0))
+
+  // The simple view first: one card, one list, and no fourteen-column table.
+  expect(screen.getByText('Take now')).toBeTruthy()
+  expect(screen.queryByText('Take one of these')).toBeNull()
+  const toggle = screen.getByRole('group', { name: 'Draft room view' })
+  expect(toggle).toBeTruthy()
+
+  // Off, and honest about why: nobody here has a seat, and nothing an
+  // unlock or a reconnect could do would change that.
+  const draft = screen.getAllByRole('button', { name: 'Draft' }) as HTMLButtonElement[]
+  expect(draft.length).toBeGreaterThan(0)
+  expect(draft.every((b) => b.disabled)).toBe(true)
+  expect(draft.every((b) => b.title === "Watching — this is someone else's draft")).toBe(true)
+
+  // The cheat sheet is one click away, and the choice is the room's own
+  // remembered one, so draft night opens on whatever the visitor picked.
+  fireEvent.click(screen.getByRole('button', { name: 'Cheat sheet' }))
+  expect(screen.getByText('Take one of these')).toBeTruthy()
+  expect(screen.queryByText('Take now')).toBeNull()
+  expect(window.localStorage.getItem('room-view')).toBe('cheat')
 })

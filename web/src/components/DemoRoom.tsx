@@ -4,10 +4,14 @@ import { fetchLiveMock, fetchPlayers,
          type LiveCandidate, type LiveMock, type LiveState, type Player } from '../api'
 import { Logo } from './Logo'
 import AvailableList from './draft/AvailableList'
+import CheatSheetToggle, { useRoomView } from './draft/CheatSheetToggle'
+import { type DraftGate } from './draft/draftGate'
 import DraftBoardGrid from './DraftBoardGrid'
 import PickTicker from './draft/PickTicker'
 import PlayerOverlay, { type OverlayTarget } from './draft/PlayerOverlay'
+import RoomSimpleList from './draft/RoomSimpleList'
 import RosterPanel from './draft/RosterPanel'
+import TakeNowCard from './draft/TakeNowCard'
 import TargetCards from './draft/TargetCards'
 import { nextPickFor } from './draft/pickOrder'
 import { seedFromBoardPlayer, seedFromCandidate, seedFromPlayer } from './draft/playerSeed'
@@ -78,6 +82,16 @@ function mmss(seconds: number): string {
   return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`
 }
 
+// Nobody here holds a seat, so every Draft button is off, and the reason it
+// gives is the true one -- not "not your turn", which promises a turn.
+const SPECTATOR: DraftGate = {
+  isMyTurn: false, youAreUp: false, socketAlive: true, locked: false, spectator: true,
+}
+
+// One set, never added to: no pick made from this browser lands on the
+// board, so the "already drafted" filter has nothing to hold.
+const NOBODY = new Set<string>()
+
 export default function DemoRoom({ onMode, live = false, site = false }: {
   /** Standing as its own page (/live) rather than as the landing page's
    *  first screen. The bar then carries the site's own tab strip -- Drafts,
@@ -99,6 +113,10 @@ export default function DemoRoom({ onMode, live = false, site = false }: {
   const [players, setPlayers] = useState<Record<string, Player>>({})
   const [open, setOpen] = useState<OverlayTarget | null>(null)
   const [tab, setTab] = useState<'available' | 'board'>('available')
+  // The same switch, and the same remembered choice, as the real room: a
+  // visitor who flips this to the cheat sheet gets the cheat sheet on draft
+  // night too, which is the point of showing them the room at all.
+  const [view, setView] = useRoomView()
   const [turn, setTurn] = useState<Turn | null>(null)
   const [now, setNow] = useState(() => Date.now())
 
@@ -377,26 +395,66 @@ export default function DemoRoom({ onMode, live = false, site = false }: {
             </div>
           ) : tab === 'available' ? (
             <>
-              <TargetCards
-                plan={[]}
-                candidates={candidates}
-                players={players}
-                onDraft={() => { /* not your room */ }}
-                isMyTurn={false}
-                pickNo={thisPick}
-                settings={room?.settings ?? null}
-                recompute={null}
-                onOpenPlayer={openCandidate}
-              />
-              <AvailableList
-                candidates={candidates}
-                players={players}
-                onDraft={() => { /* not your room */ }}
-                isMyTurn={false}
-                onOpenPlayer={openCandidate}
-                draftedIds={new Set<string>()}
-                settings={room?.settings ?? null}
-              />
+              {/* The room's own view switch, in the same thin row it has in
+                  /draft, so the demo IS the product and not a picture of
+                  it. No recompute line: a watched room never recomputes
+                  for this browser. */}
+              <div className="room-view">
+                <span className="room-recompute" role="status" />
+                <CheatSheetToggle view={view} onChange={setView} />
+              </div>
+              {view === 'simple' ? (
+                <>
+                  {/* On the clock, because somebody is: the card names the
+                      pick the seat should make, with no plan behind it (no
+                      seat, no plan) so the lead is the top of the board and
+                      the sentence comes from his own figures. */}
+                  <TakeNowCard
+                    plan={[]}
+                    candidates={candidates}
+                    players={players}
+                    onDraft={() => { /* not your room */ }}
+                    isMyTurn={false}
+                    onTheClock
+                    pickNo={thisPick}
+                    onOpenPlayer={openCandidate}
+                    draftedIds={NOBODY}
+                    gate={SPECTATOR}
+                  />
+                  <RoomSimpleList
+                    candidates={candidates}
+                    players={players}
+                    onDraft={() => { /* not your room */ }}
+                    isMyTurn={false}
+                    onOpenPlayer={openCandidate}
+                    draftedIds={NOBODY}
+                    gate={SPECTATOR}
+                  />
+                </>
+              ) : (
+                <>
+                  <TargetCards
+                    plan={[]}
+                    candidates={candidates}
+                    players={players}
+                    onDraft={() => { /* not your room */ }}
+                    isMyTurn={false}
+                    pickNo={thisPick}
+                    settings={room?.settings ?? null}
+                    recompute={null}
+                    onOpenPlayer={openCandidate}
+                  />
+                  <AvailableList
+                    candidates={candidates}
+                    players={players}
+                    onDraft={() => { /* not your room */ }}
+                    isMyTurn={false}
+                    onOpenPlayer={openCandidate}
+                    draftedIds={NOBODY}
+                    settings={room?.settings ?? null}
+                  />
+                </>
+              )}
             </>
           ) : room?.board ? (
             <div className="board-tab">

@@ -21,6 +21,10 @@ export interface DraftGate {
   socketAlive: boolean
   /** `billing.required` -- the room is readable but not draftable. */
   locked: boolean
+  /** The room belongs to somebody else and this browser only watches it --
+   *  the landing page's demo. Nothing is wrong and no unlock will help, so
+   *  the button says what it is looking at rather than "not your turn". */
+  spectator?: boolean
 }
 
 /** The button's `title` while it is disabled, or `undefined` while it is not.
@@ -30,6 +34,7 @@ export interface DraftGate {
  *  their turn is the one wording that is flatly untrue. */
 export function draftHint(gate: DraftGate): string | undefined {
   if (gate.isMyTurn) return undefined
+  if (gate.spectator) return "Watching — this is someone else's draft"
   if (gate.youAreUp && !gate.socketAlive) return 'Reconnecting to ESPN…'
   if (gate.locked) return 'Unlock to draft'
   return 'Not your turn yet'
