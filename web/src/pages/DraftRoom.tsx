@@ -2,13 +2,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { fetchBoard, fetchLiveState, fetchPlayers, selectPlayer, setAutodraft,
          type BoardPlayer, type LiveBoard,
-         type LiveCandidate, type LiveSettings, type LiveState, type Player,
-         type RosterPlayer } from '../api'
+         type LiveCandidate, type LivePlanTurn, type LiveSettings,
+         type LiveState, type Player, type RosterPlayer } from '../api'
 import ClockPanel from '../components/draft/ClockPanel'
 import RosterPanel, { type RosterSlot } from '../components/draft/RosterPanel'
-import TargetCards from '../components/draft/TargetCards'
+import TargetCards, { type RecomputeState } from '../components/draft/TargetCards'
+import TakeNowCard from '../components/draft/TakeNowCard'
 import PlanPanel from '../components/draft/PlanPanel'
 import AvailableList from '../components/draft/AvailableList'
+import RoomSimpleList from '../components/draft/RoomSimpleList'
+import CheatSheetToggle, { useRoomView } from '../components/draft/CheatSheetToggle'
 import ConfirmPick, { type PickStatus } from '../components/draft/ConfirmPick'
 import Paywall from '../components/Paywall'
 import PickTicker from '../components/draft/PickTicker'
@@ -187,6 +190,9 @@ export default function DraftRoom() {
   // in the top bar (see the header below); the auto-switch that jumps back
   // to Available the moment you come on the clock is in the poll.
   const [tab, setTab] = useState<Tab>('available')
+  // Simple or cheat sheet, remembered per browser -- see CheatSheetToggle.
+  // A fresh browser opens on Simple: one name, one reason, one button.
+  const [view, setView] = useRoomView()
 
   // The on_the_clock slot seen on the *previous* successful poll, so the
   // auto-switch below can fire on the transition into your turn rather than
@@ -926,45 +932,54 @@ export default function DraftRoom() {
             </div>
           ) : tab === 'available'
             ? (
-              // TargetCards ABOVE AvailableList's own filter row/table --
-              // the mock draws the filter row first (search+pills, then
-              // top three, then the table). Deliberately not matched:
-              // under a 30-second clock the recommendation is what the
-              // eye needs first, and the search/position filter is a
-              // browsing tool that belongs attached to the table it
-              // filters, which is where AvailableList already puts it.
-              // Reviewed and confirmed as a conscious deviation from the
-              // mock, not an oversight -- do not "fix" this back to
-              // match the mock's own ordering.
               <>
-                <TargetCards
-                  plan={plan}
-                  candidates={state?.candidates ?? []}
-                  players={players}
-                  onDraft={handleDraftClick}
-                  isMyTurn={isMyTurn && !locked}
-                  // Two different facts, deliberately two props. `isMyTurn
-                  // && !locked` is "may he send this pick" and gates the
-                  // Draft button; `youAreUp` is "is the pick his", which is
-                  // what decides WHICH TURN the cards describe. An unpaid
-                  // room and a socket mid-reconnect both disable the button
-                  // with the clock still running on his seat, and the cards
-                  // must not answer a different question during it.
-                  onTheClock={youAreUp}
-                  pickNo={thisPickNo}
-                  settings={state?.settings}
-                  recompute={recompute}
-                  onOpenPlayer={handleOpenCandidate}
-                />
-                <AvailableList
-                  candidates={state?.candidates ?? []}
-                  players={players}
-                  onDraft={handleDraftClick}
-                  isMyTurn={isMyTurn && !locked}
-                  onOpenPlayer={handleOpenCandidate}
-                  draftedIds={draftedIds}
-                  settings={state?.settings}
-                />
+                {/* THE SWITCH SITS ABOVE BOTH VIEWS, in its own thin row,
+                    rather than inside either of them: a control that lived
+                    in the simple view's header would be gone the moment it
+                    was used, and there would be no way back to it. Its
+                    position never changes between the two, so switching
+                    does not move the thing that was just clicked. */}
+                <div className="room-view">
+                  <CheatSheetToggle view={view} onChange={setView} />
+                </div>
+                {view === 'simple' ? (
+                  <>
+                    <TakeNowCard
+                      plan={plan}
+                      candidates={state?.candidates ?? []}
+                      players={players}
+                      onDraft={handleDraftClick}
+                      // The SAME gate the cheat sheet's cards and table
+                      // carry -- one boolean, computed once above, so no
+                      // view of this room can offer a pick another refuses.
+                      isMyTurn={isMyTurn && !locked}
+                      onTheClock={youAreUp}
+                      pickNo={thisPickNo}
+                      onOpenPlayer={handleOpenCandidate}
+                    />
+                    <RoomSimpleList
+                      candidates={state?.candidates ?? []}
+                      players={players}
+                      onDraft={handleDraftClick}
+                      isMyTurn={isMyTurn && !locked}
+                      onOpenPlayer={handleOpenCandidate}
+                      draftedIds={draftedIds}
+                    />
+                  </>
+                ) : (
+                  <CheatSheet
+                    plan={plan}
+                    state={state}
+                    players={players}
+                    onDraft={handleDraftClick}
+                    isMyTurn={isMyTurn && !locked}
+                    youAreUp={youAreUp}
+                    pickNo={thisPickNo}
+                    recompute={recompute}
+                    onOpenPlayer={handleOpenCandidate}
+                    draftedIds={draftedIds}
+                  />
+                )}
               </>
             )
             : (
@@ -1085,5 +1100,68 @@ export default function DraftRoom() {
         />
       )}
     </div>
+  )
+}
+
+// THE CHEAT SHEET: everything the room used to open with, one click away.
+//
+// Nothing in here changed when the simple view became the default -- same
+// three cards, same fourteen columns, same props, same gate. It is a
+// component now only because the main column chooses between two views and a
+// forty-line branch inside that ternary would bury the choice it is making.
+//
+// TargetCards ABOVE AvailableList's own filter row/table -- the mock draws
+// the filter row first (search+pills, then top three, then the table).
+// Deliberately not matched: under a 30-second clock the recommendation is
+// what the eye needs first, and the search/position filter is a browsing tool
+// that belongs attached to the table it filters, which is where AvailableList
+// already puts it. Reviewed and confirmed as a conscious deviation from the
+// mock, not an oversight -- do not "fix" this back to match the mock's own
+// ordering.
+function CheatSheet({
+  plan, state, players, onDraft, isMyTurn, youAreUp, pickNo, recompute,
+  onOpenPlayer, draftedIds,
+}: {
+  plan: LivePlanTurn[]
+  state: LiveState | null
+  players: Record<string, Player>
+  onDraft: (c: LiveCandidate) => void
+  isMyTurn: boolean
+  youAreUp: boolean
+  pickNo: number | null
+  recompute: RecomputeState | null
+  onOpenPlayer: (c: LiveCandidate) => void
+  draftedIds: Set<string>
+}) {
+  return (
+    <>
+      <TargetCards
+        plan={plan}
+        candidates={state?.candidates ?? []}
+        players={players}
+        onDraft={onDraft}
+        isMyTurn={isMyTurn}
+        // Two different facts, deliberately two props. `isMyTurn && !locked`
+        // is "may he send this pick" and gates the Draft button; `youAreUp`
+        // is "is the pick his", which is what decides WHICH TURN the cards
+        // describe. An unpaid room and a socket mid-reconnect both disable
+        // the button with the clock still running on his seat, and the cards
+        // must not answer a different question during it.
+        onTheClock={youAreUp}
+        pickNo={pickNo}
+        settings={state?.settings}
+        recompute={recompute}
+        onOpenPlayer={onOpenPlayer}
+      />
+      <AvailableList
+        candidates={state?.candidates ?? []}
+        players={players}
+        onDraft={onDraft}
+        isMyTurn={isMyTurn}
+        onOpenPlayer={onOpenPlayer}
+        draftedIds={draftedIds}
+        settings={state?.settings}
+      />
+    </>
   )
 }
