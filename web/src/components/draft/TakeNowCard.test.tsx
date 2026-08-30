@@ -139,6 +139,10 @@ test('off the clock: the next turn, and who is likely to be there for it', () =>
   expect(screen.queryByRole('button', { name: 'Draft' })).toBeNull()
   expect(container.querySelector('.takenow-why')).toBeNull()
 
+  // NEUTRAL, over chips that are routinely red: "likely there" above a 30%
+  // was the card contradicting its own number.
+  expect(screen.getByText('In the running:')).toBeTruthy()
+
   // The target and both alternates, each with the chance HE is there at
   // that turn -- the plan's own figures, in the plan's own order.
   const rows = Array.from(container.querySelectorAll('.takenow-likely-row'))
@@ -195,8 +199,68 @@ test('a turn with no clear target says so instead of naming somebody', () => {
       onOpenPlayer={() => {}}
     />,
   )
-  expect(screen.getByRole('status').textContent).toContain('No clear pick for pick 6')
+  expect(screen.getByRole('status').textContent)
+    .toBe("No standout — take the best name below (ESPN's order).")
   expect(screen.queryByRole('button', { name: 'Draft' })).toBeNull()
+})
+
+// A PICK LANDS ABOUT A SECOND BEFORE THE RANKING THAT REMOVES HIM. The board
+// says so immediately, the plan does not -- and for that second this card was
+// offering a player who was already gone, with a live Draft button on him,
+// while the list underneath had already dropped him.
+test('a player the board says is gone stops being the card\'s answer', () => {
+  const { container } = draw({ isMyTurn: true, draftedIds: new Set(['a']) })
+  // The first surviving alternate leads, which is what "if he's gone"
+  // promised, and the third name moves up behind him.
+  expect(container.querySelector('.takenow-name-btn')?.textContent).toBe('Bijan')
+  expect(container.querySelector('.takenow-backups')?.textContent)
+    .toBe("If he's gone: Chase")
+})
+
+test('every name the plan had gone falls back to the top of the board', () => {
+  const { container } = draw({
+    isMyTurn: true, draftedIds: new Set(['a', 'b', 'c']),
+    candidates: [...CANDIDATES, candidate({ player_id: 'd', rank: 4 })],
+    players: { ...PLAYERS, d: player('d', 'Dell') },
+  })
+  expect(container.querySelector('.takenow-name-btn')?.textContent).toBe('Dell')
+  // No plan behind him, so no reasoning is claimed for him -- only what his
+  // own row measures.
+  expect(container.querySelector('.takenow-why')?.textContent)
+    .toBe("He's worth about 8 more points than the next RB you would get "
+          + "at pick 11 — he's 65% to be there.")
+})
+
+// THE ONE THING ARGUING AGAINST HIM, in the plan's own words, under the
+// reason and quieter than it.
+test('the plan\'s first con rides under the reason', () => {
+  const { container } = draw()
+  expect(container.querySelector('.takenow-watch')?.textContent).toBe('Watch: health 2/5')
+})
+
+// "Not your turn yet" is one of three situations and the least likely to
+// need explaining: the clock can be on your seat with the send socket
+// detached, or the room can be unpaid, and both look identical from the
+// button's side.
+test('the disabled button says which of the three things is wrong', () => {
+  const gate = { isMyTurn: false, youAreUp: true, socketAlive: false, locked: false }
+  const title = () => screen.getByRole('button', { name: 'Draft' }).getAttribute('title')
+
+  draw({ gate })
+  expect(title()).toBe('Reconnecting to ESPN…')
+  cleanup()
+
+  draw({ gate: { ...gate, socketAlive: true, locked: true } })
+  expect(title()).toBe('Unlock to draft')
+  cleanup()
+
+  draw({ gate: { ...gate, youAreUp: false, socketAlive: true } })
+  expect(title()).toBe('Not your turn yet')
+  cleanup()
+
+  // Live: no explanation, because there is nothing to explain.
+  draw({ isMyTurn: true, gate: { ...gate, isMyTurn: true, socketAlive: true } })
+  expect(title()).toBeNull()
 })
 
 // The sentence is the one place the model's words become the reader's, so it
@@ -207,7 +271,12 @@ test('the reason is matched from the plan, never invented', () => {
   }
   // The pick is named once: the lead already said pick 11.
   expect(reasonSentence({ ...base, pros: ['biggest drop-off at RB before pick 11'] }))
-    .toBe('RBs dry up before pick 11 — he\'s 65% to be there.')
+    .toBe("RBs dry up before pick 11 — he's 65% to be there.")
+  // ...and "pick 1" inside "pick 11" is not the same pick, so the clause
+  // still names its own. A substring test dropped it.
+  expect(reasonSentence({ ...base, lastsAtPick: 1,
+                          pros: ['biggest drop-off at RB before pick 11'] }))
+    .toBe("RBs dry up before pick 11 — he's 65% to be there at pick 1.")
   // No lead the card can match: the availability clause stands alone, and
   // names the pick itself.
   expect(reasonSentence({ ...base, pros: ['bench'] }))

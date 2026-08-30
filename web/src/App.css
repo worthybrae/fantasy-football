@@ -7355,8 +7355,50 @@ button.pp-pop-comp:focus-visible {
 .room-view {
   flex-shrink: 0;
   display: flex;
+  align-items: center;
+  gap: var(--space-3);
   justify-content: flex-end;
   padding: var(--space-3) var(--space-4) 0;
+}
+
+/* The recompute indicator, sharing the switch's row rather than taking one
+   of its own -- and always in the DOM (DraftRoom renders it empty when there
+   is nothing to say). `margin-right: auto` parks it at the far left, so its
+   own width changes push nothing: there is nothing to its left. `min-width:
+   0` plus nowrap and an ellipsis is what stops a long sentence wrapping and
+   growing the row that sits directly above the Draft button. */
+.room-recompute {
+  margin-right: auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: var(--text-xs);
+  line-height: 1.45;
+  color: var(--accent);
+}
+
+/* The room's own spinner idiom (`.target-recompute-dot`, `.cs-glyph-run`),
+   restated rather than shared: those two sit in different rows with
+   different flex rules, and joining a third to their selector list would
+   make a change to any one of them a change to all three. */
+.room-recompute-dot {
+  flex-shrink: 0;
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: landing-spin 0.8s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .room-recompute-dot {
+    animation: none;
+  }
 }
 
 .room-view-toggle {
@@ -7512,11 +7554,14 @@ button.pp-pop-comp:focus-visible {
   color: var(--accent);
 }
 
+/* --text-2, not --text-3: position, team and bye are the only identity on a
+   card whose whole job is telling one player from another, and at 11px
+   uppercase the tertiary grey was the quietest thing on the screen. */
 .takenow-sub {
   font-size: var(--text-xs);
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--text-3);
+  color: var(--text-2);
 }
 
 /* Bigger than the table's button, and only here: this is the one control on
@@ -7550,6 +7595,25 @@ button.pp-pop-comp:focus-visible {
   line-height: 1.5;
   color: var(--text-1);
   font-weight: 400;
+}
+
+/* THE ONE CON, under the reason and quieter than it. Same size as the
+   backups line: this is a caveat on the pick, not an argument against making
+   it, and a card that draws the doubt at the size of the recommendation is a
+   card nobody acts on. */
+.takenow-watch {
+  margin: 6px 0 0;
+  padding-left: var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+
+.takenow-watch-cap {
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: var(--text-xs);
+  color: var(--text-3);
 }
 
 /* Plain inline text, deliberately NOT the flex row the forecast line below

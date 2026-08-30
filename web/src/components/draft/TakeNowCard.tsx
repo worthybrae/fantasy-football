@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import type { LiveCandidate, LivePlanTurn, PlanPlayer, Player } from '../../api'
+import { draftHint, type DraftGate } from './draftGate'
 import { turnFor } from './TargetCards'
 import { lastsBand } from './tone'
 
@@ -91,11 +92,14 @@ function leadClause(pros: string[]): string | null {
  *
  *  The pick is named only when the lead has not already named it -- "RBs dry
  *  up before pick 11 - he's 65% to be there at pick 11" says pick 11 twice in
- *  a sentence a reader has three seconds for. */
+ *  a sentence a reader has three seconds for. Matched on the WHOLE token: a
+ *  substring test reads "pick 1" inside "pick 11" and drops the one number
+ *  the second half of the sentence exists to give. */
 function availClause(pct: number, atPick: number | null, lead: string | null): string {
   const shown = Math.round(pct)
-  const at = atPick !== null && !(lead ?? '').includes(`pick ${atPick}`)
-    ? ` at pick ${atPick}` : ''
+  const named = atPick !== null
+    && new RegExp(`\\bpick ${atPick}\\b`).test(lead ?? '')
+  const at = atPick !== null && !named ? ` at pick ${atPick}` : ''
   return lastsBand(shown) === 'low'
     ? `only ${shown}% to be there${at}`
     : `he's ${shown}% to be there${at}`
@@ -168,16 +172,43 @@ interface TakeNowCardProps {
   onTheClock?: boolean
   pickNo?: number | null
   onOpenPlayer: (c: LiveCandidate) => void
+  /** Player ids the BOARD reports as drafted. Current the moment a pick
+   *  lands; the plan is not, and does not catch up until the next ranking
+   *  finishes about a second later. Without this the card spent that second
+   *  offering a player who was already gone, with a live Draft button on him
+   *  -- the list below had dropped him on the same frame. */
+  draftedIds?: Set<string>
+  /** Why the button is off, when it is (see draftGate.ts). Absent is the
+   *  plain "not your turn", which is what a room with no billing and a
+   *  healthy socket has. */
+  gate?: DraftGate
 }
+
+// Module-level, so the default identity never changes between renders.
+const NOBODY = new Set<string>()
 
 export default function TakeNowCard({
   plan, candidates, players, onDraft, isMyTurn, onTheClock = false,
-  pickNo = null, onOpenPlayer,
+  pickNo = null, onOpenPlayer, draftedIds = NOBODY, gate,
 }: TakeNowCardProps) {
   const turn = turnFor(plan, pickNo, onTheClock)
-  const rows: PlanPlayer[] = turn
-    ? [...(turn.target ? [turn.target] : []), ...turn.alternates].slice(0, 3)
-    : candidates.slice(0, 3).map(fromCandidate)
+  const stillThere = (id: string) => !draftedIds.has(id)
+  // The plan's names for this turn, minus anyone the board says has just
+  // gone. If the target is one of them the first surviving alternate leads,
+  // which is exactly what "if he's gone" promised.
+  const planned: PlanPlayer[] = turn
+    ? [...(turn.target ? [turn.target] : []), ...turn.alternates]
+      .filter((row) => stillThere(row.player_id))
+    : []
+  // EVERY NAME THE PLAN HAD IS GONE, and the recompute that will name new
+  // ones is a second away. The top of the board (already drafted-filtered) is
+  // a better answer for that second than an empty column under a clock -- and
+  // it carries no reasoning, so the card cannot claim the plan chose him.
+  const planEmptied = turn !== null && planned.length === 0
+    && (turn.target !== null || turn.alternates.length > 0)
+  const rows: PlanPlayer[] = turn !== null && !planEmptied
+    ? planned.slice(0, 3)
+    : candidates.filter((c) => stillThere(c.player_id)).slice(0, 3).map(fromCandidate)
   const noClearTarget = turn !== null && turn.target === null
 
   if (rows.length === 0) {
@@ -191,9 +222,7 @@ export default function TakeNowCard({
           <span className="draft-cap takenow-cap">Take now</span>
         </div>
         <p className="takenow-none" role="status">
-          No clear pick for {turn?.pick_no ? `pick ${turn.pick_no}` : 'this turn'}
-          {' '}— nobody is likely enough to be there, or worth waiting for. The
-          {' '}list below is in ESPN&apos;s order.
+          No standout — take the best name below (ESPN&apos;s order).
         </p>
       </section>
     )
@@ -253,7 +282,11 @@ export default function TakeNowCard({
           )}
         </div>
         <p className="takenow-likely">
-          <span className="takenow-likely-cap">Likely there:</span>
+          {/* NOT "likely there", which is what this said while sitting over
+              a chip reading 30% in red. The caption is neutral and the chips
+              carry the odds, because they are the only thing here that
+              actually knows them. */}
+          <span className="takenow-likely-cap">In the running:</span>
           {rows.map((row) => (
             <span key={row.player_id} className="takenow-likely-row">
               {nameButton(row, 'takenow-alt')}
@@ -265,18 +298,25 @@ export default function TakeNowCard({
     )
   }
 
-  const sentence = reasonSentence({
-    pros: lead.pros,
-    // ON THE CLOCK THE FIGURES COME OFF THE CANDIDATE ROW, not the plan's --
-    // both are measured to the reader's next turn in that case, but only the
-    // candidate row is measured to it by contract (see TargetCards' own note
-    // where it makes the identical choice).
-    lastsPct: leadCandidate?.lasts_pct ?? lead.lasts_pct,
-    lastsAtPick: leadCandidate?.lasts_at_pick ?? null,
-    edgePts: leadCandidate?.edge_pts ?? lead.edge_pts,
-    edgeAtPick: leadCandidate?.edge_at_pick ?? lead.edge_at_pick,
-    position,
-  })
+  // ON THE CLOCK THE FIGURES COME OFF THE CANDIDATE ROW, not the plan's --
+  // both are measured to the reader's next turn in that case, but only the
+  // candidate row is measured to it by contract (see TargetCards' own note
+  // where it makes the identical choice).
+  //
+  // ONE OBJECT, chosen once. Reading each figure with `??` mixed the two
+  // sources whenever the candidate row had a null in it: a percentage from
+  // the board and a pick number from the plan are measured to different
+  // turns, and a sentence built from both is a sentence about no turn at all.
+  const figures = leadCandidate
+    ? {
+        lastsPct: leadCandidate.lasts_pct, lastsAtPick: leadCandidate.lasts_at_pick,
+        edgePts: leadCandidate.edge_pts, edgeAtPick: leadCandidate.edge_at_pick,
+      }
+    : {
+        lastsPct: lead.lasts_pct, lastsAtPick: null,
+        edgePts: lead.edge_pts, edgeAtPick: lead.edge_at_pick,
+      }
+  const sentence = reasonSentence({ pros: lead.pros, position, ...figures })
 
   return (
     <section className="takenow">
@@ -314,7 +354,7 @@ export default function TakeNowCard({
           type="button"
           className="avail-draft-btn takenow-draft"
           disabled={!isMyTurn || !leadCandidate}
-          title={isMyTurn ? undefined : 'Not your turn yet'}
+          title={gate ? draftHint(gate) : (isMyTurn ? undefined : 'Not your turn yet')}
           onClick={() => leadCandidate && onDraft(leadCandidate)}
         >
           Draft
@@ -322,6 +362,17 @@ export default function TakeNowCard({
       </div>
 
       {sentence && <p className="takenow-why">{sentence}</p>}
+
+      {/* THE ONE THING ARGUING AGAINST HIM, if the plan named one. First
+          only: a card with a paragraph of doubt under a thirty-second clock
+          is a card that gets skipped, and the plan sorts its cons so that
+          the one that argues against the PICK leads. In the plan's own
+          words, like everything else on this card. */}
+      {lead.cons.length > 0 && (
+        <p className="takenow-watch">
+          <span className="takenow-watch-cap">Watch:</span> {lead.cons[0]}
+        </p>
+      )}
 
       {alts.length > 0 && (
         <p className="takenow-backups">

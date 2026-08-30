@@ -4,6 +4,7 @@ import {
 } from 'react'
 import { fetchMarketOverview, type LiveCandidate, type Player } from '../../api'
 import { positionTip, TIP_DELAY_MS } from './AvailableList'
+import { draftHint, type DraftGate } from './draftGate'
 import { LastsChip } from './TakeNowCard'
 
 // THE BOARD, WITH FOUR THINGS ON A ROW.
@@ -55,6 +56,9 @@ interface RoomSimpleListProps {
   /** Player ids the BOARD reports as drafted -- current the moment a pick
    *  lands, roughly a second before the candidate list catches up. */
   draftedIds: Set<string>
+  /** Why the buttons are off, when they are (see draftGate.ts). Absent is
+   *  the plain "not your turn". */
+  gate?: DraftGate
 }
 
 // One row, memoized on primitives for the same reason the cheat sheet's is:
@@ -62,11 +66,15 @@ interface RoomSimpleListProps {
 // re-rendered a few hundred rows on every poll would spend a pick clock's
 // worth of main thread on rows that did not change.
 const SimpleRow = memo(function SimpleRow({
-  c, player, isMyTurn, onOpenPlayer, onDraft,
+  c, player, isMyTurn, hint, onOpenPlayer, onDraft,
 }: {
   c: LiveCandidate
   player: Player | undefined
   isMyTurn: boolean
+  /** The disabled button's own words, resolved once by the list so ~250 rows
+   *  do not each re-derive them (and so the card and the table cannot word
+   *  the same failure differently). */
+  hint: string | undefined
   onOpenPlayer: (c: LiveCandidate) => void
   onDraft: (c: LiveCandidate) => void
 }): ReactNode {
@@ -120,7 +128,7 @@ const SimpleRow = memo(function SimpleRow({
           type="button"
           className="avail-draft-btn"
           disabled={!isMyTurn}
-          title={isMyTurn ? undefined : 'Not your turn yet'}
+          title={hint}
           onClick={() => onDraft(c)}
         >
           Draft
@@ -131,8 +139,9 @@ const SimpleRow = memo(function SimpleRow({
 })
 
 export default function RoomSimpleList({
-  candidates, players, onDraft, isMyTurn, onOpenPlayer, draftedIds,
+  candidates, players, onDraft, isMyTurn, onOpenPlayer, draftedIds, gate,
 }: RoomSimpleListProps) {
+  const hint = gate ? draftHint(gate) : (isMyTurn ? undefined : 'Not your turn yet')
   const [search, setSearch] = useState('')
   const [pos, setPos] = useState('ALL')
   const [goingFast, setGoingFast] = useState(false)
@@ -172,7 +181,10 @@ export default function RoomSimpleList({
 
   const showTip = useCallback((id: TipId, el: HTMLElement, now: boolean) => {
     if (tipTimer.current !== null) window.clearTimeout(tipTimer.current)
-    askCorpus()
+    // Only the two sentences that actually print the count ask for it. The
+    // name, star and draft tooltips say nothing about the archive, and a
+    // pointer resting on one of them should not fetch anything at all.
+    if (id === 'lasts' || id === 'edge') askCorpus()
     const rect = el.getBoundingClientRect()
     if (now) {
       // A Tab press is already one deliberate move; making its answer wait
@@ -231,11 +243,17 @@ export default function RoomSimpleList({
   const tipCopy: Record<TipId, string> = {
     name: 'His name, NFL team and bye week -- click any row for his full '
       + 'profile.',
-    lasts: `The share of ${counted} where he was still on the board at `
-      + `${when}, which is when you pick again.`,
+    // THE CONDITIONING IS THE WHOLE CLAIM. This is not "how often he lasts
+    // to pick 20" over every draft ever recorded -- it is counted only over
+    // the drafts where he was still on the board at THIS pick, which is the
+    // question a reader holding this pick is actually asking.
+    lasts: `Of ${counted} where he was still available at this pick, the `
+      + `share where he was still there at ${when} -- which is when you pick `
+      + `again.`,
     edge: `How many points you gain by taking him now instead of the best `
       + `player at his position you could still expect at ${when}, weighted `
-      + `by how likely each of them is to be there in those same ${counted}.`,
+      + `by how likely each of them is to be there in those same ${counted}. `
+      + `A negative number means waiting is the better play.`,
     star: 'The players you picked as my guys -- your draft plan leans towards '
       + 'them when they are close.',
     draft: 'Sends the pick to ESPN. Only enabled on your turn.',
@@ -320,6 +338,7 @@ export default function RoomSimpleList({
               c={c}
               player={players[c.player_id]}
               isMyTurn={isMyTurn}
+              hint={hint}
               onOpenPlayer={onOpenPlayer}
               onDraft={onDraft}
             />

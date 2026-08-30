@@ -12,6 +12,7 @@ import PlanPanel from '../components/draft/PlanPanel'
 import AvailableList from '../components/draft/AvailableList'
 import RoomSimpleList from '../components/draft/RoomSimpleList'
 import CheatSheetToggle, { useRoomView } from '../components/draft/CheatSheetToggle'
+import { type DraftGate } from '../components/draft/draftGate'
 import ConfirmPick, { type PickStatus } from '../components/draft/ConfirmPick'
 import Paywall from '../components/Paywall'
 import PickTicker from '../components/draft/PickTicker'
@@ -451,6 +452,18 @@ export default function DraftRoom() {
   // can never disagree about whose pick it is.
   const youAreUp = !!state?.active && state.on_the_clock !== null
     && state.on_the_clock === state.my_slot
+
+  // WHY A DISABLED DRAFT BUTTON IS DISABLED, gathered once here because it
+  // is three different facts and every one of them already lives in this
+  // function. The simple view's card and list both take it and both say the
+  // same thing about the same failure; the cheat sheet keeps its own plain
+  // "not your turn", which is all its fourteen-column table has room for.
+  const gate: DraftGate = {
+    isMyTurn: isMyTurn && !locked,
+    youAreUp,
+    socketAlive: !!state?.socket_alive,
+    locked,
+  }
 
   // The list on screen was computed for an older pick than the one on the
   // clock: a pick has landed and its recompute has not finished (0.1-0.8s of
@@ -940,6 +953,22 @@ export default function DraftRoom() {
                     position never changes between the two, so switching
                     does not move the thing that was just clicked. */}
                 <div className="room-view">
+                  {/* ALWAYS MOUNTED, even with nothing to say -- the same two
+                      reasons TargetCards' own indicator is (see its comment):
+                      a strip that appears and disappears between polls moves
+                      the Draft button under a resting cursor, and a
+                      `role="status"` region is only reliably announced when
+                      the region was already there before its text was. Empty,
+                      it is a zero-width flex item and nothing moves. */}
+                  <span className="room-recompute" role="status">
+                    {recompute !== null && (
+                      <>
+                        <span className="room-recompute-dot" aria-hidden="true" />
+                        Recomputing for pick {recompute.forPick} — the list is
+                        {' '}still for pick {recompute.listedForPick}
+                      </>
+                    )}
+                  </span>
                   <CheatSheetToggle view={view} onChange={setView} />
                 </div>
                 {view === 'simple' ? (
@@ -956,6 +985,12 @@ export default function DraftRoom() {
                       onTheClock={youAreUp}
                       pickNo={thisPickNo}
                       onOpenPlayer={handleOpenCandidate}
+                      // The board's own drafted set, not the candidate
+                      // list's: a pick lands here about a second before the
+                      // ranking that removes him, and for that second the
+                      // card was still offering him with a live button.
+                      draftedIds={draftedIds}
+                      gate={gate}
                     />
                     <RoomSimpleList
                       candidates={state?.candidates ?? []}
@@ -964,6 +999,7 @@ export default function DraftRoom() {
                       isMyTurn={isMyTurn && !locked}
                       onOpenPlayer={handleOpenCandidate}
                       draftedIds={draftedIds}
+                      gate={gate}
                     />
                   </>
                 ) : (

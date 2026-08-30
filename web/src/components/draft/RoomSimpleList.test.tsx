@@ -83,7 +83,12 @@ function names(container: HTMLElement): (string | null)[] {
     .map((el) => el.textContent)
 }
 
-beforeEach(() => { fetchMarketOverview.mockResolvedValue({ drafts: 854, picks: 109_000 }) })
+beforeEach(() => {
+  // The mock is module-level and outlives each test; without this, "did
+  // anything fetch?" is answered by an earlier test's hover.
+  fetchMarketOverview.mockClear()
+  fetchMarketOverview.mockResolvedValue({ drafts: 854, picks: 109_000 })
+})
 afterEach(cleanup)
 
 test('opens in ESPN order, whatever order the payload arrived in', () => {
@@ -186,6 +191,25 @@ test('the Draft button carries the room\'s one gate', () => {
   expect(onDraft.mock.calls[0][0].player_id).toBe('a')
 })
 
+// A disabled button that says "not your turn" while the clock is on your seat
+// is the one wording that is flatly untrue. Same three answers as the card,
+// from the same helper.
+test('and says which of the three things is wrong when it is not the turn', () => {
+  const title = () => screen.getAllByRole('button', { name: 'Draft' })[0].getAttribute('title')
+
+  draw({ gate: { isMyTurn: false, youAreUp: true, socketAlive: false, locked: false } })
+  expect(title()).toBe('Reconnecting to ESPN…')
+  cleanup()
+
+  draw({ gate: { isMyTurn: false, youAreUp: true, socketAlive: true, locked: true } })
+  expect(title()).toBe('Unlock to draft')
+  cleanup()
+
+  draw({ isMyTurn: true,
+         gate: { isMyTurn: true, youAreUp: true, socketAlive: true, locked: false } })
+  expect(title()).toBeNull()
+})
+
 test('a row opens the profile, and its Draft button does not', () => {
   const onOpenPlayer = vi.fn()
   const { container } = draw({ onOpenPlayer })
@@ -207,7 +231,10 @@ test('the header explains the number, with the count of real drafts behind it', 
 
   fireEvent.focus(screen.getByText('Will he be there?'))
   const tip = screen.getByRole('tooltip')
-  expect(tip.textContent).toContain('still on the board at pick 20')
+  // THE CONDITIONING, not just the number: this is counted over the drafts
+  // where he was still there at THIS pick, which is the question being asked.
+  expect(tip.textContent).toContain('still available at this pick')
+  expect(tip.textContent).toContain('still there at pick 20')
   await waitFor(() => expect(tip.textContent).toContain('854 real ESPN drafts'))
   expect(fetchMarketOverview).toHaveBeenCalledTimes(1)
 
@@ -223,4 +250,16 @@ test('a count that never arrives leaves the sentence standing', async () => {
   await waitFor(() => expect(fetchMarketOverview).toHaveBeenCalled())
   expect(tip.textContent).toContain('real ESPN drafts')
   expect(tip.textContent).not.toContain('null')
+  // And it says which way a negative number reads, which is the one thing a
+  // points figure cannot say for itself.
+  expect(tip.textContent).toContain('waiting is the better play')
+})
+
+// The archive is only asked about by the two sentences that print its size.
+test('a tooltip that does not use the count does not fetch one', () => {
+  draw()
+  fireEvent.focus(screen.getByText('My guys'))
+  expect(screen.getByRole('tooltip').textContent).toContain('my guys')
+  fireEvent.focus(screen.getByText('Player'))
+  expect(fetchMarketOverview).not.toHaveBeenCalled()
 })
