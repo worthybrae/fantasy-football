@@ -135,12 +135,15 @@ def _text_or_none(value):
     return text or None
 
 
-def _snake_picks(teams: int, slot: int, rounds: int) -> list:
+def snake_picks(teams: int, slot: int, rounds: int) -> list:
     """The overall pick numbers this seat owns, in order.
 
     The snake stated once: odd rounds run out from slot 1, even rounds run
-    back. The same derivation `api/market.py` uses for its turn pages and
-    `api/account.py` uses for the outlook's columns.
+    back. The same derivation `api/market.py` uses for its turn pages, and
+    the one `api/account.py` imports for the outlook -- both the columns it
+    draws and the turns it walks the planner over, which is why this is a
+    public name and not an underscored one. Two snakes that disagreed by a
+    pick would be two plans on one page.
     """
     picks = []
     for rnd in range(1, rounds + 1):
@@ -535,7 +538,7 @@ def register_plan_preview_routes(app, conn, store=None):
             # than building a new one keeps the two in step: a league that
             # adds a flex slot changes the plan here as well as in the room.
             settings = replace(league_mod.load(cur), teams=int(teams))
-            picks = _snake_picks(int(teams), int(slot), int(settings.rounds))
+            picks = snake_picks(int(teams), int(slot), int(settings.rounds))
             answer = {
                 "teams": int(teams),
                 "slot": int(slot),
