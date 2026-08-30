@@ -961,7 +961,9 @@ export default function DraftRoom() {
                       the region was already there before its text was. Empty,
                       it is a zero-width flex item and nothing moves. */}
                   <span className="room-recompute" role="status">
-                    {recompute !== null && (
+                    {/* Empty on the cheat sheet: TargetCards carries its own
+                        status region there, and one announcement is enough. */}
+                    {view === 'simple' && recompute !== null && (
                       <>
                         <span className="room-recompute-dot" aria-hidden="true" />
                         Recomputing for pick {recompute.forPick} — the list is
